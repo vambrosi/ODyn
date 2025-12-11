@@ -1,0 +1,91 @@
+# ODyn Configuration File ------------------------------------------------------------- #
+# All settings necessary for data processing and analysis will be stored here.
+# This file is created/loaded automatically by creating an `Experiment` object.
+
+# We will mark settings as follows:
+# D -> Default value for all experiments, might need to be changed
+# A -> Automatically gathered from files, no need to change
+
+[experiment]
+# Determines what files are included in data analysis
+
+date = ""    # A - Date of the experiment
+name = ""    # A - Experiment name (usually something like e1)
+subject = "" # A - Subject ID (examples: m0001 or sid309)
+
+first_acq = 0 # A - File number of the first usable acquisition
+last_acq = 0  # A - File number of the last usable acquisition
+
+mcor_folder = "mcor" # D - Motion corrected TIFFs folder
+raw_folder = "raw"   # D - Raw TIFFs folder
+
+
+[imaging]
+# Microscope and imaging metadata
+
+um_per_pixels = 2.0 # A - Conversion rate (as seen on Fiji)
+
+
+[motion_correction]
+# Latest motion correction settings (deemed ok when run on all data)
+# Parameters are in micrometers to match Fiji measurements
+
+border_nan = 'copy'     # D - copy along the boundary (if true, fill in with NaN)
+max_deviation_um = 12.0
+max_shift_um = 128.0    # D - Max-shift of the overall rigid motion correction
+overlap_um = 96.0
+pw_rigid = true         # D - Piecewise-rigid (non-rigid) or rigid motion correction
+shifts_opencv = false   # D - true = bicubic, false = FFT (true is faster)
+strides_um = 128.0      # D - Start a new patch every
+
+
+[player]
+# Settings for playing movies in a generic folder (not temp). These settings
+# are used to check raw files or final results of the motion correction.
+
+do_loop = false   # D - Loop the video or not
+fr = 30           # D - How fast to play the video (frames/s)
+magnification = 1 # D - Magnification of video
+plot_text = true  # D - Add current frame label on the video
+q_max = 99.5      # D - Quantile to consider as white
+
+downsample_ratio = 0.1 # D - Percentage of frames to keep
+rigid = false          # D - Play rigid or non-rigid motion movies
+step = 1               # D - How big a jump in index to the next file
+
+
+# Test Settings ----------------------------------------------------------------------- #
+# The settings below are used when experimenting in subsets of the data or when doing
+# quick checks, as opposed to the settings above that record the values for the final
+# product.
+
+[test.motion_correction]
+# Latest motion correction test settings (tested on a subset of the data)
+
+first_acq = 1 # D - Number of the first acquisition to motion correct
+last_acq = 10 # D - Number of the last acquisition to motion correct
+
+border_nan = 'copy'     # D - copy along the boundary (if true, fill in with NaN)
+max_deviation_um = 12.0
+max_shift_um = 128.0    # D - Max-shift of the overall rigid motion correction
+overlap_um = 96.0
+pw_rigid = true         # D - Piecewise-rigid (non-rigid) or rigid motion correction
+shifts_opencv = false   # D - true = bicubic, false = FFT (true is faster)
+strides_um = 128.0      # D - Start a new patch every
+
+
+[test.player.video]
+# Video settings
+
+do_loop = false   # D - Loop the video or not
+fr = 30           # D - How fast to play the video (frames/s)
+magnification = 1 # D - Magnification of video
+plot_text = true  # D - Add current frame label on the video
+q_max = 99.5      # D - Quantile to consider as white
+
+
+[test.player.load]
+# Movie loading settings
+
+downsample_ratio = 0.1 # D - Percentage of frames to keep
+rigid = false          # D - Play rigid or non-rigid motion movies
