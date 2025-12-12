@@ -9,25 +9,24 @@
 [experiment]
 # Determines what files are included in data analysis
 
-date = ""    # A - Date of the experiment
-name = ""    # A - Experiment name (usually something like e1)
-subject = "" # A - Subject ID (examples: m0001 or sid309)
+date = 2025-01-01  # A - Date of the experiment
+name = "xx"        # A - Experiment name (usually something like e1)
+subject = "xxxxxx" # A - Subject ID (examples: m0001 or sid309)
 
 first_acq = 0 # A - File number of the first usable acquisition
 last_acq = 0  # A - File number of the last usable acquisition
 
 mcor_folder = "mcor" # D - Motion corrected TIFFs folder
-raw_folder = "raw"   # D - Raw TIFFs folder
+raw_folder = "xxx"   # A - Raw TIFFs folder
 
 
 [imaging]
 # Microscope and imaging metadata
 
-um_per_pixels = 2.0 # A - Conversion rate (as seen on Fiji)
-
+um_per_pixels = [0.0, 0.0] # A - Conversion rate (as seen on Fiji)
 
 [motion_correction]
-# Latest motion correction settings (deemed ok when run on all data)
+# Latest motion correction settings
 # Parameters are in micrometers to match Fiji measurements
 
 border_nan = 'copy'     # D - copy along the boundary (if true, fill in with NaN)

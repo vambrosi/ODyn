@@ -41,7 +41,7 @@ class Experiment:
         # Kept the old file
         return False
 
-    def _get_temp_movie(self):
+    def _get_temp_movie(self) -> None:
         load_config = self.config["test"]["player"]["load"]
         downsample_ratio = load_config["downsample_ratio"]
         rigid = load_config["rigid"]
@@ -65,7 +65,7 @@ class Experiment:
         with open(self.config_path, "w") as file:
             dump(self.config, file)
 
-    def play_test_movie(self):
+    def play_test_movie(self) -> None:
         if self.temp_movie is None or self._did_config_update():
             self._get_temp_movie()
 

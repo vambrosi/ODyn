@@ -3,6 +3,7 @@ import datetime
 from pathlib import Path
 from shutil import copy
 from tomlkit import load, dump
+from tifffile import TiffFile
 
 
 def create_config(path: str | Path) -> None:
@@ -14,8 +15,8 @@ def create_config(path: str | Path) -> None:
     exp_path = path.parent
 
     # Get files that have stem starting and ending with a number
-    # In other words, tries to get all raw TIFF files (in the raw folder)
-    file_paths = sorted([p for p in exp_path.glob("raw/[0-9]*[0-9].tif")])
+    # In other words, tries to get all raw TIFF files
+    file_paths = sorted([p for p in exp_path.rglob("[0-9]*[0-9].tif")])
     if not file_paths:
         print("Found no raw '.tif' files in this folder.")
         return
@@ -35,7 +36,19 @@ def create_config(path: str | Path) -> None:
     config["experiment"]["first_acq"] = int(first_acq)
     config["experiment"]["last_acq"] = int(last_acq)
 
-    # Get metadata from the first raw TIFF file
+    # Get and store raw folder path
+    config["experiment"]["raw_folder"] = str(file_paths[0].parent.relative_to(exp_path))
 
+    # Get metadata from the first raw TIFF file
+    tif = TiffFile(file_paths[0])
+
+    # Assume unit is centimeters
+    dx, nx = tif.pages[0].tags["XResolution"].value
+    dy, ny = tif.pages[0].tags["YResolution"].value
+    config["imaging"]["um_per_pixels"] = list(
+        map(lambda x: round(1e4 * x, 4), [nx / dx, ny / dy])
+    )
+
+    # Save config
     with open(path, "w") as file:
         dump(config, file)
