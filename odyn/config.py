@@ -42,6 +42,9 @@ def create_config(path: str | Path) -> None:
     # Get metadata from the first raw TIFF file
     tif = TiffFile(file_paths[0])
 
+    config["imaging"]["frames"] = len(tif.pages)
+    config["imaging"]["size_pixels"] = tif.pages[0].shape
+
     # Assume unit is centimeters
     dx, nx = tif.pages[0].tags["XResolution"].value
     dy, ny = tif.pages[0].tags["YResolution"].value

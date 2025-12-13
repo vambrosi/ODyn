@@ -4,7 +4,11 @@
 
 # We will mark settings as follows:
 # D -> Default value for all experiments, might need to be changed
-# A -> Automatically gathered from files, no need to change
+# A -> Automatically gathered from files or other settings, no need to change
+
+# Final Settings ---------------------------------------------------------------------- #
+# The settings below are mostly used as a record and are updated automatically.
+# ------------------------------------------------------------------------------------- #
 
 [experiment]
 # Determines what files are included in data analysis
@@ -16,61 +20,58 @@ subject = "xxxxxx" # A - Subject ID (examples: m0001 or sid309)
 first_acq = 0 # A - File number of the first usable acquisition
 last_acq = 0  # A - File number of the last usable acquisition
 
-mcor_folder = "mcor" # D - Motion corrected TIFFs folder
-raw_folder = "xxx"   # A - Raw TIFFs folder
+mcor_folder = 'processed/mcor' # D - Motion corrected TIFFs folder
+raw_folder = 'xxx'             # A - Raw TIFFs folder
 
 
 [imaging]
 # Microscope and imaging metadata
 
+# The next 3 settings are taken from the first raw TIFF file
+frames = 100               # A - How many frames in each TIFF stack
+size_pixels = [100, 100]   # A - Size of each frame in pixels
 um_per_pixels = [0.0, 0.0] # A - Conversion rate (as seen on Fiji)
 
+
 [motion_correction]
-# Latest motion correction settings
-# Parameters are in micrometers to match Fiji measurements
+# DON`T CHANGE THESE SETTINGS!!! Use the test settings below
+# These are the latest settings used to run motion correction on the whole dataset
 
-border_nan = 'copy'     # D - copy along the boundary (if true, fill in with NaN)
-max_deviation_um = 12.0
-max_shift_um = 128.0    # D - Max-shift of the overall rigid motion correction
-overlap_um = 96.0
-pw_rigid = true         # D - Piecewise-rigid (non-rigid) or rigid motion correction
-shifts_opencv = false   # D - true = bicubic, false = FFT (true is faster)
-strides_um = 128.0      # D - Start a new patch every
+border_nan = 'copy'   # A - copy along the boundary (if true, fill in with NaN)
+nonneg_movie = false  # A - make SAVED movie mostly non-negative
+pw_rigid = true       # A - Piecewise-rigid (true) or rigid motion correction
+shifts_opencv = false # A - true = bicubic, false = FFT (true is faster)
 
-
-[player]
-# Settings for playing movies in a generic folder (not temp). These settings
-# are used to check raw files or final results of the motion correction.
-
-do_loop = false   # D - Loop the video or not
-fr = 30           # D - How fast to play the video (frames/s)
-magnification = 1 # D - Magnification of video
-plot_text = true  # D - Add current frame label on the video
-q_max = 99.5      # D - Quantile to consider as white
-
-downsample_ratio = 0.1 # D - Percentage of frames to keep
-rigid = false          # D - Play rigid or non-rigid motion movies
-step = 1               # D - How big a jump in index to the next file
+max_deviation_um = 12.0       # A - max deviation for patch with respect to rigid shifts
+max_shift_um = [128.0, 128.0] # A - max allowed rigid shift
+overlap_um = [96.0, 96.0]     # A - overlap between patches (patch = strides + overlaps)
+strides_um = [128.0, 128.0]   # A - start a new patch every x or y um (only for pw-rigid)
 
 
 # Test Settings ----------------------------------------------------------------------- #
-# The settings below are used when experimenting in subsets of the data or when doing
-# quick checks, as opposed to the settings above that record the values for the final
-# product.
+# The settings below are used when processing subsets of the data or when doing quick
+# checks. They will be automatically copied to the section above when appropriate.
+# ------------------------------------------------------------------------------------- #
 
-[test.motion_correction]
-# Latest motion correction test settings (tested on a subset of the data)
+[test]
+# Main test settings
 
 first_acq = 1 # D - Number of the first acquisition to motion correct
 last_acq = 10 # D - Number of the last acquisition to motion correct
 
-border_nan = 'copy'     # D - copy along the boundary (if true, fill in with NaN)
-max_deviation_um = 12.0
-max_shift_um = 128.0    # D - Max-shift of the overall rigid motion correction
-overlap_um = 96.0
-pw_rigid = true         # D - Piecewise-rigid (non-rigid) or rigid motion correction
-shifts_opencv = false   # D - true = bicubic, false = FFT (true is faster)
-strides_um = 128.0      # D - Start a new patch every
+
+[test.motion_correction]
+# Latest motion correction test settings (units in micrometers)
+
+border_nan = 'copy'   # D - copy along the boundary (if true, fill in with NaN)
+nonneg_movie = false  # D - make SAVED movie mostly non-negative
+pw_rigid = true       # D - Piecewise-rigid (true) or rigid motion correction
+shifts_opencv = false # D - true = bicubic, false = FFT (true is faster)
+
+max_deviation_um = 12.0       # D - max deviation for patch with respect to rigid shifts
+max_shift_um = [128.0, 128.0] # D - max allowed rigid shift
+overlap_um = [96.0, 96.0]     # D - overlap between patches (patch = strides + overlaps)
+strides_um = [128.0, 128.0]   # D - start a new patch every x or y um (only for pw-rigid)
 
 
 [test.player.video]
@@ -86,5 +87,5 @@ q_max = 99.5      # D - Quantile to consider as white
 [test.player.load]
 # Movie loading settings
 
-downsample_ratio = 0.1 # D - Percentage of frames to keep
+downsample_ratio = 0.3 # D - Percentage of frames to keep
 rigid = false          # D - Play rigid or non-rigid motion movies

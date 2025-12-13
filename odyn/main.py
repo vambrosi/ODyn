@@ -1,7 +1,9 @@
 from pathlib import Path
 from hashlib import file_digest
 from tomlkit import load, dump
+
 import caiman as cm
+from caiman.motion_correction import MotionCorrect
 
 from .config import create_config
 
@@ -71,3 +73,42 @@ class Experiment:
 
         video_config = self.config["test"]["player"]["video"]
         self.temp_movie.play(**video_config)
+
+    def run_test_motion_correction(self) -> None:
+        # Check and sync config
+        self._did_config_update()
+
+        # Get config
+        test_config = self.config["test"]
+        mcor_config = test_config["motion_correction"]
+
+        # Get raw movies
+        raw_path = self.path / self.config["experiment"]["raw_folder"]
+        tif_files = sorted([p for p in raw_path.glob("[!.]?*.tif")])
+        tif_files = tif_files[test_config["first_acq"] - 1 : test_config["last_acq"]]
+
+        # Convert settings to pixel units
+        factor = self.config["imaging"]["um_per_pixels"]
+        settings = {
+            "border_nan": mcor_config["border_nan"],
+            "pw_rigid": mcor_config["pw_rigid"],
+            "shifts_opencv": mcor_config["shifts_opencv"],
+            "nonneg_movie": mcor_config["nonneg_movie"],
+            "max_deviation_rigid": int(mcor_config["max_deviation_um"] / min(factor)),
+            "max_shifts": um_to_pixels(mcor_config["max_shift_um"], factor),
+            "overlaps": um_to_pixels(mcor_config["overlap_um"], factor),
+            "strides": um_to_pixels(mcor_config["strides_um"], factor),
+        }
+
+        _, dview, _ = cm.cluster.setup_cluster(
+            backend="multiprocessing", n_processes=None, single_thread=False
+        )
+
+        self.test_mc = MotionCorrect(tif_files, dview=dview, **settings)
+        self.test_mc.motion_correct(save_movie=True)
+
+        cm.stop_server(dview=dview)
+
+
+def um_to_pixels(values_um, um_per_pixels):
+    return [int(a / b) for (a, b) in zip(values_um, um_per_pixels)]
