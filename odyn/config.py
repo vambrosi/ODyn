@@ -2,7 +2,7 @@ import datetime
 
 from pathlib import Path
 from shutil import copy
-from tomlkit import load, dump
+from tomlkit import load, dump, string
 from tifffile import TiffFile
 
 
@@ -37,7 +37,9 @@ def create_config(path: str | Path) -> None:
     config["experiment"]["last_acq"] = int(last_acq)
 
     # Get and store raw folder path
-    config["experiment"]["raw_folder"] = str(file_paths[0].parent.relative_to(exp_path))
+    config["experiment"]["raw_folder"] = string(
+        str(file_paths[0].parent.relative_to(exp_path)), literal=True
+    )
 
     # Get metadata from the first raw TIFF file
     tif = TiffFile(file_paths[0])
