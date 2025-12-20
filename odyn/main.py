@@ -46,7 +46,7 @@ class Experiment:
                 self.config_hash = new_hash
 
     def _get_temp_movie(self) -> None:
-        load_config = self.config["test"]["player"]["load"]
+        load_config = self.config["player"]["load"]
         downsample_ratio = load_config["downsample_ratio"]
         rigid = load_config["rigid"]
 
@@ -149,7 +149,7 @@ class Experiment:
         if self.temp_movie is None or self._did_config_update():
             self._get_temp_movie()
 
-        video_config = self.config["test"]["player"]["video"]
+        video_config = self.config["player"]["video"]
         self.temp_movie.play(**video_config)
 
     def run_final_motion_correction(self) -> None:

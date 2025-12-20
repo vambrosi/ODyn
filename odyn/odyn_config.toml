@@ -23,7 +23,6 @@ last_acq = 0  # A - File number of the last usable acquisition
 mcor_folder = 'processed/mcor' # D - Motion corrected TIFFs folder
 raw_folder = 'xxx'             # A - Raw TIFFs folder
 
-
 [imaging]
 # Microscope and imaging metadata
 
@@ -31,7 +30,6 @@ raw_folder = 'xxx'             # A - Raw TIFFs folder
 frames = 100               # A - How many frames in each TIFF stack
 size_pixels = [100, 100]   # A - Size of each frame in pixels
 um_per_pixels = [0.0, 0.0] # A - Conversion rate (as seen on Fiji)
-
 
 [motion_correction]
 # DON`T CHANGE THESE SETTINGS!!! Use the test settings below
@@ -59,7 +57,6 @@ strides_um = [128.0, 128.0]   # A - start a new patch every x or y um (only for 
 first_acq = 1 # D - Number of the first acquisition to motion correct
 last_acq = 10 # D - Number of the last acquisition to motion correct
 
-
 [test.motion_correction]
 # Latest motion correction test settings (units in micrometers)
 
@@ -74,18 +71,22 @@ overlap_um = [96.0, 96.0]     # D - overlap between patches (patch = strides + o
 strides_um = [128.0, 128.0]   # D - start a new patch every x or y um (only for pw-rigid)
 
 
-[test.player.video]
-# Video settings
+# Player Settings --------------------------------------------------------------------- #
+# The settings below are used to preview motion correction outputs and raw files.
+# ------------------------------------------------------------------------------------- #
 
-do_loop = false   # D - Loop the video or not
-fr = 30           # D - How fast to play the video (frames/s)
-magnification = 1 # D - Magnification of video
-plot_text = true  # D - Add current frame label on the video
-q_max = 99.5      # D - Quantile to consider as white
-
-
-[test.player.load]
+[player.load]
 # Movie loading settings
 
 downsample_ratio = 0.3 # D - Percentage of frames to keep
 rigid = false          # D - Play rigid or non-rigid motion movies
+
+[player.video]
+# Video settings
+
+backend = "embed_opencv" # D - "opencv" for popup and "embed_opencv" for inline player
+do_loop = false          # D - Loop the video or not
+fr = 30                  # D - How fast to play the video (frames/s)
+magnification = 1        # D - Magnification of video
+plot_text = true         # D - Add current frame label on the video
+q_max = 99.5             # D - Quantile to consider as white
