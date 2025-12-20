@@ -79,7 +79,7 @@ strides_um = [128.0, 128.0]   # D - start a new patch every x or y um (only for 
 # Movie loading settings
 
 downsample_ratio = 0.3 # D - Percentage of frames to keep
-rigid = false          # D - Play rigid or non-rigid motion movies
+rigid = false          # D - Play rigid or non-rigid motion movies (on tests)
 
 [player.video]
 # Video settings

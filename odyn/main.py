@@ -16,7 +16,7 @@ class Experiment:
         self.config_path = self.path / "odyn_config.toml"
 
         self.config_hash = ""
-        self.temp_movie = None
+        self.movies = {}
 
         if not self.config_path.exists():
             create_config(self.config_path)
@@ -32,7 +32,7 @@ class Experiment:
     def _get_config_file_hash(self) -> str:
         with open(self.config_path, "rb") as f:
             return file_digest(f, "sha256").hexdigest()
-        
+
     def _did_config_update(self) -> bool:
         return self.config_hash != self._get_config_file_hash()
 
@@ -45,25 +45,38 @@ class Experiment:
                 self.config = load(file)
                 self.config_hash = new_hash
 
-    def _get_temp_movie(self) -> None:
+    def _get_movies(self, movie_type: str) -> None:
         load_config = self.config["player"]["load"]
         downsample_ratio = load_config["downsample_ratio"]
-        rigid = load_config["rigid"]
 
-        path = Path(get_tempdir())
+        if movie_type == "temp":
+            rigid = load_config["rigid"]
+            path = Path(get_tempdir())
+            file_identifier = "rig" if rigid else "els"
+            movie_paths = sorted(list(path.glob(f"[!.]?*{file_identifier}*.mmap")))
 
-        file_identifier = "rig" if rigid else "els"
-        filenames = sorted([p for p in path.rglob(f"[!.]?*{file_identifier}*.mmap")])
+            assert movie_paths, "No movies found in the caiman temp folder"
+        else:
+            path = self.path / self.config["experiment"][movie_type + "_folder"]
+            movie_paths = sorted(list(path.glob(f"[!.]?*.tif")))
 
-        assert filenames, "No movies found in the caiman temp folder"
+            assert movie_paths, "No movies found in the {movie_type}_folder"
 
-        movie_chain = cm.load(filenames[0]).resize(1, 1, downsample_ratio)
+        movie_chain = cm.load(movie_paths[0]).resize(1, 1, downsample_ratio)
 
-        for filename in filenames[1:]:
+        for filename in movie_paths[1:]:
             movie = cm.load(filename).resize(1, 1, downsample_ratio)
             movie_chain = cm.concatenate([movie_chain, movie], axis=0)
 
-        self.temp_movie = movie_chain
+        self.movies[movie_type] = movie_chain
+
+    def _play_movies(self, movie_type) -> None:
+        if movie_type not in self.movies or self._did_config_update():
+            self._sync_config()
+            self._get_movies(movie_type=movie_type)
+
+        video_config = self.config["player"]["video"]
+        self.movies[movie_type].play(**video_config)
 
     def _run_motion_correction(self, final=False) -> None:
         # Check and sync config
@@ -145,12 +158,14 @@ class Experiment:
         with open(self.config_path, "w") as file:
             dump(self.config, file)
 
-    def play_test_movie(self) -> None:
-        if self.temp_movie is None or self._did_config_update():
-            self._get_temp_movie()
+    def play_raw_movies(self) -> None:
+        self._play_movies(movie_type="raw")
 
-        video_config = self.config["player"]["video"]
-        self.temp_movie.play(**video_config)
+    # def play_mcor_movies(self) -> None:
+    #     self._play_movies(movie_type="mcor")
+
+    def play_test_movies(self) -> None:
+        self._play_movies(movie_type="temp")
 
     def run_final_motion_correction(self) -> None:
         self._run_motion_correction(final=True)
