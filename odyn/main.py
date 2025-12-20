@@ -1,3 +1,4 @@
+from typing import Optional
 from pathlib import Path
 from hashlib import file_digest
 from tomlkit import load, dump
@@ -20,7 +21,7 @@ class Experiment:
         if not self.config_path.exists():
             create_config(self.config_path)
 
-        self._did_config_update()
+        self._sync_config()
 
     def __getitem__(self, key):
         return self.config[key]
@@ -28,21 +29,21 @@ class Experiment:
     def __setitem__(self, key, value):
         self.config[key] = value
 
-    def _did_config_update(self) -> bool:
+    def _get_config_file_hash(self) -> str:
         with open(self.config_path, "rb") as f:
-            new_hash = file_digest(f, "sha256").hexdigest()
+            return file_digest(f, "sha256").hexdigest()
+        
+    def _did_config_update(self) -> bool:
+        return self.config_hash != self._get_config_file_hash()
+
+    def _sync_config(self) -> None:
+        new_hash = self._get_config_file_hash()
 
         if self.config_hash != new_hash:
             with open(self.config_path) as file:
                 print("Loading new config...")
                 self.config = load(file)
                 self.config_hash = new_hash
-
-            # Had to load the file
-            return True
-
-        # Kept the old file
-        return False
 
     def _get_temp_movie(self) -> None:
         load_config = self.config["test"]["player"]["load"]
@@ -66,7 +67,7 @@ class Experiment:
 
     def _run_motion_correction(self, final=False) -> None:
         # Check and sync config
-        self._did_config_update()
+        self._sync_config()
 
         # Get config
         test_config = self.config["test"]
@@ -114,7 +115,7 @@ class Experiment:
 
         # Record settings in the motion_correction section
         temp = test_config.copy()
-        self._did_config_update()
+        self._sync_config()
         for key, value in temp["motion_correction"].items():
             self.config["motion_correction"][key] = value
         self._save_config()
