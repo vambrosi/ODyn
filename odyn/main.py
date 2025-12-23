@@ -49,7 +49,7 @@ class Experiment:
         load_config = self.config["player"]["load"]
         downsample_ratio = load_config["downsample_ratio"]
 
-        if movie_type == "temp":
+        if movie_type == "test":
             rigid = load_config["rigid"]
             path = Path(get_tempdir())
             file_identifier = "rig" if rigid else "els"
@@ -60,7 +60,7 @@ class Experiment:
             path = self.path / self.config["experiment"][movie_type + "_folder"]
             movie_paths = sorted(list(path.glob(f"[!.]?*.tif")))
 
-            assert movie_paths, "No movies found in the {movie_type}_folder"
+            assert movie_paths, "No movies found in the {movie_type} folder"
 
         movie_chain = cm.load(movie_paths[0]).resize(1, 1, downsample_ratio)
 
@@ -75,7 +75,12 @@ class Experiment:
             self._sync_config()
             self._get_movies(movie_type=movie_type)
 
-        video_config = self.config["player"]["video"]
+        video_config = dict(self.config["player"]["video"])
+        
+        filename = f"{self.config["experiment"]["tiff_stem"]}_{movie_type}.avi"
+        filepath = (self.path / filename).resolve()
+        video_config["movie_name"] = str(filepath)
+
         self.movies[movie_type].play(**video_config)
 
     def _run_motion_correction(self, final=False) -> None:
@@ -127,7 +132,7 @@ class Experiment:
             return
 
         # Record settings in the motion_correction section
-        temp = test_config.copy()
+        temp = dict(test_config)
         self._sync_config()
         for key, value in temp["motion_correction"].items():
             self.config["motion_correction"][key] = value
@@ -161,11 +166,11 @@ class Experiment:
     def play_raw_movies(self) -> None:
         self._play_movies(movie_type="raw")
 
-    # def play_mcor_movies(self) -> None:
-    #     self._play_movies(movie_type="mcor")
+    def play_mcor_movies(self) -> None:
+        self._play_movies(movie_type="mcor")
 
     def play_test_movies(self) -> None:
-        self._play_movies(movie_type="temp")
+        self._play_movies(movie_type="test")
 
     def run_final_motion_correction(self) -> None:
         self._run_motion_correction(final=True)

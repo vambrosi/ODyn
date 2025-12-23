@@ -23,6 +23,8 @@ last_acq = 0  # A - File number of the last usable acquisition
 mcor_folder = 'processed/mcor' # A - Motion corrected TIFFs folder
 raw_folder = 'raw'             # A - Raw TIFFs folder
 
+tiff_stem = "" # A - Start of the file name for raw TIFF files
+
 [imaging]
 # Microscope and imaging metadata
 
@@ -91,5 +93,6 @@ magnification = 1        # M - Magnification of video
 plot_text = true         # M - Add current frame label on the video
 q_max = 99.5             # M - Quantile to consider as white
 
+# Motion correction preview videos will be saved in the experiment folder by default
 opencv_codec = "MJPG" # M - Codec used to encode the saved video
 save_movie = true     # M - Put "true" if you want to save the preview video to a file
