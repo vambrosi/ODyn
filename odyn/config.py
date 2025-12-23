@@ -14,15 +14,19 @@ def create_config(path: str | Path) -> None:
     path = Path(path)
     exp_path = path.parent
 
-    # Get files that have stem starting and ending with a number
-    # In other words, tries to get all raw TIFF files
-    file_paths = sorted([p for p in exp_path.rglob("[0-9]*[0-9].tif")])
+    # Assume raw files are in the 'raw' folder
+    raw_path = exp_path / "raw"
+
+    # Get TIFF files in the raw folder that don't start with a '.'
+    # The last condition is to exclude some hidden files that MacOS creates
+    file_paths = sorted([p for p in exp_path.glob("[!.]?*.tif")])
     if not file_paths:
         print("Found no raw '.tif' files in this folder.")
         return
 
     # Get some metadata from the first and last filenames
-    date, subject, name, *_, first_acq = file_paths[0].stem.split("_")
+    file_stem_parts = file_paths[0].stem.split("_")
+    date, subject, name, *_, first_acq = file_stem_parts
     *_, last_acq = file_paths[-1].stem.split("_")
 
     # Transform string into actual date
@@ -35,11 +39,6 @@ def create_config(path: str | Path) -> None:
 
     config["experiment"]["first_acq"] = int(first_acq)
     config["experiment"]["last_acq"] = int(last_acq)
-
-    # Get and store raw folder path
-    config["experiment"]["raw_folder"] = string(
-        str(file_paths[0].parent.relative_to(exp_path)), literal=True
-    )
 
     # Get metadata from the first raw TIFF file
     tif = TiffFile(file_paths[0])
