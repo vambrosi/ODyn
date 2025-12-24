@@ -23,6 +23,18 @@ class Experiment:
 
         self._sync_config()
 
+    def __str__(self):
+        exp_info = self["experiment"]
+        return (
+            f"Experiment {exp_info["name"]}\n"
+            f"  Date: {exp_info["date"]}\n"
+            f"  Subject: {exp_info["subject"]}\n"
+            f"  Folder: {str(self.path)}"
+        )
+
+    def __repr__(self):
+        return str(self)
+
     def __getitem__(self, key):
         return self.config[key]
 
