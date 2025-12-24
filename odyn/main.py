@@ -76,7 +76,7 @@ class Experiment:
             self._get_movies(movie_type=movie_type)
 
         video_config = dict(self.config["player"]["video"])
-        
+
         filename = f"{self.config["experiment"]["tiff_stem"]}_{movie_type}.avi"
         filepath = (self.path / filename).resolve()
         video_config["movie_name"] = str(filepath)
@@ -121,8 +121,12 @@ class Experiment:
             backend="multiprocessing", n_processes=None, single_thread=False
         )
 
-        self.mc = MotionCorrect(raw_paths, dview=dview, **settings)
-        self.mc.motion_correct(save_movie=True)
+        try:
+            self.mc = MotionCorrect(raw_paths, dview=dview, **settings)
+            self.mc.motion_correct(save_movie=True)
+        except:
+            cm.stop_server(dview=dview)
+            raise
 
         cm.stop_server(dview=dview)
 
