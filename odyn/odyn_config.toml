@@ -49,8 +49,8 @@ strides_um = [128.0, 128.0]   # A - start a new patch every x or y um (only for 
 
 
 # Test Settings ----------------------------------------------------------------------- #
-# The settings in this section are used when processing subsets of the data or when doing
-# quick checks. They will be automatically copied to the section above when appropriate.
+# Settings used when processing subsets of the data or when doing quick checks.
+# They will be automatically copied to the section above when appropriate.
 # ------------------------------------------------------------------------------------- #
 
 [test]
@@ -74,7 +74,7 @@ strides_um = [128.0, 128.0]   # M - start a new patch every x or y um (only for 
 
 
 # Player Settings --------------------------------------------------------------------- #
-# The settings below are used to preview motion correction outputs and raw files.
+# Settings used to play motion correction outputs and raw files.
 # ------------------------------------------------------------------------------------- #
 
 [player.load]
