@@ -135,7 +135,7 @@ class Experiment:
         raw_paths = raw_paths[first_acq - 1 : last_acq]
 
         # Convert settings to pixel units
-        factor = self.config["imaging"]["um_per_pixels"]
+        factor = self.config["metadata"]["um_per_pixels"]
         settings = {
             "border_nan": mcor_config["border_nan"],
             "pw_rigid": mcor_config["pw_rigid"],
