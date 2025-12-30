@@ -99,6 +99,10 @@ class Experiment:
         # Check and sync config
         self._sync_config()
 
+        # Get config
+        test_config = self.config["test"]
+        mcor_config = test_config["motion_correction"]
+
         # Get some setup variables and possibly return early
         if final:
             # Get TIFFs destination folder (and creates it if it doesn't exist)
@@ -125,10 +129,6 @@ class Experiment:
             first_acq = test_config["first_acq"]
             last_acq = test_config["last_acq"]
 
-        # Get config
-        test_config = self.config["test"]
-        mcor_config = test_config["motion_correction"]
-
         # Get raw movies
         raw_path = self.path / self.config["experiment"]["raw_folder"]
         raw_paths = sorted([p for p in raw_path.glob("[!.]?*.tif")])
@@ -154,11 +154,13 @@ class Experiment:
         try:
             self.mc = MotionCorrect(raw_paths, dview=dview, **settings)
             self.mc.motion_correct(save_movie=True)
+        
         except:
-            cm.stop_server(dview=dview)
             raise
-
-        cm.stop_server(dview=dview)
+        
+        # Always stop the server after motion correction
+        finally:
+            cm.stop_server(dview=dview)
 
         # If final save settings and TIFF files
         if final:
