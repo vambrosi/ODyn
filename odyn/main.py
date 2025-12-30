@@ -75,6 +75,11 @@ class Experiment:
                 + "experiment in the caiman temp folder"
             )
             assert movie_paths, msg
+
+            first_acq = self.config["test"]["first_acq"]
+            last_acq = self.config["test"]["last_acq"]
+
+            movie_paths = movie_paths[first_acq - 1: last_acq]
         else:
             path = self.path / self.config["experiment"][movie_type + "_folder"]
             movie_paths = sorted(path.glob(f"[!.]?*.tif"))
