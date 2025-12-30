@@ -99,17 +99,35 @@ class Experiment:
         # Check and sync config
         self._sync_config()
 
-        # Get config
-        test_config = self.config["test"]
-        mcor_config = test_config["motion_correction"]
-
-        # Get acquisition range
+        # Get some setup variables and possibly return early
         if final:
+            # Get TIFFs destination folder (and creates it if it doesn't exist)
+            mcor_folder = self.path / self.config["experiment"]["mcor_folder"]
+            mcor_folder.mkdir(parents=True, exist_ok=True)
+
+            # If it is a final motion correction run, there are previous motion corrected
+            # files, and the user doesn't want to overwrite them, exit the function.
+
+            # This for loop is executed at most once (if the iterator is non-empty)
+            for _ in mcor_folder.glob(f"[!.]?*_mcor.tif"):
+                answer = input(f"Overwrite motion corrected files? [y/N]")
+
+                if answer.lower() != "y":
+                    return
+
+                break
+
+            # Get acquisition range
             first_acq = self.config["experiment"]["first_acq"]
             last_acq = self.config["experiment"]["last_acq"]
+            
         else:
             first_acq = test_config["first_acq"]
             last_acq = test_config["last_acq"]
+
+        # Get config
+        test_config = self.config["test"]
+        mcor_config = test_config["motion_correction"]
 
         # Get raw movies
         raw_path = self.path / self.config["experiment"]["raw_folder"]
@@ -142,38 +160,21 @@ class Experiment:
 
         cm.stop_server(dview=dview)
 
-        # If final save settings and TIFFs
-        # If not final skip the rest of the function
-        if not final:
-            return
+        # If final save settings and TIFF files
+        if final:
+            # Record settings in the motion_correction section
+            temp = dict(test_config)
+            self._sync_config()
+            for key, value in temp["motion_correction"].items():
+                self.config["motion_correction"][key] = value
+            self._save_config()
 
-        # Record settings in the motion_correction section
-        temp = dict(test_config)
-        self._sync_config()
-        for key, value in temp["motion_correction"].items():
-            self.config["motion_correction"][key] = value
-        self._save_config()
+            # Load mmap files and save them as TIFFs
+            for mmap_path, raw_path in zip(self.mc.mmap_file, raw_paths):
+                mcor_path = mcor_folder / (raw_path.stem + "_mcor.tif")
 
-        # Get TIFFs destination folder and caiman temp folder
-        temp_folder = Path(get_tempdir())
-        mcor_folder = self.path / self.config["experiment"]["mcor_folder"]
-        mcor_folder.mkdir(parents=True, exist_ok=True)
-
-        # Load mmap files and save them as TIFFs
-        for mmap_path, raw_path in zip(self.mc.mmap_file, raw_paths):
-            mcor_path = mcor_folder / (raw_path.stem + "_mcor.tif")
-
-            # Check if file already exists
-            if mcor_path.exists():
-                answer = input(
-                    f"File {mcor_path.resolve()} already exists. Overwrite? [y/N]"
-                )
-
-                if answer.lower() != "y":
-                    continue
-
-            mc = cm.load(mmap_path)
-            mc.save(mcor_path)
+                mc = cm.load(mmap_path)
+                mc.save(mcor_path)
 
     def _save_config(self) -> None:
         with open(self.config_path, "w") as file:
