@@ -2,6 +2,7 @@ from typing import Optional
 from pathlib import Path
 from hashlib import file_digest
 from tomlkit import load, dump
+import tifffile
 
 import caiman as cm
 from caiman.motion_correction import MotionCorrect
@@ -79,7 +80,7 @@ class Experiment:
             first_acq = self.config["test"]["first_acq"]
             last_acq = self.config["test"]["last_acq"]
 
-            movie_paths = movie_paths[first_acq - 1: last_acq]
+            movie_paths = movie_paths[first_acq - 1 : last_acq]
         else:
             path = self.path / self.config["experiment"][movie_type + "_folder"]
             movie_paths = sorted(path.glob(f"[!.]?*.tif"))
@@ -188,7 +189,14 @@ class Experiment:
                 mcor_path = mcor_folder / (raw_path.stem + "_mcor.tif")
 
                 mc = cm.load(mmap_path)
-                mc.save(mcor_path)
+
+                # Saving TIFFs directly because caiman saves them as 64-bit
+                with tifffile.TiffWriter(mcor_path) as tif:
+                    tif.write(
+                        [mc[i].copy() for i in range(mc.shape[0])],
+                        shape=mc[0].shape,
+                        dtype=mc.dtype,
+                    )
 
     def _save_config(self) -> None:
         with open(self.config_path, "w") as file:
