@@ -64,13 +64,20 @@ class Experiment:
         if movie_type == "test":
             rigid = load_config["rigid"]
             path = Path(get_tempdir())
-            file_identifier = "rig" if rigid else "els"
-            movie_paths = sorted(list(path.glob(f"[!.]?*{file_identifier}*.mmap")))
 
-            assert movie_paths, "No movies found in the caiman temp folder"
+            stem = self.config["experiment"]["tiff_stem"]
+            file_identifier = "rig" if rigid else "els"
+
+            movie_paths = sorted(path.glob(f"{stem}*{file_identifier}*.mmap"))
+
+            msg = (
+                f"No {"rigid" if rigid else "non-rigid"} movies found for this "
+                + "experiment in the caiman temp folder"
+            )
+            assert movie_paths, msg
         else:
             path = self.path / self.config["experiment"][movie_type + "_folder"]
-            movie_paths = sorted(list(path.glob(f"[!.]?*.tif")))
+            movie_paths = sorted(path.glob(f"[!.]?*.tif"))
 
             assert movie_paths, "No movies found in the {movie_type} folder"
 
@@ -124,14 +131,14 @@ class Experiment:
             # Get acquisition range
             first_acq = self.config["experiment"]["first_acq"]
             last_acq = self.config["experiment"]["last_acq"]
-            
+
         else:
             first_acq = test_config["first_acq"]
             last_acq = test_config["last_acq"]
 
         # Get raw movies
         raw_path = self.path / self.config["experiment"]["raw_folder"]
-        raw_paths = sorted([p for p in raw_path.glob("[!.]?*.tif")])
+        raw_paths = sorted(raw_path.glob("[!.]?*.tif"))
         raw_paths = raw_paths[first_acq - 1 : last_acq]
 
         # Convert settings to pixel units
@@ -154,10 +161,10 @@ class Experiment:
         try:
             self.mc = MotionCorrect(raw_paths, dview=dview, **settings)
             self.mc.motion_correct(save_movie=True)
-        
+
         except:
             raise
-        
+
         # Always stop the server after motion correction
         finally:
             cm.stop_server(dview=dview)

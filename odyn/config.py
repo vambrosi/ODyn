@@ -19,7 +19,7 @@ def create_config(path: str | Path) -> None:
 
     # Get TIFF files in the raw folder that don't start with a '.'
     # The last condition is to exclude some hidden files that MacOS creates
-    file_paths = sorted([p for p in raw_path.glob("[!.]?*.tif")])
+    file_paths = sorted(raw_path.glob("[!.]?*.tif"))
     if not file_paths:
         print("Found no raw '.tif' files in this folder.")
         return
