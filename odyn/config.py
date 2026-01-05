@@ -20,12 +20,19 @@ def create_config(path: str | Path) -> None:
     # Get TIFF files in the raw folder that don't start with a '.'
     # The last condition is to exclude some hidden files that MacOS creates
     file_paths = sorted(raw_path.glob("[!.]?*.tif"))
-    if not file_paths:
-        print("Found no raw '.tif' files in this folder.")
-        return
+    assert file_paths, f"Found no .tif files in: {raw_path.resolve()}"
 
     # Get some metadata from the first and last filenames
     file_stem_parts = file_paths[0].stem.split("_")
+
+    # Check if file names have the correct form
+    msg = (
+        "File names should be of the form: "
+        + "MMDDYYYY_SubjectID_ExperimentName_Number.tif -- "
+        + "Example: 20251014_sid309_e1_00001.tif"
+    )
+    assert len(file_stem_parts) >= 4, msg
+
     date, subject, name, *_, first_acq = file_stem_parts
     *_, last_acq = file_paths[-1].stem.split("_")
 

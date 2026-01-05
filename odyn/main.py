@@ -242,9 +242,14 @@ class LazyMovie:
 
             movie_paths = sorted(path.glob(f"{stem}*{file_identifier}*.mmap"))
 
+            mcor_type, other_type = "rigid", "non-rigid"
+            if not rigid:
+                mcor_type, other_type = other_type, mcor_type
+
             msg = (
-                f"No {"rigid" if rigid else "non-rigid"} movies found for this "
-                + "experiment in the caiman temp folder"
+                f"No {mcor_type} test movies found for this experiment.\n"
+                + f"Change the 'rigid' setting to {str(not rigid).lower()} "
+                + f"in [player.load] to play {other_type} test movies."
             )
             assert movie_paths, msg
 
@@ -258,7 +263,7 @@ class LazyMovie:
             path = self.owner.path / self.owner.config["experiment"][folder_type]
             movie_paths = sorted(path.glob(f"[!.]?*.tif"))
 
-            assert movie_paths, f"No movies found in the {self.type.value} folder"
+            assert movie_paths, f"No movies found in the folder: {path.resolve()}"
 
         movie_chain = cm.load(movie_paths[0]).resize(1, 1, downsample_ratio)
 
