@@ -22,12 +22,22 @@ class MovieType(Enum):
 
 
 class Experiment:
+    """
+    Class that creates/loads the config file and runs data processing.
+    """
+
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.config_path = self.path / "odyn_config.toml"
 
         self.config_hash = ""
-        self.movies = {t: LazyMovie(self, t) for t in MovieType}
+
+        # Add a movie of every type (and load it later)
+        self.movies = {(t,): LazyMovie(self, (t,)) for t in MovieType}
+
+        # Add all movie comparisons
+        for t in [MovieType.TEST, MovieType.MCOR]:
+            self.movies[(MovieType.RAW, t)] = LazyMovie(self, (MovieType.RAW, t))
 
         if not self.config_path.exists():
             create_config(self.config_path)
@@ -67,15 +77,16 @@ class Experiment:
 
         return new_hash
 
-    def _play_movie(self, movie_type: MovieType) -> None:
+    def _play_movie(self, movie_types: tuple[MovieType, ...]) -> None:
         new_hash = self._sync_config()
         video_config = dict(self.config["player"]["video"])
 
-        filename = f"{self.config["experiment"]["tiff_stem"]}_{movie_type.value}.avi"
+        movie_type_str = "_".join(t.value for t in movie_types)
+        filename = f"{self.config["experiment"]["tiff_stem"]}_{movie_type_str}.avi"
         filepath = (self.path / filename).resolve()
         video_config["movie_name"] = str(filepath)
 
-        self.movies[movie_type].get(new_hash).play(**video_config)
+        self.movies[movie_types].maybe_update(new_hash).play(**video_config)
 
     def _run_motion_correction(self, final=False) -> None:
         # Check and sync config
@@ -195,35 +206,47 @@ class Experiment:
             print(f"No .mmap files found.")
 
     def play_raw_movies(self) -> None:
-        self._play_movie(movie_type=MovieType.RAW)
+        self._play_movie(movie_types=(MovieType.RAW,))
 
     def play_mcor_movies(self) -> None:
-        self._play_movie(movie_type=MovieType.MCOR)
+        self._play_movie(movie_types=(MovieType.MCOR,))
 
     def play_test_movies(self) -> None:
-        self._play_movie(movie_type=MovieType.TEST)
+        self._play_movie(movie_types=(MovieType.TEST,))
+
+    def play_test_comparison(self) -> None:
+        self._play_movie(movie_types=(MovieType.RAW, MovieType.TEST))
+
+    def play_mcor_comparison(self) -> None:
+        self._play_movie(movie_types=(MovieType.RAW, MovieType.MCOR))
 
     def run_final_motion_correction(self) -> None:
         self._run_motion_correction(final=True)
-        self.movies[MovieType.MCOR].mark_as_outdated()
+        self.movies[(MovieType.MCOR,)].mark_as_outdated()
+        self.movies[(MovieType.RAW, MovieType.MCOR)].mark_as_outdated()
 
     def run_test_motion_correction(self) -> None:
         self._run_motion_correction(final=False)
-        self.movies[MovieType.TEST].mark_as_outdated()
+        self.movies[(MovieType.TEST,)].mark_as_outdated()
+        self.movies[(MovieType.RAW, MovieType.TEST)].mark_as_outdated()
 
 
 @dataclass
 class LazyMovie:
     """
-    Movies that only reload when the config changes
+    Movies that only reload when the config changes.
     """
 
     owner: Experiment
-    type: MovieType
+    types: tuple[MovieType, ...]
     movie: Optional[cm.movie] = None
     hash: str = ""
 
-    def get(self, new_hash) -> cm.movie:
+    def mark_as_outdated(self):
+        self.movie = None
+        self.hash = ""
+
+    def maybe_update(self, new_hash) -> cm.movie:
         if self.hash == new_hash:
             print("No changes to the config. Using cached movie...")
             return self.movie
@@ -233,52 +256,68 @@ class LazyMovie:
         load_config = self.owner.config["player"]["load"]
         downsample_ratio = load_config["downsample_ratio"]
 
-        if self.type == MovieType.TEST:
-            rigid = load_config["rigid"]
-            path = Path(get_tempdir())
+        movie_chains = []
 
-            stem = self.owner.config["experiment"]["tiff_stem"]
-            file_identifier = "rig" if rigid else "els"
+        for movie_type in self.types:
+            if movie_type == MovieType.TEST:
+                rigid = load_config["rigid"]
+                path = Path(get_tempdir())
 
-            movie_paths = sorted(path.glob(f"{stem}*{file_identifier}*.mmap"))
+                stem = self.owner.config["experiment"]["tiff_stem"]
+                file_identifier = "rig" if rigid else "els"
 
-            mcor_type, other_type = "rigid", "non-rigid"
-            if not rigid:
-                mcor_type, other_type = other_type, mcor_type
+                movie_paths = sorted(path.glob(f"{stem}*{file_identifier}*.mmap"))
 
-            msg = (
-                f"No {mcor_type} test movies found for this experiment.\n"
-                + f"Change the 'rigid' setting to {str(not rigid).lower()} "
-                + f"in [player.load] to play {other_type} test movies."
-            )
-            assert movie_paths, msg
+                mcor_type, other_type = "rigid", "non-rigid"
+                if not rigid:
+                    mcor_type, other_type = other_type, mcor_type
 
-            first_acq = self.owner.config["test"]["first_acq"]
-            last_acq = self.owner.config["test"]["last_acq"]
+                msg = (
+                    f"No {mcor_type} test movies found for this experiment.\n"
+                    + f"Change the 'rigid' setting to {str(not rigid).lower()} "
+                    + f"in [player.load] to play {other_type} test movies."
+                )
+                assert movie_paths, msg
 
-            movie_paths = movie_paths[first_acq - 1 : last_acq]
+                first_acq = self.owner.config["test"]["first_acq"]
+                last_acq = self.owner.config["test"]["last_acq"]
 
-        else:
-            folder_type = self.type.value + "_folder"
-            path = self.owner.path / self.owner.config["experiment"][folder_type]
-            movie_paths = sorted(path.glob(f"[!.]?*.tif"))
+                movie_paths = movie_paths[first_acq - 1 : last_acq]
 
-            assert movie_paths, f"No movies found in the folder: {path.resolve()}"
+            else:
+                folder_type = movie_type.value + "_folder"
+                path = self.owner.path / self.owner.config["experiment"][folder_type]
+                movie_paths = sorted(path.glob(f"[!.]?*.tif"))
 
-        movie_chain = cm.load(movie_paths[0]).resize(1, 1, downsample_ratio)
+                assert movie_paths, f"No movies found in the folder: {path.resolve()}"
 
-        for filename in movie_paths[1:]:
-            movie = cm.load(filename).resize(1, 1, downsample_ratio)
-            movie_chain = cm.concatenate([movie_chain, movie], axis=0)
+                if len(self.types) > 1:
+                    first_acq = self.owner.config["test"]["first_acq"]
+                    last_acq = self.owner.config["test"]["last_acq"]
+
+                    movie_paths = movie_paths[first_acq - 1 : last_acq]
+
+            movie_chain = cm.load(movie_paths[0]).resize(1, 1, downsample_ratio)
+
+            for filename in movie_paths[1:]:
+                movie = cm.load(filename).resize(1, 1, downsample_ratio)
+                movie_chain = cm.concatenate([movie_chain, movie], axis=0)
+
+            movie_chains.append(movie_chain)
+
+        movie_chain = cm.concatenate(movie_chains, axis=2)
 
         self.movie = movie_chain
         self.hash = new_hash
 
         return self.movie
 
-    def mark_as_outdated(self):
-        self.movie = None
-        self.hash = ""
+    def play(self) -> None:
+        # TODO: - Use Caiman function as blueprint
+        #       - Add movie type, total time, current time, and speed (e.g. x2) to label
+        #       - Remove frame number from label
+        #       - Possibly add total time to config and remove fr in [play.load]
+        return
 
 
 def um_to_pixels(values_um, um_per_pixels):

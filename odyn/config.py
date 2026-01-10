@@ -46,14 +46,17 @@ def create_config(path: str | Path) -> None:
 
     config["experiment"]["first_acq"] = int(first_acq)
     config["experiment"]["last_acq"] = int(last_acq)
+    config["experiment"]["n_acq"] = len(file_paths)
 
     config["experiment"]["tiff_stem"] = "_".join(file_stem_parts[:-1])
 
     # Get metadata from the first raw TIFF file
     tif = TiffFile(file_paths[0])
+    SI_metadata = tif.scanimage_metadata["FrameData"]
 
     config["metadata"]["frames"] = len(tif.pages)
     config["metadata"]["size_pixels"] = tif.pages[0].shape
+    config["metadata"]["frame_rate"] = SI_metadata["SI.hRoiManager.scanFrameRate"]
 
     # Assume unit is centimeters
     dx, nx = tif.pages[0].tags["XResolution"].value
