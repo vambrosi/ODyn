@@ -292,8 +292,8 @@ class LazyMovie:
                 assert movie_paths, f"No movies found in the folder: {path.resolve()}"
 
                 if len(self.types) > 1:
-                    first_acq = self.owner.config["test"]["first_acq"]
-                    last_acq = self.owner.config["test"]["last_acq"]
+                    first_acq = self.owner.config["experiment"]["first_acq"]
+                    last_acq = self.owner.config["experiment"]["last_acq"]
 
                     movie_paths = movie_paths[first_acq - 1 : last_acq]
 
