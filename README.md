@@ -22,18 +22,15 @@ curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Mi
 bash Miniforge3-$(uname)-$(uname -m).sh
 ```
 
-- Lastly, create a new conda environment and install `caiman` (from my fork) and `tomlkit`:
+- Lastly, create a new conda environment and install `caiman` and `tomlkit`:
 
-```
+```bash
 conda deactivate
-git clone -b temp-fix --single-branch https://github.com/vambrosi/CaImAn.git
-cd CaImAn/
-mamba env create -f environment.yml -n caiman_va
-mamba activate caiman_va
-pip install -e .
+mamba create -n caiman caiman
+conda activate caiman
 pip install tomlkit
 ```
 
 ## Usage
 
-If you are using VS Code, open the `odyn` folder, go to `View -> Command Palette`, type `Python: Select Interpreter`, and pick `Python 3.12.0 (caiman_va)` from the list. Then, make a copy of `DONT_EDIT_processing.ipynb` and follow the instructions there. You will possibly need to select `caiman_va` as your kernel and install the Jupyter extension (you will get prompts after you try to run a notebook cell).
+If you are using VS Code, open the `odyn` folder, go to `View -> Command Palette`, type `Python: Select Interpreter`, and pick `caiman (Python 3.13.12)` from the list. Then, make a copy of `DONT_EDIT_processing.ipynb` and follow the instructions there. You will possibly need to select `caiman` as your kernel and install the Jupyter extension (you will get prompts after you try to run a notebook cell).
