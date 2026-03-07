@@ -1,3 +1,5 @@
+import re
+
 from enum import Enum
 from typing import Optional
 from dataclasses import dataclass
@@ -282,7 +284,39 @@ class LazyMovie:
                 first_acq = self.owner.config["test"]["first_acq"]
                 last_acq = self.owner.config["test"]["last_acq"]
 
-                movie_paths = movie_paths[first_acq - 1 : last_acq]
+                # Inefficient way of getting the indices of the first and last
+                # acquisitions to be added to the test movie. Start with the
+                # smallest and largest possible values.
+                first_index = 0
+                last_index = 99_999
+
+                for index, movie_path in enumerate(movie_paths):
+                    # Get the acquisition number. It should be the only 5 digit number
+                    # in the filename with underscores around it.
+                    matches = re.findall(r"_\d{5}_", movie_path.name)
+                    assert (
+                        len(matches) == 1
+                    ), "Failed to get files by acquisition number"
+
+                    # Remove underscores and cast it to a integer
+                    acq_n = int(matches[0][1:6])
+
+                    # Get indices of first acquisition and last acquisition
+                    if acq_n == first_acq:
+                        first_index = index
+
+                    if acq_n == last_acq:
+                        last_index = index
+                        break
+
+                # If there is a temp file missing, there will be less files between
+                # first_index and last_index than acquisitions between the first_acq
+                # and last_acq. Thus, the numbers below would be different.
+                assert (
+                    last_index - first_index == last_acq - first_acq
+                ), "Missing temp files."
+
+                movie_paths = movie_paths[first_index : last_index + 1]
 
             else:
                 folder_type = movie_type.value + "_folder"
@@ -292,8 +326,8 @@ class LazyMovie:
                 assert movie_paths, f"No movies found in the folder: {path.resolve()}"
 
                 if len(self.types) > 1:
-                    first_acq = self.owner.config["experiment"]["first_acq"]
-                    last_acq = self.owner.config["experiment"]["last_acq"]
+                    first_acq = self.owner.config["test"]["first_acq"]
+                    last_acq = self.owner.config["test"]["last_acq"]
 
                     movie_paths = movie_paths[first_acq - 1 : last_acq]
 
