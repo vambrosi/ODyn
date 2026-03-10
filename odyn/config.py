@@ -65,6 +65,9 @@ def create_config(path: str | Path) -> None:
         map(lambda x: round(1e4 * x, 4), [nx / dx, ny / dy])
     )
 
+    # TODO: 1) Find max_shift limit.
+    #       2) Write code to enforce this limit.
+
     # Save config
     with open(path, "w") as file:
         dump(config, file)
