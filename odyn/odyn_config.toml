@@ -6,8 +6,8 @@
 # M -> Manually adjusted values. They will start with a reasonable default.
 # A -> Automatically gathered from files or other settings, no need to change.
 
-# Final Settings ---------------------------------------------------------------------- #
-# The settings in this section are used as a record and are updated automatically.
+# Metadata ---------------------------------------------------------------------------- #
+# Parameters extracted automatically from the TIFF files
 # ------------------------------------------------------------------------------------- #
 
 [experiment]
@@ -35,22 +35,8 @@ frames = 100                   # A - How many frames in each TIFF stack
 size_pixels = [100, 100]       # A - Size of each frame in pixels
 um_per_pixels = [0.0, 0.0]     # A - Conversion rate
 
-[motion_correction]
-# DON`T CHANGE THESE SETTINGS!!! Use the [test.motion_correction] settings below
-# Here we record the latest settings used to run motion correction on the whole dataset
 
-border_nan = "copy"   # A - copy along the boundary (if true, fill in with NaN)
-nonneg_movie = false  # A - make SAVED movie mostly non-negative
-pw_rigid = true       # A - Piecewise-rigid (true) or rigid motion correction
-shifts_opencv = false # A - true = bicubic, false = FFT (true is faster)
-
-max_deviation_um = 12.0       # A - max deviation for patch with respect to rigid shifts
-max_shift_um = [128.0, 128.0] # A - max allowed rigid shift
-overlap_um = [96.0, 96.0]     # A - overlap between patches (patch = strides + overlaps)
-strides_um = [128.0, 128.0]   # A - start a new patch every x or y um (only for pw-rigid)
-
-
-# Test Settings ----------------------------------------------------------------------- #
+# Test Motion Correction Settings ----------------------------------------------------- #
 # Settings used when processing subsets of the data or when doing quick checks.
 # They will be automatically copied to the section above when appropriate.
 # ------------------------------------------------------------------------------------- #
@@ -99,3 +85,32 @@ q_min = 0.0              # M - Quantile to consider as black
 # Motion correction preview videos will be saved in the experiment folder by default
 opencv_codec = "MJPG" # M - Codec used to encode the saved video
 save_movie = true     # M - Put "true" if you want to save the preview video to a file
+
+
+# Data Analysis ----------------------------------------------------------------------- #
+# Contains dF/F Z-score computation parameters
+# ------------------------------------------------------------------------------------- #
+
+[z-score]
+
+baseline_pre_odor = true # M - before analysis window (false) or odor presentation (true)
+post_odor_interval = 2   # M - Interval (in seconds) to be analyzed
+
+
+# Final Settings ---------------------------------------------------------------------- #
+# The settings in this section are used as a record and are updated automatically.
+# ------------------------------------------------------------------------------------- #
+
+[motion_correction]
+# DON`T CHANGE THESE SETTINGS!!! Use the [test.motion_correction] settings below
+# Here we record the latest settings used to run motion correction on the whole dataset
+
+border_nan = "copy"   # A - copy along the boundary (if true, fill in with NaN)
+nonneg_movie = false  # A - make SAVED movie mostly non-negative
+pw_rigid = true       # A - Piecewise-rigid (true) or rigid motion correction
+shifts_opencv = false # A - true = bicubic, false = FFT (true is faster)
+
+max_deviation_um = 12.0       # A - max deviation for patch with respect to rigid shifts
+max_shift_um = [128.0, 128.0] # A - max allowed rigid shift
+overlap_um = [96.0, 96.0]     # A - overlap between patches (patch = strides + overlaps)
+strides_um = [128.0, 128.0]   # A - start a new patch every x or y um (only for pw-rigid)

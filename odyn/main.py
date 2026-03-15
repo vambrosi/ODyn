@@ -25,7 +25,7 @@ class MovieType(Enum):
 
 class Experiment:
     """
-    Class that creates/loads the config file and runs data processing.
+    Class that creates/loads the config file and runs data processing/analysis.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -78,6 +78,10 @@ class Experiment:
                 self.config_hash = new_hash
 
         return new_hash
+
+    # ----------------------------------------------------------------- #
+    # Motion Correction functions
+    # ----------------------------------------------------------------- #
 
     def _play_movie(self, movie_types: tuple[MovieType, ...]) -> None:
         new_hash = self._sync_config()
@@ -232,6 +236,58 @@ class Experiment:
         self.movies[(MovieType.TEST,)].mark_as_outdated()
         self.movies[(MovieType.RAW, MovieType.TEST)].mark_as_outdated()
 
+    # ----------------------------------------------------------------- #
+    # Data Analysis
+    # ----------------------------------------------------------------- #
+
+    # TODO: 1) Compute z-score compared with the baseline for each file
+    #       2) Reproduce the pre-processing from the MATLAB code
+
+    def compute_z_scores(self) -> cm.movie:
+        # Check an sync config
+        self._sync_config()
+
+        # TODO: replace dummy values below
+        odor_onset = 2
+        odor_offset = 4
+        # END OF DUMMY VALUES ------------
+
+        # Get config parameters
+        frame_rate = self.config["metadata"]["frame_rate"]
+        post_odor_interval = self.config["z-scores"]["post_odor_interval"]
+        baseline_pre_odor = self.config["z-scores"]["baseline_pre_odor"]
+
+        frame_odor_onset = int(odor_onset * frame_rate)
+        frame_onset = int((odor_onset + post_odor_interval) * frame_rate)
+        frame_offset = int((odor_offset + post_odor_interval) * frame_rate)
+        frame_duration = frame_offset - frame_onset + 1
+
+        frame_baseline_start = (
+            frame_odor_onset - frame_duration
+            if baseline_pre_odor
+            else frame_onset - frame_duration
+        )
+
+        mcor_folder = self.path / self.config["experiment"]["mcor_folder"]
+        mcor_files = mcor_folder.glob(f"[!.]?*_mcor.tif")
+
+        assert mcor_files, "No .tif files in the mcor folder."
+
+        # TIFFs were originally in int16, so we add 32768 to make then non-negative
+        baseline_range = range(frame_baseline_start, frame_duration)
+        baseline_avg = cm.load(mcor_files[0], subindices=baseline_range).mean(axis=0)
+        baseline_avg += 32768
+
+        signal_range = range(frame_onset, frame_duration)
+        signal_avg = cm.load(mcor_files[0], subindices=signal_range).mean(axis=0)
+        signal_avg += 32768
+
+        # Computes z-score of dF/F
+        dFF = (signal_avg - baseline_avg) / baseline_avg
+        z_score = (dFF - dFF.mean()) / dFF.std()
+
+        return z_score
+
 
 @dataclass
 class LazyMovie:
@@ -325,12 +381,14 @@ class LazyMovie:
 
                 assert movie_paths, f"No movies found in the folder: {path.resolve()}"
 
-                if len(self.types) > 1:
+                # Should use a subset of the files if one the MovieTypes is TEST
+                if any(mt == MovieType.TEST for mt in self.types):
                     first_acq = self.owner.config["test"]["first_acq"]
                     last_acq = self.owner.config["test"]["last_acq"]
 
                     movie_paths = movie_paths[first_acq - 1 : last_acq]
 
+            print(f"Adding {len(movie_paths)} {movie_type.value} files to the movie.")
             movie_chain = cm.load(movie_paths[0]).resize(1, 1, downsample_ratio)
 
             for filename in movie_paths[1:]:
