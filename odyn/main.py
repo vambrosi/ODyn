@@ -73,7 +73,7 @@ class Experiment:
 
         if self.config_hash != new_hash:
             with open(self.config_path) as file:
-                print("Loading new config...")
+                print("[INFO] Loading new config...")
                 self.config = load(file)
                 self.config_hash = new_hash
 
@@ -199,7 +199,7 @@ class Experiment:
 
         # Remove files
         if movie_paths:
-            print(f"Removing .mmap files that start with {stem}...")
+            print(f"[INFO] Removing .mmap files that start with {stem}...")
             total_size = 0  # in bytes
             for movie_path in movie_paths:
                 total_size += movie_path.stat().st_size
@@ -207,9 +207,9 @@ class Experiment:
 
             total_size = total_size / (1_000_000_000)  # in GBs
             ending = "s" if len(movie_paths) > 1 else ""
-            print(f"Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB).")
+            print(f"[INFO] Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB).")
         else:
-            print(f"No .mmap files found.")
+            print(f"[INFO] No .mmap files found.")
 
     def play_raw_movies(self) -> None:
         self._play_movie(movie_types=(MovieType.RAW,))
@@ -306,10 +306,10 @@ class LazyMovie:
 
     def maybe_update(self, new_hash) -> cm.movie:
         if self.hash == new_hash:
-            print("No changes to the config. Using cached movie...")
+            print("[INFO] No changes to the config. Using cached movie...")
             return self.movie
 
-        print("Loading the movie...")
+        print("[INFO] Updating movie...")
 
         load_config = self.owner.config["player"]["load"]
         downsample_ratio = load_config["downsample_ratio"]
@@ -388,13 +388,20 @@ class LazyMovie:
 
                     movie_paths = movie_paths[first_acq - 1 : last_acq]
 
-            print(f"Adding {len(movie_paths)} {movie_type.value} files to the movie.")
+            print(f"[INFO] Adding {len(movie_paths)} {movie_type.value} files to the movie.")
+
+            bar = ProgressBar(len(movie_paths))
+            bar.show()
+
             movie_chain = cm.load(movie_paths[0]).resize(1, 1, downsample_ratio)
+            bar.step()
 
             for filename in movie_paths[1:]:
                 movie = cm.load(filename).resize(1, 1, downsample_ratio)
                 movie_chain = cm.concatenate([movie_chain, movie], axis=0)
+                bar.step()
 
+            bar.end()
             movie_chains.append(movie_chain)
 
         movie_chain = cm.concatenate(movie_chains, axis=2)
@@ -410,6 +417,30 @@ class LazyMovie:
         #       - Remove frame number from label
         #       - Possibly add total time to config and remove fr in [play.load]
         return
+
+# TODO: - Fix the logging interaction with this class
+@dataclass
+class ProgressBar:
+    total: int
+    current: int = 0
+
+    def show(self) -> None:
+        filled_squares = int(40 * self.current / self.total)
+
+        progress_str = "[INFO] [ "
+        progress_str += "\u2588" * filled_squares
+        progress_str += "-" * (40 - filled_squares)
+        progress_str += f" ] {self.current:03d}/{self.total:03d} Files processed"
+
+        print(progress_str, end="\r")
+
+    def step(self) -> None:
+        self.current = min(self.current + 1, self.total)
+        self.show()
+
+    def end(self) -> None:
+        msg = f"[INFO] {self.total} files processed sucessfully."
+        print(f"{msg:75s}")
 
 
 def um_to_pixels(values_um, um_per_pixels):
