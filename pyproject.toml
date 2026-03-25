@@ -1,0 +1,13 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61.0"]
+
+[project]
+name = "odyn"
+readme = "README.md"
+version = "0.0.1"
+
+dependencies = ["tomlkit"]
+
+[tool.setuptools]
+packages = ["odyn"]

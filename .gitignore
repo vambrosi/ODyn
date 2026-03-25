@@ -6,3 +6,5 @@ test_exp/
 __pycache__/
 *.py[codz]
 *$py.class
+
+odyn.egg-info
