@@ -5,6 +5,8 @@ from shutil import copy
 from tomlkit import load, dump, string
 from tifffile import TiffFile
 
+from .validate import normalize_config
+
 
 def create_config(path: str | Path) -> None:
     default_path = Path(__file__).parent / "odyn_config.toml"
@@ -53,20 +55,36 @@ def create_config(path: str | Path) -> None:
     # Get metadata from the first raw TIFF file
     tif = TiffFile(file_paths[0])
     SI_metadata = tif.scanimage_metadata["FrameData"]
+    width_px, height_px = tif.pages[0].shape
 
     config["metadata"]["frames"] = len(tif.pages)
-    config["metadata"]["size_pixels"] = tif.pages[0].shape
+    config["metadata"]["size_pixels"] = [width_px, height_px]
     config["metadata"]["frame_rate"] = SI_metadata["SI.hRoiManager.scanFrameRate"]
 
     # Assume unit is centimeters
     dx, nx = tif.pages[0].tags["XResolution"].value
     dy, ny = tif.pages[0].tags["YResolution"].value
-    config["metadata"]["um_per_pixels"] = list(
-        map(lambda x: round(1e4 * x, 4), [nx / dx, ny / dy])
-    )
 
-    # TODO: 1) Find max_shift limit.
-    #       2) Write code to enforce this limit.
+    # um per pixels in each direction
+    factor_x = round(1e4 * nx / dx, 4)
+    factor_y = round(1e4 * ny / dy, 4)
+
+    # Size of image in um
+    width_um = width_px * factor_x
+    height_um = height_px * factor_y
+
+    config["metadata"]["um_per_pixels"] = [factor_x, factor_y]
+    config["metadata"]["size_ums"] = [width_um, height_um]
+
+    # TODO: 1) Find max_shift_um limit (temp range: 0 < max_shift_um < image_um/4).
+    #       2) Should the limit be enforced when editing?
+
+    # Make sure config parameters are within acceptable ranges
+    normalize_config(config)
+
+    # Make sure test and final are equal
+    for key, value in config["test"]["motion_correction"].items():
+        config["motion_correction"][key] = value
 
     # Save config
     with open(path, "w") as file:

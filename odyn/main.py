@@ -69,8 +69,10 @@ class Experiment:
             return file_digest(f, "sha256").hexdigest()
 
     def _sync_config(self) -> str:
+        # Compute hash to see if something changed
         new_hash = self._get_config_file_hash()
 
+        # Load file if config changed
         if self.config_hash != new_hash:
             with open(self.config_path) as file:
                 print("[INFO] Loading new config...")
@@ -78,6 +80,10 @@ class Experiment:
                 self.config_hash = new_hash
 
         return new_hash
+
+    def _save_config(self) -> None:
+        with open(self.config_path, "w") as file:
+            dump(self.config, file)
 
     # ----------------------------------------------------------------- #
     # Motion Correction functions
@@ -183,10 +189,6 @@ class Experiment:
                         shape=mc[0].shape,
                         dtype=mc.dtype,
                     )
-
-    def _save_config(self) -> None:
-        with open(self.config_path, "w") as file:
-            dump(self.config, file)
 
     def delete_temp_files(self) -> None:
         # Check an sync config

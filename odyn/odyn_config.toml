@@ -33,6 +33,7 @@ tiff_stem = "" # A - Start of the file name for raw TIFF files
 frame_rate = 0.000000000000000 # A - Frame rate from Scan Image Metadata
 frames = 100                   # A - How many frames in each TIFF stack
 size_pixels = [100, 100]       # A - Size of each frame in pixels
+size_ums = [100, 100]          # A - Size of each frame in micrometers
 um_per_pixels = [0.0, 0.0]     # A - Conversion rate
 
 
@@ -68,8 +69,8 @@ strides_um = [128.0, 128.0]   # M - start a new patch every x or y um (only for 
 [player.load]
 # Movie loading settings
 
-downsample_ratio = 0.3 # M - Percentage of frames to keep
-rigid = false          # M - Play rigid or non-rigid motion movies (on tests)
+downsample_ratio = 0.03 # M - Percentage of frames to keep
+rigid = false           # M - Play rigid or non-rigid motion movies (on tests)
 
 [player.video]
 # Video settings
