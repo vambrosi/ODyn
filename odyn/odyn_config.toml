@@ -46,6 +46,7 @@ um_per_pixels = [0.0, 0.0]     # A - Conversion rate
 # Main test settings
 
 first_acq = 1 # M - Number of the first acquisition to motion correct
+step_acq = 1  # M - Get one acquisition for every 'step_acq' acquisitions
 last_acq = 10 # M - Number of the last acquisition to motion correct
 
 [test.motion_correction]

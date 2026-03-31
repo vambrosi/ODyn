@@ -129,15 +129,22 @@ class Experiment:
             # Get acquisition range
             first_acq = self.config["experiment"]["first_acq"]
             last_acq = self.config["experiment"]["last_acq"]
+            step_acq = 1
 
         else:
             first_acq = test_config["first_acq"]
+            step_acq = test_config["step_acq"]
             last_acq = test_config["last_acq"]
 
         # Get raw movies
         raw_path = self.path / self.config["experiment"]["raw_folder"]
         raw_paths = sorted(raw_path.glob("[!.]?*.tif"))
-        raw_paths = raw_paths[first_acq - 1 : last_acq]
+        raw_paths = raw_paths[first_acq - 1 : last_acq : step_acq]
+
+        if not final:
+            print("[INFO] List of files included in the test:")
+            for path in raw_paths:
+                print(f"[INFO]   {path}")
 
         # Convert settings to pixel units
         factor = self.config["metadata"]["um_per_pixels"]
@@ -156,6 +163,8 @@ class Experiment:
             backend="multiprocessing", n_processes=None, single_thread=False
         )
 
+        print("[INFO] Starting motion correction...")
+
         try:
             self.mc = MotionCorrect(raw_paths, dview=dview, **settings)
             self.mc.motion_correct(save_movie=True)
@@ -167,14 +176,21 @@ class Experiment:
         finally:
             cm.stop_server(dview=dview)
 
+        print("[INFO] Finished motion correction")
+
         # If final save settings and TIFF files
         if final:
+            print("[INFO] Saving mcor files...")
+
             # Record settings in the motion_correction section
             temp = dict(test_config)
             self._sync_config()
             for key, value in temp["motion_correction"].items():
                 self.config["motion_correction"][key] = value
             self._save_config()
+
+            bar = ProgressBar(len(self.mc.mmap_file))
+            bar.show()
 
             # Load mmap files and save them as TIFFs
             for mmap_path, raw_path in zip(self.mc.mmap_file, raw_paths):
@@ -189,6 +205,9 @@ class Experiment:
                         shape=mc[0].shape,
                         dtype=mc.dtype,
                     )
+
+                bar.step()
+            bar.end()
 
     def delete_temp_files(self) -> None:
         # Check an sync config
@@ -209,7 +228,9 @@ class Experiment:
 
             total_size = total_size / (1_000_000_000)  # in GBs
             ending = "s" if len(movie_paths) > 1 else ""
-            print(f"[INFO] Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB).")
+            print(
+                f"[INFO] Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB)."
+            )
         else:
             print(f"[INFO] No .mmap files found.")
 
@@ -340,15 +361,13 @@ class LazyMovie:
                 assert movie_paths, msg
 
                 first_acq = self.owner.config["test"]["first_acq"]
+                step_acq = self.owner.config["test"]["step_acq"]
                 last_acq = self.owner.config["test"]["last_acq"]
 
-                # Inefficient way of getting the indices of the first and last
-                # acquisitions to be added to the test movie. Start with the
-                # smallest and largest possible values.
-                first_index = 0
-                last_index = 99_999
+                # Get only the slice of movies_paths determined by the parameters above
+                updated_movie_paths = []
 
-                for index, movie_path in enumerate(movie_paths):
+                for movie_path in movie_paths:
                     # Get the acquisition number. It should be the only 5 digit number
                     # in the filename with underscores around it.
                     matches = re.findall(r"_\d{5}_", movie_path.name)
@@ -357,24 +376,21 @@ class LazyMovie:
                     ), "Failed to get files by acquisition number"
 
                     # Remove underscores and cast it to a integer
-                    acq_n = int(matches[0][1:6])
+                    i_acq = int(matches[0][1:6])
 
-                    # Get indices of first acquisition and last acquisition
-                    if acq_n == first_acq:
-                        first_index = index
+                    if (
+                        first_acq <= i_acq <= last_acq
+                        and (i_acq - first_acq) % step_acq == 0
+                    ):
+                        updated_movie_paths.append(movie_path)
 
-                    if acq_n == last_acq:
-                        last_index = index
-                        break
-
-                # If there is a temp file missing, there will be less files between
-                # first_index and last_index than acquisitions between the first_acq
-                # and last_acq. Thus, the numbers below would be different.
-                assert (
-                    last_index - first_index == last_acq - first_acq
+                # Compare predicted movie count with actual movie count
+                # They disagree only when some temp files are missing.
+                assert len(updated_movie_paths) == max(
+                    0, (last_acq - first_acq) // step_acq + 1
                 ), "Missing temp files."
 
-                movie_paths = movie_paths[first_index : last_index + 1]
+                movie_paths = updated_movie_paths
 
             else:
                 folder_type = movie_type.value + "_folder"
@@ -386,11 +402,14 @@ class LazyMovie:
                 # Should use a subset of the files if one the MovieTypes is TEST
                 if any(mt == MovieType.TEST for mt in self.types):
                     first_acq = self.owner.config["test"]["first_acq"]
+                    step_acq = self.owner.config["test"]["step_acq"]
                     last_acq = self.owner.config["test"]["last_acq"]
 
-                    movie_paths = movie_paths[first_acq - 1 : last_acq]
+                    movie_paths = movie_paths[first_acq - 1 : last_acq : step_acq]
 
-            print(f"[INFO] Adding {len(movie_paths)} {movie_type.value} files to the movie.")
+            print(
+                f"[INFO] Adding {len(movie_paths)} {movie_type.value} files to the movie."
+            )
 
             bar = ProgressBar(len(movie_paths))
             bar.show()
@@ -419,6 +438,7 @@ class LazyMovie:
         #       - Remove frame number from label
         #       - Possibly add total time to config and remove fr in [play.load]
         return
+
 
 # TODO: - Fix the logging interaction with this class
 @dataclass
