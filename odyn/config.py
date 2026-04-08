@@ -55,7 +55,10 @@ def create_config(path: str | Path) -> None:
     # Get metadata from the first raw TIFF file
     tif = TiffFile(file_paths[0])
     SI_metadata = tif.scanimage_metadata["FrameData"]
-    width_px, height_px = tif.pages[0].shape
+
+    # Get size from tags (instead of shape)
+    width_px = tif.pages[0].tags["ImageWidth"].value
+    height_px = tif.pages[0].tags["ImageLength"].value
 
     config["metadata"]["frames"] = len(tif.pages)
     config["metadata"]["size_pixels"] = [width_px, height_px]
