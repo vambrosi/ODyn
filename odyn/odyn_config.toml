@@ -32,8 +32,8 @@ tiff_stem = "" # A - Start of the file name for raw TIFF files
 # The next 3 settings are taken from the first raw TIFF file
 frame_rate = 0.000000000000000 # A - Frame rate from Scan Image Metadata
 frames = 100                   # A - How many frames in each TIFF stack
-size_pixels = [100, 100]       # A - Size of each frame in pixels
-size_ums = [100, 100]          # A - Size of each frame in micrometers
+size_pixels = [100, 100]       # A - Size of each frame in pixels (H x W)
+size_ums = [100, 100]          # A - Size of each frame in micrometers (H x W)
 um_per_pixels = [0.0, 0.0]     # A - Conversion rate
 
 

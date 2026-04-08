@@ -61,7 +61,7 @@ def create_config(path: str | Path) -> None:
     height_px = tif.pages[0].tags["ImageLength"].value
 
     config["metadata"]["frames"] = len(tif.pages)
-    config["metadata"]["size_pixels"] = [width_px, height_px]
+    config["metadata"]["size_pixels"] = [height_px, width_px]
     config["metadata"]["frame_rate"] = SI_metadata["SI.hRoiManager.scanFrameRate"]
 
     # Assume unit is centimeters
@@ -76,8 +76,8 @@ def create_config(path: str | Path) -> None:
     width_um = width_px * factor_x
     height_um = height_px * factor_y
 
-    config["metadata"]["um_per_pixels"] = [factor_x, factor_y]
-    config["metadata"]["size_ums"] = [width_um, height_um]
+    config["metadata"]["um_per_pixels"] = [factor_y, factor_x]
+    config["metadata"]["size_ums"] = [height_um, width_um]
 
     # TODO: 1) Find max_shift_um limit (temp range: 0 < max_shift_um < image_um/4).
     #       2) Should the limit be enforced when editing?

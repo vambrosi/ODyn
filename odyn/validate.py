@@ -5,10 +5,10 @@ def normalize_config(config):
     size_ums = config["metadata"]["size_ums"]
     max_shift_um = config["test"]["motion_correction"]["max_shift_um"]
 
-    # The coordinates of max_shift_um must be between 0 and image_size/4
+    # The coordinates of max_shift_um must be between 0 and image_size / 4
     # where image_size is the size of the image in the corresponding axis.
     # The upper bound is more or less arbitrary, but it needs to be
-    # below image_size/4
+    # below image_size / 2
 
     config["test"]["motion_correction"]["max_shift_um"] = list(
         map(
