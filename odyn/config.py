@@ -34,6 +34,9 @@ def create_db(path: str | Path) -> None:
     # Create metadata dict for SQL INSERT
     metadata = {}
 
+    # Gets the part of the filename before the acquisition number
+    metadata["tiff_stem"] = "_".join(file_stem_parts[:-1])
+
     # Reformat date to YYYY-MM-DD (from YYYYMMDD)
     metadata["exp_date"] = date.fromisoformat(file_stem_parts[0]).isoformat()
 

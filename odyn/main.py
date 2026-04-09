@@ -188,30 +188,27 @@ class Experiment:
     #             bar.step()
     #         bar.end()
 
-    # def delete_temp_files(self) -> None:
-    #     # Check an sync config
-    #     self._sync_config()
+    def delete_temp_files(self) -> None:
+        # Get file paths for mmaps in the temp folder
+        path = Path(get_tempdir())
+        stem = self.metadata["tiff_stem"]
+        movie_paths = sorted(path.glob(f"{stem}*.mmap"))
 
-    #     # Get file paths for mmaps in the temp folder
-    #     path = Path(get_tempdir())
-    #     stem = self.config["experiment"]["tiff_stem"]
-    #     movie_paths = sorted(path.glob(f"{stem}*.mmap"))
+        # Remove files
+        if movie_paths:
+            print(f"[INFO] Removing .mmap files that start with {stem}...")
+            total_size = 0  # in bytes
+            for movie_path in movie_paths:
+                total_size += movie_path.stat().st_size
+                movie_path.unlink(missing_ok=True)
 
-    #     # Remove files
-    #     if movie_paths:
-    #         print(f"[INFO] Removing .mmap files that start with {stem}...")
-    #         total_size = 0  # in bytes
-    #         for movie_path in movie_paths:
-    #             total_size += movie_path.stat().st_size
-    #             movie_path.unlink(missing_ok=True)
-
-    #         total_size = total_size / (1_000_000_000)  # in GBs
-    #         ending = "s" if len(movie_paths) > 1 else ""
-    #         print(
-    #             f"[INFO] Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB)."
-    #         )
-    #     else:
-    #         print(f"[INFO] No .mmap files found.")
+            total_size = total_size / (1_000_000_000)  # in GBs
+            ending = "s" if len(movie_paths) > 1 else ""
+            print(
+                f"[INFO] Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB)."
+            )
+        else:
+            print(f"[INFO] No .mmap files found.")
 
     # def play_raw_movies(self) -> None:
     #     self._play_movie(movie_types=(MovieType.RAW,))

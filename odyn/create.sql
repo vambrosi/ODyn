@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS metadata
     , width_um REAL NOT NULL
     , frame_count INTEGER NOT NULL
     , frame_rate REAL NOT NULL
+    , tiff_stem TEXT NOT NULL
     );
 
 CREATE TABLE IF NOT EXISTS acquisitions
