@@ -14,6 +14,11 @@ from caiman.motion_correction import MotionCorrect
 from caiman.paths import get_tempdir
 
 from .config import create_db
+from .help import help_strings
+
+# Print a helpful string when user imports this library
+INFO = "\033[1;34mINFO\033[0m"
+print(f"[{INFO}] Run Experiment.help() to get examples of how to use ODyn.")
 
 
 class MovieType(Enum):
@@ -24,7 +29,7 @@ class MovieType(Enum):
 
 class Experiment:
     """
-    Class that creates/loads the config file and runs data processing/analysis.
+    Class that runs data processing/analysis.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -50,6 +55,11 @@ class Experiment:
             res = con.execute("SELECT * FROM metadata;")
             self.metadata = dict(res.fetchone())
 
+        print(f"[{INFO}] Run Experiment.help() to get a list of useful functions.")
+        print(
+            f"[{INFO}] Run Experiment.help('function_name') to know more about a function."
+        )
+
     def __del__(self):
         self.db_con.close()
 
@@ -63,6 +73,13 @@ class Experiment:
 
     def __repr__(self):
         return str(self)
+
+    @staticmethod
+    def help(function_name="Experiment"):
+        if function_name in help_strings:
+            print(help_strings[function_name])
+        else:
+            print(f"[{INFO}] Class/method not found!")
 
     # ----------------------------------------------------------------- #
     # Motion Correction functions
@@ -121,9 +138,9 @@ class Experiment:
     #     raw_paths = raw_paths[first_acq - 1 : last_acq : step_acq]
 
     #     if not final:
-    #         print("[INFO] List of files included in the test:")
+    #         print(f"[{INFO}] List of files included in the test:")
     #         for path in raw_paths:
-    #             print(f"[INFO]   {path}")
+    #             print(f"[{INFO}]   {path}")
 
     #     # Convert settings to pixel units
     #     factor = self.config["metadata"]["um_per_pixels"]
@@ -142,7 +159,7 @@ class Experiment:
     #         backend="multiprocessing", n_processes=None, single_thread=False
     #     )
 
-    #     print("[INFO] Starting motion correction...")
+    #     print(f"[{INFO}] Starting motion correction...")
 
     #     try:
     #         self.mc = MotionCorrect(raw_paths, dview=dview, **settings)
@@ -155,11 +172,11 @@ class Experiment:
     #     finally:
     #         cm.stop_server(dview=dview)
 
-    #     print("[INFO] Finished motion correction")
+    #     print(f"[{INFO}] Finished motion correction")
 
     #     # If final save settings and TIFF files
     #     if final:
-    #         print("[INFO] Saving mcor files...")
+    #         print(f"[{INFO}] Saving mcor files...")
 
     #         # Record settings in the motion_correction section
     #         temp = dict(test_config)
@@ -196,7 +213,7 @@ class Experiment:
 
         # Remove files
         if movie_paths:
-            print(f"[INFO] Removing .mmap files that start with {stem}...")
+            print(f"[{INFO}] Removing .mmap files that start with {stem}...")
             total_size = 0  # in bytes
             for movie_path in movie_paths:
                 total_size += movie_path.stat().st_size
@@ -205,10 +222,10 @@ class Experiment:
             total_size = total_size / (1_000_000_000)  # in GBs
             ending = "s" if len(movie_paths) > 1 else ""
             print(
-                f"[INFO] Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB)."
+                f"[{INFO}] Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB)."
             )
         else:
-            print(f"[INFO] No .mmap files found.")
+            print(f"[{INFO}] No .mmap files found.")
 
     # def play_raw_movies(self) -> None:
     #     self._play_movie(movie_types=(MovieType.RAW,))
@@ -305,10 +322,10 @@ class Experiment:
 
 #     def maybe_update(self, new_hash) -> cm.movie:
 #         if self.hash == new_hash:
-#             print("[INFO] No changes to the config. Using cached movie...")
+#             print(f"[{INFO}] No changes to the config. Using cached movie...")
 #             return self.movie
 
-#         print("[INFO] Updating movie...")
+#         print(f"[{INFO}] Updating movie...")
 
 #         load_config = self.owner.config["player"]["load"]
 #         downsample_ratio = load_config["downsample_ratio"]
@@ -384,7 +401,7 @@ class Experiment:
 #                     movie_paths = movie_paths[first_acq - 1 : last_acq : step_acq]
 
 #             print(
-#                 f"[INFO] Adding {len(movie_paths)} {movie_type.value} files to the movie."
+#                 f"[{INFO}] Adding {len(movie_paths)} {movie_type.value} files to the movie."
 #             )
 
 #             bar = ProgressBar(len(movie_paths))
@@ -425,7 +442,7 @@ class ProgressBar:
     def show(self) -> None:
         filled_squares = int(40 * self.current / self.total)
 
-        progress_str = "[INFO] [ "
+        progress_str = f"[{INFO}] [ "
         progress_str += "\u2588" * filled_squares
         progress_str += "-" * (40 - filled_squares)
         progress_str += f" ] {self.current:03d}/{self.total:03d} Files processed"
@@ -437,7 +454,7 @@ class ProgressBar:
         self.show()
 
     def end(self) -> None:
-        msg = f"[INFO] {self.total} files processed sucessfully."
+        msg = f"[{INFO}] {self.total} files processed sucessfully."
         print(f"{msg:75s}")
 
 
