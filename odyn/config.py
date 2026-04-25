@@ -49,6 +49,11 @@ def create_db(path: str | Path) -> None:
 
     # Get metadata from the first raw TIFF file
     tif = TiffFile(file_paths[0])
+
+    # We only support ScanImage files
+    assert (
+        tif.scanimage_metadata is not None
+    ), "Did not find ScanImage metadata in the first TIFF file"
     SI_metadata = tif.scanimage_metadata["FrameData"]
 
     # Get size from tags (instead of shape)

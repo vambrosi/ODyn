@@ -1,7 +1,6 @@
 import re
 import sqlite3
 
-from enum import Enum
 from typing import Optional
 from dataclasses import dataclass
 
@@ -13,23 +12,30 @@ import caiman as cm
 from caiman.motion_correction import MotionCorrect
 from caiman.paths import get_tempdir
 
+from .const import MovieType, INFO
 from .config import create_db
-from .help import help_strings
 
 # Print a helpful string when user imports this library
-INFO = "\033[1;34mINFO\033[0m"
 print(f"[{INFO}] Run Experiment.help() to get examples of how to use ODyn.")
-
-
-class MovieType(Enum):
-    RAW = "raw"
-    MCOR = "mcor"
-    TEST = "test"
 
 
 class Experiment:
     """
+    \033[1;31mEXPERIMENT\033[0m
     Class that runs data processing/analysis.
+
+    \033[1;34mUSAGE\033[0m
+        exp = Experiment(experimentFolder)
+
+    \033[1;34mRELEVANT METHODS\033[0m
+        exp.run_motion_correction()
+        exp.play_movie()
+        exp.delete_temp_files()
+
+    Run Experiment.help('method_name') to know more about one of the methods above.
+
+    \033[1;34mEXAMPLE\033[0m
+        Experiment.help('play_movie')
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -55,10 +61,7 @@ class Experiment:
             res = con.execute("SELECT * FROM metadata;")
             self.metadata = dict(res.fetchone())
 
-        print(f"[{INFO}] Run Experiment.help() to get a list of useful functions.")
-        print(
-            f"[{INFO}] Run Experiment.help('function_name') to know more about a function."
-        )
+        Experiment.short_help()
 
     def __del__(self):
         self.db_con.close()
@@ -75,11 +78,24 @@ class Experiment:
         return str(self)
 
     @staticmethod
-    def help(function_name="Experiment"):
-        if function_name in help_strings:
-            print(help_strings[function_name])
-        else:
-            print(f"[{INFO}] Class/method not found!")
+    def short_help():
+        msg = (
+            f"[{INFO}] Run Experiment.help() to get a list of useful functions.\n"
+            f"[{INFO}] Run Experiment.help('function_name') to know more about a function."
+        )
+        print(msg)
+
+    @staticmethod
+    def help(name="Experiment"):
+        if name.lower() == "experiment":
+            return print(Experiment.__doc__)
+
+        attr = getattr(Experiment, name, None)
+
+        if attr is not None:
+            return print(attr.__doc__)
+
+        return print(f"[{INFO}] Class/method not found!")
 
     # ----------------------------------------------------------------- #
     # Motion Correction functions
@@ -206,6 +222,18 @@ class Experiment:
     #         bar.end()
 
     def delete_temp_files(self) -> None:
+        """
+        \033[1;31mDELETE_TEMP_FILES\033[0m
+        Deletes all temp files associated with this experiment
+
+        \033[1;34mUSAGE\033[0m
+            exp = Experiment(experimentFolder)
+            exp.delete_temp_files()
+
+        \033[1;34mEXAMPLES\033[0m
+            exp.delete_temp_files()
+        """
+
         # Get file paths for mmaps in the temp folder
         path = Path(get_tempdir())
         stem = self.metadata["tiff_stem"]
@@ -226,6 +254,42 @@ class Experiment:
             )
         else:
             print(f"[{INFO}] No .mmap files found.")
+
+    def run_motion_correction(self):
+        """
+        \033[1;31mRUN_MOTION_CORRECTION\033[0m
+        Method that does test/final motion correction
+
+        \033[1;34mUSAGE\033[0m
+            exp = Experiment(experimentFolder)
+            exp.run_motion_correction(...)
+
+        \033[1;34mLIST OF PARAMETERS\033[0m (WITH DEFAULT VALUES)
+
+            \033[0;32mBasic Parameters\033[0m
+            use_last_parameters = False             Use parameters from last run as the defaults
+            is_test             = True              Whether to use a limited range of acquisitions in this run
+
+            \033[0;32mParameters in this section are ignored if is_test == False\033[0m
+            first_acq           = 1                 Number of the first acquisition to motion correct
+            step_acq            = 1                 Get one acquisition for every 'step_acq' acquisitions
+            last_acq            = 3                 Number of the last acquisition to motion correct
+
+            \033[0;32mCaImAn motion correction parameters\033[0m
+            border_nan          = "copy"            copy along the boundary (if True, fill in with NaN)
+            nonneg_movie        = False             make SAVED movie mostly non-negative
+            pw_rigid            = True              Piecewise-rigid (True) or rigid motion correction
+            shifts_opencv       = False             True = bicubic, False = FFT (True is faster)
+            max_deviation_um    = 12.0              max deviation for patch with respect to rigid shifts
+            max_shift_um        = [128.0, 128.0]    max allowed rigid shift
+            overlap_um          = [96.0, 96.0]      overlap between patches (patch = strides + overlaps)
+            strides_um          = [128.0, 128.0]    start a new patch every x or y um (only for pw-rigid)
+
+        \033[1;34mEXAMPLES\033[0m
+            exp.run_motion_correction(is_test=True, last_acq=10)
+        """
+
+        return
 
     # def play_raw_movies(self) -> None:
     #     self._play_movie(movie_types=(MovieType.RAW,))
