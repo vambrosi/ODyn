@@ -1,7 +1,7 @@
 import re
 import sqlite3
 
-from typing import Optional
+from typing import Optional, Iterable
 from dataclasses import dataclass
 
 from pathlib import Path
@@ -101,6 +101,171 @@ class Experiment:
     # Motion Correction functions
     # ----------------------------------------------------------------- #
 
+    def run_motion_correction(
+        self,
+        use_last_parameters: bool = False,
+        is_test: bool = True,
+        first_acq: int = 1,
+        step_acq: int = 1,
+        last_acq: int = 3,
+        border_nan: bool | str = "copy",
+        nonneg_movie: bool = False,
+        pw_rigid: bool = True,
+        shifts_opencv: bool = False,
+        max_deviation_um: float = 12.0,
+        max_shift_um: Iterable[float] = [128.0, 128.0],
+        overlap_um: Iterable[float] = [96.0, 96.0],
+        strides_um: Iterable[float] = [128.0, 128.0],
+    ):
+        """
+        \033[1;31mRUN_MOTION_CORRECTION\033[0m
+        Method that does test/final motion correction
+
+        \033[1;34mUSAGE\033[0m
+            exp = Experiment(experimentFolder)
+            exp.run_motion_correction(...)
+
+        \033[1;34mLIST OF PARAMETERS\033[0m (WITH DEFAULT VALUES)
+
+            \033[0;32mBasic Parameters\033[0m
+            use_last_parameters = False             Use parameters from last run as the defaults
+            is_test             = True              Whether to use a limited range of acquisitions in this run
+
+            \033[0;32mParameters in this section will be ignored if is_test == False\033[0m
+            first_acq           = 1                 Number of the first acquisition to motion correct
+            step_acq            = 1                 Get one acquisition for every 'step_acq' acquisitions
+            last_acq            = 3                 Number of the last acquisition to motion correct
+
+            \033[0;32mCaImAn motion correction parameters\033[0m
+            border_nan          = "copy"            copy along the boundary (if True, fill in with NaN)
+            nonneg_movie        = False             make SAVED movie mostly non-negative
+            pw_rigid            = True              Piecewise-rigid (True) or rigid motion correction
+            shifts_opencv       = False             True = bicubic, False = FFT (True is faster)
+            max_deviation_um    = 12.0              max deviation for patch with respect to rigid shifts
+            max_shift_um        = [128.0, 128.0]    max allowed rigid shift
+            overlap_um          = [96.0, 96.0]      overlap between patches (patch = strides + overlaps)
+            strides_um          = [128.0, 128.0]    start a new patch every x or y um (only for pw-rigid)
+
+        \033[1;34mEXAMPLES\033[0m
+            exp.run_motion_correction(is_test=True, last_acq=10)
+        """
+
+        # --- Validate and adjust parameters to reasonable values --- #
+
+        # If is not test, include all acquisitions
+        if not is_test:
+            first_acq = self.metadata["first_acq"]
+            step_acq = 1
+            last_acq = self.metadata["last_acq"]
+
+        # max_shift_um has to less than size of image (in μm / 4)
+        height_um = self.metadata["height_um"]
+        width_um = self.metadata["width_um"]
+        max_shift_um[0] = clamp(max_shift_um[0], 0, height_um / 4)
+        max_shift_um[1] = clamp(max_shift_um[1], 0, width_um / 4)
+
+        # --- Save validated parameters in the database --- #
+
+        # TODO: Implement this!!
+
+        # --- Make sure movies will be updated next time they are played --- #
+
+        # TODO: Uncomment this, when ready!!
+        # if is_test:
+        #     self.movies[(MovieType.TEST,)].mark_as_outdated()
+        #     self.movies[(MovieType.RAW, MovieType.TEST)].mark_as_outdated()
+        # else:
+        #     self.movies[(MovieType.MCOR,)].mark_as_outdated()
+        #     self.movies[(MovieType.RAW, MovieType.MCOR)].mark_as_outdated()
+
+        # --- Get settings for CaImAn MotionCorrection class --- #
+
+        # Get raw paths
+        raw_folder = self.path / "raw"
+        with self.db_con as con:
+            res = con.execute("SELECT raw_filename FROM acquisitions")
+            raw_paths = [raw_folder / row["raw_filename"] for row in res.fetchall()]
+
+        # Pick acquisitions within the specified range
+        def acq_number_in_range(path):
+            acq_number = int(path.stem.split("_")[-1])
+
+            return (
+                first_acq <= acq_number <= last_acq
+                and (acq_number - first_acq) % step_acq == 0
+            )
+
+        raw_paths = [path for path in raw_paths if acq_number_in_range(path)]
+        raw_paths.sort()
+
+        # CaImAn only uses pixels as units, so we make the conversion
+        factor = [
+            height_um / self.metadata["height_px"],
+            width_um / self.metadata["width_px"],
+        ]
+
+        settings = {
+            "border_nan": border_nan,
+            "pw_rigid": pw_rigid,
+            "shifts_opencv": shifts_opencv,
+            "nonneg_movie": nonneg_movie,
+            "max_deviation_rigid": int(max_deviation_um) / min(factor),
+            "max_shifts": um_to_pixels(max_shift_um, factor),
+            "overlaps": um_to_pixels(overlap_um, factor),
+            "strides": um_to_pixels(strides_um, factor),
+        }
+
+        # --- Run the motion correction --- #
+
+        print(f"[{INFO}] Starting motion correction...")
+
+        _, dview, _ = cm.cluster.setup_cluster(
+            backend="multiprocessing", n_processes=None, single_thread=False
+        )
+
+        try:
+            self.mc = MotionCorrect(raw_paths, dview=dview, **settings)
+            self.mc.motion_correct(save_movie=True)
+
+        except:
+            raise
+
+        # Always stop the server after motion correction
+        finally:
+            cm.stop_server(dview=dview)
+
+        print(f"[{INFO}] Finished motion correction")
+
+        # --- Save the results in TIFF files (if it is not a test) --- #
+
+        if not is_test:
+            print(f"[{INFO}] Saving mcor files...")
+
+            # Create folder if it doesn't exist
+            mcor_folder = self.path / "processed" / "mcor"
+            mcor_folder.mkdir(parents=True, exist_ok=True)
+
+            bar = ProgressBar(len(self.mc.mmap_file))
+            bar.show()
+
+            # Load mmap files and save them as TIFFs
+            # TODO: Make sure mmap_file and raw_path correspond to the same file
+            for mmap_path, raw_path in zip(self.mc.mmap_file, raw_paths):
+                mcor_path = mcor_folder / (raw_path.stem + "_mcor.tif")
+
+                mc = cm.load(mmap_path)
+
+                # Saving TIFFs directly because caiman saves them as 64-bit
+                with tifffile.TiffWriter(mcor_path) as tif:
+                    tif.write(
+                        [mc[i].copy() for i in range(mc.shape[0])],
+                        shape=mc[0].shape,
+                        dtype=mc.dtype,
+                    )
+
+                bar.step()
+            bar.end()
+
     # def _play_movie(self, movie_types: tuple[MovieType, ...]) -> None:
     #     new_hash = self._sync_config()
     #     video_config = dict(self.config["player"]["video"])
@@ -111,115 +276,6 @@ class Experiment:
     #     video_config["movie_name"] = str(filepath)
 
     #     self.movies[movie_types].maybe_update(new_hash).play(**video_config)
-
-    # def _run_motion_correction(self, final=False) -> None:
-    #     # Check and sync config
-    #     self._sync_config()
-
-    #     # Get config
-    #     test_config = self.config["test"]
-    #     mcor_config = test_config["motion_correction"]
-
-    #     # Get some setup variables and possibly return early
-    #     if final:
-    #         # Get TIFFs destination folder (and creates it if it doesn't exist)
-    #         mcor_folder = self.path / self.config["experiment"]["mcor_folder"]
-    #         mcor_folder.mkdir(parents=True, exist_ok=True)
-
-    #         # If it is a final motion correction run, there are previous motion corrected
-    #         # files, and the user doesn't want to overwrite them, exit the function.
-
-    #         # This for loop is executed at most once (if the iterator is non-empty)
-    #         for _ in mcor_folder.glob(f"[!.]?*_mcor.tif"):
-    #             answer = input(f"Overwrite motion corrected files? [y/N]")
-
-    #             if answer.lower() != "y":
-    #                 return
-
-    #             break
-
-    #         # Get acquisition range
-    #         first_acq = self.config["experiment"]["first_acq"]
-    #         last_acq = self.config["experiment"]["last_acq"]
-    #         step_acq = 1
-
-    #     else:
-    #         first_acq = test_config["first_acq"]
-    #         step_acq = test_config["step_acq"]
-    #         last_acq = test_config["last_acq"]
-
-    #     # Get raw movies
-    #     raw_path = self.path / self.config["experiment"]["raw_folder"]
-    #     raw_paths = sorted(raw_path.glob("[!.]?*.tif"))
-    #     raw_paths = raw_paths[first_acq - 1 : last_acq : step_acq]
-
-    #     if not final:
-    #         print(f"[{INFO}] List of files included in the test:")
-    #         for path in raw_paths:
-    #             print(f"[{INFO}]   {path}")
-
-    #     # Convert settings to pixel units
-    #     factor = self.config["metadata"]["um_per_pixels"]
-    #     settings = {
-    #         "border_nan": mcor_config["border_nan"],
-    #         "pw_rigid": mcor_config["pw_rigid"],
-    #         "shifts_opencv": mcor_config["shifts_opencv"],
-    #         "nonneg_movie": mcor_config["nonneg_movie"],
-    #         "max_deviation_rigid": int(mcor_config["max_deviation_um"] / min(factor)),
-    #         "max_shifts": um_to_pixels(mcor_config["max_shift_um"], factor),
-    #         "overlaps": um_to_pixels(mcor_config["overlap_um"], factor),
-    #         "strides": um_to_pixels(mcor_config["strides_um"], factor),
-    #     }
-
-    #     _, dview, _ = cm.cluster.setup_cluster(
-    #         backend="multiprocessing", n_processes=None, single_thread=False
-    #     )
-
-    #     print(f"[{INFO}] Starting motion correction...")
-
-    #     try:
-    #         self.mc = MotionCorrect(raw_paths, dview=dview, **settings)
-    #         self.mc.motion_correct(save_movie=True)
-
-    #     except:
-    #         raise
-
-    #     # Always stop the server after motion correction
-    #     finally:
-    #         cm.stop_server(dview=dview)
-
-    #     print(f"[{INFO}] Finished motion correction")
-
-    #     # If final save settings and TIFF files
-    #     if final:
-    #         print(f"[{INFO}] Saving mcor files...")
-
-    #         # Record settings in the motion_correction section
-    #         temp = dict(test_config)
-    #         self._sync_config()
-    #         for key, value in temp["motion_correction"].items():
-    #             self.config["motion_correction"][key] = value
-    #         self._save_config()
-
-    #         bar = ProgressBar(len(self.mc.mmap_file))
-    #         bar.show()
-
-    #         # Load mmap files and save them as TIFFs
-    #         for mmap_path, raw_path in zip(self.mc.mmap_file, raw_paths):
-    #             mcor_path = mcor_folder / (raw_path.stem + "_mcor.tif")
-
-    #             mc = cm.load(mmap_path)
-
-    #             # Saving TIFFs directly because caiman saves them as 64-bit
-    #             with tifffile.TiffWriter(mcor_path) as tif:
-    #                 tif.write(
-    #                     [mc[i].copy() for i in range(mc.shape[0])],
-    #                     shape=mc[0].shape,
-    #                     dtype=mc.dtype,
-    #                 )
-
-    #             bar.step()
-    #         bar.end()
 
     def delete_temp_files(self) -> None:
         """
@@ -254,42 +310,6 @@ class Experiment:
             )
         else:
             print(f"[{INFO}] No .mmap files found.")
-
-    def run_motion_correction(self):
-        """
-        \033[1;31mRUN_MOTION_CORRECTION\033[0m
-        Method that does test/final motion correction
-
-        \033[1;34mUSAGE\033[0m
-            exp = Experiment(experimentFolder)
-            exp.run_motion_correction(...)
-
-        \033[1;34mLIST OF PARAMETERS\033[0m (WITH DEFAULT VALUES)
-
-            \033[0;32mBasic Parameters\033[0m
-            use_last_parameters = False             Use parameters from last run as the defaults
-            is_test             = True              Whether to use a limited range of acquisitions in this run
-
-            \033[0;32mParameters in this section are ignored if is_test == False\033[0m
-            first_acq           = 1                 Number of the first acquisition to motion correct
-            step_acq            = 1                 Get one acquisition for every 'step_acq' acquisitions
-            last_acq            = 3                 Number of the last acquisition to motion correct
-
-            \033[0;32mCaImAn motion correction parameters\033[0m
-            border_nan          = "copy"            copy along the boundary (if True, fill in with NaN)
-            nonneg_movie        = False             make SAVED movie mostly non-negative
-            pw_rigid            = True              Piecewise-rigid (True) or rigid motion correction
-            shifts_opencv       = False             True = bicubic, False = FFT (True is faster)
-            max_deviation_um    = 12.0              max deviation for patch with respect to rigid shifts
-            max_shift_um        = [128.0, 128.0]    max allowed rigid shift
-            overlap_um          = [96.0, 96.0]      overlap between patches (patch = strides + overlaps)
-            strides_um          = [128.0, 128.0]    start a new patch every x or y um (only for pw-rigid)
-
-        \033[1;34mEXAMPLES\033[0m
-            exp.run_motion_correction(is_test=True, last_acq=10)
-        """
-
-        return
 
     # def play_raw_movies(self) -> None:
     #     self._play_movie(movie_types=(MovieType.RAW,))
@@ -524,3 +544,7 @@ class ProgressBar:
 
 def um_to_pixels(values_um, um_per_pixels):
     return [int(a / b) for (a, b) in zip(values_um, um_per_pixels)]
+
+
+def clamp(x, min_x, max_x):
+    return max(min_x, min(x, max_x))
