@@ -14,6 +14,7 @@ from caiman.paths import get_tempdir
 
 from .const import MovieType, INFO
 from .config import create_db
+from .utils import ProgressBar, um_to_pixels, clamp
 
 # Print a helpful string when user imports this library
 print(f"[{INFO}] Run Experiment.help() to get examples of how to use ODyn.")
@@ -249,8 +250,8 @@ class Experiment:
             bar.show()
 
             # Load mmap files and save them as TIFFs
-            # TODO: Make sure mmap_file and raw_path correspond to the same file
-            for mmap_path, raw_path in zip(self.mc.mmap_file, raw_paths):
+            # TODO: Confirm that mmap_file and fname have the same order
+            for mmap_path, raw_path in zip(self.mc.mmap_file, self.mc.fname):
                 mcor_path = mcor_folder / (raw_path.stem + "_mcor.tif")
 
                 mc = cm.load(mmap_path)
@@ -325,16 +326,6 @@ class Experiment:
 
     # def play_mcor_comparison(self) -> None:
     #     self._play_movie(movie_types=(MovieType.RAW, MovieType.MCOR))
-
-    # def run_final_motion_correction(self) -> None:
-    #     self._run_motion_correction(final=True)
-    #     self.movies[(MovieType.MCOR,)].mark_as_outdated()
-    #     self.movies[(MovieType.RAW, MovieType.MCOR)].mark_as_outdated()
-
-    # def run_test_motion_correction(self) -> None:
-    #     self._run_motion_correction(final=False)
-    #     self.movies[(MovieType.TEST,)].mark_as_outdated()
-    #     self.movies[(MovieType.RAW, MovieType.TEST)].mark_as_outdated()
 
     # ----------------------------------------------------------------- #
     # Data Analysis
@@ -515,36 +506,3 @@ class Experiment:
 #         #       - Remove frame number from label
 #         #       - Possibly add total time to config and remove fr in [play.load]
 #         return
-
-
-# TODO: - Fix the logging interaction with this class
-@dataclass
-class ProgressBar:
-    total: int
-    current: int = 0
-
-    def show(self) -> None:
-        filled_squares = int(40 * self.current / self.total)
-
-        progress_str = f"[{INFO}] [ "
-        progress_str += "\u2588" * filled_squares
-        progress_str += "-" * (40 - filled_squares)
-        progress_str += f" ] {self.current:03d}/{self.total:03d} Files processed"
-
-        print(progress_str, end="\r")
-
-    def step(self) -> None:
-        self.current = min(self.current + 1, self.total)
-        self.show()
-
-    def end(self) -> None:
-        msg = f"[{INFO}] {self.total} files processed sucessfully."
-        print(f"{msg:75s}")
-
-
-def um_to_pixels(values_um, um_per_pixels):
-    return [int(a / b) for (a, b) in zip(values_um, um_per_pixels)]
-
-
-def clamp(x, min_x, max_x):
-    return max(min_x, min(x, max_x))

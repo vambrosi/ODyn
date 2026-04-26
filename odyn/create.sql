@@ -12,14 +12,20 @@ CREATE TABLE IF NOT EXISTS metadata
     , width_um REAL NOT NULL
     , frame_count INTEGER NOT NULL
     , frame_rate REAL NOT NULL
+    , laser_power_920 INTEGER NOT NULL
+    , laser_power_1040 INTEGER NOT NULL
+    , time_between_acq_onset_s REAL NOT NULL
     , tiff_stem TEXT NOT NULL
-    );
+    ) STRICT;
 
 CREATE TABLE IF NOT EXISTS acquisitions
     ( id INTEGER PRIMARY KEY
     , raw_filename TEXT NOT NULL
-    , should_include BOOLEAN NOT NULL
-    );
+    , should_include INTEGER NOT NULL
+    , frame_count INTEGER NOT NULL
+    , first_frame_start_s REAL NOT NULL
+    , loop_start_datetime TEXT NOT NULL
+    ) STRICT;
 
 CREATE TABLE IF NOT EXISTS function_calls
     ( id INTEGER PRIMARY KEY
@@ -27,7 +33,7 @@ CREATE TABLE IF NOT EXISTS function_calls
     , object_class TEXT NOT NULL
     , method_name TEXT NOT NULL
     , git_commit TEXT NOT NULL
-    );
+    ) STRICT;
 
 CREATE TABLE IF NOT EXISTS parameters
     ( id INTEGER PRIMARY KEY
@@ -35,4 +41,4 @@ CREATE TABLE IF NOT EXISTS parameters
     , parameter_type TEXT NOT NULL
     , parameter_value TEXT NOT NULL
     , function_call_id INTEGER REFERENCES function_calls(id)
-    );
+    ) STRICT;
