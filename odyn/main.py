@@ -1,3 +1,32 @@
+# --------------------------------------------------------------------------- #
+#
+# TODO: - Integrate docstrings with default values, to avoid copy-paste.
+#       - Create Database class that gobbles up all metadata in a folder.
+#       - Add pipeline function/classes to facilitate data analysis:
+#           - Convolution layers (moving weighted averages)
+#           - Thresholding (entrywise biased Heaviside or ReLU functions)
+#           - All the steps in the MATLAB segmentation GUI?
+#       - Add git hash to every db entry? (To help db updates...)
+#       - Finish porting all comments from odyn_config.toml
+#
+# NOTE: There is a question of how to integrate everything into a unique db
+#       while preserving the ability to copy files to do analysis off the
+#       server or to process subsets of the data. This would require being
+#       able to call functions on query results, and possibly make db
+#       consolidation easy (preferably automatic). Which steps would be most
+#       relevant would depend on how much of the code would run on each
+#       computer vs directly on the server. All possibilities should be
+#       feasible given the different workflows of people in the lab.
+#
+# Related TODO: - Make a function that creates .py file containing the whole
+#                 processing/analysis pipeline, to run on the server.
+#               - Make function outputs relative to raw-files folder.
+#               - Create function to append a db to a main one. It would have
+#                 to check if experiment is already on the list and adjust
+#                 primary keys and references accordingly.
+#
+# --------------------------------------------------------------------------- #
+
 import re
 import sqlite3
 
@@ -98,9 +127,9 @@ class Experiment:
 
         return print(f"[{INFO}] Class/method not found!")
 
-    # ----------------------------------------------------------------- #
+    # ----------------------------------------------------------------------- #
     # Motion Correction functions
-    # ----------------------------------------------------------------- #
+    # ----------------------------------------------------------------------- #
 
     def run_motion_correction(
         self,
@@ -327,9 +356,9 @@ class Experiment:
     # def play_mcor_comparison(self) -> None:
     #     self._play_movie(movie_types=(MovieType.RAW, MovieType.MCOR))
 
-    # ----------------------------------------------------------------- #
+    # ----------------------------------------------------------------------- #
     # Data Analysis
-    # ----------------------------------------------------------------- #
+    # ----------------------------------------------------------------------- #
 
     # TODO: 1) Compute z-score compared with the baseline for each file
     #       2) Reproduce the pre-processing from the MATLAB code
