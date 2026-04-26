@@ -1,10 +1,19 @@
+# System files
 .DS_Store
-test_exp/
+
+# IDE config
+.vscode
+
+# Design docs
 *.pdf
+
+# Temp files
+tmp/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class
 
+# Package by-products
 odyn.egg-info
