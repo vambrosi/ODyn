@@ -7,7 +7,8 @@
 #           - Thresholding (entrywise biased Heaviside or ReLU functions)
 #           - All the steps in the MATLAB segmentation GUI?
 #       - Add git hash to every db entry? (To help db updates...)
-#       - Finish porting all comments from odyn_config.toml
+#       - Add support for use_last_parameters
+#       - Split experiments using metadata (loop_start_datetime?)
 #
 # NOTE: There is a question of how to integrate everything into a unique db
 #       while preserving the ability to copy files to do analysis off the
@@ -296,16 +297,74 @@ class Experiment:
                 bar.step()
             bar.end()
 
-    # def _play_movie(self, movie_types: tuple[MovieType, ...]) -> None:
-    #     new_hash = self._sync_config()
-    #     video_config = dict(self.config["player"]["video"])
+    def play_movie(
+        self,
+        use_last_parameters: bool = False,
+        grid: Iterable[str] = ["raw", "mcor"],
+        downsample_ratio: float = 0.03,
+        rigid: bool = False,
+        opencv_codec: str = "MJPG",
+        save_movie: bool = True,
+        save_folder: str = r"./movies",
+        backend: str = "embed_opencv",
+        do_loop: bool = False,
+        fr: float = 30,
+        magnification: float = 1,
+        plot_text: bool = True,
+        q_max: float = 99.5,
+        q_min: float = 0.0,
+    ) -> None:
+        """
+        \033[1;31mPLAY_MOVIE\033[0m
+        Play and save movies for quality control
 
-    #     movie_type_str = "_".join(t.value for t in movie_types)
-    #     filename = f"{self.config["experiment"]["tiff_stem"]}_{movie_type_str}.avi"
-    #     filepath = (self.path / filename).resolve()
-    #     video_config["movie_name"] = str(filepath)
+        \033[1;34mUSAGE\033[0m
+            exp = Experiment(experimentFolder)
+            exp.play_movie(...)
 
-    #     self.movies[movie_types].maybe_update(new_hash).play(**video_config)
+        \033[1;34mLIST OF PARAMETERS\033[0m (WITH DEFAULT VALUES)
+
+            \033[0;32mBasic settings\033[0m
+            use_last_parameters = False             Use parameters from last run as the defaults
+            grid                = ["raw", "mcor"]   How to concatenate movies horizontally.
+                                                    ("raw", "mcor", "test" in some order)
+
+            \033[0;32mMovie loading settings\033[0m
+            downsample_ratio    = 0.03              Percentage of frames to keep
+            rigid               = false             Play rigid or non-rigid motion movies (on tests)
+
+            \033[0;32mVideo saving\033[0m
+            opencv_codec        = "MJPG"            Codec used to encode the saved video
+            save_movie          = true              Put "true" if you want to save the preview video to a file
+            save_folder         = r"./movies"       "." is the experiment folder (r is to use \ in the path)
+
+            \033[0;32mVideo settings\033[0m
+            backend             = "embed_opencv"    "opencv" for popup and "embed_opencv" for inline player
+            do_loop             = false             Loop the video or not
+            fr                  = 30                How fast to play the video (frames/s)
+            magnification       = 1                 Magnification of video
+            plot_text           = true              Add current frame label on the video
+            q_max               = 99.5              Quantile to consider as white
+            q_min               = 0.0               Quantile to consider as black
+
+        \033[1;34mEXAMPLES\033[0m
+            exp.play_movie(grid=["raw"], save_folder="~/TempData/20260101/e1/movies")
+                Running this command would save a compilation of all raw movies
+
+            exp.play_movie(grid=["raw", "test"])
+                This would save a video with raw movies on the left and test on the right
+        """
+
+        #     new_hash = self._sync_config()
+        #     video_config = dict(self.config["player"]["video"])
+
+        #     movie_type_str = "_".join(t.value for t in movie_types)
+        #     filename = f"{self.config["experiment"]["tiff_stem"]}_{movie_type_str}.avi"
+        #     filepath = (self.path / filename).resolve()
+        #     video_config["movie_name"] = str(filepath)
+
+        #     self.movies[movie_types].maybe_update(new_hash).play(**video_config)
+        return
 
     def delete_temp_files(self) -> None:
         """

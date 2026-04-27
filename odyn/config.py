@@ -76,13 +76,12 @@ def create_db(path: str | Path) -> None:
     metadata["height_px"] = tif.pages[0].tags["ImageLength"].value
     metadata["frame_rate"] = SI_metadata["SI.hRoiManager.scanFrameRate"]
 
-    # TODO: Ask why the 920, 1040 (maybe not hardcode or split these)
     laser_powers = SI_metadata["SI.hBeams.powers"]
     metadata["laser_power_920"] = laser_powers[0]
     metadata["laser_power_1040"] = laser_powers[1]
 
     # TODO: Make variable name clearer
-    metadata["time_between_acq_onset_s"] = SI_metadata["SI.loopAcqInterval"]
+    metadata["loop_acq_interval_s"] = SI_metadata["SI.loopAcqInterval"]
 
     # Assume unit is centimeters
     # TODO: Check that units are centimeters (throw error otherwise)

@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS metadata
     , frame_rate REAL NOT NULL
     , laser_power_920 INTEGER NOT NULL
     , laser_power_1040 INTEGER NOT NULL
-    , time_between_acq_onset_s REAL NOT NULL
+    , loop_acq_interval_s REAL NOT NULL
     , tiff_stem TEXT NOT NULL
     ) STRICT;
 
