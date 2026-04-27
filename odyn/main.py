@@ -9,6 +9,8 @@
 #       - Add git hash to every db entry? (To help db updates...)
 #       - Add support for use_last_parameters
 #       - Split experiments using metadata (loop_start_datetime?)
+#       - Add delete_temp_files reminder in run_motion_correction
+#       - Add help for expected file name and folder structure?
 #
 # NOTE: There is a question of how to integrate everything into a unique db
 #       while preserving the ability to copy files to do analysis off the
