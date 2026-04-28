@@ -4,7 +4,7 @@ from pathlib import Path
 from datetime import date, datetime
 from tifffile import TiffFile
 
-from .const import INFO, FAIL
+from .const import INFO, PASS, FAIL, CHECK, CROSS
 from .utils import ProgressBar
 
 
@@ -141,13 +141,13 @@ def create_db(path: str | Path) -> None:
         if frame_count != acq["frame_count"]:
             print(
                 f"[{FAIL}] File {acq["raw_filename"]} doesn't have the "
-                "same number of frames as its predecessor!"
+                "same number of frames as its predecessor! {CROSS}"
             )
             frame_count = acq["frame_count"]
         if loop_start != acq["loop_start_datetime"]:
             print(
                 f"[{FAIL}] File {acq["raw_filename"]} doesn't have the "
-                "same loop start datetime as its predecessor!"
+                "same loop start datetime as its predecessor! {CROSS}"
             )
             loop_start = acq["loop_start_datetime"]
 
@@ -159,7 +159,7 @@ def create_db(path: str | Path) -> None:
             "fail. Split the database afterwards if necessary."
         )
     else:
-        print(f"[{INFO}] Passed all checks!")
+        print(f"[{PASS}] Passed all checks! {CHECK}")
 
     # ----------------------------------------------------------------------- #
     # Create SQL DB and store metadata

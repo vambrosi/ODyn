@@ -338,7 +338,7 @@ class Experiment:
             \033[0;32mVideo saving\033[0m
             opencv_codec        = "MJPG"            Codec used to encode the saved video
             save_movie          = true              Put "true" if you want to save the preview video to a file
-            save_folder         = r"./movies"       "." is the experiment folder (r is to use \ in the path)
+            save_folder         = r"./movies"       "." is the experiment folder (r is to use \\ in the path)
 
             \033[0;32mVideo settings\033[0m
             backend             = "embed_opencv"    "opencv" for popup and "embed_opencv" for inline player
