@@ -35,7 +35,7 @@ frames = 100                   # A - How many frames in each TIFF stack
 size_pixels = [100, 100]       # A - Size of each frame in pixels
 size_ums = [100, 100]          # A - Size of each frame in micrometers
 um_per_pixels = [0.0, 0.0]     # A - Conversion rate
-
+size_gigabytes = 10
 
 # Test Motion Correction Settings ----------------------------------------------------- #
 # Settings used when processing subsets of the data or when doing quick checks.

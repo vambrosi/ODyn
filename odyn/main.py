@@ -180,7 +180,12 @@ class Experiment:
 
         # If final save settings and TIFF files
         if final:
-            print("[INFO] Saving mcor files...")
+            if self.config["metadata"]["size_gigabytes"] > 4:
+                big_file = True
+                print("[INFO] Saving mcor files with bigtiff = True...")
+            else:
+                big_file = False
+                print("[INFO] Saving mcor files...")
 
             # Record settings in the motion_correction section
             temp = dict(test_config)

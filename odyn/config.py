@@ -54,6 +54,8 @@ def create_config(path: str | Path) -> None:
 
     # Get metadata from the first raw TIFF file
     tif = TiffFile(file_paths[0])
+    size_gb = file_paths[0].stat().st_size / 1000000000
+    config["metadata"]["size_gigabytes"] = size_gb
     SI_metadata = tif.scanimage_metadata["FrameData"]
     width_px, height_px = tif.pages[0].shape
 
