@@ -204,7 +204,7 @@ class Experiment:
                 mc = cm.load(mmap_path)
 
                 # Saving TIFFs directly because caiman saves them as 64-bit
-                with tifffile.TiffWriter(mcor_path) as tif:
+                with tifffile.TiffWriter(mcor_path, bigtiff = big_file) as tif:
                     tif.write(
                         [mc[i].copy() for i in range(mc.shape[0])],
                         shape=mc[0].shape,
