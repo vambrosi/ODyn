@@ -44,12 +44,7 @@ import caiman as cm
 from caiman.motion_correction import MotionCorrect
 from caiman.paths import get_tempdir
 
-from .const import MovieType, INFO
-from .config import create_db
-from .utils import ProgressBar, um_to_pixels, clamp
-
-# Print a helpful string when user imports this library
-print(f"[{INFO}] Run Experiment.help() to get examples of how to use ODyn.")
+from .utils import ProgressBar, um_to_pixels, clamp, MovieType, INFO
 
 
 class Experiment:
@@ -61,8 +56,8 @@ class Experiment:
         exp = Experiment(experimentFolder)
 
     \033[1;34mRELEVANT METHODS\033[0m
-        exp.run_motion_correction()
-        exp.play_movie()
+        exp.run_motion_correction(...)
+        exp.play_movie(...)
         exp.delete_temp_files()
 
     Run Experiment.help('method_name') to know more about one of the methods above.
@@ -71,9 +66,13 @@ class Experiment:
         Experiment.help('play_movie')
     """
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self.db_path = self.path / "odyn.db"
+    def __init__(self, exp_id: int, con: sqlite3.Connection) -> None:
+        self.con = con
+
+        # Get metadata for all raw files
+        query = "SELECT * FROM raw_files WHERE exp_id = ?;"
+        res = self.con.execute(query, [exp_id])
+        self.metadata = dict(res.fetchall())
 
         # Add a movie of every type (and load it later)
         # self.movies = {(t,): LazyMovie(self, (t,)) for t in MovieType}
@@ -82,22 +81,10 @@ class Experiment:
         # for t in [MovieType.TEST, MovieType.MCOR]:
         #     self.movies[(MovieType.RAW, t)] = LazyMovie(self, (MovieType.RAW, t))
 
-        # Get connection or create database if needed
-        self.db_con = (
-            sqlite3.connect(self.db_path)
-            if self.db_path.exists()
-            else create_db(self.db_path)
-        )
-        self.db_con.row_factory = sqlite3.Row
-
-        with self.db_con as con:
-            res = con.execute("SELECT * FROM metadata;")
-            self.metadata = dict(res.fetchone())
-
         Experiment.short_help()
 
     def __del__(self):
-        self.db_con.close()
+        self.con.close()
 
     def __str__(self):
         return (
@@ -128,7 +115,7 @@ class Experiment:
         if attr is not None:
             return print(attr.__doc__)
 
-        return print(f"[{INFO}] Class/method not found!")
+        return print(f"[{INFO}] Method not found!")
 
     # ----------------------------------------------------------------------- #
     # Motion Correction functions
@@ -165,9 +152,9 @@ class Experiment:
             is_test             = True              Whether to use a limited range of acquisitions in this run
 
             \033[0;32mParameters in this section will be ignored if is_test == False\033[0m
-            first_acq           = 1                 Number of the first acquisition to motion correct
+            first_acq           = 1                 Index of the first acquisition to motion correct
             step_acq            = 1                 Get one acquisition for every 'step_acq' acquisitions
-            last_acq            = 3                 Number of the last acquisition to motion correct
+            last_acq            = 3                 Index of the last acquisition to motion correct
 
             \033[0;32mCaImAn motion correction parameters\033[0m
             border_nan          = "copy"            copy along the boundary (if True, fill in with NaN)
@@ -215,7 +202,7 @@ class Experiment:
 
         # Get raw paths
         raw_folder = self.path / "raw"
-        with self.db_con as con:
+        with self.con as con:
             res = con.execute("SELECT raw_filename FROM acquisitions")
             raw_paths = [raw_folder / row["raw_filename"] for row in res.fetchall()]
 

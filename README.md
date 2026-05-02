@@ -2,7 +2,7 @@
 
 ## Installation
 
-- Install a code editor with Python and TOML extensions (_e.g._ [VS Code](https://code.visualstudio.com/), its [python extension](https://marketplace.visualstudio.com/items?itemName=ms-python.python), and [Even Better TOML](https://marketplace.visualstudio.com/items?itemName=tamasfe.even-better-toml)).
+- Install a code editor with a Python extensions (_e.g._ [VS Code](https://code.visualstudio.com/) and its [python extension](https://marketplace.visualstudio.com/items?itemName=ms-python.python)).
 
 - Install `git` if it's not installed yet. This can be done by downloading the [GitHub Desktop](https://desktop.github.com/download/) app, or intalling `git` directly from the [official website](https://git-scm.com/).
 
@@ -32,4 +32,4 @@ where `ODYN_PATH` is the folder where you installed `odyn`.
 
 ## Usage
 
-Make a copy of notebook file `DONT_EDIT_processing.ipynb` in the `odyn` folder, open that copy in VS Code, and follow the instructions there. You will need to select `caiman` as your _Python Environment_ and install the Jupyter extension (you will get prompts after you try to run a notebook cell).
+Create a notebook file (extension `.ipynb`) in VS Code, and run `from odyn import Database` in a cell. You will get more instructions after that. You will also need to select `caiman` as your _Python Environment_ and install the Jupyter extension (you will get prompts after you try to run a notebook cell).

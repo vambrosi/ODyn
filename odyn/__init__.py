@@ -1,3 +1,3 @@
-from odyn.main import Experiment
+from odyn.database import Database
 
-__all__ = [Experiment]
+__all__ = [Database]
