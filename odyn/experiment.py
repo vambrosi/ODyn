@@ -1,14 +1,12 @@
 # --------------------------------------------------------------------------- #
 #
 # TODO: - Integrate docstrings with default values, to avoid copy-paste.
-#       - Create Database class that gobbles up all metadata in a folder.
 #       - Add pipeline function/classes to facilitate data analysis:
 #           - Convolution layers (moving weighted averages)
 #           - Thresholding (entrywise biased Heaviside or ReLU functions)
 #           - All the steps in the MATLAB segmentation GUI?
 #       - Add git hash to every db entry? (To help db updates...)
 #       - Add support for use_last_parameters
-#       - Split experiments using metadata (loop_start_datetime?)
 #       - Add delete_temp_files reminder in run_motion_correction
 #       - Add help for expected file name and folder structure?
 #
@@ -23,10 +21,6 @@
 #
 # Related TODO: - Make a function that creates .py file containing the whole
 #                 processing/analysis pipeline, to run on the server.
-#               - Make function outputs relative to raw-files folder.
-#               - Create function to append a db to a main one. It would have
-#                 to check if experiment is already on the list and adjust
-#                 primary keys and references accordingly.
 #
 # --------------------------------------------------------------------------- #
 
@@ -407,9 +401,6 @@ class Experiment:
     # ----------------------------------------------------------------------- #
     # Data Analysis
     # ----------------------------------------------------------------------- #
-
-    # TODO: 1) Compute z-score compared with the baseline for each file
-    #       2) Reproduce the pre-processing from the MATLAB code
 
     # def compute_z_scores(self) -> cm.movie:
     #     # Check an sync config

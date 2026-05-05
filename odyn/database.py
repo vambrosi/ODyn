@@ -126,7 +126,8 @@ class Database:
         # I used preProcessing_v2.m and other scripts in that file as a baseline
         # for what metadata has to be collected, and what needs to be checked.
         #
-        # TODO: Make sure all relevant data is added to the db.
+        # TODO: 1) Make sure all relevant data is added to the db.
+        #       2) Only get metadata of new experiments, unless "forced = True".
         #
         # ----------------------------------------------------------------------- #
 
