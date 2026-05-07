@@ -12,10 +12,10 @@ from tifffile import TiffFile
 import pandas as pd
 
 from .experiment import Experiment
-from .utils import ProgressBar, INFO
+from .utils import ProgressBar, INFO, FAIL, PASS, CHECK, CROSS
 
 # Print a helpful string when user imports this library
-print(f"[{INFO}] Run Database.help() to get examples of how to use ODyn.")
+print(f"{INFO} Run Database.help() to get examples of how to use ODyn.")
 
 
 class Database:
@@ -27,9 +27,9 @@ class Database:
         db = Database(main_folder)
 
     \033[1;34mRELEVANT PROPRIETIES/METHODS\033[0m
-        db.experiments          <- Returns DataFrame with experiment data
-        db.experiment(exp_id)   <- Return an Experiment to do processing/analysis
-        db.update()          <- Add new data to the database
+        db.experiments          <- Return all Experiments for processing/analysis
+        db.experiment_table     <- Returns DataFrame with experiment data
+        db.raw_files_table      <- Returns DataFrame with raw files data
 
     Run Database.help('method_name') to know more about one of the methods above.
 
@@ -41,75 +41,83 @@ class Database:
         self.main_folder = Path(path)
         self.path = self.main_folder / ".odyn" / "odyn.db"
         self._experiments = None
+        self._experiment_table = None
+        self._raw_files_table = None
+        self._mcor_files_table = None
 
         # Get connection or create database if needed
         if not self.path.exists():
-            print(f"[{INFO}] Did not find a database!")
-            print(f"[{INFO}] Creating database...")
+            print(f"{INFO} Did not find a database!")
+            print(f"{INFO} Creating database...")
 
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.con = sqlite3.connect(self.path)
 
             self.update()
 
-            print(f"[{INFO}] Database created at the following location:")
-            print(f"[{INFO}]    {self.path.resolve()}")
+            print(f"{INFO} Database created at the following location:")
+            print(f"{INFO}    {self.path.resolve()}")
 
         elif force_update:
-            print(f"[{INFO}] Updating the database...")
+            print(f"{INFO} Updating the database...")
 
             self.con = sqlite3.connect(self.path)
             self.update()
 
-            print(f"[{INFO}] Database updated!")
-            print(f"[{INFO}] Path to the database:")
-            print(f"[{INFO}]    {self.path.resolve()}")
+            print(f"{INFO} Database updated!")
+            print(f"{INFO} Path to the database:")
+            print(f"{INFO}    {self.path.resolve()}")
 
         else:
             self.con = sqlite3.connect(self.path)
-            print(f"[{INFO}] Connected to the database at:")
-            print(f"[{INFO}]    {self.path.resolve()}")
+            print(f"{INFO} Connected to the database at:")
+            print(f"{INFO}    {self.path.resolve()}")
 
         self.con.execute("PRAGMA foreign_keys = ON;")
         self.con.row_factory = sqlite3.Row
+
+    def __del__(self):
+        self.con.close()
 
     def experiment(self, exp_id: int):
         return Experiment(exp_id, self.con)
 
     @property
-    def experiments(self) -> pd.DataFrame:
+    def experiments(self) -> list[Experiment]:
         if self._experiments is not None:
             return self._experiments
 
-        COLUMN_NAMES = [
-            "e.exp_id",
-            "exp_name",
-            "exp_type",
-            "loop_start",
-            "height_px",
-            "width_px",
-            "height_um",
-            "width_um",
-            "frame_count",
-            "frame_rate",
-            "laser_power_920",
-            "laser_power_1040",
-            "loop_acq_interval_s",
-        ]
+        query = "SELECT exp_id FROM experiments;"
+        res = self.con.execute(query)
 
-        query = f"""
-            SELECT DISTINCT {", ".join(COLUMN_NAMES)}
-                FROM raw_files
-                JOIN exp_files ON raw_files.acq_id = exp_files.acq_id
-                JOIN experiments AS e ON e.exp_id = exp_files.exp_id;
-            """
-
-        # Cache result
-        self._experiments = pd.read_sql_query(query, self.con).astype(
-            {"exp_name": str, "exp_type": "category", "loop_start": "datetime64[ms]"}
-        )
+        exp_ids = sorted(exp["exp_id"] for exp in res.fetchall())
+        self._experiments = [Experiment(exp_id, self.main_folder, self.con) for exp_id in exp_ids]
 
         return self._experiments
+
+    @property
+    def experiment_table(self) -> pd.DataFrame:
+        query = "SELECT * FROM experiments;"
+        self._experiment_table = pd.read_sql_query(query, self.con)
+        self._experiment_table.set_index("exp_id", inplace=True)
+
+        return self._experiment_table
+
+    @property
+    def raw_files_table(self) -> pd.DataFrame:
+        query = "SELECT * FROM raw_files;"
+        self._raw_files_table = pd.read_sql_query(query, self.con)
+        self._raw_files_table.set_index("acq_id", inplace=True)
+
+        return self._raw_files_table
+
+    @property
+    def mcor_files_table(self) -> pd.DataFrame:
+        query = "SELECT * FROM mcor_files;"
+        self._mcor_files_table = pd.read_sql_query(query, self.con)
+        self._mcor_files_table.set_index("acq_id", inplace=True)
+
+        return self._mcor_files_table
 
     def update(self) -> None:
         # ----------------------------------------------------------------------- #
@@ -131,40 +139,42 @@ class Database:
         #
         # ----------------------------------------------------------------------- #
 
-        print(f"[{INFO}] Searching for raw files ('**/raw/*.tif')...")
+        self.con.execute("PRAGMA foreign_keys = ON;")
+
+        print(f"{INFO} Searching for raw files ('**/raw/*.tif')...")
 
         raw_paths = sorted(self.main_folder.rglob("raw/[!.]?*.tif"))
         assert raw_paths, f"Found no .tif files in: {raw_path.resolve()}"
 
-        print(f"[{INFO}] Found {len(raw_paths)} raw TIFF files.")
+        print(f"{INFO} Found {len(raw_paths)} raw TIFF files.")
 
         # Experiments are sets of acquisitions with the same loop start time
         experiments = {}
 
         # Add experiments and acquisitions
-        print(f"[{INFO}] Getting metadata from files...")
+        print(f"{INFO} Getting metadata from files...")
+        checks_failed = 0
 
         bar = ProgressBar(len(raw_paths))
         bar.show()
 
         for raw_path in raw_paths:
+            file_stem_parts = raw_path.stem.split("_")
             tif = TiffFile(raw_path)
 
             if not tif.is_scanimage:
-                bar.message(
-                    f"[{INFO}]   Skipped file {raw_path} (not a ScanImage TIFFs)"
-                )
+                bar.message(f"{INFO}   Skipped file {raw_path} (not a ScanImage TIFFs)")
                 continue
 
             # Get file SI metadata
             SI_metadata = tif.scanimage_metadata["FrameData"]
             laser_powers = SI_metadata["SI.hBeams.powers"]
 
-            # TODO: What is better? And why the redundancy?
-            #           len(tif.pages) or
-            #           SI_metadata["SI.hStackManager.framesPerSlice"]
-            acq = {
-                "raw_path": str(raw_path.relative_to(self.main_folder)),
+            # Get the data that must be the same across the experiment
+            exp_data = {
+                "exp_name": "_".join(file_stem_parts[:-1]),
+                "exp_type": tif.scanimage_metadata["FrameData"]["SI.acqState"],
+                "mouse_id": file_stem_parts[1],
                 "height_px": tif.pages[0].tags["ImageLength"].value,
                 "width_px": tif.pages[0].tags["ImageWidth"].value,
                 "frame_count": len(tif.pages),
@@ -184,8 +194,8 @@ class Database:
             factor_y = round(1e4 * ny / dy, 4)
 
             # Size of image in um
-            acq["width_um"] = acq["width_px"] * factor_x
-            acq["height_um"] = acq["height_px"] * factor_y
+            exp_data["width_um"] = exp_data["width_px"] * factor_x
+            exp_data["height_um"] = exp_data["height_px"] * factor_y
 
             # Parse ImageDescription
             image_description = dict(
@@ -193,7 +203,11 @@ class Database:
                 for line in tif.pages[0].tags["ImageDescription"].value.splitlines()
             )
 
-            acq["first_frame_start_s"] = float(image_description["frameTimestamps_sec"])
+            # Data specific to the acquisition
+            acq = {
+                "raw_path": str(raw_path.relative_to(self.main_folder)),
+                "first_frame_start_s": float(image_description["frameTimestamps_sec"]),
+            }
 
             # Parse ImageDescription epoch as a datetime
             date_string = image_description["epoch"].strip("[]")
@@ -201,26 +215,36 @@ class Database:
             dt = datetime.strptime(date_string, "%Y %m %d %H %M %S.%f")
 
             loop_start = dt.isoformat(" ")
+            exp_data["exp_start"] = loop_start
 
             # Add group if this is the first acquisition
             # NOTE: We name the experiment using the first acquisition stem
             if loop_start not in experiments:
-                file_stem_parts = raw_path.stem.split("_")
-
                 experiments[loop_start] = {
-                    "columns": {
-                        "exp_name": "_".join(file_stem_parts[:-1]),
-                        "exp_type": tif.scanimage_metadata["FrameData"]["SI.acqState"],
-                        "loop_start": loop_start,
-                    },
+                    "data": exp_data,
                     "acquisitions": [acq],
                 }
+
             else:
+                # Check if metadata is consistent across acquisitions
+                if exp_data != experiments[loop_start]["data"]:
+                    checks_failed += 1
+
+                    bar.message(
+                        f"{FAIL}   {acq["raw_path"]} metadata is "
+                        "inconsistent with the first experiment acquisition."
+                    )
+
                 experiments[loop_start]["acquisitions"].append(acq)
 
             bar.step()
 
         bar.end()
+
+        if checks_failed > 0:
+            print(f"{FAIL} Failed {checks_failed} checks. {CROSS}")
+        else:
+            print(f"{PASS} Passed all checks! {CHECK}")
 
         # ----------------------------------------------------------------------- #
         # Create SQL DB and store metadata
@@ -235,26 +259,35 @@ class Database:
 
             for exp in experiments.values():
                 # Add experiment to the database
-                insertion_query = _create_insertion_query("experiments", exp["columns"])
-                cur.execute(insertion_query, exp["columns"])
+                insertion_query = _create_insertion_query("experiments", exp["data"])
+                cur.execute(insertion_query, exp["data"])
 
                 # Store exp_id for later
                 exp_id = cur.lastrowid
 
+                # Add raw acquisition files in the exp loop
                 for acq in exp["acquisitions"]:
-                    # Add raw acquisition files in the exp loop
+                    acq["exp_id"] = exp_id
+
                     insertion_query = _create_insertion_query("raw_files", acq)
                     cur.execute(insertion_query, acq)
 
-                    # Add pair exp_id and acq_id to the join table
-                    acq_id = cur.lastrowid
-                    cur.execute(
-                        "INSERT INTO exp_files (exp_id, acq_id) VALUES (?, ?)",
-                        [exp_id, acq_id],
-                    )
-
             # Make sure the corresponding property will be recomputed
             self._experiments = None
+
+    def from_query(self, query: str):
+        """
+        \033[1;31mFROM_QUERY\033[0m
+        Creates a pandas DataFrame from a SQL query.
+
+        \033[1;34mUSAGE\033[0m
+            db = Database(main_folder)
+            df = db.from_query(query_as_a_string)
+
+        \033[1;34mEXAMPLE\033[0m
+            db.from_query("SELECT exp_id, exp_name FROM experiments;")
+        """
+        return pd.read_sql_query(query, self.con)
 
     @staticmethod
     def help(name="Database"):
@@ -266,7 +299,7 @@ class Database:
         if attr is not None:
             return print(attr.__doc__)
 
-        return print(f"[{INFO}] Method not found!")
+        return print(f"{INFO} Method not found!")
 
 
 def _create_insertion_query(table_name, data):

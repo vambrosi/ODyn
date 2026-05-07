@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import tifffile
+import pandas as pd
 
 import caiman as cm
 from caiman.motion_correction import MotionCorrect
@@ -60,13 +61,16 @@ class Experiment:
         Experiment.help('play_movie')
     """
 
-    def __init__(self, exp_id: int, con: sqlite3.Connection) -> None:
-        self.con = con
+    is_first = True
 
-        # Get metadata for all raw files
-        query = "SELECT * FROM raw_files WHERE exp_id = ?;"
-        res = self.con.execute(query, [exp_id])
-        self.metadata = dict(res.fetchall())
+    def __init__(self, exp_id: int, main_folder: Path, con: sqlite3.Connection) -> None:
+        self.main_folder = main_folder
+        self.con = con
+        self.exp_id = exp_id
+
+        self._metadata = None
+        self._raw_files = None
+        self._mcor_files = None
 
         # Add a movie of every type (and load it later)
         # self.movies = {(t,): LazyMovie(self, (t,)) for t in MovieType}
@@ -75,29 +79,33 @@ class Experiment:
         # for t in [MovieType.TEST, MovieType.MCOR]:
         #     self.movies[(MovieType.RAW, t)] = LazyMovie(self, (MovieType.RAW, t))
 
-        Experiment.short_help()
+        if Experiment.is_first:
+            Experiment.short_help()
+            Experiment.is_first = False
 
-    def __del__(self):
-        self.con.close()
+    @property
+    def metadata(self) -> Optional[pd.DataFrame]:
+        query = f"SELECT * FROM experiments WHERE exp_id = {self.exp_id};"
+        self._metadata = pd.read_sql_query(query, self.con)
+        self._metadata.set_index("exp_id", inplace=True)
 
-    def __str__(self):
-        return (
-            f"Experiment {self.metadata["exp_name"]}\n"
-            f"  Date: {self.metadata["exp_date"]}\n"
-            f"  Subject: {self.metadata["mouse_id"]}\n"
-            f"  Folder: {str(self.path)}"
-        )
+        return self._metadata
 
-    def __repr__(self):
-        return str(self)
+    @property
+    def mcor_files(self) -> Optional[pd.DataFrame]:
+        query = f"SELECT * FROM mcor_files WHERE exp_id = {self.exp_id};"
+        self._mcor_files = pd.read_sql_query(query, self.con)
+        self._mcor_files.set_index("acq_id", inplace=True)
 
-    @staticmethod
-    def short_help():
-        msg = (
-            f"[{INFO}] Run Experiment.help() to get a list of useful functions.\n"
-            f"[{INFO}] Run Experiment.help('function_name') to know more about a function."
-        )
-        print(msg)
+        return self._mcor_files
+
+    @property
+    def raw_files(self) -> Optional[pd.DataFrame]:
+        query = f"SELECT * FROM raw_files WHERE exp_id = {self.exp_id};"
+        self._raw_files = pd.read_sql_query(query, self.con)
+        self._raw_files.set_index("acq_id", inplace=True)
+
+        return self._raw_files
 
     @staticmethod
     def help(name="Experiment"):
@@ -109,7 +117,15 @@ class Experiment:
         if attr is not None:
             return print(attr.__doc__)
 
-        return print(f"[{INFO}] Method not found!")
+        return print(f"{INFO} Method not found!")
+
+    @staticmethod
+    def short_help():
+        msg = (
+            f"{INFO} Run Experiment.help() to get a list of useful functions.\n"
+            f"{INFO} Run Experiment.help('function_name') to know more about a function."
+        )
+        print(msg)
 
     # ----------------------------------------------------------------------- #
     # Motion Correction functions
@@ -136,7 +152,8 @@ class Experiment:
         Method that does test/final motion correction
 
         \033[1;34mUSAGE\033[0m
-            exp = Experiment(experimentFolder)
+            db  = Database(main_folder)
+            exp = db.experiments[some_index]
             exp.run_motion_correction(...)
 
         \033[1;34mLIST OF PARAMETERS\033[0m (WITH DEFAULT VALUES)
@@ -168,13 +185,13 @@ class Experiment:
 
         # If is not test, include all acquisitions
         if not is_test:
-            first_acq = self.metadata["first_acq"]
+            first_acq = 0
             step_acq = 1
-            last_acq = self.metadata["last_acq"]
+            last_acq = len(self.raw_files)
 
         # max_shift_um has to less than size of image (in μm / 4)
-        height_um = self.metadata["height_um"]
-        width_um = self.metadata["width_um"]
+        height_um = self.metadata.at[self.exp_id, "height_um"]
+        width_um = self.metadata.at[self.exp_id, "width_um"]
         max_shift_um[0] = clamp(max_shift_um[0], 0, height_um / 4)
         max_shift_um[1] = clamp(max_shift_um[1], 0, width_um / 4)
 
@@ -195,27 +212,13 @@ class Experiment:
         # --- Get settings for CaImAn MotionCorrection class --- #
 
         # Get raw paths
-        raw_folder = self.path / "raw"
-        with self.con as con:
-            res = con.execute("SELECT raw_filename FROM acquisitions")
-            raw_paths = [raw_folder / row["raw_filename"] for row in res.fetchall()]
-
-        # Pick acquisitions within the specified range
-        def acq_number_in_range(path):
-            acq_number = int(path.stem.split("_")[-1])
-
-            return (
-                first_acq <= acq_number <= last_acq
-                and (acq_number - first_acq) % step_acq == 0
-            )
-
-        raw_paths = [path for path in raw_paths if acq_number_in_range(path)]
-        raw_paths.sort()
+        raw_files_slice = self.raw_files.iloc[first_acq:last_acq:step_acq]
+        raw_paths = [self.main_folder / p for p in raw_files_slice["raw_path"]]
 
         # CaImAn only uses pixels as units, so we make the conversion
         factor = [
-            height_um / self.metadata["height_px"],
-            width_um / self.metadata["width_px"],
+            height_um / self.metadata.at[self.exp_id, "height_px"],
+            width_um / self.metadata.at[self.exp_id, "width_px"],
         ]
 
         settings = {
@@ -231,7 +234,7 @@ class Experiment:
 
         # --- Run the motion correction --- #
 
-        print(f"[{INFO}] Starting motion correction...")
+        print(f"{INFO} Starting motion correction...")
 
         _, dview, _ = cm.cluster.setup_cluster(
             backend="multiprocessing", n_processes=None, single_thread=False
@@ -248,23 +251,34 @@ class Experiment:
         finally:
             cm.stop_server(dview=dview)
 
-        print(f"[{INFO}] Finished motion correction")
+        print(f"{INFO} Finished motion correction")
 
         # --- Save the results in TIFF files (if it is not a test) --- #
 
-        if not is_test:
-            print(f"[{INFO}] Saving mcor files...")
+        if is_test:
+            return
 
-            # Create folder if it doesn't exist
-            mcor_folder = self.path / "processed" / "mcor"
-            mcor_folder.mkdir(parents=True, exist_ok=True)
+        with self.con as con:
+            print(f"{INFO} Saving mcor files...")
 
             bar = ProgressBar(len(self.mc.mmap_file))
             bar.show()
 
+            # acq_id            INTEGER PRIMARY KEY
+            # , mcor_path         TEXT NOT NULL
+            # , approved          INTEGER NOT NULL DEFAULT FALSE
+            # , last_updated_by   INTEGER
+
             # Load mmap files and save them as TIFFs
             # TODO: Confirm that mmap_file and fname have the same order
-            for mmap_path, raw_path in zip(self.mc.mmap_file, self.mc.fname):
+
+            for acq_id, mmap_path, raw_path in zip(
+                raw_files_slice.index, self.mc.mmap_file, self.mc.fname
+            ):
+                # Create folder if it doesn't exist
+                mcor_folder = raw_path.parent.parent / "processed" / "mcor"
+                mcor_folder.mkdir(parents=True, exist_ok=True)
+
                 mcor_path = mcor_folder / (raw_path.stem + "_mcor.tif")
 
                 mc = cm.load(mmap_path)
@@ -276,6 +290,12 @@ class Experiment:
                         shape=mc[0].shape,
                         dtype=mc.dtype,
                     )
+
+                # Update the database with the latest mcor files
+                query = "INSERT OR REPLACE INTO mcor_files (acq_id, mcor_path) VALUES (?,?);"
+                con.execute(
+                    query, [acq_id, str(mcor_path.relative_to(self.main_folder))]
+                )
 
                 bar.step()
             bar.end()
@@ -369,7 +389,7 @@ class Experiment:
 
         # Remove files
         if movie_paths:
-            print(f"[{INFO}] Removing .mmap files that start with {stem}...")
+            print(f"{INFO} Removing .mmap files that start with {stem}...")
             total_size = 0  # in bytes
             for movie_path in movie_paths:
                 total_size += movie_path.stat().st_size
@@ -378,25 +398,10 @@ class Experiment:
             total_size = total_size / (1_000_000_000)  # in GBs
             ending = "s" if len(movie_paths) > 1 else ""
             print(
-                f"[{INFO}] Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB)."
+                f"{INFO} Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB)."
             )
         else:
-            print(f"[{INFO}] No .mmap files found.")
-
-    # def play_raw_movies(self) -> None:
-    #     self._play_movie(movie_types=(MovieType.RAW,))
-
-    # def play_mcor_movies(self) -> None:
-    #     self._play_movie(movie_types=(MovieType.MCOR,))
-
-    # def play_test_movies(self) -> None:
-    #     self._play_movie(movie_types=(MovieType.TEST,))
-
-    # def play_test_comparison(self) -> None:
-    #     self._play_movie(movie_types=(MovieType.RAW, MovieType.TEST))
-
-    # def play_mcor_comparison(self) -> None:
-    #     self._play_movie(movie_types=(MovieType.RAW, MovieType.MCOR))
+            print(f"{INFO} No .mmap files found.")
 
     # ----------------------------------------------------------------------- #
     # Data Analysis
@@ -465,10 +470,10 @@ class Experiment:
 
 #     def maybe_update(self, new_hash) -> cm.movie:
 #         if self.hash == new_hash:
-#             print(f"[{INFO}] No changes to the config. Using cached movie...")
+#             print(f"{INFO} No changes to the config. Using cached movie...")
 #             return self.movie
 
-#         print(f"[{INFO}] Updating movie...")
+#         print(f"{INFO} Updating movie...")
 
 #         load_config = self.owner.config["player"]["load"]
 #         downsample_ratio = load_config["downsample_ratio"]
@@ -544,7 +549,7 @@ class Experiment:
 #                     movie_paths = movie_paths[first_acq - 1 : last_acq : step_acq]
 
 #             print(
-#                 f"[{INFO}] Adding {len(movie_paths)} {movie_type.value} files to the movie."
+#                 f"{INFO} Adding {len(movie_paths)} {movie_type.value} files to the movie."
 #             )
 
 #             bar = ProgressBar(len(movie_paths))
