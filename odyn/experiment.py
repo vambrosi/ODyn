@@ -9,6 +9,7 @@
 #       - Add support for use_last_parameters
 #       - Add delete_temp_files reminder in run_motion_correction
 #       - Add help for expected file name and folder structure?
+#       - Input db to Experiment instead of just con
 #
 # NOTE: There is a question of how to integrate everything into a unique db
 #       while preserving the ability to copy files to do analysis off the
@@ -27,19 +28,19 @@
 import re
 import sqlite3
 
-from typing import Optional, Iterable
 from dataclasses import dataclass
+from typing import Optional, Iterable
 
 from pathlib import Path
 
-import tifffile
 import pandas as pd
+import tifffile
 
 import caiman as cm
 from caiman.motion_correction import MotionCorrect
 from caiman.paths import get_tempdir
 
-from .utils import ProgressBar, um_to_pixels, clamp, MovieType, INFO
+from .utils import ProgressBar, record_call, um_to_pixels, clamp, MovieType, INFO
 
 
 class Experiment:
@@ -196,8 +197,7 @@ class Experiment:
         max_shift_um[1] = clamp(max_shift_um[1], 0, width_um / 4)
 
         # --- Save validated parameters in the database --- #
-
-        # TODO: Implement this!!
+        record_call(self.con, "Experiment.run_motion_correction", locals())
 
         # --- Make sure movies will be updated next time they are played --- #
 
@@ -357,6 +357,8 @@ class Experiment:
             exp.play_movie(grid=["raw", "test"])
                 This would save a video with raw movies on the left and test on the right
         """
+
+        record_call(self.con, "Experiment.play_movie", locals())
 
         #     new_hash = self._sync_config()
         #     video_config = dict(self.config["player"]["video"])

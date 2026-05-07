@@ -63,11 +63,11 @@ CREATE TABLE IF NOT EXISTS mcor_files
 
 CREATE TABLE IF NOT EXISTS method_calls
     ( method_call_id    INTEGER PRIMARY KEY
-    , group_id          INTEGER NOT NULL
+    , group_id          INTEGER
     , called_at         TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     , method_name       TEXT NOT NULL
     , parameters        TEXT NOT NULL CHECK(json_valid(parameters))
-    , git_commit        TEXT NOT NULL
+    , git_commit        TEXT
 
     , FOREIGN KEY (group_id) REFERENCES groups(group_id)
     ) STRICT;

@@ -1,5 +1,8 @@
-from enum import Enum
+import json
+import sqlite3
+
 from dataclasses import dataclass
+from enum import Enum
 
 INFO = "[\033[1;34mINFO\033[0m]"
 PASS = "[\033[1;32mTEST\033[0m]"
@@ -12,6 +15,23 @@ class MovieType(Enum):
     RAW = "raw"
     MCOR = "mcor"
     TEST = "test"
+
+
+def record_call(con: sqlite3.Connection, func_name: str, params: dict) -> None:
+    # Makes sure it will not record self
+    del params["self"]
+
+    # TODO: Add group_id and git_commit
+    with con as con:
+        query = """
+            INSERT INTO method_calls
+                ( method_name
+                , parameters
+                ) VALUES (?, ?)
+        """
+        con.execute(query, [func_name, json.dumps(params)])
+
+    print(f"{INFO} Recorded method call to db.")
 
 
 # TODO: - Fix the logging interaction with this class
