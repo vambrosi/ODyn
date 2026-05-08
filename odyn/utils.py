@@ -1,3 +1,4 @@
+import functools
 import subprocess
 
 from dataclasses import dataclass
@@ -15,6 +16,34 @@ class MovieType(Enum):
     RAW = "raw"
     MCOR = "mcor"
     TEST = "test"
+
+
+def memorize_params(method):
+    # NOTE: - Fails if there is no required keyword argument
+    #       - Positional arguments will be ignored silently
+
+    params = {}
+
+    @functools.wraps(method)
+    def wrapper(self, *, use_last_parameters=False, **kwargs):
+        assert method.__kwdefaults__ is not None, "Must have a parameter default."
+
+        # If user is passing invalid arguments, just pass
+        # them to the method so it can report the error
+        if not kwargs.keys() <= method.__kwdefaults__.keys():
+            return method(self, **kwargs)
+
+        # Clear chached parameters if caller is not using them
+        if not use_last_parameters:
+            params.clear()
+
+        # Add kwargs (possibly overwriting) to last params
+        params.update(kwargs)
+
+        # INVARIANT: params are the kwargs of the last valid method call.
+        return method(self, **params)
+
+    return wrapper
 
 
 # TODO: - Fix the logging interaction with this class

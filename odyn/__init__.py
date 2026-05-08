@@ -2,7 +2,7 @@ from .database import Database
 from .groups import Group
 from .utils import INFO
 
-__all__ = [Database, Group]
+__all__ = ["Database", "Group"]
 
 # Print a helpful string when user imports this library
 print(f"{INFO} Import Database and Group classes for db UI and help functions!")

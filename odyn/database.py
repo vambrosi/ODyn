@@ -7,7 +7,8 @@ import sqlite3
 
 from pathlib import Path
 from datetime import date, datetime
-from tifffile import TiffFile
+from tifffile import TiffFile, TiffPage
+from typing import Optional, Any
 
 import pandas as pd
 
@@ -40,11 +41,11 @@ class Database:
         self.path = self.main_folder / ".odyn" / "odyn.db"
 
         # Initialize "private" variables
-        self._groups = None
-        self._experiments = None
-        self._raw_files = None
-        self._mcor_files = None
-        self._method_calls = None
+        self._groups: Optional[list[Group]] = None
+        self._experiments: Optional[pd.DataFrame] = None
+        self._raw_files: Optional[pd.DataFrame] = None
+        self._mcor_files: Optional[pd.DataFrame] = None
+        self._method_calls: Optional[pd.DataFrame] = None
 
         # Get connection or create database if needed
         if not self.path.exists():
@@ -90,7 +91,7 @@ class Database:
         if attr is not None:
             return print(attr.__doc__)
 
-        return print(f"{INFO} Method not found!")
+        print(f"{INFO} Method not found!")
 
     @property
     def groups(self) -> list[Group]:
@@ -107,6 +108,9 @@ class Database:
 
     @property
     def experiments(self) -> pd.DataFrame:
+        if self._experiments is not None:
+            return self._experiments
+
         query = "SELECT * FROM experiments;"
         self._experiments = pd.read_sql_query(query, self.con)
         self._experiments.set_index("exp_id", inplace=True)
@@ -115,14 +119,20 @@ class Database:
 
     @property
     def raw_files(self) -> pd.DataFrame:
+        if self._raw_files is not None:
+            return self._raw_files
+
         query = "SELECT * FROM raw_files;"
         self._raw_files = pd.read_sql_query(query, self.con)
-        self._mcor_files.set_index("acq_id", inplace=True)
+        self._raw_files.set_index("acq_id", inplace=True)
 
         return self._raw_files
 
     @property
     def mcor_files(self) -> pd.DataFrame:
+        if self._mcor_files is not None:
+            return self._mcor_files
+
         query = "SELECT * FROM mcor_files;"
         self._mcor_files = pd.read_sql_query(query, self.con)
         self._mcor_files.set_index("acq_id", inplace=True)
@@ -184,12 +194,12 @@ class Database:
         print(f"{INFO} Searching for raw files ('**/raw/*.tif')...")
 
         raw_paths = sorted(self.main_folder.rglob("raw/[!.]?*.tif"))
-        assert raw_paths, f"Found no .tif files in: {raw_path.resolve()}"
+        assert raw_paths, f"Found no .tif files in: {self.main_folder.resolve()}"
 
         print(f"{INFO} Found {len(raw_paths)} raw TIFF files.")
 
         # Experiments are sets of acquisitions with the same loop start time
-        experiments = {}
+        experiments: dict[str, Any] = {}
 
         # Add experiments and acquisitions
         print(f"{INFO} Getting metadata from files...")
@@ -202,8 +212,13 @@ class Database:
             file_stem_parts = raw_path.stem.split("_")
             tif = TiffFile(raw_path)
 
-            if not tif.is_scanimage:
-                bar.message(f"{INFO}   Skipped file {raw_path} (not a ScanImage TIFFs)")
+            if (
+                not tif.is_scanimage
+                or tif.scanimage_metadata is None
+                or tif.scanimage_metadata["FrameData"] is None
+                or not isinstance(tif.pages[0], TiffPage)
+            ):
+                bar.message(f"{INFO}   Skipped file {raw_path} (file type or metadata not supported)")
                 continue
 
             # Get file SI metadata

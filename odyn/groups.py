@@ -11,7 +11,6 @@
 #       - Add help for expected file name and folder structure?
 #       - Add checks that certain metadata is the same across experiments in
 #         a group, if the method requires it.
-#       - Make use_last_parameters work
 #       - Fix play_video
 #       - Remove added stuff in docstrings
 #       - Use validated defaults on docstrings
@@ -34,7 +33,7 @@ from __future__ import annotations
 import json
 
 from dataclasses import dataclass
-from typing import Optional, Iterable, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 from pathlib import Path
 
@@ -45,10 +44,10 @@ import caiman as cm
 from caiman.motion_correction import MotionCorrect
 from caiman.paths import get_tempdir
 
-from .utils import ProgressBar, um_to_pixels, clamp, get_git_hash, MovieType, INFO
+from .utils import *
 
 if TYPE_CHECKING:
-    from database import Database
+    from .database import Database
 
 
 class Group:
@@ -78,10 +77,10 @@ class Group:
         self.db = db
 
         # Initialize "private" variables
-        self._experiments = None
-        self._raw_files = None
-        self._mcor_files = None
-        self._method_calls = None
+        self._experiments: Optional[pd.DataFrame] = None
+        self._raw_files: Optional[pd.DataFrame] = None
+        self._mcor_files: Optional[pd.DataFrame] = None
+        self._method_calls: Optional[pd.DataFrame] = None
 
         # Add a movie of every type (and load it later)
         # self.movies = {(t,): LazyMovie(self, (t,)) for t in MovieType}
@@ -206,13 +205,14 @@ class Group:
                 [self.group_id, func_name, json.dumps(params), git_commit],
             )
 
-            print(f"{INFO} Recorded method call to db.")
+            call_id = cur.lastrowid
+            print(f"{INFO} Recorded method call to db (method_call_id = {call_id}).")
 
             # Reset method_calls DataFrames
             self._method_calls = None
             self.db._method_calls = None
 
-            return cur.lastrowid
+            return call_id
 
     def _reset_caches(self) -> None:
         self._experiments = None
@@ -230,9 +230,10 @@ class Group:
     # Motion Correction functions
     # ----------------------------------------------------------------------- #
 
+    @memorize_params
     def run_motion_correction(
         self,
-        use_last_parameters: bool = False,
+        *,
         is_test: bool = True,
         first_acq: int = 0,
         step_acq: int = 1,
@@ -242,9 +243,9 @@ class Group:
         pw_rigid: bool = True,
         shifts_opencv: bool = False,
         max_deviation_um: float = 12.0,
-        max_shift_um: Iterable[float] = [128.0, 128.0],
-        overlap_um: Iterable[float] = [96.0, 96.0],
-        strides_um: Iterable[float] = [128.0, 128.0],
+        max_shift_um: list[float] = [128.0, 128.0],
+        overlap_um: list[float] = [96.0, 96.0],
+        strides_um: list[float] = [128.0, 128.0],
     ):
         """
         \033[1;35mRUN_MOTION_CORRECTION\033[0m
@@ -258,7 +259,7 @@ class Group:
         \033[1;34mLIST OF PARAMETERS\033[0m (WITH DEFAULT VALUES)
 
             \033[0;32mBasic Parameters\033[0m
-            use_last_parameters = False             (Not working yet.) Use parameters from last run as the defaults
+            use_last_parameters = False             Use parameters from last run as the defaults
             is_test             = True              Whether to use a limited range of acquisitions in this run
 
             \033[0;32mParameters in this section will be ignored if is_test == False\033[0m
@@ -408,10 +409,11 @@ class Group:
             self._mcor_files = None
             self.db._mcor_files = None
 
+    @memorize_params
     def play_movie(
         self,
-        use_last_parameters: bool = False,
-        grid: Iterable[str] = ["raw", "mcor"],
+        *,
+        grid: list[str] = ["raw", "mcor"],
         downsample_ratio: float = 0.03,
         rigid: bool = False,
         opencv_codec: str = "MJPG",
@@ -500,7 +502,7 @@ class Group:
         # Remove files
         if movie_paths:
             print(f"{INFO} Removing .mmap files that start with {stem}...")
-            total_size = 0  # in bytes
+            total_size = 0.0  # in bytes
             for movie_path in movie_paths:
                 total_size += movie_path.stat().st_size
                 movie_path.unlink(missing_ok=True)
