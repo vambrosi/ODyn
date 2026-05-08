@@ -3,6 +3,7 @@
 #       - Use logging module instead of print (console + log file)
 # --------------------------------------------------------------------------- #
 
+import json
 import sqlite3
 
 from pathlib import Path
@@ -148,6 +149,9 @@ class Database:
 
         self._method_calls = pd.read_sql_query(query, self.con)
         self._method_calls.set_index("method_call_id", inplace=True)
+        self._method_calls["parameters"] = self._method_calls["parameters"].apply(
+            json.loads
+        )
 
         return self._method_calls
 

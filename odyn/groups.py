@@ -180,6 +180,9 @@ class Group:
 
         self._method_calls = pd.read_sql_query(query, self.db.con)
         self._method_calls.set_index("method_call_id", inplace=True)
+        self._method_calls["parameters"] = self._method_calls["parameters"].apply(
+            json.loads
+        )
 
         return self._method_calls
 
@@ -568,7 +571,7 @@ class Group:
 # @dataclass
 # class LazyMovie:
 #     """
-#     Movies that only reload when the config changes.
+#     Movies that only reload when run_motion_correction is called.
 #     """
 
 #     owner: Group
