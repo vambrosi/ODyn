@@ -11,6 +11,10 @@
 #       - Add help for expected file name and folder structure?
 #       - Add checks that certain metadata is the same across experiments in
 #         a group, if the method requires it.
+#       - Make use_last_parameters work
+#       - Fix play_video
+#       - Remove added stuff in docstrings
+#       - Use validated defaults on docstrings
 #
 # NOTE: There is a question of how to integrate everything into a unique db
 #       while preserving the ability to copy files to do analysis off the
@@ -49,7 +53,7 @@ if TYPE_CHECKING:
 
 class Group:
     """
-    \033[1;31mGROUP\033[0m
+    \033[1;35mGROUP\033[0m
     Class that runs data processing/analysis.
 
     \033[1;34mUSAGE\033[0m
@@ -243,7 +247,7 @@ class Group:
         strides_um: Iterable[float] = [128.0, 128.0],
     ):
         """
-        \033[1;31mRUN_MOTION_CORRECTION\033[0m
+        \033[1;35mRUN_MOTION_CORRECTION\033[0m
         Method that does test/final motion correction
 
         \033[1;34mUSAGE\033[0m
@@ -254,7 +258,7 @@ class Group:
         \033[1;34mLIST OF PARAMETERS\033[0m (WITH DEFAULT VALUES)
 
             \033[0;32mBasic Parameters\033[0m
-            use_last_parameters = False             Use parameters from last run as the defaults
+            use_last_parameters = False             (Not working yet.) Use parameters from last run as the defaults
             is_test             = True              Whether to use a limited range of acquisitions in this run
 
             \033[0;32mParameters in this section will be ignored if is_test == False\033[0m
@@ -262,7 +266,7 @@ class Group:
             step_acq            = 1                 Get one acquisition for every 'step_acq' acquisitions
             last_acq            = 3                 Index of the last acquisition to motion correct
 
-            \033[0;32mCaImAn motion correction parameters\033[0m
+            \033[0;32mCaImAn motion correction parameters (before metadata adjustments)\033[0m
             border_nan          = "copy"            copy along the boundary (if True, fill in with NaN)
             nonneg_movie        = False             make SAVED movie mostly non-negative
             pw_rigid            = True              Piecewise-rigid (True) or rigid motion correction
@@ -422,7 +426,7 @@ class Group:
         q_min: float = 0.0,
     ) -> None:
         """
-        \033[1;31mPLAY_MOVIE\033[0m
+        \033[1;35mPLAY_MOVIE\033[0m
         Play and save movies for quality control
 
         \033[1;34mUSAGE\033[0m
@@ -477,7 +481,7 @@ class Group:
 
     def delete_temp_files(self) -> None:
         """
-        \033[1;31mDELETE_TEMP_FILES\033[0m
+        \033[1;35mDELETE_TEMP_FILES\033[0m
         Deletes all temp files associated with this experiment
 
         \033[1;34mUSAGE\033[0m

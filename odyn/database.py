@@ -14,13 +14,10 @@ import pandas as pd
 from .groups import Group
 from .utils import ProgressBar, INFO, FAIL, PASS, CHECK, CROSS
 
-# Print a helpful string when user imports this library
-print(f"{INFO} Run Database.help() to get examples of how to use ODyn.")
-
 
 class Database:
     """
-    \033[1;31mDATABASE\033[0m
+    \033[1;35mDATABASE\033[0m
     Creates and connects you to the database.
 
     \033[1;34mUSAGE\033[0m
@@ -335,7 +332,7 @@ class Database:
 
     def from_query(self, query: str):
         """
-        \033[1;31mFROM_QUERY\033[0m
+        \033[1;35mFROM_QUERY\033[0m
         Creates a pandas DataFrame from a SQL query.
 
         \033[1;34mUSAGE\033[0m
