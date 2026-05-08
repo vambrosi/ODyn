@@ -9,7 +9,8 @@
 #       - Add support for use_last_parameters
 #       - Add delete_temp_files reminder in run_motion_correction
 #       - Add help for expected file name and folder structure?
-#       - Input db to Experiment instead of just con
+#       - Add checks that certain metadata is the same across experiments in
+#         a group, if the method requires it.
 #
 # NOTE: There is a question of how to integrate everything into a unique db
 #       while preserving the ability to copy files to do analysis off the
@@ -24,12 +25,12 @@
 #                 processing/analysis pipeline, to run on the server.
 #
 # --------------------------------------------------------------------------- #
+from __future__ import annotations
 
-import re
-import sqlite3
+import json
 
 from dataclasses import dataclass
-from typing import Optional, Iterable
+from typing import Optional, Iterable, TYPE_CHECKING
 
 from pathlib import Path
 
@@ -40,38 +41,43 @@ import caiman as cm
 from caiman.motion_correction import MotionCorrect
 from caiman.paths import get_tempdir
 
-from .utils import ProgressBar, record_call, um_to_pixels, clamp, MovieType, INFO
+from .utils import ProgressBar, um_to_pixels, clamp, get_git_hash, MovieType, INFO
+
+if TYPE_CHECKING:
+    from database import Database
 
 
-class Experiment:
+class Group:
     """
-    \033[1;31mEXPERIMENT\033[0m
+    \033[1;31mGROUP\033[0m
     Class that runs data processing/analysis.
 
     \033[1;34mUSAGE\033[0m
-        exp = Experiment(experimentFolder)
+        db  = Database(main_folder)
+        group = db.groups[some_index]
 
     \033[1;34mRELEVANT METHODS\033[0m
-        exp.run_motion_correction(...)
-        exp.play_movie(...)
-        exp.delete_temp_files()
+        group.run_motion_correction(...)
+        group.play_movie(...)
+        group.delete_temp_files()
 
-    Run Experiment.help('method_name') to know more about one of the methods above.
+    Run Group.help('method_name') to know more about one of the methods above.
 
     \033[1;34mEXAMPLE\033[0m
-        Experiment.help('play_movie')
+        Group.help('play_movie')
     """
 
     is_first = True
 
-    def __init__(self, exp_id: int, main_folder: Path, con: sqlite3.Connection) -> None:
-        self.main_folder = main_folder
-        self.con = con
-        self.exp_id = exp_id
+    def __init__(self, group_id: int, db: Database) -> None:
+        self.group_id = group_id
+        self.db = db
 
-        self._metadata = None
+        # Initialize "private" variables
+        self._experiments = None
         self._raw_files = None
         self._mcor_files = None
+        self._method_calls = None
 
         # Add a movie of every type (and load it later)
         # self.movies = {(t,): LazyMovie(self, (t,)) for t in MovieType}
@@ -80,40 +86,16 @@ class Experiment:
         # for t in [MovieType.TEST, MovieType.MCOR]:
         #     self.movies[(MovieType.RAW, t)] = LazyMovie(self, (MovieType.RAW, t))
 
-        if Experiment.is_first:
-            Experiment.short_help()
-            Experiment.is_first = False
-
-    @property
-    def metadata(self) -> Optional[pd.DataFrame]:
-        query = f"SELECT * FROM experiments WHERE exp_id = {self.exp_id};"
-        self._metadata = pd.read_sql_query(query, self.con)
-        self._metadata.set_index("exp_id", inplace=True)
-
-        return self._metadata
-
-    @property
-    def mcor_files(self) -> Optional[pd.DataFrame]:
-        query = f"SELECT * FROM mcor_files WHERE exp_id = {self.exp_id};"
-        self._mcor_files = pd.read_sql_query(query, self.con)
-        self._mcor_files.set_index("acq_id", inplace=True)
-
-        return self._mcor_files
-
-    @property
-    def raw_files(self) -> Optional[pd.DataFrame]:
-        query = f"SELECT * FROM raw_files WHERE exp_id = {self.exp_id};"
-        self._raw_files = pd.read_sql_query(query, self.con)
-        self._raw_files.set_index("acq_id", inplace=True)
-
-        return self._raw_files
+        if Group.is_first:
+            Group.short_help()
+            Group.is_first = False
 
     @staticmethod
-    def help(name="Experiment"):
-        if name.lower() == "experiment":
-            return print(Experiment.__doc__)
+    def help(name="Group"):
+        if name.lower() == "group":
+            return print(Group.__doc__)
 
-        attr = getattr(Experiment, name, None)
+        attr = getattr(Group, name, None)
 
         if attr is not None:
             return print(attr.__doc__)
@@ -123,10 +105,122 @@ class Experiment:
     @staticmethod
     def short_help():
         msg = (
-            f"{INFO} Run Experiment.help() to get a list of useful functions.\n"
-            f"{INFO} Run Experiment.help('function_name') to know more about a function."
+            f"{INFO} Run Group.help() to get a list of useful functions.\n"
+            f"{INFO} Run Group.help('function_name') to know more about a function."
         )
         print(msg)
+
+    # ----------------------------------------------------------------------- #
+    # Database Interaction
+    # ----------------------------------------------------------------------- #
+
+    @property
+    def experiments(self) -> pd.DataFrame:
+        if self._experiments is not None:
+            return self._experiments
+
+        query = f"""
+            SELECT e.* FROM group_experiments AS ge
+                JOIN experiments AS e ON ge.exp_id = e.exp_id
+                WHERE ge.group_id = {self.group_id};
+        """
+        self._experiments = pd.read_sql_query(query, self.db.con)
+        self._experiments.set_index("exp_id", inplace=True)
+
+        return self._experiments
+
+    @property
+    def raw_files(self) -> pd.DataFrame:
+        if self._raw_files is not None:
+            return self._raw_files
+
+        query = f"""
+            SELECT rf.* FROM group_experiments AS ge
+                JOIN experiments AS e ON ge.exp_id = e.exp_id
+                JOIN raw_files AS rf ON e.exp_id = rf.exp_id
+                WHERE ge.group_id = {self.group_id};
+        """
+
+        self._raw_files = pd.read_sql_query(query, self.db.con)
+        self._raw_files.set_index("acq_id", inplace=True)
+
+        return self._raw_files
+
+    @property
+    def mcor_files(self) -> pd.DataFrame:
+        if self._mcor_files is not None:
+            return self._mcor_files
+
+        query = f"""
+            SELECT mf.* FROM group_experiments AS ge
+                JOIN experiments AS e ON ge.exp_id = e.exp_id
+                JOIN raw_files AS rf ON e.exp_id = rf.exp_id
+                JOIN mcor_files AS mf ON rf.acq_id = mf.acq_id
+                WHERE ge.group_id = {self.group_id};
+        """
+
+        self._mcor_files = pd.read_sql_query(query, self.db.con)
+        self._mcor_files.set_index("acq_id", inplace=True)
+
+        return self._mcor_files
+
+    @property
+    def method_calls(self) -> pd.DataFrame:
+        if self._method_calls is not None:
+            return self._method_calls
+
+        query = f"""
+            SELECT mc.* FROM group_experiments AS ge
+                JOIN method_calls AS mc ON ge.group_id = mc.group_id
+                WHERE ge.group_id = {self.group_id};
+        """
+
+        self._method_calls = pd.read_sql_query(query, self.db.con)
+        self._method_calls.set_index("method_call_id", inplace=True)
+
+        return self._method_calls
+
+    def _record_call(self, func_name: str, params: dict) -> Optional[int]:
+        # Makes sure it will not record self
+        del params["self"]
+
+        with self.db.con as con:
+            cur = con.cursor()
+
+            git_commit = get_git_hash()
+
+            query = """
+                INSERT INTO method_calls
+                    ( group_id
+                    , method_name
+                    , parameters
+                    , git_commit
+                    ) VALUES (?, ?, ?, ?);
+            """
+            cur.execute(
+                query,
+                [self.group_id, func_name, json.dumps(params), git_commit],
+            )
+
+            print(f"{INFO} Recorded method call to db.")
+
+            # Reset method_calls DataFrames
+            self._method_calls = None
+            self.db._method_calls = None
+
+            return cur.lastrowid
+
+    def _reset_caches(self) -> None:
+        self._experiments = None
+        self._raw_files = None
+        self._mcor_files = None
+        self._method_calls = None
+
+        self.db._groups = None
+        self.db._experiments = None
+        self.db._raw_files = None
+        self.db._mcor_files = None
+        self.db._method_calls = None
 
     # ----------------------------------------------------------------------- #
     # Motion Correction functions
@@ -136,7 +230,7 @@ class Experiment:
         self,
         use_last_parameters: bool = False,
         is_test: bool = True,
-        first_acq: int = 1,
+        first_acq: int = 0,
         step_acq: int = 1,
         last_acq: int = 3,
         border_nan: bool | str = "copy",
@@ -153,9 +247,9 @@ class Experiment:
         Method that does test/final motion correction
 
         \033[1;34mUSAGE\033[0m
-            db  = Database(main_folder)
-            exp = db.experiments[some_index]
-            exp.run_motion_correction(...)
+            db    = Database(main_folder)
+            group = db.groups[some_index]
+            group.run_motion_correction(...)
 
         \033[1;34mLIST OF PARAMETERS\033[0m (WITH DEFAULT VALUES)
 
@@ -164,7 +258,7 @@ class Experiment:
             is_test             = True              Whether to use a limited range of acquisitions in this run
 
             \033[0;32mParameters in this section will be ignored if is_test == False\033[0m
-            first_acq           = 1                 Index of the first acquisition to motion correct
+            first_acq           = 0                 Index of the first acquisition to motion correct
             step_acq            = 1                 Get one acquisition for every 'step_acq' acquisitions
             last_acq            = 3                 Index of the last acquisition to motion correct
 
@@ -179,7 +273,7 @@ class Experiment:
             strides_um          = [128.0, 128.0]    start a new patch every x or y um (only for pw-rigid)
 
         \033[1;34mEXAMPLES\033[0m
-            exp.run_motion_correction(is_test=True, last_acq=10)
+            group.run_motion_correction(is_test=True, last_acq=10)
         """
 
         # --- Validate and adjust parameters to reasonable values --- #
@@ -188,16 +282,16 @@ class Experiment:
         if not is_test:
             first_acq = 0
             step_acq = 1
-            last_acq = len(self.raw_files)
+            last_acq = len(self.raw_files) - 1
 
         # max_shift_um has to less than size of image (in μm / 4)
-        height_um = self.metadata.at[self.exp_id, "height_um"]
-        width_um = self.metadata.at[self.exp_id, "width_um"]
+        height_um = self.experiments["height_um"].min()
+        width_um = self.experiments["width_um"].min()
         max_shift_um[0] = clamp(max_shift_um[0], 0, height_um / 4)
         max_shift_um[1] = clamp(max_shift_um[1], 0, width_um / 4)
 
         # --- Save validated parameters in the database --- #
-        record_call(self.con, "Experiment.run_motion_correction", locals())
+        method_call_id = self._record_call("Group.run_motion_correction", locals())
 
         # --- Make sure movies will be updated next time they are played --- #
 
@@ -212,13 +306,15 @@ class Experiment:
         # --- Get settings for CaImAn MotionCorrection class --- #
 
         # Get raw paths
-        raw_files_slice = self.raw_files.iloc[first_acq:last_acq:step_acq]
-        raw_paths = [self.main_folder / p for p in raw_files_slice["raw_path"]]
+        raw_files_slice = self.raw_files.iloc[first_acq : last_acq + 1 : step_acq]
+        raw_paths = [self.db.main_folder / p for p in raw_files_slice["raw_path"]]
+
+        assert raw_paths, "No raw files within the index range."
 
         # CaImAn only uses pixels as units, so we make the conversion
         factor = [
-            height_um / self.metadata.at[self.exp_id, "height_px"],
-            width_um / self.metadata.at[self.exp_id, "width_px"],
+            height_um / self.experiments["height_px"].min(),
+            width_um / self.experiments["width_px"].min(),
         ]
 
         settings = {
@@ -254,24 +350,17 @@ class Experiment:
         print(f"{INFO} Finished motion correction")
 
         # --- Save the results in TIFF files (if it is not a test) --- #
-
         if is_test:
             return
 
-        with self.con as con:
+        with self.db.con as con:
             print(f"{INFO} Saving mcor files...")
 
             bar = ProgressBar(len(self.mc.mmap_file))
             bar.show()
 
-            # acq_id            INTEGER PRIMARY KEY
-            # , mcor_path         TEXT NOT NULL
-            # , approved          INTEGER NOT NULL DEFAULT FALSE
-            # , last_updated_by   INTEGER
-
             # Load mmap files and save them as TIFFs
             # TODO: Confirm that mmap_file and fname have the same order
-
             for acq_id, mmap_path, raw_path in zip(
                 raw_files_slice.index, self.mc.mmap_file, self.mc.fname
             ):
@@ -292,13 +381,28 @@ class Experiment:
                     )
 
                 # Update the database with the latest mcor files
-                query = "INSERT OR REPLACE INTO mcor_files (acq_id, mcor_path) VALUES (?,?);"
+                insertion_query = """
+                    INSERT OR REPLACE INTO mcor_files
+                        ( acq_id
+                        , mcor_path
+                        , last_updated_by
+                        ) VALUES (?, ?, ?);
+                """
                 con.execute(
-                    query, [acq_id, str(mcor_path.relative_to(self.main_folder))]
+                    insertion_query,
+                    [
+                        acq_id,
+                        str(mcor_path.relative_to(self.db.main_folder)),
+                        method_call_id,
+                    ],
                 )
 
                 bar.step()
             bar.end()
+
+            # Reset mcor DataFrames
+            self._mcor_files = None
+            self.db._mcor_files = None
 
     def play_movie(
         self,
@@ -322,7 +426,7 @@ class Experiment:
         Play and save movies for quality control
 
         \033[1;34mUSAGE\033[0m
-            exp = Experiment(experimentFolder)
+            exp = Group(experimentFolder)
             exp.play_movie(...)
 
         \033[1;34mLIST OF PARAMETERS\033[0m (WITH DEFAULT VALUES)
@@ -358,7 +462,7 @@ class Experiment:
                 This would save a video with raw movies on the left and test on the right
         """
 
-        record_call(self.con, "Experiment.play_movie", locals())
+        self._record_call("Group.play_movie", locals())
 
         #     new_hash = self._sync_config()
         #     video_config = dict(self.config["player"]["video"])
@@ -377,7 +481,7 @@ class Experiment:
         Deletes all temp files associated with this experiment
 
         \033[1;34mUSAGE\033[0m
-            exp = Experiment(experimentFolder)
+            exp = Group(experimentFolder)
             exp.delete_temp_files()
 
         \033[1;34mEXAMPLES\033[0m
@@ -386,7 +490,7 @@ class Experiment:
 
         # Get file paths for mmaps in the temp folder
         path = Path(get_tempdir())
-        stem = self.metadata["tiff_stem"]
+        stem = self.experiments["tiff_stem"]
         movie_paths = sorted(path.glob(f"{stem}*.mmap"))
 
         # Remove files
@@ -461,7 +565,7 @@ class Experiment:
 #     Movies that only reload when the config changes.
 #     """
 
-#     owner: Experiment
+#     owner: Group
 #     types: tuple[MovieType, ...]
 #     movie: Optional[cm.movie] = None
 #     hash: str = ""

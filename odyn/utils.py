@@ -1,8 +1,8 @@
-import json
-import sqlite3
+import subprocess
 
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 INFO = "[\033[1;34mINFO\033[0m]"
 PASS = "[\033[1;32mTEST\033[0m]"
@@ -15,23 +15,6 @@ class MovieType(Enum):
     RAW = "raw"
     MCOR = "mcor"
     TEST = "test"
-
-
-def record_call(con: sqlite3.Connection, func_name: str, params: dict) -> None:
-    # Makes sure it will not record self
-    del params["self"]
-
-    # TODO: Add group_id and git_commit
-    with con as con:
-        query = """
-            INSERT INTO method_calls
-                ( method_name
-                , parameters
-                ) VALUES (?, ?)
-        """
-        con.execute(query, [func_name, json.dumps(params)])
-
-    print(f"{INFO} Recorded method call to db.")
 
 
 # TODO: - Fix the logging interaction with this class
@@ -69,3 +52,22 @@ def um_to_pixels(values_um, um_per_pixels):
 
 def clamp(x, min_x, max_x):
     return max(min_x, min(x, max_x))
+
+
+# TODO: - Add failsafe in case git is not on the path
+#       - Embed commit hash in pip installation
+def get_git_hash():
+    try:
+        # Get odyn path
+        package_root = Path(__file__).resolve().parent.parent
+
+        # Get commit hash for that directory
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=package_root,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+
+    except Exception:
+        return "unknown-hash"

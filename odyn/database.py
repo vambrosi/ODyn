@@ -11,7 +11,7 @@ from tifffile import TiffFile
 
 import pandas as pd
 
-from .experiment import Experiment
+from .groups import Group
 from .utils import ProgressBar, INFO, FAIL, PASS, CHECK, CROSS
 
 # Print a helpful string when user imports this library
@@ -27,9 +27,10 @@ class Database:
         db = Database(main_folder)
 
     \033[1;34mRELEVANT PROPRIETIES/METHODS\033[0m
-        db.experiments          <- Return all Experiments for processing/analysis
-        db.experiment_table     <- Returns DataFrame with experiment data
-        db.raw_files_table      <- Returns DataFrame with raw files data
+        db.groups          <- Return all Groups for processing/analysis
+        db.experiments     <- Returns DataFrame with experiment metadata
+        db.raw_files       <- Returns DataFrame with raw files metadata
+        db.mcor_files      <- Returns DataFrame with mcor files metadata
 
     Run Database.help('method_name') to know more about one of the methods above.
 
@@ -40,10 +41,13 @@ class Database:
     def __init__(self, path: str | Path, force_update=False):
         self.main_folder = Path(path)
         self.path = self.main_folder / ".odyn" / "odyn.db"
+
+        # Initialize "private" variables
+        self._groups = None
         self._experiments = None
-        self._experiment_table = None
-        self._raw_files_table = None
-        self._mcor_files_table = None
+        self._raw_files = None
+        self._mcor_files = None
+        self._method_calls = None
 
         # Get connection or create database if needed
         if not self.path.exists():
@@ -79,45 +83,84 @@ class Database:
     def __del__(self):
         self.con.close()
 
-    def experiment(self, exp_id: int):
-        return Experiment(exp_id, self.con)
+    @staticmethod
+    def help(name="Database"):
+        if name.lower() == "database":
+            return print(Database.__doc__)
+
+        attr = getattr(Database, name, None)
+
+        if attr is not None:
+            return print(attr.__doc__)
+
+        return print(f"{INFO} Method not found!")
 
     @property
-    def experiments(self) -> list[Experiment]:
-        if self._experiments is not None:
-            return self._experiments
+    def groups(self) -> list[Group]:
+        if self._groups is not None:
+            return self._groups
 
-        query = "SELECT exp_id FROM experiments;"
+        query = "SELECT group_id FROM groups;"
         res = self.con.execute(query)
 
-        exp_ids = sorted(exp["exp_id"] for exp in res.fetchall())
-        self._experiments = [Experiment(exp_id, self.main_folder, self.con) for exp_id in exp_ids]
+        group_ids = sorted(exp["group_id"] for exp in res.fetchall())
+        self._groups = [Group(group_id, self) for group_id in group_ids]
+
+        return self._groups
+
+    @property
+    def experiments(self) -> pd.DataFrame:
+        query = "SELECT * FROM experiments;"
+        self._experiments = pd.read_sql_query(query, self.con)
+        self._experiments.set_index("exp_id", inplace=True)
 
         return self._experiments
 
     @property
-    def experiment_table(self) -> pd.DataFrame:
-        query = "SELECT * FROM experiments;"
-        self._experiment_table = pd.read_sql_query(query, self.con)
-        self._experiment_table.set_index("exp_id", inplace=True)
-
-        return self._experiment_table
-
-    @property
-    def raw_files_table(self) -> pd.DataFrame:
+    def raw_files(self) -> pd.DataFrame:
         query = "SELECT * FROM raw_files;"
-        self._raw_files_table = pd.read_sql_query(query, self.con)
-        self._raw_files_table.set_index("acq_id", inplace=True)
+        self._raw_files = pd.read_sql_query(query, self.con)
+        self._mcor_files.set_index("acq_id", inplace=True)
 
-        return self._raw_files_table
+        return self._raw_files
 
     @property
-    def mcor_files_table(self) -> pd.DataFrame:
+    def mcor_files(self) -> pd.DataFrame:
         query = "SELECT * FROM mcor_files;"
-        self._mcor_files_table = pd.read_sql_query(query, self.con)
-        self._mcor_files_table.set_index("acq_id", inplace=True)
+        self._mcor_files = pd.read_sql_query(query, self.con)
+        self._mcor_files.set_index("acq_id", inplace=True)
 
-        return self._mcor_files_table
+        return self._mcor_files
+
+    @property
+    def method_calls(self) -> pd.DataFrame:
+        if self._method_calls is not None:
+            return self._method_calls
+
+        query = "SELECT * FROM method_calls;"
+
+        self._method_calls = pd.read_sql_query(query, self.con)
+        self._method_calls.set_index("method_call_id", inplace=True)
+
+        return self._method_calls
+
+    def _reset_caches(self) -> None:
+        self._experiments = None
+        self._raw_files = None
+        self._mcor_files = None
+        self._method_calls = None
+
+        if self._groups is None:
+            return
+
+        # In case a specific group can still be accessed
+        for group in self._groups:
+            group._experiments = None
+            group._raw_files = None
+            group._mcor_files = None
+            group._method_calls = None
+
+        self._groups = None
 
     def update(self) -> None:
         # ----------------------------------------------------------------------- #
@@ -265,6 +308,18 @@ class Database:
                 # Store exp_id for later
                 exp_id = cur.lastrowid
 
+                # Add a group for each experiment
+                cur.execute("INSERT INTO groups DEFAULT VALUES;")
+                group_id = cur.lastrowid
+
+                insertion_query = """
+                    INSERT INTO group_experiments
+                        ( group_id
+                        , exp_id
+                        ) VALUES (?, ?);
+                """
+                cur.execute(insertion_query, [group_id, exp_id])
+
                 # Add raw acquisition files in the exp loop
                 for acq in exp["acquisitions"]:
                     acq["exp_id"] = exp_id
@@ -272,8 +327,11 @@ class Database:
                     insertion_query = _create_insertion_query("raw_files", acq)
                     cur.execute(insertion_query, acq)
 
-            # Make sure the corresponding property will be recomputed
+            # Make sure all properties will be recomputed
+            self._groups = None
             self._experiments = None
+            self._raw_files = None
+            self._mcor_files = None
 
     def from_query(self, query: str):
         """
@@ -288,18 +346,6 @@ class Database:
             db.from_query("SELECT exp_id, exp_name FROM experiments;")
         """
         return pd.read_sql_query(query, self.con)
-
-    @staticmethod
-    def help(name="Database"):
-        if name.lower() == "database":
-            return print(Database.__doc__)
-
-        attr = getattr(Database, name, None)
-
-        if attr is not None:
-            return print(attr.__doc__)
-
-        return print(f"{INFO} Method not found!")
 
 
 def _create_insertion_query(table_name, data):

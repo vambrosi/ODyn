@@ -54,20 +54,20 @@ CREATE TABLE IF NOT EXISTS mcor_files
     ( acq_id            INTEGER PRIMARY KEY
     , mcor_path         TEXT NOT NULL
     , approved          INTEGER NOT NULL DEFAULT FALSE
-    , last_updated_by   INTEGER
+    , last_updated_by   INTEGER NOT NULL
     , updated_at        TEXT DEFAULT (datetime('now', 'localtime'))
 
     , FOREIGN KEY (acq_id)          REFERENCES raw_files(acq_id)
-    -- , FOREIGN KEY (last_updated_by) REFERENCES method_calls(call_id)
+    , FOREIGN KEY (last_updated_by) REFERENCES method_calls(method_call_id)
     ) STRICT;
 
 CREATE TABLE IF NOT EXISTS method_calls
     ( method_call_id    INTEGER PRIMARY KEY
-    , group_id          INTEGER
+    , group_id          INTEGER NOT NULL
     , called_at         TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     , method_name       TEXT NOT NULL
     , parameters        TEXT NOT NULL CHECK(json_valid(parameters))
-    , git_commit        TEXT
+    , git_commit        TEXT NOT NULL
 
     , FOREIGN KEY (group_id) REFERENCES groups(group_id)
     ) STRICT;
