@@ -1,6 +1,24 @@
 # --------------------------------------------------------------------------- #
-# TODO: - Fix the database updating (shouldn't insert rows again)
-#       - Use logging module instead of print (console + log file)
+# TODO:
+#   - Use logging module instead of print (console + log file)
+#   - Add log table and every method_call stores a log
+#   - Fix the database updating (shouldn't insert rows again)
+#   - Start a test suite
+#
+# NOTE:
+#   How to deal with output files being in various computers, and analysis
+#   running locally? Given speed concerns and the different workflows of the
+#   lab members, this should be feasible. Possible solutions and steps:
+#       - Add 'computer' column when there is a folder in the table.
+#         ( Paths starting with "." should be still relative to the
+#           main_folder which is independent of the computer )
+#       - Maybe should add small db for consolidation in folders that are
+#         not relative.
+#
+# MAYBE TODO:
+#   - Add git hash to every db entry? (To help db updates...)
+#   - Make a function that creates .py file containing the whole
+#     processing/analysis pipeline, to run on the server.
 # --------------------------------------------------------------------------- #
 
 import json
@@ -222,7 +240,9 @@ class Database:
                 or tif.scanimage_metadata["FrameData"] is None
                 or not isinstance(tif.pages[0], TiffPage)
             ):
-                bar.message(f"{INFO}   Skipped file {raw_path} (file type or metadata not supported)")
+                bar.message(
+                    f"{INFO}   Skipped file {raw_path} (metadata format not supported)"
+                )
                 continue
 
             # Get file SI metadata

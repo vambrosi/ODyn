@@ -1,31 +1,25 @@
 # --------------------------------------------------------------------------- #
 #
-# TODO: - Integrate docstrings with default values, to avoid copy-paste.
-#       - Add pipeline function/classes to facilitate data analysis:
-#           - Convolution layers (moving weighted averages)
-#           - Thresholding (entrywise biased Heaviside or ReLU functions)
-#           - All the steps in the MATLAB segmentation GUI?
-#       - Add git hash to every db entry? (To help db updates...)
-#       - Add support for use_last_parameters
-#       - Add delete_temp_files reminder in run_motion_correction
-#       - Add help for expected file name and folder structure?
-#       - Add checks that certain metadata is the same across experiments in
-#         a group, if the method requires it.
-#       - Fix play_video
-#       - Remove added stuff in docstrings
-#       - Use validated defaults on docstrings
+# TODO:
+#   - TEST PLAY MOVIE!
+#   - Change save directory default?
+#   - Make list of files in play_movie optional?
+#   - Add movies to outputs
+#   - Add support for files (outputs) not in server (computer prefix?)
+#   - Integrate docstrings with default values, to avoid copy-paste.
+#   - Remove added stuff in docstrings
+#   - Use validated defaults on docstrings
+#   - Add help for expected file name and folder structure?
+#   - Add delete_temp_files reminder in run_motion_correction
+#   - Add checks that certain metadata is the same across experiments in
+#     a group, if the method requires it.
+#   - Update raw_mmap_pairs when did final mcor?
 #
-# NOTE: There is a question of how to integrate everything into a unique db
-#       while preserving the ability to copy files to do analysis off the
-#       server or to process subsets of the data. This would require being
-#       able to call functions on query results, and possibly make db
-#       consolidation easy (preferably automatic). Which steps would be most
-#       relevant would depend on how much of the code would run on each
-#       computer vs directly on the server. All possibilities should be
-#       feasible given the different workflows of people in the lab.
-#
-# Related TODO: - Make a function that creates .py file containing the whole
-#                 processing/analysis pipeline, to run on the server.
+# MAYBE TODO:
+#   - Add pipeline function/classes to facilitate data analysis:
+#       - Convolution layers (moving weighted averages)
+#       - Thresholding (entrywise biased Heaviside or ReLU functions)
+#       - All the steps in the MATLAB segmentation GUI?
 #
 # --------------------------------------------------------------------------- #
 from __future__ import annotations
@@ -82,12 +76,8 @@ class Group:
         self._mcor_files: Optional[pd.DataFrame] = None
         self._method_calls: Optional[pd.DataFrame] = None
 
-        # Add a movie of every type (and load it later)
-        # self.movies = {(t,): LazyMovie(self, (t,)) for t in MovieType}
-
-        # Add all movie comparisons
-        # for t in [MovieType.TEST, MovieType.MCOR]:
-        #     self.movies[(MovieType.RAW, t)] = LazyMovie(self, (MovieType.RAW, t))
+        self._raw_mmap_pairs: Optional[tuple[list[Path], list[Path]]] = None
+        self.movies: dict[tuple[MovieType, ...], LazyMovie] = {}
 
         if Group.is_first:
             Group.short_help()
@@ -188,7 +178,7 @@ class Group:
 
     def _record_call(self, func_name: str, params: dict) -> Optional[int]:
         # Makes sure it will not record self
-        del params["self"]
+        params.pop("self", None)
 
         with self.db.con as con:
             cur = con.cursor()
@@ -303,13 +293,14 @@ class Group:
 
         # --- Make sure movies will be updated next time they are played --- #
 
-        # TODO: Uncomment this, when ready!!
-        # if is_test:
-        #     self.movies[(MovieType.TEST,)].mark_as_outdated()
-        #     self.movies[(MovieType.RAW, MovieType.TEST)].mark_as_outdated()
-        # else:
-        #     self.movies[(MovieType.MCOR,)].mark_as_outdated()
-        #     self.movies[(MovieType.RAW, MovieType.MCOR)].mark_as_outdated()
+        if is_test:
+            for movie_types in self.movies.keys():
+                if MovieType.TEST in movie_types:
+                    self.movies[movie_types].mark_as_outdated()
+        else:
+            for movie_types in self.movies.keys():
+                if MovieType.MCOR in movie_types:
+                    self.movies[movie_types].mark_as_outdated()
 
         # --- Get settings for CaImAn MotionCorrection class --- #
 
@@ -359,6 +350,8 @@ class Group:
 
         # --- Save the results in TIFF files (if it is not a test) --- #
         if is_test:
+            # Stores the list of raw and mmap paths to make a movie later
+            self._mmap_files = (raw_files_slice.copy(), self.mc.mmap_file.copy())
             return
 
         with self.db.con as con:
@@ -418,7 +411,6 @@ class Group:
         *,
         grid: list[str] = ["raw", "mcor"],
         downsample_ratio: float = 0.03,
-        rigid: bool = False,
         opencv_codec: str = "MJPG",
         save_movie: bool = True,
         save_folder: str = r"./movies",
@@ -447,12 +439,11 @@ class Group:
 
             \033[0;32mMovie loading settings\033[0m
             downsample_ratio    = 0.03              Percentage of frames to keep
-            rigid               = false             Play rigid or non-rigid motion movies (on tests)
 
             \033[0;32mVideo saving\033[0m
             opencv_codec        = "MJPG"            Codec used to encode the saved video
-            save_movie          = true              Put "true" if you want to save the preview video to a file
-            save_folder         = r"./movies"       "." is the experiment folder (r is to use \\ in the path)
+            save_movie          = True              Put "true" if you want to save the preview video to a file
+            save_folder         = r"./movies"       "." is the main_folder (r is to use \\ in the path)
 
             \033[0;32mVideo settings\033[0m
             backend             = "embed_opencv"    "opencv" for popup and "embed_opencv" for inline player
@@ -470,19 +461,86 @@ class Group:
             exp.play_movie(grid=["raw", "test"])
                 This would save a video with raw movies on the left and test on the right
         """
+        # --- Validate parameters --- #
 
-        self._record_call("Group.play_movie", locals())
+        # Check grid input
+        assert len(grid) == 1 or (
+            len(grid) == 2
+            and MovieType.RAW.value in grid
+            and (MovieType.MCOR.value in grid or MovieType.TEST.value in grid)
+        ), (
+            "The parameter 'grid' must be one of the following:"
+            "   ['raw'], ['mcor'], ['test'], "
+            "   ['raw', 'test'], ['raw', 'mcor'],"
+            "   ['test', 'raw'], ['mcor', 'raw']"
+        )
 
-        #     new_hash = self._sync_config()
-        #     video_config = dict(self.config["player"]["video"])
+        # If test is included there must be test files
+        assert (
+            MovieType.TEST.value not in grid or self._raw_mmap_pairs is not None
+        ), "There are no cached 'test' file paths."
 
-        #     movie_type_str = "_".join(t.value for t in movie_types)
-        #     filename = f"{self.config["experiment"]["tiff_stem"]}_{movie_type_str}.avi"
-        #     filepath = (self.path / filename).resolve()
-        #     video_config["movie_name"] = str(filepath)
+        params = locals()
 
-        #     self.movies[movie_types].maybe_update(new_hash).play(**video_config)
-        return
+        # --- Check if movie needs to be updated --- #
+
+        # Get the latest play_movie call with the same grid as now
+        play_movie_calls = self.method_calls[
+            self.method_calls["method_name"] == "Group.play_movie"
+        ]
+        last_call_id = play_movie_calls[
+            play_movie_calls["parameters"].apply(lambda x: x["grid"] == grid)
+        ].index.max()
+
+        # Record call here so it doesn't return itself
+        self._record_call("Group.play_movie", params)
+
+        # Trigger recompute if the parameters changed from the last call
+        movie_types = tuple(MovieType(s) for s in grid)
+        params.pop("self", None)
+
+        if movie_types not in self.movies:
+            self.movies[movie_types] = LazyMovie(self, movie_types)
+
+        elif play_movie_calls.loc[last_call_id, "parameters"] != params:
+            self.movies[movie_types].mark_as_outdated()
+
+        # --- Transform parameters --- #
+
+        # TODO: Change name and default folder
+        movie_type_str = "_".join(t.value for t in movie_types)
+        first_exp_name = self.experiments.iloc[0]["exp_name"]
+        filename = f"Group_{self.group_id}_{first_exp_name}_{movie_type_str}.avi"
+
+        filepath = (
+            (self.db.main_folder / save_folder / filename).resolve()
+            if save_folder[0] == "."
+            else (Path(save_folder) / filename).resolve()
+        )
+
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        video_params = {
+            "backend": backend,
+            "do_loop": do_loop,
+            "fr": fr,
+            "magnification": magnification,
+            "plot_text": plot_text,
+            "q_max": q_max,
+            "q_min": q_min,
+            "opencv_codec": opencv_codec,
+            "save_movie": save_movie,
+            "movie_name": str(filepath),
+        }
+
+        # --- Play and maybe update movies --- #
+        # Only updated if run_motion_correction was called invalidating the
+        # relevant files (raw or mcor TIFFs, or test MMAPs)
+
+        if save_movie:
+            print(f"{INFO} Saving movie to {video_params["movie_name"]})")
+
+        self.movies[movie_types].maybe_update(downsample_ratio).play(**video_params)
 
     def delete_temp_files(self) -> None:
         """
@@ -568,125 +626,80 @@ class Group:
     #     return z_score
 
 
-# @dataclass
-# class LazyMovie:
-#     """
-#     Movies that only reload when run_motion_correction is called.
-#     """
+@dataclass
+class LazyMovie:
+    """
+    Movies that only reload when needed.
+    """
 
-#     owner: Group
-#     types: tuple[MovieType, ...]
-#     movie: Optional[cm.movie] = None
-#     hash: str = ""
+    owner: Group
+    types: tuple[MovieType, ...]
+    movie: Optional[cm.movie] = None
 
-#     def mark_as_outdated(self):
-#         self.movie = None
-#         self.hash = ""
+    def mark_as_outdated(self):
+        self.movie = None
 
-#     def maybe_update(self, new_hash) -> cm.movie:
-#         if self.hash == new_hash:
-#             print(f"{INFO} No changes to the config. Using cached movie...")
-#             return self.movie
+    def maybe_update(self, downsample_ratio) -> cm.movie:
+        if self.movie is not None:
+            print(f"{INFO} Using cached movie...")
+            return self.movie
 
-#         print(f"{INFO} Updating movie...")
+        print(f"{INFO} Updating movie...")
 
-#         load_config = self.owner.config["player"]["load"]
-#         downsample_ratio = load_config["downsample_ratio"]
+        movie_chains = []
 
-#         movie_chains = []
+        for movie_type in self.types:
+            # Get the movie_paths
+            if movie_type == MovieType.TEST:
+                self.owner.method_calls
 
-#         for movie_type in self.types:
-#             if movie_type == MovieType.TEST:
-#                 rigid = load_config["rigid"]
-#                 path = Path(get_tempdir())
+                path = Path(get_tempdir())
 
-#                 stem = self.owner.config["experiment"]["tiff_stem"]
-#                 file_identifier = "rig" if rigid else "els"
+                _, movie_paths = self.owner._raw_mmap_pairs
 
-#                 movie_paths = sorted(path.glob(f"{stem}*{file_identifier}*.mmap"))
+            elif MovieType.TEST in self.types:
+                # It must be raw in this case
+                movie_paths, _ = self.owner._raw_mmap_pairs
 
-#                 mcor_type, other_type = "rigid", "non-rigid"
-#                 if not rigid:
-#                     mcor_type, other_type = other_type, mcor_type
+            # If there is no test always include all files
+            elif movie_type == MovieType.RAW:
+                movie_paths = [
+                    self.owner.db.main_folder / path
+                    for path in self.owner.raw_files["raw_path"]
+                ]
 
-#                 msg = (
-#                     f"No {mcor_type} test movies found for this experiment.\n"
-#                     + f"Change the 'rigid' setting to {str(not rigid).lower()} "
-#                     + f"in [player.load] to play {other_type} test movies."
-#                 )
-#                 assert movie_paths, msg
+            elif movie_type == MovieType.MCOR:
+                movie_paths = [
+                    self.owner.db.main_folder / path
+                    for path in self.owner.mcor_files["mcor_path"]
+                ]
 
-#                 first_acq = self.owner.config["test"]["first_acq"]
-#                 step_acq = self.owner.config["test"]["step_acq"]
-#                 last_acq = self.owner.config["test"]["last_acq"]
+            print(
+                f"{INFO} Adding {len(movie_paths)} {movie_type.value} files to the movie."
+            )
 
-#                 # Get only the slice of movies_paths determined by the parameters above
-#                 updated_movie_paths = []
+            bar = ProgressBar(len(movie_paths))
+            bar.show()
 
-#                 for movie_path in movie_paths:
-#                     # Get the acquisition number. It should be the only 5 digit number
-#                     # in the filename with underscores around it.
-#                     matches = re.findall(r"_\d{5}_", movie_path.name)
-#                     assert (
-#                         len(matches) == 1
-#                     ), "Failed to get files by acquisition number"
+            movie_chain = cm.load(movie_paths[0]).resize(1, 1, downsample_ratio)
+            bar.message(f"  {movie_paths[0]}")
+            bar.step()
 
-#                     # Remove underscores and cast it to a integer
-#                     i_acq = int(matches[0][1:6])
+            for filename in movie_paths[1:]:
+                movie = cm.load(filename).resize(1, 1, downsample_ratio)
+                movie_chain = cm.concatenate([movie_chain, movie], axis=0)
+                bar.message(f"  {filename}")
+                bar.step()
 
-#                     if (
-#                         first_acq <= i_acq <= last_acq
-#                         and (i_acq - first_acq) % step_acq == 0
-#                     ):
-#                         updated_movie_paths.append(movie_path)
+            bar.end()
+            movie_chains.append(movie_chain)
 
-#                 # Compare predicted movie count with actual movie count
-#                 # They disagree only when some temp files are missing.
-#                 assert len(updated_movie_paths) == max(
-#                     0, (last_acq - first_acq) // step_acq + 1
-#                 ), "Missing temp files."
+        movie_chain = cm.concatenate(movie_chains, axis=2)
 
-#                 movie_paths = updated_movie_paths
+        self.movie = movie_chain
 
-#             else:
-#                 folder_type = movie_type.value + "_folder"
-#                 path = self.owner.path / self.owner.config["experiment"][folder_type]
-#                 movie_paths = sorted(path.glob(f"[!.]?*.tif"))
+        return self.movie
 
-#                 assert movie_paths, f"No movies found in the folder: {path.resolve()}"
-
-#                 # Should use a subset of the files if one the MovieTypes is TEST
-#                 if any(mt == MovieType.TEST for mt in self.types):
-#                     first_acq = self.owner.config["test"]["first_acq"]
-#                     step_acq = self.owner.config["test"]["step_acq"]
-#                     last_acq = self.owner.config["test"]["last_acq"]
-
-#                     movie_paths = movie_paths[first_acq - 1 : last_acq : step_acq]
-
-#             print(
-#                 f"{INFO} Adding {len(movie_paths)} {movie_type.value} files to the movie."
-#             )
-
-#             bar = ProgressBar(len(movie_paths))
-#             bar.show()
-
-#             movie_chain = cm.load(movie_paths[0]).resize(1, 1, downsample_ratio)
-#             bar.step()
-
-#             for filename in movie_paths[1:]:
-#                 movie = cm.load(filename).resize(1, 1, downsample_ratio)
-#                 movie_chain = cm.concatenate([movie_chain, movie], axis=0)
-#                 bar.step()
-
-#             bar.end()
-#             movie_chains.append(movie_chain)
-
-#         movie_chain = cm.concatenate(movie_chains, axis=2)
-
-#         self.movie = movie_chain
-#         self.hash = new_hash
-
-#         return self.movie
 
 #     def play(self) -> None:
 #         # TODO: - Use Caiman function as blueprint
