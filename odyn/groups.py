@@ -76,7 +76,7 @@ class Group:
         self._mcor_files: Optional[pd.DataFrame] = None
         self._method_calls: Optional[pd.DataFrame] = None
 
-        self._raw_mmap_pairs: Optional[tuple[list[Path], list[Path]]] = None
+        self._raw_mmap_pairs: Optional[tuple[list[str], list[str]]] = None
         self.movies: dict[tuple[MovieType, ...], LazyMovie] = {}
 
         if Group.is_first:
@@ -352,8 +352,8 @@ class Group:
         if is_test:
             # Stores the list of raw and mmap paths to make a movie later
             self._raw_mmap_pairs = (
-                raw_paths,
-                [Path(p) for p in self.mc.mmap_file.copy()],
+                [str(p) for p in raw_paths],
+                self.mc.mmap_file.copy(),
             )
             return
 
@@ -423,7 +423,7 @@ class Group:
         magnification: float = 1,
         plot_text: bool = True,
         q_max: float = 99.5,
-        q_min: float = 0.0,
+        q_min: float = 0.05,
     ) -> None:
         """
         \033[1;35mPLAY_MOVIE\033[0m
@@ -455,7 +455,7 @@ class Group:
             magnification       = 1                 Magnification of video
             plot_text           = true              Add current frame label on the video
             q_max               = 99.5              Quantile to consider as white
-            q_min               = 0.0               Quantile to consider as black
+            q_min               = 0.05              Quantile to consider as black
 
         \033[1;34mEXAMPLES\033[0m
             exp.play_movie(grid=["raw"], save_folder="~/TempData/20260101/e1/movies")
@@ -471,12 +471,10 @@ class Group:
             len(grid) == 2
             and MovieType.RAW.value in grid
             and (MovieType.MCOR.value in grid or MovieType.TEST.value in grid)
-        ), (
-            "The parameter 'grid' must be one of the following:"
-            "   ['raw'], ['mcor'], ['test'], "
-            "   ['raw', 'test'], ['raw', 'mcor'],"
-            "   ['test', 'raw'], ['mcor', 'raw']"
-        )
+        ), """The parameter 'grid' must be one of the following:
+                ['raw'], ['mcor'], ['test'],
+                ['raw', 'test'], ['raw', 'mcor'],
+                ['test', 'raw'], ['mcor', 'raw']"""
 
         params = locals()
 
@@ -518,27 +516,26 @@ class Group:
 
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        video_params = {
-            "backend": backend,
-            "do_loop": do_loop,
-            "fr": fr,
-            "magnification": magnification,
-            "plot_text": plot_text,
-            "q_max": q_max,
-            "q_min": q_min,
-            "opencv_codec": opencv_codec,
-            "save_movie": save_movie,
-            "movie_name": str(filepath),
-        }
-
         # --- Play and maybe update movies --- #
         # Only updated if run_motion_correction was called invalidating the
         # relevant files (raw or mcor TIFFs, or test MMAPs)
+        movie_name = str(filepath)
 
         if save_movie:
-            print(f"{INFO} Saving movie to {video_params["movie_name"]})")
+            print(f"{INFO} Saving movie to {movie_name})")
 
-        self.movies[movie_types].maybe_update(downsample_ratio).play(**video_params)
+        self.movies[movie_types].maybe_update(downsample_ratio).play(
+            backend=backend,
+            do_loop=do_loop,
+            fr=fr,
+            magnification=magnification,
+            plot_text=plot_text,
+            q_max=q_max,
+            q_min=q_min,
+            opencv_codec=opencv_codec,
+            save_movie=save_movie,
+            movie_name=movie_name,
+        )
 
     def delete_temp_files(self) -> None:
         """
