@@ -351,7 +351,10 @@ class Group:
         # --- Save the results in TIFF files (if it is not a test) --- #
         if is_test:
             # Stores the list of raw and mmap paths to make a movie later
-            self._mmap_files = (raw_files_slice.copy(), self.mc.mmap_file.copy())
+            self._raw_mmap_pairs = (
+                raw_paths,
+                [Path(p) for p in self.mc.mmap_file.copy()],
+            )
             return
 
         with self.db.con as con:
@@ -475,11 +478,6 @@ class Group:
             "   ['test', 'raw'], ['mcor', 'raw']"
         )
 
-        # If test is included there must be test files
-        assert (
-            MovieType.TEST.value not in grid or self._raw_mmap_pairs is not None
-        ), "There are no cached 'test' file paths."
-
         params = locals()
 
         # --- Check if movie needs to be updated --- #
@@ -557,24 +555,30 @@ class Group:
 
         # Get file paths for mmaps in the temp folder
         path = Path(get_tempdir())
-        stem = self.experiments["tiff_stem"]
-        movie_paths = sorted(path.glob(f"{stem}*.mmap"))
+
+        exp_movies = []
+        for exp_name in self.experiments["exp_name"]:
+            exp_movies.append((exp_name, sorted(path.glob(f"{exp_name}*.mmap"))))
 
         # Remove files
-        if movie_paths:
-            print(f"{INFO} Removing .mmap files that start with {stem}...")
-            total_size = 0.0  # in bytes
-            for movie_path in movie_paths:
-                total_size += movie_path.stat().st_size
-                movie_path.unlink(missing_ok=True)
+        for exp_name, movie_paths in exp_movies:
+            print(f"{INFO} Removing .mmap files that start with {exp_name}...")
+            if movie_paths:
+                total_size = 0.0  # in bytes
+                for movie_path in movie_paths:
+                    total_size += movie_path.stat().st_size
+                    movie_path.unlink(missing_ok=True)
 
-            total_size = total_size / (1_000_000_000)  # in GBs
-            ending = "s" if len(movie_paths) > 1 else ""
-            print(
-                f"{INFO} Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB)."
-            )
-        else:
-            print(f"{INFO} No .mmap files found.")
+                total_size = total_size / (1_000_000_000)  # in GBs
+                ending = "s" if len(movie_paths) > 1 else ""
+                print(
+                    f"{INFO} Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB)."
+                )
+
+            else:
+                print(f"{INFO} No .mmap files found.")
+
+        self._raw_mmap_pairs = None
 
     # ----------------------------------------------------------------------- #
     # Data Analysis
@@ -648,6 +652,12 @@ class LazyMovie:
 
         movie_chains = []
 
+        if MovieType.TEST in self.types:
+            # If test is included there must be test files
+            assert (
+                self.owner._raw_mmap_pairs is not None
+            ), "There are no cached 'test' file paths."
+
         for movie_type in self.types:
             # Get the movie_paths
             if movie_type == MovieType.TEST:
@@ -655,9 +665,14 @@ class LazyMovie:
 
                 path = Path(get_tempdir())
 
+                # Redundant check for mypy
+                assert self.owner._raw_mmap_pairs is not None
                 _, movie_paths = self.owner._raw_mmap_pairs
 
             elif MovieType.TEST in self.types:
+                # Redundant check for mypy
+                assert self.owner._raw_mmap_pairs is not None
+
                 # It must be raw in this case
                 movie_paths, _ = self.owner._raw_mmap_pairs
 
