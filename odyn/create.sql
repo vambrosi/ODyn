@@ -1,10 +1,10 @@
 CREATE TABLE IF NOT EXISTS mice
-    ( mouse_id      TEXT PRIMARY KEY
-    , sex           TEXT NOT NULL CHECK(sex IN ('M', 'F'))
-    , DOB           TEXT NOT NULL CHECK(date(DOB) IS NOT NULL)
-    , "line"        TEXT NOT NULL
-    , genotype      TEXT NOT NULL
-    , injection     TEXT NOT NULL
+    ( mouse_id          TEXT PRIMARY KEY
+    , mouse_sex         TEXT NOT NULL CHECK(mouse_sex IN ('M', 'F'))
+    , mouse_dob         TEXT NOT NULL CHECK(date(mouse_dob) IS NOT NULL)
+    , mouse_line        TEXT NOT NULL
+    , mouse_genotype    TEXT NOT NULL
+    , injection         TEXT NOT NULL
     ) STRICT;
 
 CREATE TABLE IF NOT EXISTS groups
@@ -40,14 +40,16 @@ CREATE TABLE IF NOT EXISTS group_experiments
     , FOREIGN KEY (exp_id)   REFERENCES experiments(exp_id)
     ) STRICT;
 
-CREATE TABLE IF NOT EXISTS raw_files
-    ( acq_id                INTEGER PRIMARY KEY
-    , exp_id                INTEGER NOT NULL
-    , raw_path              TEXT NOT NULL
-    , first_frame_start_s   REAL NOT NULL
-    , added_to_db_at        TEXT DEFAULT (datetime('now', 'localtime'))
+CREATE TABLE IF NOT EXISTS acquisitions
+    ( acq_id            INTEGER PRIMARY KEY
+    , exp_id            INTEGER NOT NULL
+    , acq_start         TEXT CHECK(datetime(acq_start) IS NOT NULL)
+    , raw_path          TEXT NOT NULL
 
-    , FOREIGN KEY (exp_id) REFERENCES experiments(exp_id)
+    , UNIQUE (exp_id, acq_id)
+    , UNIQUE (exp_id, acq_start)
+
+    , FOREIGN KEY (exp_id)  REFERENCES experiments(exp_id)
     ) STRICT;
 
 CREATE TABLE IF NOT EXISTS mcor_files
@@ -55,10 +57,59 @@ CREATE TABLE IF NOT EXISTS mcor_files
     , mcor_path         TEXT NOT NULL
     , approved          INTEGER NOT NULL DEFAULT FALSE
     , last_updated_by   INTEGER NOT NULL
-    , updated_at        TEXT DEFAULT (datetime('now', 'localtime'))
 
-    , FOREIGN KEY (acq_id)          REFERENCES raw_files(acq_id)
+    , FOREIGN KEY (acq_id)          REFERENCES acquisitions(acq_id)
     , FOREIGN KEY (last_updated_by) REFERENCES method_calls(method_call_id)
+    ) STRICT;
+
+CREATE TABLE IF NOT EXISTS programs
+    ( program_id        INTEGER PRIMARY KEY
+    , exp_id            INTEGER NOT NULL
+    , program_name      TEXT NOT NULL
+    , program_type      TEXT NOT NULL
+    , program_start     TEXT CHECK(datetime(program_start) IS NOT NULL)
+    , program_path      TEXT NOT NULL
+
+    , UNIQUE (exp_id, program_id)
+    , UNIQUE (exp_id, program_start)
+
+    , FOREIGN KEY (exp_id) REFERENCES experiments(exp_id)
+    ) STRICT;
+
+CREATE TABLE IF NOT EXISTS trials
+    ( trial_id      INTEGER PRIMARY KEY
+    , trial_start   TEXT NOT NULL CHECK(datetime(trial_start) IS NOT NULL)
+    , odor_start    TEXT NOT NULL CHECK(datetime(odor_start) IS NOT NULL)
+    , odor_end      TEXT NOT NULL CHECK(datetime(odor_end) IS NOT NULL)
+    , odor_id       INTEGER NOT NULL
+    , outcome       TEXT NOT NULL
+    , acq_id        INTEGER
+    , program_id    INTEGER NOT NULL
+    , exp_id        INTEGER NOT NULL
+
+    , UNIQUE (trial_id, program_id)
+    , UNIQUE (trial_start, program_id)
+
+    , FOREIGN KEY (program_id, exp_id)  REFERENCES programs(program_id, exp_id)
+    , FOREIGN KEY (acq_id, exp_id)      REFERENCES acquisitions(acq_id, exp_id)
+    , FOREIGN KEY (odor_id)             REFERENCES odors(odor_id)
+    ) STRICT;
+
+CREATE TABLE IF NOT EXISTS events
+    ( event_id      INTEGER PRIMARY KEY
+    , event_time    REAL NOT NULL
+    , event_type    TEXT NOT NULL
+    , event_tag     TEXT NOT NULL
+    , program_id    INTEGER NOT NULL
+    , trial_id      INTEGER
+
+    , FOREIGN KEY (trial_id, program_id)    REFERENCES trials(trial_id, program_id)
+    , FOREIGN KEY (program_id)              REFERENCES programs(program_id)
+    ) STRICT;
+
+CREATE TABLE IF NOT EXISTS odors
+    ( odor_id   INTEGER PRIMARY KEY
+    , odor_name TEXT NOT NULL
     ) STRICT;
 
 CREATE TABLE IF NOT EXISTS method_calls
@@ -77,7 +128,37 @@ CREATE TABLE IF NOT EXISTS outputs
     , method_call_id    INTEGER NOT NULL
     , file_path         TEXT
     , log_text          TEXT NOT NULL
-    , removed           INTEGER CHECK( removed IN (FALSE, TRUE) )
+    , removed           INTEGER CHECK(removed IN (FALSE, TRUE))
 
     , FOREIGN KEY (method_call_id) REFERENCES method_calls(method_call_id)
     ) STRICT;
+
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (1 , 'eugenol');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (2 , 'methyl salicylate');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (3 , 'acetophenone'); -- 'mineral oil'
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (4 , '1-butanol');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (5 , '1-pentanol');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (6 , '1-hexanol');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (7 , '1-heptanol');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (8 , '1-octanol');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (9 , '(+) alpha pinene');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (10, '(-) alpha pinene');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (11, '(-) beta pinene');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (12, '(-) limonene');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (13, '(+) limonene');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (14, 'citral');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (15, 'allyl sulfide');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (17, 'alpha');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (18, 'alpha''');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (19, 'beta');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (20, 'beta''');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (21, 'ethyl butyrate');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (22, 'cyclopentanecarboxylic acid');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (23, 'cinnamaldehyde');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (24, 'isovaleric acid');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (25, 'gamma');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (26, 'gamma''');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (27, 'delta');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (28, 'delta''');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (29, 'pyruvic acid');
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (30, 'trans-2-methyl-2-pentenoic acid');

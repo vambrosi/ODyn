@@ -7,12 +7,11 @@
 #   - Add movies to outputs
 #   - Add support for files (outputs) not in server (computer prefix?)
 #   - Integrate docstrings with default values, to avoid copy-paste.
+#   - Split docstrings and help functions to make VSCode hints usable.
 #   - Remove added stuff in docstrings
-#   - Use validated defaults on docstrings
+#   - Use validated defaults on docstrings?
 #   - Add help for expected file name and folder structure?
 #   - Add delete_temp_files reminder in run_motion_correction
-#   - Add checks that certain metadata is the same across experiments in
-#     a group, if the method requires it.
 #   - Update raw_mmap_pairs when did final mcor?
 #
 # MAYBE TODO:
@@ -22,6 +21,7 @@
 #       - All the steps in the MATLAB segmentation GUI?
 #
 # --------------------------------------------------------------------------- #
+
 from __future__ import annotations
 
 import json
@@ -71,10 +71,13 @@ class Group:
         self.db = db
 
         # Initialize "private" variables
+        self._acquisitions: Optional[pd.DataFrame] = None
+        self._events: Optional[pd.DataFrame] = None
         self._experiments: Optional[pd.DataFrame] = None
-        self._raw_files: Optional[pd.DataFrame] = None
         self._mcor_files: Optional[pd.DataFrame] = None
         self._method_calls: Optional[pd.DataFrame] = None
+        self._programs: Optional[pd.DataFrame] = None
+        self._trials: Optional[pd.DataFrame] = None
 
         self._raw_mmap_pairs: Optional[tuple[list[str], list[str]]] = None
         self.movies: dict[tuple[MovieType, ...], LazyMovie] = {}
@@ -82,6 +85,15 @@ class Group:
         if Group.is_first:
             Group.short_help()
             Group.is_first = False
+
+    def __repr__(self):
+        msg = f"Group {self.group_id}"
+
+        # Show the experiment name if there is only one
+        if len(self.experiments) == 1:
+            msg += f" (exp_name = {self.experiments["exp_name"].iloc[0]})"
+
+        return msg
 
     @staticmethod
     def help(name="Group"):
@@ -108,36 +120,58 @@ class Group:
     # ----------------------------------------------------------------------- #
 
     @property
+    def acquisitions(self) -> pd.DataFrame:
+        if self._acquisitions is not None:
+            return self._acquisitions
+
+        query = f"""
+            SELECT a.* FROM group_experiments AS g
+                JOIN experiments  AS e ON e.exp_id = g.exp_id
+                JOIN acquisitions AS a ON a.exp_id = e.exp_id
+                WHERE g.group_id = {self.group_id};
+        """
+
+        self._acquisitions = pd.read_sql_query(
+            query, self.db.con, parse_dates=["acq_start"]
+        )
+        self._acquisitions.set_index("acq_id", inplace=True)
+
+        return self._acquisitions
+
+    @property
+    def events(self) -> pd.DataFrame:
+        if self._events is not None:
+            return self._events
+
+        query = f"""
+            SELECT e.* FROM group_experiments AS g
+                JOIN experiments AS x ON x.exp_id     = g.exp_id
+                JOIN programs    AS p ON p.exp_id     = x.exp_id
+                JOIN events      AS e ON e.program_id = p.program_id
+                WHERE g.group_id = {self.group_id};
+        """
+
+        self._events = pd.read_sql_query(query, self.db.con)
+        self._events.set_index("event_id", inplace=True)
+
+        return self._events
+
+    @property
     def experiments(self) -> pd.DataFrame:
         if self._experiments is not None:
             return self._experiments
 
         query = f"""
             SELECT e.* FROM group_experiments AS ge
-                JOIN experiments AS e ON ge.exp_id = e.exp_id
+                JOIN experiments AS e ON e.exp_id = ge.exp_id
                 WHERE ge.group_id = {self.group_id};
         """
-        self._experiments = pd.read_sql_query(query, self.db.con)
+        self._experiments = pd.read_sql_query(
+            query, self.db.con, parse_dates=["exp_start", "added_to_db_at"]
+        )
         self._experiments.set_index("exp_id", inplace=True)
 
         return self._experiments
-
-    @property
-    def raw_files(self) -> pd.DataFrame:
-        if self._raw_files is not None:
-            return self._raw_files
-
-        query = f"""
-            SELECT rf.* FROM group_experiments AS ge
-                JOIN experiments AS e ON ge.exp_id = e.exp_id
-                JOIN raw_files AS rf ON e.exp_id = rf.exp_id
-                WHERE ge.group_id = {self.group_id};
-        """
-
-        self._raw_files = pd.read_sql_query(query, self.db.con)
-        self._raw_files.set_index("acq_id", inplace=True)
-
-        return self._raw_files
 
     @property
     def mcor_files(self) -> pd.DataFrame:
@@ -145,11 +179,11 @@ class Group:
             return self._mcor_files
 
         query = f"""
-            SELECT mf.* FROM group_experiments AS ge
-                JOIN experiments AS e ON ge.exp_id = e.exp_id
-                JOIN raw_files AS rf ON e.exp_id = rf.exp_id
-                JOIN mcor_files AS mf ON rf.acq_id = mf.acq_id
-                WHERE ge.group_id = {self.group_id};
+            SELECT m.* FROM group_experiments AS g
+                JOIN experiments  AS e ON e.exp_id = g.exp_id
+                JOIN acquisitions AS a ON a.exp_id = e.exp_id
+                JOIN mcor_files   AS m ON m.acq_id = a.acq_id
+                WHERE g.group_id = {self.group_id};
         """
 
         self._mcor_files = pd.read_sql_query(query, self.db.con)
@@ -168,13 +202,54 @@ class Group:
                 WHERE ge.group_id = {self.group_id};
         """
 
-        self._method_calls = pd.read_sql_query(query, self.db.con)
+        self._method_calls = pd.read_sql_query(
+            query, self.db.con, parse_dates=["called_at"]
+        )
         self._method_calls.set_index("method_call_id", inplace=True)
         self._method_calls["parameters"] = self._method_calls["parameters"].apply(
             json.loads
         )
 
         return self._method_calls
+
+    @property
+    def programs(self) -> pd.DataFrame:
+        if self._programs is not None:
+            return self._programs
+
+        query = f"""
+            SELECT p.* FROM group_experiments AS g
+                JOIN experiments AS e ON e.exp_id = g.exp_id
+                JOIN programs    AS p ON p.exp_id = e.exp_id
+                WHERE g.group_id = {self.group_id};
+        """
+
+        self._programs = pd.read_sql_query(
+            query, self.db.con, parse_dates=["program_start"]
+        )
+        self._programs.set_index("program_id", inplace=True)
+
+        return self._programs
+
+    @property
+    def trials(self) -> pd.DataFrame:
+        if self._trials is not None:
+            return self._trials
+
+        query = f"""
+            SELECT t.* FROM group_experiments AS g
+                JOIN experiments AS x ON x.exp_id     = g.exp_id
+                JOIN programs    AS p ON p.exp_id     = x.exp_id
+                JOIN trials      AS t ON t.program_id = p.program_id
+                WHERE g.group_id = {self.group_id};
+        """
+
+        self._trials = pd.read_sql_query(
+            query, self.db.con, parse_dates=["trial_start", "odor_start", "odor_end"]
+        )
+        self._trials.set_index("trial_id", inplace=True)
+
+        return self._trials
 
     def _record_call(self, func_name: str, params: dict) -> Optional[int]:
         # Makes sure it will not record self
@@ -208,16 +283,21 @@ class Group:
             return call_id
 
     def _reset_caches(self) -> None:
+        self._acquisitions = None
+        self._events = None
         self._experiments = None
-        self._raw_files = None
         self._mcor_files = None
         self._method_calls = None
+        self._programs = None
+        self._trials = None
 
-        self.db._groups = None
+        self.db._acquisitions = None
+        self.db._events = None
         self.db._experiments = None
-        self.db._raw_files = None
         self.db._mcor_files = None
         self.db._method_calls = None
+        self.db._programs = None
+        self.db._trials = None
 
     # ----------------------------------------------------------------------- #
     # Motion Correction functions
@@ -280,7 +360,7 @@ class Group:
         if not is_test:
             first_acq = 0
             step_acq = 1
-            last_acq = len(self.raw_files) - 1
+            last_acq = len(self.acquisitions) - 1
 
         # max_shift_um has to less than size of image (in μm / 4)
         height_um = self.experiments["height_um"].min()
@@ -305,8 +385,8 @@ class Group:
         # --- Get settings for CaImAn MotionCorrection class --- #
 
         # Get raw paths
-        raw_files_slice = self.raw_files.iloc[first_acq : last_acq + 1 : step_acq]
-        raw_paths = [self.db.main_folder / p for p in raw_files_slice["raw_path"]]
+        acquisitions_slice = self.acquisitions.iloc[first_acq : last_acq + 1 : step_acq]
+        raw_paths = [self.db.main_folder / p for p in acquisitions_slice["raw_path"]]
 
         assert raw_paths, "No raw files within the index range."
 
@@ -366,7 +446,7 @@ class Group:
             # Load mmap files and save them as TIFFs
             # TODO: Confirm that mmap_file and fname have the same order
             for acq_id, mmap_path, raw_path in zip(
-                raw_files_slice.index, self.mc.mmap_file, self.mc.fname
+                acquisitions_slice.index, self.mc.mmap_file, self.mc.fname
             ):
                 # Create folder if it doesn't exist
                 mcor_folder = raw_path.parent.parent / "processed" / "mcor"
@@ -430,8 +510,8 @@ class Group:
         Play and save movies for quality control
 
         \033[1;34mUSAGE\033[0m
-            exp = Group(experimentFolder)
-            exp.play_movie(...)
+            group = Group(experimentFolder)
+            group.play_movie(...)
 
         \033[1;34mLIST OF PARAMETERS\033[0m (WITH DEFAULT VALUES)
 
@@ -458,10 +538,10 @@ class Group:
             q_min               = 0.05              Quantile to consider as black
 
         \033[1;34mEXAMPLES\033[0m
-            exp.play_movie(grid=["raw"], save_folder="~/TempData/20260101/e1/movies")
+            group.play_movie(grid=["raw"], save_folder="~/TempData/20260101/e1/movies")
                 Running this command would save a compilation of all raw movies
 
-            exp.play_movie(grid=["raw", "test"])
+            group.play_movie(grid=["raw", "test"])
                 This would save a video with raw movies on the left and test on the right
         """
         # --- Validate parameters --- #
@@ -543,11 +623,11 @@ class Group:
         Deletes all temp files associated with this experiment
 
         \033[1;34mUSAGE\033[0m
-            exp = Group(experimentFolder)
-            exp.delete_temp_files()
+            group = Group(experimentFolder)
+            group.delete_temp_files()
 
         \033[1;34mEXAMPLES\033[0m
-            exp.delete_temp_files()
+            group.delete_temp_files()
         """
 
         # Get file paths for mmaps in the temp folder
@@ -677,7 +757,7 @@ class LazyMovie:
             elif movie_type == MovieType.RAW:
                 movie_paths = [
                     self.owner.db.main_folder / path
-                    for path in self.owner.raw_files["raw_path"]
+                    for path in self.owner.acquisitions["raw_path"]
                 ]
 
             elif movie_type == MovieType.MCOR:
@@ -686,21 +766,25 @@ class LazyMovie:
                     for path in self.owner.mcor_files["mcor_path"]
                 ]
 
-            print(
-                f"{INFO} Adding {len(movie_paths)} {movie_type.value} files to the movie."
-            )
+            # There must be at least one movie
+            # TODO: Gather movie_paths for every type first, so it fails
+            #       before having spent time loading anything.
+            assert movie_paths, f"Didn't find any {movie_type.value} files."
+
+            msg = f"{INFO} Adding {len(movie_paths)} {movie_type.value} files to the movie."
+            print(msg)
 
             bar = ProgressBar(len(movie_paths))
             bar.show()
 
             movie_chain = cm.load(movie_paths[0]).resize(1, 1, downsample_ratio)
-            bar.message(f"  {movie_paths[0]}")
+            bar.message(f"{INFO}  {movie_paths[0]}")
             bar.step()
 
             for filename in movie_paths[1:]:
                 movie = cm.load(filename).resize(1, 1, downsample_ratio)
                 movie_chain = cm.concatenate([movie_chain, movie], axis=0)
-                bar.message(f"  {filename}")
+                bar.message(f"{INFO}  {filename}")
                 bar.step()
 
             bar.end()

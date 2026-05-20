@@ -4,6 +4,7 @@ import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Optional
 
 INFO = "[\033[1;34mINFO\033[0m]"
 PASS = "[\033[1;32mTEST\033[0m]"
@@ -62,16 +63,18 @@ class ProgressBar:
 
         print(progress_str, end="\r")
 
-    def message(self, msg) -> None:
-        print(f"{INFO} {msg:<120}")
+    def message(self, msg: str) -> None:
+        print(f"{msg:<120}")
         self.show()
 
     def step(self) -> None:
         self.current = min(self.current + 1, self.total)
         self.show()
 
-    def end(self) -> None:
-        msg = f"{INFO} {self.total} files processed sucessfully."
+    def end(self, msg: Optional[str] = None) -> None:
+        if msg is None:
+            msg = f"{INFO} {self.total} files processed sucessfully."
+
         print(f"{msg:<120}")
 
 
