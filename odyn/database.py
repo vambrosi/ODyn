@@ -16,6 +16,8 @@
 #   - Add quality control plots for ported MATLAB code
 #   - Reduce the conversions between strings and datetimes
 #   - Match Odor ID and name (prefer name, fail test)
+#   - Test change in metadata against the previous instead of the first
+#   - ProgressBar is increasing sometimes
 #
 # NOTE:
 #   How to deal with output files being in various computers and analysis
@@ -376,7 +378,7 @@ class Database:
 
         # Fetch raw file paths list if not provided
         if raw_paths is None:
-            raw_paths = sorted(self.main_folder.glob("raw/[!.]?*.tif"))
+            raw_paths = sorted(exp_path.glob("raw/[!.]?*.tif"))
 
         # ASSUMPTION: raw_paths are sorted
 
@@ -847,11 +849,11 @@ def _get_h5_metadata(path: Path, exp_start: str) -> Optional[dict[str, np.ndarra
         odor_starts -= trial_starts[0]
         odor_ends -= trial_starts[0]
 
-        assert len(trial_starts) == len(odor_starts) == len(odor_ends), print(
-            f"{FAIL} The following do not match:"
-            f"{FAIL}    Number of trials ({len(trial_starts)}"
-            f"{FAIL}    Odor presentation starts ({len(trial_starts)}"
-            f"{FAIL}    Odor presentation ends ({len(odor_ends)}"
+        assert len(trial_starts) == len(odor_starts) == len(odor_ends), (
+            f"The following do not match:\n"
+            f"    Number of trials {len(trial_starts)}\n"
+            f"    Odor presentation starts {len(trial_starts)}\n"
+            f"    Odor presentation ends {len(odor_ends)}"
         )
 
         print(f"{INFO} Found {len(trial_starts)} trial starts in the H5 file.")

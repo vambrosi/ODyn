@@ -1,0 +1,347 @@
+[[1;34mINFO[0m] Processing folder: /Volumes/MossLab/ImagingData/20260520/m357/e1
+[[1;34mINFO[0m] 90 files processed sucessfully.                                                                       
+[[1;32mTEST[0m] Passed all TIFF metadata checks! [1;32m✔[0m
+[[1;34mINFO[0m] Getting timing data from: /Volumes/MossLab/ImagingData/20260520/m357/e1/20260520_m357_e1_00001.h5
+[[1;34mINFO[0m] Found 90 trial starts in the H5 file.
+[[1;34mINFO[0m] Found 1 olfactometer event files.
+
+---------------------------------------------------------------------------
+IntegrityError                            Traceback (most recent call last)
+Cell In[3], line 1
+----> 1 db.add_experiment(rel_path="20260520/m357/e1")
+
+File ~/Documents/GitHub/ODyn/odyn/database.py:576, in Database.add_experiment(self, rel_path, raw_paths)
+    573 if event_type == "Trial" and event_tag != "Interval":
+    574     # Insert the last trial (if not the first)
+    575     if trial is not None:
+--> 576         self._insert_trial(cur, trial, events)
+    578         current_trial += 1
+    580     # Stop processing if tag is not an integer
+
+File ~/Documents/GitHub/ODyn/odyn/database.py:335, in Database._insert_trial(self, cur, trial, events)
+    334 def _insert_trial(self, cur: Cursor, trial: InsertData, events: list[InsertData]):
+--> 335     trial_id = _db_insert(cur, "trials", trial)
+    337     self._insert_events(cur, trial_id, events)
+
+File ~/Documents/GitHub/ODyn/odyn/database.py:798, in _db_insert(cur, table_name, data)
+    795     cur.executemany(insertion_query, data)
+    797 else:
+--> 798     cur.execute(insertion_query, data)
+    800 return cur.lastrowid
+
+IntegrityError: FOREIGN KEY constraint failed
+
+[[1;34mINFO[0m] Processing folder: /Volumes/MossLab/ImagingData/20260515/m316/e1
+[[1;34mINFO[0m] 18 files processed sucessfully.                                                                       
+[[1;32mTEST[0m] Passed all TIFF metadata checks! [1;32m✔[0m
+[[1;34mINFO[0m] Found 1 olfactometer event files.
+
+---------------------------------------------------------------------------
+AssertionError                            Traceback (most recent call last)
+Cell In[4], line 1
+----> 1 db.add_experiment(rel_path="20260515/m316/e1")
+
+File ~/Documents/GitHub/ODyn/odyn/database.py:591, in Database.add_experiment(self, rel_path, raw_paths)
+    586     print(f"{FAIL} Experiment will not be added to DB.")
+    588     raise e
+    590 assert (
+--> 591     timing_data is not None
+    592 ), "There is a trial without corresponding H5 file data"
+    594 trial_start = timing_data["trial_starts"][current_trial]
+    595 odor_start = timing_data["odor_starts"][current_trial]
+
+AssertionError: There is a trial without corresponding H5 file data
+
+[[1;34mINFO[0m] Processing folder: /Volumes/MossLab/ImagingData/20260515/m316/e2
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00061.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00062.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00063.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00064.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00065.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00066.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00067.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00068.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00069.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00070.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00071.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00072.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00073.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00074.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00075.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00076.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00077.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00078.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00079.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00080.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00081.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00082.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00083.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00084.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00085.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00086.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00087.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00088.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00089.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00090.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00091.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00092.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00093.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00094.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00095.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00096.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00097.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00098.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00099.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00100.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00101.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00102.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00103.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00104.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00105.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00106.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00107.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00108.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00109.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00110.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00111.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00112.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00113.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00114.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00115.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00116.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00117.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00118.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00119.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260515/m316/e2/raw/20260515_m316_e2_00120.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.06886356656462, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:14:13.826000'}
+{'exp_name': '20260515_m316_e2', 'exp_type': 'loop', 'mouse_id': 'm316', 'height_px': 600, 'width_px': 1800, 'frame_count': 500, 'frame_rate': 25.05662054567354, 'laser_power_920': 60, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 1200.06, 'height_um': 400.02, 'exp_start': '2026-05-15 12:51:26.535000'}
+[[1;34mINFO[0m] 120 files processed sucessfully.                                                                      
+[[1;31mTEST[0m] Failed 60 TIFF metadata checks. [1;31m✘[0m
+
+[[1;34mINFO[0m] Processing folder: /Volumes/MossLab/ImagingData/20260505/m316/e1
+[[1;34mINFO[0m] 1 files processed sucessfully.                                                                        
+[[1;32mTEST[0m] Passed all TIFF metadata checks! [1;32m✔[0m
+[[1;34mINFO[0m] Getting timing data from: /Volumes/MossLab/ImagingData/20260505/m316/e1/20260505_m316_e1_00001.h5
+[[1;34mINFO[0m] Found 17 trial starts in the H5 file.
+[[1;34mINFO[0m] Found 1 olfactometer event files.
+[[1;31mTEST[0m] There are 13 trials without acquisition! [1;31m✘[0m
+
+[[1;34mINFO[0m] Processing folder: /Volumes/MossLab/ImagingData/20260505/m316/e2
+[[1;34mINFO[0m] 9 files processed sucessfully.                                                                        
+[[1;32mTEST[0m] Passed all TIFF metadata checks! [1;32m✔[0m
+[[1;34mINFO[0m] Getting timing data from: /Volumes/MossLab/ImagingData/20260505/m316/e2/20260505_m316_e2_00001.h5
+
+---------------------------------------------------------------------------
+AssertionError                            Traceback (most recent call last)
+Cell In[3], line 1
+----> 1 db.add_experiment(rel_path="20260505/m316/e2")
+
+File ~/Documents/GitHub/ODyn/odyn/database.py:491, in Database.add_experiment(self, rel_path, raw_paths)
+    484 assert (
+    485     len(h5_paths) <= 1
+    486 ), "There must be at most one H5 file per experiment!"
+    488 # Get the datetimes of trial starts and odor presentation starts and ends
+    489 # It is None if there is no H5 file or if there are no trial starts
+    490 timing_data = (
+--> 491     _get_h5_metadata(h5_paths[0], experiment["exp_start"])
+    492     if h5_paths
+    493     else None
+    494 )
+    496 # Get event files
+    497 event_files = sorted(
+    498     exp_path.rglob("[!.]?*Events.csv"), key=lambda x: x.stat().st_mtime
+    499 )
+
+File ~/Documents/GitHub/ODyn/odyn/database.py:852, in _get_h5_metadata(path, exp_start)
+    849 odor_starts -= trial_starts[0]
+    850 odor_ends -= trial_starts[0]
+--> 852 assert len(trial_starts) == len(odor_starts) == len(odor_ends), (
+    853     f"The following do not match:\n"
+    854     f"    Number of trials {len(trial_starts)}\n"
+    855     f"    Odor presentation starts {len(trial_starts)}\n"
+    856     f"    Odor presentation ends {len(odor_ends)}"
+    857 )
+    859 print(f"{INFO} Found {len(trial_starts)} trial starts in the H5 file.")
+    861 # Convert to timedeltas
+
+AssertionError: The following do not match:
+    Number of trials 9
+    Odor presentation starts 9
+    Odor presentation ends 0
+
+[[1;34mINFO[0m] Processing folder: /Volumes/MossLab/ImagingData/20260505/m316/e3
+[[1;34mINFO[0m] 30 files processed sucessfully.                                                                       
+[[1;32mTEST[0m] Passed all TIFF metadata checks! [1;32m✔[0m
+[[1;34mINFO[0m] Getting timing data from: /Volumes/MossLab/ImagingData/20260505/m316/e3/20260505_m316_e3_00001.h5
+
+---------------------------------------------------------------------------
+AssertionError                            Traceback (most recent call last)
+Cell In[3], line 1
+----> 1 db.add_experiment(rel_path="20260505/m316/e3")
+
+File ~/Documents/GitHub/ODyn/odyn/database.py:491, in Database.add_experiment(self, rel_path, raw_paths)
+    484 assert (
+    485     len(h5_paths) <= 1
+    486 ), "There must be at most one H5 file per experiment!"
+    488 # Get the datetimes of trial starts and odor presentation starts and ends
+    489 # It is None if there is no H5 file or if there are no trial starts
+    490 timing_data = (
+--> 491     _get_h5_metadata(h5_paths[0], experiment["exp_start"])
+    492     if h5_paths
+    493     else None
+    494 )
+    496 # Get event files
+    497 event_files = sorted(
+    498     exp_path.rglob("[!.]?*Events.csv"), key=lambda x: x.stat().st_mtime
+    499 )
+
+File ~/Documents/GitHub/ODyn/odyn/database.py:852, in _get_h5_metadata(path, exp_start)
+    849 odor_starts -= trial_starts[0]
+    850 odor_ends -= trial_starts[0]
+--> 852 assert len(trial_starts) == len(odor_starts) == len(odor_ends), (
+    853     f"The following do not match:\n"
+    854     f"    Number of trials {len(trial_starts)}\n"
+    855     f"    Odor presentation starts ({len(trial_starts)}\n"
+    856     f"    Odor presentation ends ({len(odor_ends)}"
+    857 )
+    859 print(f"{INFO} Found {len(trial_starts)} trial starts in the H5 file.")
+    861 # Convert to timedeltas
+
+AssertionError: The following do not match:
+    Number of trials 30
+    Odor presentation starts 30
+    Odor presentation ends 0
+
+[[1;34mINFO[0m] Processing folder: /Volumes/MossLab/ImagingData/20260424/m411/e1
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260424/m411/e1/raw/20260424_m411_e1_00002.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260424_m411_e1', 'exp_type': 'grab', 'mouse_id': 'm411', 'height_px': 600, 'width_px': 800, 'frame_count': 250, 'frame_rate': 25.07264528185849, 'laser_power_920': 55.00000000000001, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 800.0, 'height_um': 600.0, 'exp_start': '2026-04-24 10:42:00.879000'}
+{'exp_name': '20260424_m411_e1', 'exp_type': 'grab', 'mouse_id': 'm411', 'height_px': 600, 'width_px': 800, 'frame_count': 250, 'frame_rate': 25.07102440703136, 'laser_power_920': 55.00000000000001, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 800.0, 'height_um': 600.0, 'exp_start': '2026-04-24 10:42:17.666000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260424/m411/e1/raw/20260424_m411_e1_00003.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260424_m411_e1', 'exp_type': 'grab', 'mouse_id': 'm411', 'height_px': 600, 'width_px': 800, 'frame_count': 250, 'frame_rate': 25.07264528185849, 'laser_power_920': 55.00000000000001, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 800.0, 'height_um': 600.0, 'exp_start': '2026-04-24 10:42:00.879000'}
+{'exp_name': '20260424_m411_e1', 'exp_type': 'grab', 'mouse_id': 'm411', 'height_px': 600, 'width_px': 800, 'frame_count': 250, 'frame_rate': 25.06983272099966, 'laser_power_920': 55.00000000000001, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 800.0, 'height_um': 600.0, 'exp_start': '2026-04-24 10:42:33.307000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260424/m411/e1/raw/20260424_m411_e1_00004.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260424_m411_e1', 'exp_type': 'grab', 'mouse_id': 'm411', 'height_px': 600, 'width_px': 800, 'frame_count': 250, 'frame_rate': 25.07264528185849, 'laser_power_920': 55.00000000000001, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 800.0, 'height_um': 600.0, 'exp_start': '2026-04-24 10:42:00.879000'}
+{'exp_name': '20260424_m411_e1', 'exp_type': 'grab', 'mouse_id': 'm411', 'height_px': 600, 'width_px': 800, 'frame_count': 250, 'frame_rate': 25.06954673320902, 'laser_power_920': 55.00000000000001, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 800.0, 'height_um': 600.0, 'exp_start': '2026-04-24 10:42:52.421000'}
+[[1;31mTEST[0m]   /Volumes/MossLab/ImagingData/20260424/m411/e1/raw/20260424_m411_e1_00005.tif metadata is inconsistent with the first experiment acquisition.
+{'exp_name': '20260424_m411_e1', 'exp_type': 'grab', 'mouse_id': 'm411', 'height_px': 600, 'width_px': 800, 'frame_count': 250, 'frame_rate': 25.07264528185849, 'laser_power_920': 55.00000000000001, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 800.0, 'height_um': 600.0, 'exp_start': '2026-04-24 10:42:00.879000'}
+{'exp_name': '20260424_m411_e1', 'exp_type': 'grab', 'mouse_id': 'm411', 'height_px': 600, 'width_px': 800, 'frame_count': 250, 'frame_rate': 25.06891122814554, 'laser_power_920': 55.00000000000001, 'laser_power_1040': 0, 'loop_acq_interval_s': 10, 'width_um': 800.0, 'height_um': 600.0, 'exp_start': '2026-04-24 10:43:09.378000'}
+[[1;34mINFO[0m] 5 files processed sucessfully.                                                                        
+[[1;31mTEST[0m] Failed 4 TIFF metadata checks. [1;31m✘[0m
