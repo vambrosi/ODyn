@@ -4,18 +4,17 @@
 # - Parse log excel file possibly
 # - RWD Olfactometer trigger
 # - All odors have concentration, even monomolecular ones (add to DB)
-# - Odor ID and odor name (future unchangeable but currently in flux)
 # - Not in metadata: Odor Dilution (%v/v), Odor Made in Date
 # - Inconsistent a:b and a/b usage
 # - Record vial to odor association
 #
 # TODO:
+#   - Possibly change to "nothing fails, just skip and log"
 #   - Use logging module instead of print (console + log file)
 #   - Add log table and every method_call stores a log
 #   - Start a test suite (so far only for DB tests)
 #   - Add quality control plots for ported MATLAB code
 #   - Reduce the conversions between strings and datetimes
-#   - Match Odor ID and name (prefer name, fail test)
 #   - Test change in metadata against the previous instead of the first
 #   - ProgressBar is increasing sometimes
 #
@@ -514,6 +513,12 @@ class Database:
                 "warm-up",
             ]
 
+            # Get odor -> odor_id mapping
+            res = cur.execute("SELECT odor_name, odor_id FROM odors;")
+            odors: dict[str, int] = {
+                odor_name: odor_id for odor_name, odor_id in res.fetchall()
+            }
+
             # Next acquisition not currently matched to a trial
             next_acq = 0
 
@@ -572,7 +577,6 @@ class Database:
                         # Insert the last trial (if not the first)
                         if trial is not None:
                             self._insert_trial(cur, trial, events)
-
                             current_trial += 1
 
                         # Stop processing if tag is not an integer
@@ -654,10 +658,10 @@ class Database:
 
                     # Add odor_id to trial
                     elif event_type == "Odor":
-                        # "Odor #" can only come after a trial is created
+                        # "Odor" can only come after a trial is created
                         assert trial is not None, "Odor presentation without trial"
 
-                        trial["odor_id"] = int(event_tag)
+                        trial["odor_id"] = odors.get(event_tag.lower())
 
                     # Reward <=> hit
                     elif event_type == "Reward":
@@ -883,8 +887,8 @@ def _parse_event_file(path: Path) -> pd.DataFrame:
     df[["Type", "Tag"]] = df["Events"].str.split("[ _]", n=1, expand=True)
     df["Tag"] = df["Tag"].fillna("")
 
-    # Simplify "Tag" value for df["Type"] == "Odor"
+    # Simplify "Tag" value for df["Type"] == "Odor" to just the odor name
     mask = df["Tag"].str.startswith("I ")
-    df.loc[mask, "Tag"] = df.loc[mask, "Tag"].str.split(" ").str[1]
+    df.loc[mask, "Tag"] = df.loc[mask, "Tag"].str.split(" ").str[3:].str.join(" ")
 
     return df

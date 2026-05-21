@@ -133,9 +133,10 @@ CREATE TABLE IF NOT EXISTS outputs
     , FOREIGN KEY (method_call_id) REFERENCES method_calls(method_call_id)
     ) STRICT;
 
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (0 , 'mineral oil');
 INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (1 , 'eugenol');
 INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (2 , 'methyl salicylate');
-INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (3 , 'acetophenone'); -- 'mineral oil'
+INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (3 , 'acetophenone');
 INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (4 , '1-butanol');
 INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (5 , '1-pentanol');
 INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (6 , '1-hexanol');
