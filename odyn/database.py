@@ -17,6 +17,9 @@
 #   - Test change in metadata against the previous instead of the first
 #   - ProgressBar is increasing sometimes
 #
+#   - What to do about some particular experiments?
+#       - '20250703/SID200' has more trials in .csv than in H5
+#
 # NOTE:
 #   How to deal with output files being in various computers and analysis
 #   running locally? Given speed concerns and the different workflows of the
@@ -509,6 +512,7 @@ class Database:
                 "coarse 2",
                 "passive",
                 "warm-up",
+                "short"
             ]
 
             # Get odor -> odor_id mapping
@@ -532,9 +536,9 @@ class Database:
                 # Parse file name
                 stem_split = event_file.stem.split("-")
 
-                program_name = stem_split[0]
+                program_name = "-".join(stem_split[:-3])
                 program_start = datetime.strptime(
-                    " ".join(stem_split[1:3]), "%Y_%m_%d %H_%M_%S"
+                    " ".join(stem_split[-3:-1]), "%Y_%m_%d %H_%M_%S"
                 )
 
                 # Find program type (DEFAULT: "unknown")
@@ -662,7 +666,8 @@ class Database:
                         trial["odor_id"] = odors.get(event_tag.lower())
 
                     # Reward <=> hit
-                    elif event_type == "Reward":
+                    # is_response_window is to skip rewards in "short" session
+                    elif event_type == "Reward" and is_response_window:
                         # "Reward" can only come after a trial is created
                         assert trial is not None, "Reward without trial"
 

@@ -71,7 +71,6 @@ CREATE TABLE IF NOT EXISTS programs
     , program_path      TEXT NOT NULL
 
     , UNIQUE (exp_id, program_id)
-    , UNIQUE (exp_id, program_start)
 
     , FOREIGN KEY (exp_id) REFERENCES experiments(exp_id)
     ) STRICT;
