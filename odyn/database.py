@@ -77,7 +77,7 @@ class Database:
         Database.help('experiment')
     """
 
-    def __init__(self, path: str | Path, force_update=False):
+    def __init__(self, path: str | Path, update=False):
         self.main_folder = Path(path)
         self.path = self.main_folder / ".odyn" / "odyn.db"
 
@@ -92,7 +92,7 @@ class Database:
         self._programs: Optional[pd.DataFrame] = None
         self._trials: Optional[pd.DataFrame] = None
 
-        # Get connection or create database if needed
+        # Get connection and create database if needed
         if not self.path.exists():
             print(f"{INFO} Did not find a database!")
             print(f"{INFO} Creating database...")
@@ -100,18 +100,11 @@ class Database:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.con = sqlite3.connect(self.path)
 
-            self.update()
+            with self.con:
+                with open(Path(__file__).parent / "create.sql") as f:
+                    self.con.executescript(f.read())
 
             print(f"{INFO} Database created at: {self.path.resolve()}")
-
-        elif force_update:
-            print(f"{INFO} Updating the database...")
-
-            self.con = sqlite3.connect(self.path)
-            self.update()
-
-            print(f"{INFO} Database updated!")
-            print(f"{INFO} Path to the database: {self.path.resolve()}")
 
         else:
             self.con = sqlite3.connect(self.path)
@@ -119,6 +112,9 @@ class Database:
 
         self.con.execute("PRAGMA foreign_keys = ON;")
         self.con.row_factory = sqlite3.Row
+
+        if update:
+            self.update()
 
     def __del__(self):
         self.con.close()
@@ -741,6 +737,7 @@ class Database:
         #
         # ----------------------------------------------------------------------- #
 
+        print(f"{INFO} Updating the database...")
         print(f"{INFO} Searching for raw files ('**/raw/*.tif')...")
 
         raw_paths = sorted(self.main_folder.rglob("raw/[!.]?*.tif"))
@@ -756,14 +753,11 @@ class Database:
             rel_path = str(exp_path.relative_to(self.main_folder))
             experiments[rel_path].append(raw_path)
 
-        # Create DB if it doesn't exists
-        with self.con:
-            with open(Path(__file__).parent / "create.sql") as f:
-                self.con.executescript(f.read())
-
         # Add experiments to the database
         for path in experiments:
             self.add_experiment(rel_path=path, raw_paths=experiments[path])
+
+        print(f"{INFO} Database updated!")
 
     def from_query(self, query: str):
         """
