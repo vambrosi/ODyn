@@ -14,14 +14,13 @@
 #   - Add log table and every method_call stores a log
 #   - Start a test suite (so far only for DB tests)
 #   - Add quality control plots for ported MATLAB code
-#   - Reduce the conversions between strings and datetimes
 #   - Test change in metadata against the previous instead of the first
 #   - ProgressBar is increasing sometimes
 #
 # NOTE:
 #   How to deal with output files being in various computers and analysis
 #   running locally? Given speed concerns and the different workflows of the
-#   lab members, this should be requirement. Possible solutions and steps:
+#   lab members, this should be a requirement. Possible solutions and steps:
 #       - Add 'computer' column/prefix when there is a folder in the table.
 #         ( Paths starting with "." should be still relative to the
 #           main_folder which is independent of the computer )
@@ -302,18 +301,17 @@ class Database:
         # Parse ImageDescription epoch as a datetime
         date_string = image_description["epoch"].strip("[]")
         date_string = " ".join(date_string.split())
-        dt = datetime.strptime(date_string, "%Y %m %d %H %M %S.%f")
+        loop_start = datetime.strptime(date_string, "%Y %m %d %H %M %S.%f")
 
-        loop_start = dt.isoformat(" ")
         experiment["exp_start"] = loop_start
 
         # Data specific to the acquisition
         delta_sec = float(image_description["frameTimestamps_sec"])
-        acquisition_time = dt + timedelta(seconds=delta_sec)
+        acquisition_time = loop_start + timedelta(seconds=delta_sec)
 
         acquisition: InsertData = {
             "raw_path": str(path.relative_to(self.main_folder)),
-            "acq_start": acquisition_time.isoformat(" "),
+            "acq_start": acquisition_time,
         }
 
         return experiment, acquisition
@@ -621,9 +619,9 @@ class Database:
                             trials_without_acq += 1
 
                         trial = {
-                            "trial_start": _format_np_datetime(trial_start),
-                            "odor_start": _format_np_datetime(odor_start),
-                            "odor_end": _format_np_datetime(odor_end),
+                            "trial_start": _to_datetime(trial_start),
+                            "odor_start": _to_datetime(odor_start),
+                            "odor_end": _to_datetime(odor_end),
                             "odor_id": None,
                             "outcome": "na",
                             "acq_id": acq_id,
@@ -800,9 +798,9 @@ def _db_insert(cur: Cursor, table_name: str, data: InsertData | list[InsertData]
     return cur.lastrowid
 
 
-def _format_np_datetime(dt: np.datetime64) -> str:
+def _to_datetime(dt: np.datetime64) -> datetime:
     dt_str = np.datetime_as_string(dt).item()
-    return datetime.fromisoformat(dt_str).isoformat(" ")
+    return datetime.fromisoformat(dt_str)
 
 
 def _get_h5_metadata(path: Path, exp_start: str) -> Optional[dict[str, np.ndarray]]:
