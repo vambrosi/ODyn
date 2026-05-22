@@ -53,7 +53,7 @@ import numpy as np
 import pandas as pd
 
 from .groups import Group
-from .utils import ProgressBar, INFO, FAIL, PASS, CHECK, CROSS
+from .utils import *
 
 type InsertData = dict[str, Any]
 
@@ -105,11 +105,11 @@ class Database:
                 with open(Path(__file__).parent / "create.sql") as f:
                     self.con.executescript(f.read())
 
-            print(f"{INFO} Database created at: {self.path.resolve()}")
+            print(f"{INFO} Database created at: '{self.path.resolve()}'")
 
         else:
             self.con = sqlite3.connect(self.path)
-            print(f"{INFO} Connected to the database at: {self.path.resolve()}")
+            print(f"{INFO} Connected to the database at: '{self.path.resolve()}'")
 
         self.con.execute("PRAGMA foreign_keys = ON;")
         self.con.row_factory = sqlite3.Row
@@ -370,7 +370,7 @@ class Database:
 
         exp_path = self.main_folder / rel_path
 
-        assert exp_path.is_dir(), f"Folder not found: {exp_path.resolve()}"
+        assert exp_path.is_dir(), f"Folder not found: '{exp_path.resolve()}'"
 
         # Fetch raw file paths list if not provided
         if raw_paths is None:
@@ -378,7 +378,7 @@ class Database:
 
         # ASSUMPTION: raw_paths are sorted
 
-        print(f"{INFO} Processing folder: {exp_path.resolve()}")
+        print(f"{INFO} Processing folder: '{exp_path.resolve()}'")
 
         with self.con as con:
             # Create a cursor to get row ids
@@ -392,51 +392,52 @@ class Database:
             # ----------------------------------------------------------------------- #
 
             # Initialize variables
-            first_metadata = True
+            experiment: Optional[InsertData] = None
+            acquisitions: list[InsertData] = []
+
+            last_exp_data: Optional[InsertData] = None
             checks_failed = 0
-            acquisitions = []
 
             bar = ProgressBar(len(raw_paths))
             bar.show()
 
             for raw_path in raw_paths:
-                last_raw_metadata = self._get_raw_metadata(raw_path)
+                raw_metadata = self._get_raw_metadata(raw_path)
 
-                if last_raw_metadata is None:
+                if raw_metadata is None:
                     msg = f"{INFO}   Skipped file {raw_path} (metadata format not supported)"
                     bar.message(msg)
                     continue
 
-                last_exp_data, acq = last_raw_metadata
+                exp_data, acq = raw_metadata
 
-                # Don't do anything if experiment is already in the DB
-                if first_metadata:
+                if last_exp_data is None:
+                    # Don't do anything if experiment is already in the DB
                     query = f"""
                         SELECT EXISTS(
                             SELECT 1 FROM experiments as e
                                 WHERE e.exp_start = ?
                         );
                     """
-                    cur.execute(query, [last_exp_data["exp_start"]])
+                    cur.execute(query, [exp_data["exp_start"]])
 
                     if cur.fetchone()[0]:
                         bar.end(f"{INFO} Experiment already in DB.")
                         return
 
-                    experiment = last_exp_data
-                    first_metadata = False
+                    # If it is not in the DB, store the metadata
+                    experiment = exp_data
 
                 # Check if metadata is consistent across acquisitions
-                elif experiment != last_exp_data:
+                elif last_exp_data != exp_data:
                     checks_failed += 1
 
                     bar.message(
-                        f"{FAIL}   {raw_path} metadata is inconsistent "
-                        "with the first experiment acquisition."
+                        f"{FAIL}   '{raw_path.relative_to(self.main_folder)}' "
+                        "metadata is inconsistent with the previous acquisition."
                     )
-                    bar.message(f"{experiment}")
-                    bar.message(f"{last_exp_data}")
 
+                last_exp_data = exp_data
                 acquisitions.append(acq)
                 bar.step()
 
@@ -444,7 +445,12 @@ class Database:
 
             # Don't add the experiment if checks failed
             if checks_failed > 0:
-                print(f"{FAIL} Failed {checks_failed} TIFF metadata checks. {CROSS}")
+                print(
+                    f"{FAIL} TIFF metadata changed {checks_failed} "
+                    f"or more times in the raw folder. {CROSS}"
+                )
+                print(f"{INFO} Are there multiple loops or grabs in the same folder?")
+                print(f"{WARNING} Experiment will not be added to the database.")
                 return
 
             print(f"{PASS} Passed all TIFF metadata checks! {CHECK}")
@@ -452,6 +458,10 @@ class Database:
             # ----------------------------------------------------------------------- #
             # Insert Experiment and Group
             # ----------------------------------------------------------------------- #
+
+            assert (
+                experiment is not None
+            ), "Could not find any TIFF file with the expected metadata format."
 
             # Add experiment to the database
             exp_id = _db_insert(cur, "experiments", experiment)
@@ -512,7 +522,7 @@ class Database:
                 "coarse 2",
                 "passive",
                 "warm-up",
-                "short"
+                "short",
             ]
 
             # Get odor -> odor_id mapping
@@ -748,7 +758,7 @@ class Database:
         print(f"{INFO} Searching for raw files ('**/raw/*.tif')...")
 
         raw_paths = sorted(self.main_folder.rglob("raw/[!.]?*.tif"))
-        assert raw_paths, f"Found no .tif files in: {self.main_folder.resolve()}"
+        assert raw_paths, f"Found no .tif files in: '{self.main_folder.resolve()}'"
 
         print(f"{INFO} Found {len(raw_paths)} raw TIFF files.")
 
@@ -781,7 +791,9 @@ class Database:
         return pd.read_sql_query(query, self.con)
 
 
-def _db_insert(cur: Cursor, table_name: str, data: InsertData | list[InsertData]):
+def _db_insert(
+    cur: Cursor, table_name: str, data: InsertData | list[InsertData]
+) -> Optional[int]:
     # HACK:
     #   ONLY FOR INTERNAL USE (CAN BE USED FOR SQL INJECTION)
     #   Column names are not validated, for simplicity
@@ -810,7 +822,7 @@ def _to_datetime(dt: np.datetime64) -> datetime:
 
 def _get_h5_metadata(path: Path, exp_start: str) -> Optional[dict[str, np.ndarray]]:
     # Very similar to getScopeH5Timestamps
-    print(f"{INFO} Getting timing data from: {path}")
+    print(f"{INFO} Getting timing data from: '{path}'")
 
     # Parse experiment start time
     exp_start_np = np.datetime64(exp_start)
