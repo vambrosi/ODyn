@@ -180,7 +180,12 @@ class Experiment:
 
         # If final save settings and TIFF files
         if final:
-            print("[INFO] Saving mcor files...")
+            if self.config["metadata"]["size_gigabytes"] > 4:
+                big_file = True
+                print("[INFO] Saving mcor files with bigtiff = True...")
+            else:
+                big_file = False
+                print("[INFO] Saving mcor files...")
 
             # Record settings in the motion_correction section
             temp = dict(test_config)
@@ -199,7 +204,7 @@ class Experiment:
                 mc = cm.load(mmap_path)
 
                 # Saving TIFFs directly because caiman saves them as 64-bit
-                with tifffile.TiffWriter(mcor_path) as tif:
+                with tifffile.TiffWriter(mcor_path, bigtiff = big_file) as tif:
                     tif.write(
                         [mc[i].copy() for i in range(mc.shape[0])],
                         shape=mc[0].shape,
