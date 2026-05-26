@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS acquisitions
     ( acq_id            INTEGER PRIMARY KEY
     , exp_id            INTEGER NOT NULL
     , acq_start         TEXT CHECK(datetime(acq_start) IS NOT NULL)
+    , odor_start        TEXT CHECK(odor_start IS NULL OR datetime(odor_start) IS NOT NULL)
+    , odor_end          TEXT CHECK(odor_end IS NULL OR datetime(odor_end) IS NOT NULL)
     , raw_path          TEXT NOT NULL
 
     , UNIQUE (exp_id, acq_id)
@@ -77,9 +79,9 @@ CREATE TABLE IF NOT EXISTS programs
 
 CREATE TABLE IF NOT EXISTS trials
     ( trial_id      INTEGER PRIMARY KEY
-    , trial_start   TEXT NOT NULL CHECK(datetime(trial_start) IS NOT NULL)
-    , odor_start    TEXT NOT NULL CHECK(datetime(odor_start) IS NOT NULL)
-    , odor_end      TEXT NOT NULL CHECK(datetime(odor_end) IS NOT NULL)
+    , trial_start   TEXT CHECK(datetime(trial_start) IS NOT NULL)
+    , odor_start    TEXT CHECK(datetime(odor_start) IS NOT NULL)
+    , odor_end      TEXT CHECK(datetime(odor_end) IS NOT NULL)
     , odor_id       INTEGER NOT NULL
     , outcome       TEXT NOT NULL
     , acq_id        INTEGER
@@ -96,7 +98,7 @@ CREATE TABLE IF NOT EXISTS trials
 
 CREATE TABLE IF NOT EXISTS events
     ( event_id      INTEGER PRIMARY KEY
-    , event_time    REAL NOT NULL
+    , event_time    TEXT CHECK(datetime(event_time) IS NOT NULL)
     , event_type    TEXT NOT NULL
     , event_tag     TEXT NOT NULL
     , program_id    INTEGER NOT NULL

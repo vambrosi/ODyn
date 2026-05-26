@@ -132,7 +132,7 @@ class Group:
         """
 
         self._acquisitions = pd.read_sql_query(
-            query, self.db.con, parse_dates=["acq_start"]
+            query, self.db.con, parse_dates=["acq_start", "odor_start", "odor_end"]
         )
         self._acquisitions.set_index("acq_id", inplace=True)
 
