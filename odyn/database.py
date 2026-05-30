@@ -13,7 +13,6 @@
 #   - Seems consistent across programs, but not whole experiments.
 #
 # TODO:
-#   - Get all files before fetching raw metadata (to crash early)
 #   - Change h5 timing data assert position
 #   - Add mcors that where already made to DB.
 #   - Assert that non-passive trials have a non "na" outcome
@@ -49,7 +48,7 @@ import json
 import sqlite3
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import time, datetime, timedelta
 from pathlib import Path
 from scipy.signal import find_peaks
 from sqlite3 import Cursor
@@ -64,6 +63,8 @@ from .groups import Group
 from .utils import *
 
 type InsertData = dict[str, Any]
+
+TIMEDELTA_MS = timedelta(milliseconds=1)
 
 
 class Database:
@@ -88,7 +89,7 @@ class Database:
 
     def __init__(self, path: str | Path, update=False):
         self.main_folder = Path(path)
-        self.path = self.main_folder / ".odyn" / "odyn.db"
+        self.path = self.main_folder / ODYN_FOLDER / "odyn.db"
 
         # Initialize "private" variables
         self._acquisitions: Optional[pd.DataFrame] = None
@@ -279,11 +280,11 @@ class Database:
 
         experiment: InsertData = {
             "exp_name": "_".join(file_stem_parts[:-1]),
-            "exp_type": tif.scanimage_metadata["FrameData"]["SI.acqState"],
+            "exp_type": SI_metadata["SI.acqState"],
             "mouse_id": file_stem_parts[1],
             "height_px": tif.pages[0].tags["ImageLength"].value,
             "width_px": tif.pages[0].tags["ImageWidth"].value,
-            "frame_count": len(tif.pages),
+            "frame_count": SI_metadata["SI.hStackManager.framesPerSlice"],
             "frame_rate": SI_metadata["SI.hRoiManager.scanFrameRate"],
             "laser_power_920": laser_powers[0],
             "laser_power_1040": laser_powers[1],
@@ -396,7 +397,7 @@ class Database:
             cur.execute("PRAGMA foreign_keys = ON;")
 
             # ----------------------------------------------------------------------- #
-            # Load TIFF metadata
+            # Load TIFF metadata, H5 file, and Event files
             # ----------------------------------------------------------------------- #
 
             # Initialize variables
@@ -406,6 +407,8 @@ class Database:
             last_exp_data: Optional[InsertData] = None
             checks_failed = 0
 
+            assert raw_paths, "Did not find any raw/*.tif files."
+
             bar = ProgressBar(len(raw_paths))
             bar.show()
 
@@ -413,8 +416,10 @@ class Database:
                 raw_metadata = self._get_raw_metadata(raw_path)
 
                 if raw_metadata is None:
-                    msg = f"{INFO}   Skipped file {raw_path} (metadata format not supported)"
-                    bar.message(msg)
+                    bar.message(
+                        f"{INFO}   Skipped file {raw_path}"
+                        "(metadata format not supported)"
+                    )
                     continue
 
                 exp_data, acq = raw_metadata
@@ -435,6 +440,43 @@ class Database:
 
                     # If it is not in the DB, store the metadata
                     experiment = exp_data
+
+                    # Load H5 file and csv files before metadata checks
+                    # (Checks take some time so better to not do them if possible)
+                    h5_paths = list(exp_path.glob("[!.]?*.h5"))
+
+                    if len(h5_paths) > 1:
+                        bar.end()
+
+                        print(
+                            f"{FAIL} There is more than one H5 file"
+                            f" in this experiment folder. {CROSS}"
+                        )
+
+                        for path in h5_paths:
+                            relative_path = path.relative_to(self.main_folder).resolve()
+                            print(f"{FAIL}   {relative_path}")
+
+                        print(f"{WARNING} Experiment will not be added to the DB.")
+                        return
+
+                    # Get the datetimes of trial starts and odor presentation starts and ends
+                    # It is None if there is no H5 file or if there are no trial starts
+                    timing_data = (
+                        _get_h5_metadata(h5_paths[0], experiment["exp_start"])
+                        if h5_paths
+                        else None
+                    )
+
+                    # Get event files
+                    event_files = sorted(
+                        exp_path.rglob("[!.]?*Events.csv"),
+                        key=lambda x: x.stat().st_mtime,
+                    )
+
+                    bar.message(
+                        f"{INFO} Found {len(event_files)} olfactometer event files."
+                    )
 
                 # Check if metadata is consistent across acquisitions
                 elif last_exp_data != exp_data:
@@ -487,31 +529,6 @@ class Database:
             cur.execute(insertion_query, [group_id, exp_id])
 
             # ----------------------------------------------------------------------- #
-            # Load H5 file and Event files
-            # ----------------------------------------------------------------------- #
-
-            h5_paths = list(exp_path.glob("*.h5"))
-
-            assert (
-                len(h5_paths) <= 1
-            ), "There must be at most one H5 file per experiment!"
-
-            # Get the datetimes of trial starts and odor presentation starts and ends
-            # It is None if there is no H5 file or if there are no trial starts
-            timing_data = (
-                _get_h5_metadata(h5_paths[0], experiment["exp_start"])
-                if h5_paths
-                else None
-            )
-
-            # Get event files
-            event_files = sorted(
-                exp_path.rglob("[!.]?*Events.csv"), key=lambda x: x.stat().st_mtime
-            )
-
-            print(f"{INFO} Found {len(event_files)} olfactometer event files.")
-
-            # ----------------------------------------------------------------------- #
             # Insert Program, Events, Trials, and Acquisitions
             # ----------------------------------------------------------------------- #
             # TODO:
@@ -538,215 +555,261 @@ class Database:
 
             # Pointers to the next unmatched h5 trial start
             next_h5_trial = 0
+            acq_len = len(acquisitions)
 
             h5_trials_without_acq = 0
             csv_trials_without_acq = 0
 
             # Initialize trial variables
             events: list[InsertData] = []
-            elapsed_time = timedelta(0)
 
-            for event_file in event_files:
-                # All data should be in inside main_folder
-                program_path = str(event_file.relative_to(self.main_folder))
+            # Gets program starts from olfactometer log file
+            if event_files:
+                first_file = event_files[0]
 
                 # Parse file name
-                stem_split = event_file.stem.split("-")
-
+                stem_split = first_file.stem.split("-")
                 program_name = "-".join(stem_split[:-3])
-                program_start = (
-                    datetime.strptime(" ".join(stem_split[-3:-1]), "%Y_%m_%d %H_%M_%S")
-                    + elapsed_time
+
+                events_start = datetime.strptime(
+                    " ".join(stem_split[-3:-1]), "%Y_%m_%d %H_%M_%S"
                 )
 
-                # Find program type (DEFAULT: "unknown")
-                program_type = "unknown"
+                program_starts = _parse_program_starts(self, events_start)
 
-                for t in program_types:
-                    if t in program_name:
-                        program_type = t
+                for (program_start, name), event_file in zip(
+                    program_starts, event_files
+                ):
+                    # All data should be in inside main_folder
+                    program_path = str(event_file.relative_to(self.main_folder))
 
-                # For "Buffer" programs only get the program duration
-                if "buffer" in program_name.lower():
-                    df = _parse_event_file(event_file, program_start)
-                    et, *_ = df.iloc[-1]
+                    # Parse file name
+                    stem_split = event_file.stem.split("-")
 
-                    elapsed_time += et.to_pydatetime() - program_start
-                    continue
+                    program_name = "-".join(stem_split[:-3])
 
-                # Add program to the insertion list
-                program = {
-                    "exp_id": exp_id,
-                    "program_name": program_name,
-                    "program_type": program_type,
-                    "program_start": program_start.strftime("%Y-%m-%d %H:%M:%S.%f"),
-                    "program_path": program_path,
-                }
-
-                # Insert program into DB
-                program_id = _db_insert(cur, "programs", program)
-
-                # Simple iteration to parse file
-                trial: Optional[InsertData] = None
-
-                df = _parse_event_file(event_file, program_start)
-
-                is_in_response_window = False
-                is_in_odor_window = False
-                licks_count = 0
-
-                for _, (et, event_name, event_type, event_tag) in df.iterrows():
-                    event_time = et.to_pydatetime()
-                    event_time_str = event_time.strftime("%Y-%m-%d %H:%M:%S.%f")
-
-                    # Check if a trial is starting
-                    if event_type == "Trial" and event_tag != "Interval":
-                        # Insert the last trial (if not the first)
-                        if trial is not None:
-                            self._insert_trial(cur, trial, events)
-
-                        # Stop processing if tag is not an integer
-                        try:
-                            int(event_tag)
-
-                        except ValueError as e:
-                            print(f"{FAIL} Unexpected event: {event_name}")
-                            print(f"{WARNING} Experiment will not be added to the DB.")
-
-                            raise e
-
-                        trial = {
-                            "trial_start": event_time_str,
-                            "odor_start": None,
-                            "odor_end": None,
-                            "odor_id": None,
-                            "outcome": "na",
-                            "acq_id": None,
-                            "program_id": program_id,
-                            "exp_id": exp_id,
-                        }
-
-                        # CHECK IF NEXT ACQUISITION MATCHES THE NEXT TRIAL
-                        # NOTE: Assumes that acquisitions are ordered
-
-                        h5_tolerance = np.timedelta64(1, "ms")
-                        csv_tolerance = np.timedelta64(1, "s")
-
-                        if acquisitions:
-                            # Get acquisition
-                            acq = acquisitions[0]
-                            acq_start = np.datetime64(acq["acq_start"])
-
-                            assert (
-                                timing_data is not None
-                            ), "There are event files and acquisitions, but no H5 file data"
-
-                            assert next_h5_trial < len(
-                                timing_data["trial_starts"]
-                            ), "There are acquisitions that did not match with any h5 trial starts."
-
-                            h5_trial_start = timing_data["trial_starts"][next_h5_trial]
-                            h5_odor_start = timing_data["odor_starts"][next_h5_trial]
-                            h5_odor_end = timing_data["odor_ends"][next_h5_trial]
-
-                            next_h5_trial += 1
-
-                            if np.abs(h5_trial_start - acq_start) < h5_tolerance:
-                                # Insert the acquisition into DB with H5 data
-                                acq["exp_id"] = exp_id
-                                acq["odor_start"] = _to_datetime(h5_odor_start)
-                                acq["odor_end"] = _to_datetime(h5_odor_end)
-
-                                acq_id = _db_insert(cur, "acquisitions", acq)
-
-                                acquisitions.pop(0)
-
-                            else:
-                                h5_trials_without_acq += 1
-                                csv_trials_without_acq += 1
-
-                            # Associate trial with acquisition
-                            if np.abs(event_time - acq_start) < csv_tolerance:
-                                trial["acq_id"] = acq_id
-                            else:
-                                csv_trials_without_acq += 1
-
-                        else:
-                            csv_trials_without_acq += 1
-
-                    # START ODOR PRESENTATION WINDOW
-                    elif event_type == "Odor":
-                        assert trial is not None, "Odor presentation without trial"
-
-                        trial["odor_id"] = odors.get(event_tag.lower())
-                        trial["odor_start"] = event_time_str
-                        is_in_odor_window = True
-
-                    # Record licks inside response window
-                    elif is_in_response_window and event_type == "Lick":
-                        licks_count += 1
-
-                    # END OF ODOR PRESENTATION WINDOW
-                    elif is_in_odor_window and event_type == "Delay":
-                        is_in_odor_window = False
-
-                        assert trial is not None, "Odor presentation without trial"
-                        trial["odor_end"] = event_time_str
-
-                    # START OF RESPONSE WINDOW
-                    # Licks start to count after "Response"
-                    elif event_type == "Response":
-                        is_in_odor_window = False
-                        is_in_response_window = True
-
-                        assert trial is not None, "Response window without trial"
-                        trial["odor_end"] = event_time_str
-
-                    # Reward <=> hit
-                    # is_response_window is to skip rewards in "short" session
-                    elif event_type == "Reward" and is_in_response_window:
-                        # "Reward" can only come after a trial is created
-                        assert trial is not None, "Reward without trial"
-
-                        trial["outcome"] = "hit"
-
-                    # END OF RESPONSE WINDOW
-                    elif event_type == "Trial" and event_tag == "Interval":
-                        is_in_response_window = False
-
-                        assert trial is not None, "Response window without trial"
-
-                        if program_type != "passive" and trial["outcome"] != "hit":
-                            trial["outcome"] = (
-                                "miss" if licks_count < 3 else "false choice"
-                            )
-
-                        licks_count = 0
-
-                    # Don't add session start to DB
-                    elif event_type == "Session":
-                        continue
-
-                    # Add event to event list
-                    events.append(
-                        {
-                            "program_id": program_id,
-                            "event_time": event_time_str,
-                            "event_type": event_type,
-                            "event_tag": event_tag,
-                        }
+                    assert name in program_name, (
+                        f"Program name from log ({name}) does not match"
+                        f" name from Events .csv ({program_name})"
                     )
 
-                # Store program duration to shift next program
-                elapsed_time += event_time - program_start
+                    # Find program type (DEFAULT: "unknown")
+                    program_type = "unknown"
 
-                # Add last trial and its events
-                if trial is not None:
-                    self._insert_trial(cur, trial, events)
+                    for t in program_types:
+                        if t in program_name:
+                            program_type = t
 
-                # Add events without trial
-                elif events:
-                    self._insert_events(cur, None, events)
+                    # Skip "Buffer" programs
+                    if "buffer" in program_name.lower():
+                        continue
+
+                    # Add program to the insertion list
+                    program = {
+                        "exp_id": exp_id,
+                        "program_name": program_name,
+                        "program_type": program_type,
+                        "program_start": program_start,
+                        "program_path": program_path,
+                    }
+
+                    # Insert program into DB
+                    program_id = _db_insert(cur, "programs", program)
+
+                    # Simple iteration to parse file
+                    trial: Optional[InsertData] = None
+                    trial_phase = TrialPhase.NOT_IN_TRIAL
+
+                    df = _parse_event_file(event_file, program_start)
+
+                    licks_count = 0
+
+                    for _, (et, event_name, event_type, event_tag) in df.iterrows():
+                        event_time = et.to_pydatetime()
+
+                        # Check if a trial is starting
+                        if event_type == "Trial" and event_tag != "Interval":
+                            # Insert the last trial (if not the first)
+                            if trial is not None:
+                                self._insert_trial(cur, trial, events)
+
+                            # Stop processing if tag is not an integer
+                            try:
+                                int(event_tag)
+
+                            except ValueError as e:
+                                print(f"{FAIL} Unexpected event: {event_name}")
+                                print(
+                                    f"{WARNING} Experiment will not be added to the DB."
+                                )
+
+                                raise e
+
+                            trial = {
+                                "trial_start": event_time,
+                                "odor_start": None,
+                                "odor_end": None,
+                                "odor_id": None,
+                                "outcome": "na",
+                                "acq_id": None,
+                                "program_id": program_id,
+                                "exp_id": exp_id,
+                            }
+
+                            trial_phase = TrialPhase.TRIAL_START
+
+                            # CHECK IF NEXT ACQUISITION MATCHES THE NEXT TRIAL
+                            # NOTE: Assumes that acquisitions are ordered
+
+                            h5_tolerance = np.timedelta64(100, "ms")
+                            csv_tolerance = np.timedelta64(1, "s")
+
+                            if acquisitions:
+                                # Get acquisition
+                                acq = acquisitions[0]
+                                acq_start = np.datetime64(acq["acq_start"])
+
+                                assert timing_data is not None, (
+                                    "There are event files and acquisitions,"
+                                    " but no H5 file data"
+                                )
+
+                                assert next_h5_trial < len(
+                                    timing_data["trial_starts"]
+                                ), (
+                                    "There are acquisitions that did not"
+                                    " match with any h5 trial starts."
+                                )
+
+                                h5_trial_start = _to_datetime(
+                                    timing_data["trial_starts"][next_h5_trial]
+                                )
+                                h5_odor_start = _to_datetime(
+                                    timing_data["odor_starts"][next_h5_trial]
+                                )
+                                h5_odor_end = _to_datetime(
+                                    timing_data["odor_ends"][next_h5_trial]
+                                )
+
+                                print(f"----------------------------------------")
+                                print(f"h5_trial        = {next_h5_trial}")
+                                print(f"h5_trial_start  = {h5_trial_start}")
+                                print(f"acq_start       = {acq_start}")
+                                print(f"event_time      = {event_time}")
+
+                                next_h5_trial += 1
+
+                                if np.abs(h5_trial_start - acq_start) < h5_tolerance:
+                                    # Insert the acquisition into DB with H5 data
+                                    acq["exp_id"] = exp_id
+                                    acq["odor_start"] = h5_odor_start
+                                    acq["odor_end"] = h5_odor_end
+
+                                    t_diff = np.abs(h5_trial_start - acq_start)
+                                    acq["h5_timedelta_ms"] = t_diff / TIMEDELTA_MS
+
+                                    acq_id = _db_insert(cur, "acquisitions", acq)
+
+                                    acquisitions.pop(0)
+                                    print(f"Matched trial to acquisition")
+
+                                else:
+                                    print(f"Did not get a match")
+                                    h5_trials_without_acq += 1
+                                    csv_trials_without_acq += 1
+
+                                print(f"acq = {acq_len - len(acquisitions) - 1}")
+                                print(f"diff = {np.abs(h5_trial_start - acq_start)}")
+
+                                # Associate trial with acquisition
+                                if np.abs(event_time - acq_start) < csv_tolerance:
+                                    t_diff = np.abs(event_time - acq_start)
+                                    trial["acq_id"] = acq_id
+                                    trial["acq_timedelta_ms"] = t_diff / TIMEDELTA_MS
+                                else:
+                                    csv_trials_without_acq += 1
+
+                            else:
+                                csv_trials_without_acq += 1
+
+                        # START ODOR PRESENTATION WINDOW
+                        elif event_type == "Odor":
+                            assert trial is not None, "Odor presentation without trial"
+
+                            trial["odor_id"] = odors.get(event_tag.lower())
+                            trial["odor_start"] = event_time
+                            trial_phase = TrialPhase.ODOR_WINDOW
+
+                        # Record licks inside response window
+                        elif (
+                            trial_phase == TrialPhase.RESPONSE_WINDOW
+                            and event_type == "Lick"
+                        ):
+                            licks_count += 1
+
+                        # END OF ODOR PRESENTATION WINDOW
+                        elif (
+                            trial_phase == TrialPhase.ODOR_WINDOW
+                            and event_type == "Delay"
+                        ):
+                            trial_phase = TrialPhase.INTERVAL
+
+                            assert trial is not None, "Odor presentation without trial"
+                            trial["odor_end"] = event_time
+
+                        # START OF RESPONSE WINDOW
+                        # Licks start to count after "Response"
+                        elif event_type == "Response":
+                            trial_phase = TrialPhase.RESPONSE_WINDOW
+
+                            assert trial is not None, "Response window without trial"
+                            trial["odor_end"] = event_time
+
+                        # Reward <=> hit
+                        # Checks if in response window to skip rewards in "short" session
+                        elif (
+                            event_type == "Reward"
+                            and trial_phase == TrialPhase.RESPONSE_WINDOW
+                        ):
+                            # "Reward" can only come after a trial is created
+                            assert trial is not None, "Reward without trial"
+
+                            trial["outcome"] = "hit"
+
+                        # END OF RESPONSE WINDOW
+                        elif event_type == "Trial" and event_tag == "Interval":
+                            trial_phase = TrialPhase.TRIAL_END
+
+                            assert trial is not None, "Response window without trial"
+
+                            if program_type != "passive" and trial["outcome"] != "hit":
+                                trial["outcome"] = (
+                                    "miss" if licks_count < 3 else "false choice"
+                                )
+
+                            licks_count = 0
+
+                        # Don't add session start to DB
+                        elif event_type == "Session":
+                            continue
+
+                        # Add event to event list
+                        events.append(
+                            {
+                                "program_id": program_id,
+                                "event_time": event_time,
+                                "event_type": event_type,
+                                "event_tag": event_tag,
+                            }
+                        )
+
+                    # Add last trial and its events (if it ended successfully)
+                    if trial is not None and trial_phase == TrialPhase.TRIAL_END:
+                        self._insert_trial(cur, trial, events)
+
+                    # Add events without trial
+                    elif events:
+                        self._insert_events(cur, None, events)
 
             if h5_trials_without_acq > 0:
                 print(
@@ -801,8 +864,15 @@ class Database:
         # I used preProcessing_v2.m and other scripts in that file as a baseline
         # for what metadata has to be collected, and what needs to be checked.
         #
-        # TODO: 1) Make sure all relevant data is added to the db.
-        #       2) Add option to overwrite experiment data? (Keeping calls.)
+        # TODO:
+        #   1) Make sure all relevant data is added to the db.
+        #   2) (SEE NOTE) Add option to overwrite experiment data?
+        #
+        # NOTE:
+        #   - Should not overwrite experiment data and keep calls, because calls
+        #     will not be reproducible. Better to add an added_by tag and create
+        #     a new experiment every time the metadata is recomputed. Only the
+        #     experiment with the latest added_by would be reproducible.
         #
         # ----------------------------------------------------------------------- #
 
@@ -919,7 +989,7 @@ def _get_h5_metadata(path: Path, exp_start: str) -> Optional[dict[str, np.ndarra
         assert len(trial_starts) == len(odor_starts) == len(odor_ends), (
             f"The following do not match:\n"
             f"    Number of trials {len(trial_starts)}\n"
-            f"    Odor presentation starts {len(trial_starts)}\n"
+            f"    Odor presentation starts {len(odor_starts)}\n"
             f"    Odor presentation ends {len(odor_ends)}"
         )
 
@@ -966,3 +1036,38 @@ def _parse_event_file(path: Path, program_start: datetime) -> pd.DataFrame:
     )
 
     return df
+
+
+def _parse_program_starts(db: Database, start: datetime) -> list[tuple[time, str]]:
+    """ "
+    Gets program starts after a certain datetime (-1s) from olfactometer log file.
+    """
+
+    log_path = (
+        db.main_folder
+        / INFO_FOLDER
+        / start.date().strftime("%Y%m")
+        / f"Program_{start.date().strftime("%Y%m%d")}.txt"
+    )
+
+    starts = []
+
+    # Olfactometer log entries format:
+    # [TIMESTAMP] PROGRAM_EVENT: PROGRAM_NAME
+
+    with open(log_path) as f:
+        for line in f:
+            timestamp, desc = line[1:].strip().split("] ", 1)
+
+            if desc.startswith("Start program"):
+                _, program_name = desc.split(": ", 1)
+
+                t = time.fromisoformat(timestamp)
+                dt = datetime.combine(start.date(), t)
+
+                # 'start' is only precise up to seconds, so rounding might
+                # have pushed 'start' to the second after the actual start.
+                if dt >= start - timedelta(seconds=1):
+                    starts.append((dt, program_name))
+
+    return starts

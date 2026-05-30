@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS acquisitions
     , acq_start         TEXT CHECK(datetime(acq_start) IS NOT NULL)
     , odor_start        TEXT CHECK(odor_start IS NULL OR datetime(odor_start) IS NOT NULL)
     , odor_end          TEXT CHECK(odor_end IS NULL OR datetime(odor_end) IS NOT NULL)
+    , h5_timedelta_ms   REAL CHECK(odor_start IS NULL OR h5_timedelta_ms NOT NULL)
     , raw_path          TEXT NOT NULL
 
     , UNIQUE (exp_id, acq_id)
@@ -78,15 +79,16 @@ CREATE TABLE IF NOT EXISTS programs
     ) STRICT;
 
 CREATE TABLE IF NOT EXISTS trials
-    ( trial_id      INTEGER PRIMARY KEY
-    , trial_start   TEXT CHECK(datetime(trial_start) IS NOT NULL)
-    , odor_start    TEXT CHECK(datetime(odor_start) IS NOT NULL)
-    , odor_end      TEXT CHECK(datetime(odor_end) IS NOT NULL)
-    , odor_id       INTEGER NOT NULL
-    , outcome       TEXT NOT NULL
-    , acq_id        INTEGER
-    , program_id    INTEGER NOT NULL
-    , exp_id        INTEGER NOT NULL
+    ( trial_id          INTEGER PRIMARY KEY
+    , trial_start       TEXT CHECK(datetime(trial_start) IS NOT NULL)
+    , odor_start        TEXT CHECK(datetime(odor_start) IS NOT NULL)
+    , odor_end          TEXT CHECK(datetime(odor_end) IS NOT NULL)
+    , odor_id           INTEGER NOT NULL
+    , outcome           TEXT NOT NULL
+    , acq_id            INTEGER
+    , acq_timedelta_ms  REAL CHECK(acq_id IS NULL OR acq_timedelta_ms NOT NULL)
+    , program_id        INTEGER NOT NULL
+    , exp_id            INTEGER NOT NULL
 
     , UNIQUE (trial_id, program_id)
     , UNIQUE (trial_start, program_id)

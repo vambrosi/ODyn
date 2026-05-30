@@ -13,6 +13,18 @@ WARNING = "[\033[1;33mWARNING\033[0m]"
 CHECK = "\033[1;32m\u2714\033[0m"
 CROSS = "\033[1;31m\u2718\033[0m"
 
+ODYN_FOLDER = ".odyn"
+INFO_FOLDER = ".odyn/olfactometer/Log/Info"
+
+
+class TrialPhase(Enum):
+    NOT_IN_TRIAL = 0
+    TRIAL_START = 1
+    ODOR_WINDOW = 2
+    INTERVAL = 3
+    RESPONSE_WINDOW = 4
+    TRIAL_END = 5
+
 
 class MovieType(Enum):
     RAW = "raw"
