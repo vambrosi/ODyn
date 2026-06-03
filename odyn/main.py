@@ -1,4 +1,5 @@
 import re
+import sys
 
 from enum import Enum
 from typing import Optional
@@ -8,11 +9,13 @@ from pathlib import Path
 from hashlib import file_digest
 from tomlkit import load, dump
 
+import numpy as np
 import tifffile
 
 import caiman as cm
 from caiman.motion_correction import MotionCorrect
 from caiman.paths import get_tempdir
+from caiman.utils.visualization import create_quilt_patches
 
 from .config import create_config
 
@@ -204,7 +207,7 @@ class Experiment:
                 mc = cm.load(mmap_path)
 
                 # Saving TIFFs directly because caiman saves them as 64-bit
-                with tifffile.TiffWriter(mcor_path, bigtiff = big_file) as tif:
+                with tifffile.TiffWriter(mcor_path, bigtiff=big_file) as tif:
                     tif.write(
                         [mc[i].copy() for i in range(mc.shape[0])],
                         shape=mc[0].shape,
@@ -238,6 +241,169 @@ class Experiment:
             )
         else:
             print(f"[INFO] No .mmap files found.")
+
+    def pick_mcor_parameters(self):
+        import bokeh.plotting as bpl
+
+        from bokeh.io import output_notebook
+        from bokeh.models import (
+            Button,
+            ColumnDataSource,
+            Slider,
+            LinearColorMapper,
+        )
+        from bokeh.io.state import curstate
+        from bokeh.palettes import Greys256
+
+        is_notebook = "ipykernel" in sys.modules
+        is_bokeh_initialized = curstate().notebook
+
+        if is_notebook and not is_bokeh_initialized:
+            # HACK: So things show in VSCode (change it)
+            import os
+
+            os.environ["BOKEH_ALLOW_WS_ORIGIN"] = "*"
+
+            output_notebook()
+
+        def modify_doc(doc):
+            # Check and sync config
+            self._sync_config()
+
+            # Get raw movies
+            raw_path = self.path / self.config["experiment"]["raw_folder"]
+            raw_paths = sorted(raw_path.glob("[!.]?*.tif"))
+
+            assert raw_paths, "Could not find any raw TIFF files."
+
+            # Create correlation image as in demo_pipeline.ipynb
+            movie = cm.load(raw_paths[0])
+            correlation_image = cm.local_correlations(movie, swap_dim=False)
+            correlation_image[np.isnan(correlation_image)] = 0
+
+            lower_quantile = np.quantile(correlation_image, 0.01)
+            higher_quantile = np.quantile(correlation_image, 0.99)
+
+            # Get current values
+            size_pixels = self.config["metadata"]["size_pixels"]
+            um_per_pixels = self.config["metadata"]["um_per_pixels"]
+            strides_um = self.config["motion_correction"]["strides_um"]
+            overlap_um = self.config["motion_correction"]["overlap_um"]
+
+            strides = [int(s / c) for s, c in zip(strides_um, um_per_pixels)]
+            overlaps = [int(o / c) for o, c in zip(overlap_um, um_per_pixels)]
+
+            MAX = min(size_pixels) / 2
+            MIN = 1
+
+            p = bpl.figure(
+                x_range=(0, size_pixels[1]),
+                y_range=(size_pixels[0], 0),
+                width=600,
+                height=600,
+            )
+
+            stride_x = Slider(start=MIN, end=MAX, value=strides[1], title="Stride x")
+            overlap_x = Slider(start=MIN, end=MAX, value=overlaps[1], title="Overlap x")
+
+            stride_y = Slider(
+                start=MIN,
+                end=MAX,
+                value=strides[0],
+                title="Stride y",
+            )
+            overlap_y = Slider(
+                start=MIN,
+                end=MAX,
+                value=overlaps[0],
+                title="Overlap y",
+            )
+
+            source = ColumnDataSource(data=dict(x=[], y=[], w=[], h=[]))
+
+            color_mapper = LinearColorMapper(
+                palette=Greys256, low=lower_quantile, high=higher_quantile
+            )
+
+            p.image(
+                image=[correlation_image],
+                x=[0],
+                y=[0],
+                dh=[correlation_image.shape[0]],
+                dw=[correlation_image.shape[1]],
+                color_mapper=color_mapper,
+            )
+
+            p.rect(
+                x="x",
+                y="y",
+                width="w",
+                height="h",
+                source=source,
+                alpha=0.2,
+                line_color="white",
+                selection_color="red",
+            )
+
+            p.xaxis.visible = False
+            p.yaxis.visible = False
+
+            def update_data(attrs, old, new):
+                patch_rows, patch_cols = get_rectangle_coords(
+                    size_pixels,
+                    stride_x.value,
+                    stride_y.value,
+                    overlap_x.value,
+                    overlap_y.value,
+                )
+                patches = create_quilt_patches(patch_rows, patch_cols)
+
+                source.data = dict(
+                    x=[patch["center_x"] for patch in patches],
+                    y=[patch["center_y"] for patch in patches],
+                    w=[patch["width"] for patch in patches],
+                    h=[patch["height"] for patch in patches],
+                )
+
+            stride_x.on_change("value", update_data)
+            stride_y.on_change("value", update_data)
+            overlap_x.on_change("value", update_data)
+            overlap_y.on_change("value", update_data)
+
+            p.add_tools("tap")
+
+            # Force the first update
+            update_data(None, None, None)
+
+            save_button = Button(label="Save Parameters", button_type="success")
+
+            # Save slider values to odyn_config.toml
+            def save_callback():
+                strides = [stride_x.value, stride_y.value]
+                overlaps = [overlap_x.value, overlap_y.value]
+
+                self.config["test"]["motion_correction"]["strides_um"] = [
+                    float(s * c) for s, c in zip(strides, um_per_pixels)
+                ]
+                self.config["test"]["motion_correction"]["overlap_um"] = [
+                    float(o * c) for o, c in zip(overlaps, um_per_pixels)
+                ]
+                self._save_config()
+
+            save_button.on_click(save_callback)
+
+            layout = bpl.row(
+                bpl.column(
+                    p,
+                    bpl.row(stride_x, stride_y),
+                    bpl.row(overlap_x, overlap_y),
+                    save_button,
+                ),
+            )
+
+            doc.add_root(layout)
+
+        bpl.show(modify_doc)
 
     def play_raw_movies(self) -> None:
         self._play_movie(movie_types=(MovieType.RAW,))
@@ -472,3 +638,27 @@ class ProgressBar:
 
 def um_to_pixels(values_um, um_per_pixels):
     return [int(a / b) for (a, b) in zip(values_um, um_per_pixels)]
+
+
+def get_rectangle_coords(
+    size: list[int], stride_x: int, stride_y: int, overlap_x: int, overlap_y: int
+) -> tuple[np.ndarray, np.ndarray]:
+
+    patch_width = overlap_x + stride_x
+    patch_height = overlap_y + stride_y
+
+    patch_onset_rows = np.array(
+        list(range(0, size[0] - patch_height, stride_y)) + [size[0] - patch_height]
+    )
+    patch_offset_rows = patch_onset_rows + patch_height
+    patch_offset_rows[patch_offset_rows > size[0] - 1] = size[0] - 1
+    patch_rows = np.column_stack((patch_onset_rows, patch_offset_rows))
+
+    patch_onset_cols = np.array(
+        list(range(0, size[1] - patch_width, stride_x)) + [size[1] - patch_width]
+    )
+    patch_offset_cols = patch_onset_cols + patch_width
+    patch_offset_cols[patch_offset_cols > size[1] - 1] = size[1] - 1
+    patch_cols = np.column_stack((patch_onset_cols, patch_offset_cols))
+
+    return patch_rows, patch_cols
