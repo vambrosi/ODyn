@@ -287,8 +287,9 @@ class Experiment:
             # Get current values
             size_pixels = self.config["metadata"]["size_pixels"]
             um_per_pixels = self.config["metadata"]["um_per_pixels"]
-            strides_um = self.config["motion_correction"]["strides_um"]
-            overlap_um = self.config["motion_correction"]["overlap_um"]
+
+            strides_um = self.config["test"]["motion_correction"]["strides_um"]
+            overlap_um = self.config["test"]["motion_correction"]["overlap_um"]
 
             strides = [int(s / c) for s, c in zip(strides_um, um_per_pixels)]
             overlaps = [int(o / c) for o, c in zip(overlap_um, um_per_pixels)]
@@ -379,8 +380,8 @@ class Experiment:
 
             # Save slider values to odyn_config.toml
             def save_callback():
-                strides = [stride_x.value, stride_y.value]
-                overlaps = [overlap_x.value, overlap_y.value]
+                strides = [stride_y.value, stride_x.value]
+                overlaps = [overlap_y.value, overlap_x.value]
 
                 self.config["test"]["motion_correction"]["strides_um"] = [
                     float(s * c) for s, c in zip(strides, um_per_pixels)
