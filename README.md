@@ -6,11 +6,16 @@
 
 - Install `git` if it's not installed yet. This can be done by downloading the [GitHub Desktop](https://desktop.github.com/download/) app, or intalling `git` directly from the [official website](https://git-scm.com/).
 
-- Install `miniforge` by downloading the [installer](https://github.com/conda-forge/miniforge?tab=readme-ov-file#windows) (for Windows) or running these commands on the Mac terminal (answer `yes` in the next two prompts)
-```bash
-curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
-bash Miniforge3-$(uname)-$(uname -m).sh
-```
+- Miniforge3 installation:
+
+    - [Windows] Download and run the [installer](https://github.com/conda-forge/miniforge?tab=readme-ov-file#windows). We recommend checking every item on the "Advanced Installation Options" list except "Add installation to my PATH environment variable".
+
+    - [MacOS] Run these commands on the terminal (answer `yes` in the next two prompts)
+
+        ```bash
+        curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
+        bash Miniforge3-$(uname)-$(uname -m).sh
+        ```
 
 - Create a new conda environment and install `caiman`. You can do that by opening a terminal (`Miniforge Prompt` in Windows), and copy-pasting the following:
 
