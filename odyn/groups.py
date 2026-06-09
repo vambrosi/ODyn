@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING
+from typing import Final, Optional, TYPE_CHECKING
 
 from pathlib import Path
 
@@ -67,7 +67,7 @@ class Group:
     is_first = True
 
     def __init__(self, group_id: int, db: Database) -> None:
-        self.group_id = group_id
+        self.group_id: Final[int] = group_id
         self.db = db
 
         # Initialize "private" variables
@@ -251,37 +251,6 @@ class Group:
 
         return self._trials
 
-    def _record_call(self, func_name: str, params: dict) -> Optional[int]:
-        # Makes sure it will not record self
-        params.pop("self", None)
-
-        with self.db.con as con:
-            cur = con.cursor()
-
-            git_commit = get_git_hash()
-
-            query = """
-                INSERT INTO method_calls
-                    ( group_id
-                    , method_name
-                    , parameters
-                    , git_commit
-                    ) VALUES (?, ?, ?, ?);
-            """
-            cur.execute(
-                query,
-                [self.group_id, func_name, json.dumps(params), git_commit],
-            )
-
-            call_id = cur.lastrowid
-            print(f"{INFO} Recorded method call to db (method_call_id = {call_id}).")
-
-            # Reset method_calls DataFrames
-            self._method_calls = None
-            self.db._method_calls = None
-
-            return call_id
-
     def _reset_caches(self) -> None:
         self._acquisitions = None
         self._events = None
@@ -369,7 +338,9 @@ class Group:
         max_shift_um[1] = clamp(max_shift_um[1], 0, width_um / 4)
 
         # --- Save validated parameters in the database --- #
-        method_call_id = self._record_call("Group.run_motion_correction", locals())
+        method_call_id = record_call(
+            self, self.db, "Group.run_motion_correction", locals()
+        )
 
         # --- Make sure movies will be updated next time they are played --- #
 
@@ -569,7 +540,7 @@ class Group:
         ].index.max()
 
         # Record call here so it doesn't return itself
-        self._record_call("Group.play_movie", params)
+        record_call(self, self.db, "Group.play_movie", params)
 
         # Trigger recompute if the parameters changed from the last call
         movie_types = tuple(MovieType(s) for s in grid)
@@ -739,8 +710,6 @@ class LazyMovie:
             # Get the movie_paths
             if movie_type == MovieType.TEST:
                 self.owner.method_calls
-
-                path = Path(get_tempdir())
 
                 # Redundant check for mypy
                 assert self.owner._raw_mmap_pairs is not None

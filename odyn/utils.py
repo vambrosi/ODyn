@@ -1,10 +1,17 @@
+from __future__ import annotations
+
+import json
 import functools
 import subprocess
 
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .database import Database
+    from .groups import Group
 
 INFO = "[\033[1;34mINFO\033[0m]"
 PASS = "[\033[1;32mTEST\033[0m]"
@@ -30,6 +37,25 @@ class MovieType(Enum):
     RAW = "raw"
     MCOR = "mcor"
     TEST = "test"
+
+
+# TODO: - Add failsafe in case git is not on the path
+#       - Embed commit hash in pip installation
+def get_git_hash():
+    try:
+        # Get odyn path
+        package_root = Path(__file__).resolve().parent.parent
+
+        # Get commit hash for that directory
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=package_root,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+
+    except Exception:
+        return "unknown-hash"
 
 
 def memorize_params(method):
@@ -58,6 +84,43 @@ def memorize_params(method):
         return method(self, **params)
 
     return wrapper
+
+
+def record_call(
+    caller: Database | Group, db: Database, func_name: str, params: dict
+) -> Optional[int]:
+    # Makes sure it will not record self
+    params.pop("self", None)
+
+    with db.con as con:
+        cur = con.cursor()
+
+        git_commit = get_git_hash()
+
+        query = """
+                INSERT INTO method_calls
+                    ( group_id
+                    , method_name
+                    , parameters
+                    , git_commit
+                    ) VALUES (?, ?, ?, ?);
+            """
+        cur.execute(
+            query,
+            [caller.group_id, func_name, json.dumps(params), git_commit],
+        )
+
+        call_id = cur.lastrowid
+        print(f"{INFO} Recorded method call to db (method_call_id = {call_id}).")
+
+        # Reset method_calls DataFrames
+        caller._method_calls = None
+
+        # If not a database, refresh parent database cache
+        if caller.group_id != 0:
+            db._method_calls = None
+
+        return call_id
 
 
 # TODO: - Fix the logging interaction with this class
@@ -97,22 +160,3 @@ def um_to_pixels(values_um, um_per_pixels):
 
 def clamp(x, min_x, max_x):
     return max(min_x, min(x, max_x))
-
-
-# TODO: - Add failsafe in case git is not on the path
-#       - Embed commit hash in pip installation
-def get_git_hash():
-    try:
-        # Get odyn path
-        package_root = Path(__file__).resolve().parent.parent
-
-        # Get commit hash for that directory
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=package_root,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-
-    except Exception:
-        return "unknown-hash"

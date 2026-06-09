@@ -1,7 +1,6 @@
 # --------------------------------------------------------------------------- #
 # NOTE:
 #   - Programs with same name can be different
-#   - Parse log excel file possibly
 #   - RWD Olfactometer trigger
 #   - All odors have concentration, even monomolecular ones (add to DB)
 #   - Not in metadata: Odor Dilution (%v/v), Odor Made in Date
@@ -13,10 +12,10 @@
 #   - Seems consistent across programs, but not whole experiments.
 #
 # TODO:
+#   - Check event -> h5 -> acquisition mapping
 #   - Change h5 timing data assert position
 #   - Add mcors that where already made to DB.
 #   - Assert that non-passive trials have a non "na" outcome
-#   - add_experiment should be recorded in method_calls (possibly globally)
 #   - Possibly change to "nothing fails, just skip and log"
 #   - Use logging module instead of print (console + log file)
 #   - Add log table and every method_call stores a log
@@ -53,7 +52,7 @@ from pathlib import Path
 from scipy.signal import find_peaks
 from sqlite3 import Cursor
 from tifffile import TiffFile, TiffPage
-from typing import Optional, Any
+from typing import Any, Final, Optional
 
 import h5py
 import numpy as np
@@ -65,6 +64,8 @@ from .utils import *
 type InsertData = dict[str, Any]
 
 TIMEDELTA_MS = timedelta(milliseconds=1)
+H5_TOLERANCE = timedelta(milliseconds=100)
+TRIAL_TOLERANCE = timedelta(seconds=1)
 
 
 class Database:
@@ -89,7 +90,10 @@ class Database:
 
     def __init__(self, path: str | Path, update=False):
         self.main_folder = Path(path)
-        self.path = self.main_folder / ODYN_FOLDER / "odyn.db"
+        self.path: Final[Path] = self.main_folder / ODYN_FOLDER / "odyn.db"
+
+        # Database has a default group to record its calls
+        self.group_id: Final[int] = 0
 
         # Initialize "private" variables
         self._acquisitions: Optional[pd.DataFrame] = None
@@ -110,9 +114,14 @@ class Database:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.con = sqlite3.connect(self.path)
 
-            with self.con:
+            # Create schema and add default values
+            with self.con as con:
                 with open(Path(__file__).parent / "create.sql") as f:
-                    self.con.executescript(f.read())
+                    con.executescript(f.read())
+
+                # Insert default database group
+                query = "INSERT OR IGNORE INTO groups (group_id) VALUES (?);"
+                con.execute(query, [self.group_id])
 
             print(f"{INFO} Database created at: '{self.path.resolve()}'")
 
@@ -184,8 +193,8 @@ class Database:
         if self._groups is not None:
             return self._groups
 
-        query = "SELECT group_id FROM groups;"
-        res = self.con.execute(query)
+        query = "SELECT group_id FROM groups WHERE group_id != ?;"
+        res = self.con.execute(query, [self.group_id])
 
         group_ids = sorted(exp["group_id"] for exp in res.fetchall())
         self._groups = [Group(group_id, self) for group_id in group_ids]
@@ -371,19 +380,26 @@ class Database:
         self,
         *,
         rel_path: str,
-        raw_paths: Optional[list[Path]] = None,
+        rel_raw_paths: Optional[list[str]] = None,
     ) -> None:
+
+        print(f"{INFO} Adding experiment to database...")
+
+        # Save parameters (all paths should be relative)
+        record_call(self, self, "Database.add_experiment", locals())
 
         # Basically, everything in this function is done in a single transaction
         # because if something fails we rollback all insertions.
-
         exp_path = self.main_folder / rel_path
 
         assert exp_path.is_dir(), f"Folder not found: '{exp_path.resolve()}'"
 
         # Fetch raw file paths list if not provided
-        if raw_paths is None:
-            raw_paths = sorted(exp_path.glob("raw/[!.]?*.tif"))
+        raw_paths = (
+            sorted(exp_path.glob("raw/[!.]?*.tif"))
+            if rel_raw_paths is None
+            else [self.main_folder / p for p in rel_raw_paths]
+        )
 
         # ASSUMPTION: raw_paths are sorted
 
@@ -625,7 +641,7 @@ class Database:
                     licks_count = 0
 
                     for _, (et, event_name, event_type, event_tag) in df.iterrows():
-                        event_time = et.to_pydatetime()
+                        event_time: datetime = et.to_pydatetime()
 
                         # Check if a trial is starting
                         if event_type == "Trial" and event_tag != "Interval":
@@ -661,13 +677,10 @@ class Database:
                             # CHECK IF NEXT ACQUISITION MATCHES THE NEXT TRIAL
                             # NOTE: Assumes that acquisitions are ordered
 
-                            h5_tolerance = np.timedelta64(100, "ms")
-                            csv_tolerance = np.timedelta64(1, "s")
-
                             if acquisitions:
                                 # Get acquisition
                                 acq = acquisitions[0]
-                                acq_start = np.datetime64(acq["acq_start"])
+                                acq_start: datetime = acq["acq_start"]
 
                                 assert timing_data is not None, (
                                     "There are event files and acquisitions,"
@@ -699,13 +712,13 @@ class Database:
 
                                 next_h5_trial += 1
 
-                                if np.abs(h5_trial_start - acq_start) < h5_tolerance:
+                                if abs(h5_trial_start - acq_start) < H5_TOLERANCE:
                                     # Insert the acquisition into DB with H5 data
                                     acq["exp_id"] = exp_id
                                     acq["odor_start"] = h5_odor_start
                                     acq["odor_end"] = h5_odor_end
 
-                                    t_diff = np.abs(h5_trial_start - acq_start)
+                                    t_diff = abs(h5_trial_start - acq_start)
                                     acq["h5_timedelta_ms"] = t_diff / TIMEDELTA_MS
 
                                     acq_id = _db_insert(cur, "acquisitions", acq)
@@ -719,13 +732,14 @@ class Database:
                                     csv_trials_without_acq += 1
 
                                 print(f"acq = {acq_len - len(acquisitions) - 1}")
-                                print(f"diff = {np.abs(h5_trial_start - acq_start)}")
+                                print(f"diff = {abs(h5_trial_start - acq_start)}")
 
                                 # Associate trial with acquisition
-                                if np.abs(event_time - acq_start) < csv_tolerance:
-                                    t_diff = np.abs(event_time - acq_start)
+                                if abs(event_time - acq_start) < TRIAL_TOLERANCE:
+                                    t_diff = abs(event_time - acq_start)
                                     trial["acq_id"] = acq_id
                                     trial["acq_timedelta_ms"] = t_diff / TIMEDELTA_MS
+
                                 else:
                                     csv_trials_without_acq += 1
 
@@ -889,12 +903,17 @@ class Database:
 
         for raw_path in raw_paths:
             exp_path = raw_path.parent.parent
+
+            # Path are relative to main_folder to be computer independent
+            # This makes the DB method_call parameters reusable
+
             rel_path = str(exp_path.relative_to(self.main_folder))
-            experiments[rel_path].append(raw_path)
+            raw_path_rel = str(raw_path.relative_to(self.main_folder))
+            experiments[rel_path].append(raw_path_rel)
 
         # Add experiments to the database
         for path in experiments:
-            self.add_experiment(rel_path=path, raw_paths=experiments[path])
+            self.add_experiment(rel_path=path, rel_raw_paths=experiments[path])
 
         print(f"{INFO} Database updated!")
 
@@ -1038,7 +1057,7 @@ def _parse_event_file(path: Path, program_start: datetime) -> pd.DataFrame:
     return df
 
 
-def _parse_program_starts(db: Database, start: datetime) -> list[tuple[time, str]]:
+def _parse_program_starts(db: Database, start: datetime) -> list[tuple[datetime, str]]:
     """ "
     Gets program starts after a certain datetime (-1s) from olfactometer log file.
     """
