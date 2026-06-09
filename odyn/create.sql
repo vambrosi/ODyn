@@ -122,6 +122,8 @@ CREATE TABLE IF NOT EXISTS method_calls
     , method_name       TEXT NOT NULL
     , parameters        TEXT NOT NULL CHECK(json_valid(parameters))
     , git_commit        TEXT NOT NULL
+    -- , call_log          TEXT NOT NULL
+    -- , call_flag         INTEGER NOT NULL
 
     , FOREIGN KEY (group_id) REFERENCES groups(group_id)
     ) STRICT;
@@ -130,7 +132,6 @@ CREATE TABLE IF NOT EXISTS outputs
     ( output_id         INTEGER PRIMARY KEY
     , method_call_id    INTEGER NOT NULL
     , file_path         TEXT
-    , log_text          TEXT NOT NULL
     , removed           INTEGER CHECK(removed IN (FALSE, TRUE))
 
     , FOREIGN KEY (method_call_id) REFERENCES method_calls(method_call_id)
