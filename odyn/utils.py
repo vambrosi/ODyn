@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import json
+import contextlib
 import functools
+import json
 import subprocess
+import sys
 
 from dataclasses import dataclass
 from enum import Enum
+from io import StringIO
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -86,41 +89,82 @@ def memorize_params(method):
     return wrapper
 
 
-def record_call(
-    caller: Database | Group, db: Database, func_name: str, params: dict
-) -> Optional[int]:
-    # Makes sure it will not record self
-    params.pop("self", None)
+class _Tee:
+    """Writes to both the real stdout and a capture buffer simultaneously."""
 
-    with db.con as con:
-        cur = con.cursor()
+    def __init__(self, real, buf: StringIO):
+        self._real = real
+        self._buf = buf
 
-        git_commit = get_git_hash()
+    def write(self, data: str) -> int:
+        n = self._real.write(data)
+        self._buf.write(data)
+        return n
 
-        query = """
-                INSERT INTO method_calls
-                    ( group_id
-                    , method_name
-                    , parameters
-                    , git_commit
-                    ) VALUES (?, ?, ?, ?);
-            """
-        cur.execute(
-            query,
-            [caller.group_id, func_name, json.dumps(params), git_commit],
-        )
+    def flush(self) -> None:
+        self._real.flush()
+        self._buf.flush()
 
-        call_id = cur.lastrowid
-        print(f"{INFO} Recorded method call to db (method_call_id = {call_id}).")
 
-        # Reset method_calls DataFrames
-        caller._method_calls = None
+def record_call(func):
+    """
+    Decorator for Database/Group methods that should be tracked in method_calls.
 
-        # If not a database, refresh parent database cache
-        if caller.group_id != 0:
-            db._method_calls = None
+    Records the call, captures all print output during execution, and saves it
+    to call_log when the method returns (even on exception).
 
-        return call_id
+    Sets self._current_call_id for the duration of the call so the function
+    body can reference its own method_call_id (e.g. to store in a foreign key).
+    """
+
+    @functools.wraps(func)
+    def wrapper(self, **kwargs):
+        # Support both Database (db = self) and Group (db = self.db)
+        db = getattr(self, "db", self)
+
+        buf = StringIO()
+        tee = _Tee(sys.stdout, buf)
+
+        with contextlib.redirect_stdout(tee):
+            with db.con as con:
+                cur = con.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO method_calls
+                        ( group_id
+                        , method_name
+                        , parameters
+                        , git_commit
+                        ) VALUES (?, ?, ?, ?);
+                    """,
+                    [
+                        self.group_id,
+                        f"{type(self).__name__}.{func.__name__}",
+                        json.dumps(kwargs),
+                        get_git_hash(),
+                    ],
+                )
+                call_id = cur.lastrowid
+
+            print(f"{INFO} Recorded method call to db (method_call_id = {call_id}).")
+
+            # Reset method_calls caches
+            self._method_calls = None
+            if self.group_id != 0:
+                db._method_calls = None
+
+            self._current_call_id = call_id
+            try:
+                return func(self, **kwargs)
+            finally:
+                del self._current_call_id
+                with db.con:
+                    db.con.execute(
+                        "UPDATE method_calls SET call_log = ? WHERE method_call_id = ?",
+                        [buf.getvalue(), call_id],
+                    )
+
+    return wrapper
 
 
 # TODO: - Fix the logging interaction with this class

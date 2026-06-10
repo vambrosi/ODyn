@@ -273,6 +273,7 @@ class Group:
     # ----------------------------------------------------------------------- #
 
     @memorize_params
+    @record_call
     def run_motion_correction(
         self,
         *,
@@ -336,11 +337,6 @@ class Group:
         width_um = self.experiments["width_um"].min()
         max_shift_um[0] = clamp(max_shift_um[0], 0, height_um / 4)
         max_shift_um[1] = clamp(max_shift_um[1], 0, width_um / 4)
-
-        # --- Save validated parameters in the database --- #
-        method_call_id = record_call(
-            self, self.db, "Group.run_motion_correction", locals()
-        )
 
         # --- Make sure movies will be updated next time they are played --- #
 
@@ -448,7 +444,7 @@ class Group:
                     [
                         acq_id,
                         str(mcor_path.relative_to(self.db.main_folder)),
-                        method_call_id,
+                        self._current_call_id,
                     ],
                 )
 
@@ -460,6 +456,7 @@ class Group:
             self.db._mcor_files = None
 
     @memorize_params
+    @record_call
     def play_movie(
         self,
         *,
@@ -531,16 +528,15 @@ class Group:
 
         # --- Check if movie needs to be updated --- #
 
-        # Get the latest play_movie call with the same grid as now
+        # Exclude the current call (already recorded by decorator) so we find
+        # the most recent *previous* call with the same grid.
         play_movie_calls = self.method_calls[
-            self.method_calls["method_name"] == "Group.play_movie"
+            (self.method_calls["method_name"] == "Group.play_movie")
+            & (self.method_calls.index != self._current_call_id)
         ]
         last_call_id = play_movie_calls[
             play_movie_calls["parameters"].apply(lambda x: x["grid"] == grid)
         ].index.max()
-
-        # Record call here so it doesn't return itself
-        record_call(self, self.db, "Group.play_movie", params)
 
         # Trigger recompute if the parameters changed from the last call
         movie_types = tuple(MovieType(s) for s in grid)

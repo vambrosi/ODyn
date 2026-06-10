@@ -56,6 +56,7 @@ from typing import Any, Final, Optional
 import h5py
 import numpy as np
 import pandas as pd
+import traceback
 
 from .groups import Group
 from .utils import *
@@ -370,6 +371,7 @@ class Database:
 
         self._groups = None
 
+    @record_call
     def add_experiment(
         self,
         *,
@@ -378,9 +380,6 @@ class Database:
     ) -> None:
 
         print(f"{INFO} Adding experiment to database...")
-
-        # Save parameters (all paths should be relative)
-        record_call(self, self, "Database.add_experiment", locals())
 
         # Basically, everything in this function is done in a single transaction
         # because if something fails we rollback all insertions.
@@ -687,6 +686,7 @@ class Database:
 
             self._reset_caches()
 
+    @record_call
     def update(self) -> None:
         # ----------------------------------------------------------------------- #
         #
@@ -742,7 +742,10 @@ class Database:
 
         # Add experiments to the database
         for path in experiments:
-            self.add_experiment(rel_path=path, rel_raw_paths=experiments[path])
+            try:
+                self.add_experiment(rel_path=path, rel_raw_paths=experiments[path])
+            except Exception:
+                traceback.print_exc()
 
         print(f"{INFO} Database updated!")
 
