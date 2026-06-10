@@ -117,18 +117,6 @@ class Experiment:
             mcor_folder = self.path / self.config["experiment"]["mcor_folder"]
             mcor_folder.mkdir(parents=True, exist_ok=True)
 
-            # If it is a final motion correction run, there are previous motion corrected
-            # files, and the user doesn't want to overwrite them, exit the function.
-
-            # This for loop is executed at most once (if the iterator is non-empty)
-            for _ in mcor_folder.glob(f"[!.]?*_mcor.tif"):
-                answer = input(f"Overwrite motion corrected files? [y/N]")
-
-                if answer.lower() != "y":
-                    return
-
-                break
-
             # Get acquisition range
             first_acq = self.config["experiment"]["first_acq"]
             last_acq = self.config["experiment"]["last_acq"]
