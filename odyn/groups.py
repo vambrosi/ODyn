@@ -105,15 +105,12 @@ class Group:
         if attr is not None:
             return print(attr.__doc__)
 
-        return print(f"{INFO} Method not found!")
+        return logger.info("Method not found!")
 
     @staticmethod
     def short_help():
-        msg = (
-            f"{INFO} Run Group.help() to get a list of useful functions.\n"
-            f"{INFO} Run Group.help('function_name') to know more about a function."
-        )
-        print(msg)
+        logger.info("Run Group.help() to get a list of useful functions.")
+        logger.info("Run Group.help('function_name') to know more about a function.")
 
     # ----------------------------------------------------------------------- #
     # Database Interaction
@@ -376,7 +373,7 @@ class Group:
 
         # --- Run the motion correction --- #
 
-        print(f"{INFO} Starting motion correction...")
+        logger.info("Starting motion correction...")
 
         _, dview, _ = cm.cluster.setup_cluster(
             backend="multiprocessing", n_processes=None, single_thread=False
@@ -393,7 +390,7 @@ class Group:
         finally:
             cm.stop_server(dview=dview)
 
-        print(f"{INFO} Finished motion correction")
+        logger.info("Finished motion correction")
 
         # --- Save the results in TIFF files (if it is not a test) --- #
         if is_test:
@@ -405,7 +402,7 @@ class Group:
             return
 
         with self.db.con as con:
-            print(f"{INFO} Saving mcor files...")
+            logger.info("Saving mcor files...")
 
             bar = ProgressBar(len(self.mc.mmap_file))
             bar.show()
@@ -569,7 +566,7 @@ class Group:
         movie_name = str(filepath)
 
         if save_movie:
-            print(f"{INFO} Saving movie to {movie_name})")
+            logger.info(f"Saving movie to {movie_name}")
 
         self.movies[movie_types].maybe_update(downsample_ratio).play(
             backend=backend,
@@ -606,7 +603,7 @@ class Group:
 
         # Remove files
         for exp_name, movie_paths in exp_movies:
-            print(f"{INFO} Removing .mmap files that start with {exp_name}...")
+            logger.info(f"Removing .mmap files that start with {exp_name}...")
             if movie_paths:
                 total_size = 0.0  # in bytes
                 for movie_path in movie_paths:
@@ -615,12 +612,12 @@ class Group:
 
                 total_size = total_size / (1_000_000_000)  # in GBs
                 ending = "s" if len(movie_paths) > 1 else ""
-                print(
-                    f"{INFO} Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB)."
+                logger.info(
+                    f"Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB)."
                 )
 
             else:
-                print(f"{INFO} No .mmap files found.")
+                logger.info("No .mmap files found.")
 
         self._raw_mmap_pairs = None
 
@@ -689,10 +686,10 @@ class LazyMovie:
 
     def maybe_update(self, downsample_ratio) -> cm.movie:
         if self.movie is not None:
-            print(f"{INFO} Using cached movie...")
+            logger.info("Using cached movie...")
             return self.movie
 
-        print(f"{INFO} Updating movie...")
+        logger.info("Updating movie...")
 
         movie_chains = []
 
@@ -736,20 +733,21 @@ class LazyMovie:
             #       before having spent time loading anything.
             assert movie_paths, f"Didn't find any {movie_type.value} files."
 
-            msg = f"{INFO} Adding {len(movie_paths)} {movie_type.value} files to the movie."
-            print(msg)
+            logger.info(
+                f"Adding {len(movie_paths)} {movie_type.value} files to the movie."
+            )
 
             bar = ProgressBar(len(movie_paths))
             bar.show()
 
             movie_chain = cm.load(movie_paths[0]).resize(1, 1, downsample_ratio)
-            bar.message(f"{INFO}  {movie_paths[0]}")
+            bar.message(f"  {movie_paths[0]}")
             bar.step()
 
             for filename in movie_paths[1:]:
                 movie = cm.load(filename).resize(1, 1, downsample_ratio)
                 movie_chain = cm.concatenate([movie_chain, movie], axis=0)
-                bar.message(f"{INFO}  {filename}")
+                bar.message(f"  {filename}")
                 bar.step()
 
             bar.end()

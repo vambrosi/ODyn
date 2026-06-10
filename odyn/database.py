@@ -56,7 +56,6 @@ from typing import Any, Final, Optional
 import h5py
 import numpy as np
 import pandas as pd
-import traceback
 
 from .groups import Group
 from .utils import *
@@ -118,8 +117,8 @@ class Database:
 
         # Get connection and create database if needed
         if not self.path.exists():
-            print(f"{INFO} Did not find a database!")
-            print(f"{INFO} Creating database...")
+            logger.info("Did not find a database!")
+            logger.info("Creating database...")
 
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.con = sqlite3.connect(self.path)
@@ -133,11 +132,11 @@ class Database:
                 query = "INSERT OR IGNORE INTO groups (group_id) VALUES (?);"
                 con.execute(query, [self.group_id])
 
-            print(f"{INFO} Database created at: '{self.path.resolve()}'")
+            logger.info(f"Database created at: '{self.path.resolve()}'")
 
         else:
             self.con = sqlite3.connect(self.path)
-            print(f"{INFO} Connected to the database at: '{self.path.resolve()}'")
+            logger.info(f"Connected to the database at: '{self.path.resolve()}'")
 
         self.con.execute("PRAGMA foreign_keys = ON;")
         self.con.row_factory = sqlite3.Row
@@ -158,7 +157,7 @@ class Database:
         if attr is not None:
             return print(attr.__doc__)
 
-        print(f"{INFO} Method not found!")
+        logger.info("Method not found!")
 
     @property
     def acquisitions(self) -> pd.DataFrame:
@@ -379,7 +378,7 @@ class Database:
         rel_raw_paths: Optional[list[str]] = None,
     ) -> None:
 
-        print(f"{INFO} Adding experiment to database...")
+        logger.info("Adding experiment to database...")
 
         # Basically, everything in this function is done in a single transaction
         # because if something fails we rollback all insertions.
@@ -394,7 +393,7 @@ class Database:
             else [self.main_folder / p for p in rel_raw_paths]
         )
 
-        print(f"{INFO} Processing folder: '{exp_path.resolve()}'")
+        logger.info(f"Processing folder: '{exp_path.resolve()}'")
 
         with self.con as con:
             cur = con.cursor()
@@ -422,8 +421,7 @@ class Database:
 
                 if raw_metadata is None:
                     bar.message(
-                        f"{INFO}   Skipped file {raw_path}"
-                        "(metadata format not supported)"
+                        f"  Skipped file {raw_path} (metadata format not supported)"
                     )
                     continue
 
@@ -442,7 +440,8 @@ class Database:
                     )
 
                     if cur.fetchone()[0]:
-                        bar.end(f"{INFO} Experiment already in DB.")
+                        logger.info("Experiment already in DB.")
+                        bar.end()
                         return
 
                     experiment = exp_data
@@ -454,16 +453,15 @@ class Database:
                     if len(h5_paths) > 1:
                         bar.end()
 
-                        print(
-                            f"{FAIL} There is more than one H5 file"
-                            f" in this experiment folder. {CROSS}"
+                        logger.warning(
+                            f"There is more than one H5 file in this experiment folder. {CROSS}"
                         )
 
                         for path in h5_paths:
                             relative_path = path.relative_to(self.main_folder).resolve()
-                            print(f"{FAIL}   {relative_path}")
+                            logger.warning(f"  {relative_path}")
 
-                        print(f"{WARNING} Experiment will not be added to the DB.")
+                        logger.warning("Experiment will not be added to the DB.")
                         return
 
                     h5_data = (
@@ -477,15 +475,13 @@ class Database:
                         key=lambda x: x.stat().st_mtime,
                     )
 
-                    bar.message(
-                        f"{INFO} Found {len(event_files)} olfactometer event files."
-                    )
+                    bar.message(f"Found {len(event_files)} olfactometer event files.")
 
                 elif last_exp_data != exp_data:
                     checks_failed += 1
 
                     bar.message(
-                        f"{FAIL}   '{raw_path.relative_to(self.main_folder)}' "
+                        f"  '{raw_path.relative_to(self.main_folder)}' "
                         "metadata is inconsistent with the previous acquisition."
                     )
 
@@ -496,15 +492,14 @@ class Database:
             bar.end()
 
             if checks_failed > 0:
-                print(
-                    f"{FAIL} TIFF metadata changed {checks_failed} "
-                    f"or more times in the raw folder. {CROSS}"
+                logger.warning(
+                    f"TIFF metadata changed {checks_failed} or more times in the raw folder. {CROSS}"
                 )
-                print(f"{INFO} Are there multiple loops or grabs in the same folder?")
-                print(f"{WARNING} Experiment will not be added to the DB.")
+                logger.info("Are there multiple loops or grabs in the same folder?")
+                logger.warning("Experiment will not be added to the DB.")
                 return
 
-            print(f"{PASS} Passed all TIFF metadata checks! {CHECK}")
+            logger.info(f"Passed all TIFF metadata checks! {CHECK}")
 
             assert (
                 experiment is not None
@@ -656,19 +651,18 @@ class Database:
                 n_matched_acq = len(acq_to_h5)
 
                 if n_matched_acq < n_h5:
-                    print(
-                        f"{FAIL} {n_h5 - n_matched_acq} H5 trials without"
-                        f" matching acquisition. {CROSS}"
+                    logger.warning(
+                        f"{n_h5 - n_matched_acq} H5 trials without matching acquisition. {CROSS}"
                     )
                 else:
-                    print(f"{PASS} All H5 trials matched to acquisitions. {CHECK}")
+                    logger.info(f"All H5 trials matched to acquisitions. {CHECK}")
 
             if event_trial_pool:
                 n_events = len(event_trial_pool)
                 n_matched = len(event_to_h5)
 
                 if n_matched < n_events:
-                    print(f"{INFO} {n_events - n_matched} trials without H5 match.")
+                    logger.info(f"{n_events - n_matched} trials without H5 match.")
 
                 n_with_acq = sum(
                     1
@@ -677,12 +671,11 @@ class Database:
                 )
 
                 if n_with_acq < n_matched:
-                    print(
-                        f"{FAIL} {n_matched - n_with_acq} trials matched"
-                        f" to H5 but no acquisition. {CROSS}"
+                    logger.warning(
+                        f"{n_matched - n_with_acq} trials matched to H5 but no acquisition. {CROSS}"
                     )
                 elif event_files:
-                    print(f"{PASS} All matched trials have acquisitions. {CHECK}")
+                    logger.info(f"All matched trials have acquisitions. {CHECK}")
 
             self._reset_caches()
 
@@ -719,13 +712,13 @@ class Database:
         #
         # ----------------------------------------------------------------------- #
 
-        print(f"{INFO} Updating the database...")
-        print(f"{INFO} Searching for raw files ('**/raw/*.tif')...")
+        logger.info("Updating the database...")
+        logger.info("Searching for raw files ('**/raw/*.tif')...")
 
         raw_paths = sorted(self.main_folder.rglob("raw/[!.]?*.tif"))
         assert raw_paths, f"Found no .tif files in: '{self.main_folder.resolve()}'"
 
-        print(f"{INFO} Found {len(raw_paths)} raw TIFF files.")
+        logger.info(f"Found {len(raw_paths)} raw TIFF files.")
 
         # Split files into experiments
         experiments: defaultdict[str, list[Path]] = defaultdict(list)
@@ -745,9 +738,9 @@ class Database:
             try:
                 self.add_experiment(rel_path=path, rel_raw_paths=experiments[path])
             except Exception:
-                traceback.print_exc()
+                logger.exception("Failed to add experiment")
 
-        print(f"{INFO} Database updated!")
+        logger.info("Database updated!")
 
     def from_query(self, query: str):
         """
@@ -840,8 +833,8 @@ def _load_event_data(
                 try:
                     int(event_tag)
                 except ValueError as e:
-                    print(f"{FAIL} Unexpected event: {event_name}")
-                    print(f"{WARNING} Experiment will not be added to the DB.")
+                    logger.warning(f"Unexpected event: {event_name}")
+                    logger.warning("Experiment will not be added to the DB.")
                     raise e
 
                 current_trial_idx = len(trials)
@@ -963,8 +956,8 @@ def _match_events_to_h5(
         return {}
 
     if n_events < n_h5:
-        print(
-            f"{WARNING} Fewer trials starts in the CSV files ({n_events})"
+        logger.warning(
+            f"Fewer trial starts in the CSV files ({n_events})"
             f" than in the H5 file ({n_h5}). Matching as many as possible."
         )
         n_h5 = n_events
@@ -985,8 +978,8 @@ def _match_events_to_h5(
 
     diffs = event_ms[best_k : best_k + n_h5] - h5_ms
 
-    print(
-        f"{INFO} Average clock offset (event - h5):"
+    logger.info(
+        f"Average clock offset (event - h5):"
         f" {float(np.mean(diffs)):.1f} ms, std: {best_std:.1f} ms"
     )
 
@@ -1025,7 +1018,7 @@ def _to_datetime(dt: np.datetime64) -> datetime:
 
 def _get_h5_metadata(path: Path, exp_start: str) -> Optional[dict[str, np.ndarray]]:
     # Very similar to getScopeH5Timestamps
-    print(f"{INFO} Getting timing data from: '{path}'")
+    logger.info(f"Getting timing data from: '{path}'")
 
     # Parse experiment start time
     exp_start_np = np.datetime64(exp_start)
@@ -1056,7 +1049,7 @@ def _get_h5_metadata(path: Path, exp_start: str) -> Optional[dict[str, np.ndarra
 
         # Returns None if no trials where found
         if len(trial_starts) == 0:
-            print(f"{INFO} No trials triggers found in this H5 file.")
+            logger.info("No trial triggers found in this H5 file.")
             return None
 
         # Shift everything by first trial start, to match FrameTimestamp_sec data
@@ -1074,7 +1067,7 @@ def _get_h5_metadata(path: Path, exp_start: str) -> Optional[dict[str, np.ndarra
             f"    Odor presentation ends {len(odor_ends)}"
         )
 
-        print(f"{INFO} Found {len(trial_starts)} trial starts in the H5 file.")
+        logger.info(f"Found {len(trial_starts)} trial starts in the H5 file.")
 
         # Convert to timedeltas
         trial_starts = (trial_starts / samplerate * 1e9).astype("timedelta64[ns]")

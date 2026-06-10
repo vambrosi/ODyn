@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import contextlib
 import functools
 import json
+import logging
 import subprocess
-import sys
 
 from dataclasses import dataclass
 from enum import Enum
@@ -16,12 +15,11 @@ if TYPE_CHECKING:
     from .database import Database
     from .groups import Group
 
-INFO = "[\033[1;34mINFO\033[0m]"
-PASS = "[\033[1;32mTEST\033[0m]"
-FAIL = "[\033[1;31mTEST\033[0m]"
-WARNING = "[\033[1;33mWARNING\033[0m]"
-CHECK = "\033[1;32m\u2714\033[0m"
-CROSS = "\033[1;31m\u2718\033[0m"
+CHECK = "\033[1;32m✔\033[0m"
+CROSS = "\033[1;31m✘\033[0m"
+
+# Used only by ProgressBar — not exported
+_INFO = "[\033[1;34mINFO\033[0m]"
 
 ODYN_FOLDER = ".odyn"
 INFO_FOLDER = ".odyn/olfactometer/Log/Info"
@@ -40,6 +38,32 @@ class MovieType(Enum):
     RAW = "raw"
     MCOR = "mcor"
     TEST = "test"
+
+
+class _ColorFormatter(logging.Formatter):
+    _COLORS = {
+        logging.DEBUG: "\033[0;37m",  # grey
+        logging.INFO: "\033[1;34m",  # bold blue
+        logging.WARNING: "\033[1;33m",  # bold yellow
+        logging.ERROR: "\033[1;31m",  # bold red
+    }
+    _RESET = "\033[0m"
+
+    def format(self, record: logging.LogRecord) -> str:
+        color = self._COLORS.get(record.levelno, "")
+        return f"[{color}{record.levelname}{self._RESET}] {record.getMessage()}"
+
+
+_plain_formatter = logging.Formatter("[%(levelname)s] %(message)s")
+
+logger = logging.getLogger("odyn")
+logger.setLevel(logging.DEBUG)
+logger.propagate = False
+
+if not logger.handlers:
+    _console_handler = logging.StreamHandler()
+    _console_handler.setFormatter(_ColorFormatter())
+    logger.addHandler(_console_handler)
 
 
 # TODO: - Add failsafe in case git is not on the path
@@ -89,28 +113,11 @@ def memorize_params(method):
     return wrapper
 
 
-class _Tee:
-    """Writes to both the real stdout and a capture buffer simultaneously."""
-
-    def __init__(self, real, buf: StringIO):
-        self._real = real
-        self._buf = buf
-
-    def write(self, data: str) -> int:
-        n = self._real.write(data)
-        self._buf.write(data)
-        return n
-
-    def flush(self) -> None:
-        self._real.flush()
-        self._buf.flush()
-
-
 def record_call(func):
     """
     Decorator for Database/Group methods that should be tracked in method_calls.
 
-    Records the call, captures all print output during execution, and saves it
+    Records the call, captures all log output during execution, and saves it
     to call_log when the method returns (even on exception).
 
     Sets self._current_call_id for the duration of the call so the function
@@ -123,46 +130,51 @@ def record_call(func):
         db = getattr(self, "db", self)
 
         buf = StringIO()
-        tee = _Tee(sys.stdout, buf)
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(_plain_formatter)
+        logger.addHandler(handler)
 
-        with contextlib.redirect_stdout(tee):
-            with db.con as con:
-                cur = con.cursor()
-                cur.execute(
-                    """
-                    INSERT INTO method_calls
-                        ( group_id
-                        , method_name
-                        , parameters
-                        , git_commit
-                        ) VALUES (?, ?, ?, ?);
-                    """,
-                    [
-                        self.group_id,
-                        f"{type(self).__name__}.{func.__name__}",
-                        json.dumps(kwargs),
-                        get_git_hash(),
-                    ],
+        with db.con as con:
+            cur = con.cursor()
+            cur.execute(
+                """
+                INSERT INTO method_calls
+                    ( group_id
+                    , method_name
+                    , parameters
+                    , git_commit
+                    ) VALUES (?, ?, ?, ?);
+                """,
+                [
+                    self.group_id,
+                    f"{type(self).__name__}.{func.__name__}",
+                    json.dumps(kwargs),
+                    get_git_hash(),
+                ],
+            )
+            call_id = cur.lastrowid
+
+        logger.info(f"Recorded method call to db (method_call_id = {call_id}).")
+
+        # Reset method_calls caches
+        self._method_calls = None
+        if self.group_id != 0:
+            db._method_calls = None
+
+        self._current_call_id = call_id
+
+        try:
+            return func(self, **kwargs)
+
+        finally:
+            del self._current_call_id
+            logger.removeHandler(handler)
+
+            with db.con:
+                db.con.execute(
+                    "UPDATE method_calls SET call_log = ? WHERE method_call_id = ?",
+                    [buf.getvalue(), call_id],
                 )
-                call_id = cur.lastrowid
-
-            print(f"{INFO} Recorded method call to db (method_call_id = {call_id}).")
-
-            # Reset method_calls caches
-            self._method_calls = None
-            if self.group_id != 0:
-                db._method_calls = None
-
-            self._current_call_id = call_id
-            try:
-                return func(self, **kwargs)
-            finally:
-                del self._current_call_id
-                with db.con:
-                    db.con.execute(
-                        "UPDATE method_calls SET call_log = ? WHERE method_call_id = ?",
-                        [buf.getvalue(), call_id],
-                    )
 
     return wrapper
 
@@ -176,8 +188,8 @@ class ProgressBar:
     def show(self) -> None:
         filled_squares = int(40 * self.current / self.total)
 
-        progress_str = f"{INFO} [ \033[1;34m"
-        progress_str += "\u2588" * filled_squares
+        progress_str = f"{_INFO} [ \033[1;34m"
+        progress_str += "█" * filled_squares
         progress_str += "-" * (40 - filled_squares)
         progress_str += f"\033[0m ] {self.current:03d}/{self.total:03d} Files processed"
 
@@ -193,7 +205,7 @@ class ProgressBar:
 
     def end(self, msg: Optional[str] = None) -> None:
         if msg is None:
-            msg = f"{INFO} {self.total} files processed sucessfully."
+            msg = f"{_INFO} {self.total} files processed sucessfully."
 
         print(f"{msg:<120}")
 
