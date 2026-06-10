@@ -422,16 +422,11 @@ class Database:
 
             assert raw_paths, "Did not find any raw/*.tif files."
 
-            bar = ProgressBar(len(raw_paths))
-            bar.show()
-
-            for raw_path in raw_paths:
+            for raw_path in tqdm(raw_paths, desc="Loading TIFFs"):
                 raw_metadata = self._get_raw_metadata(raw_path)
 
                 if raw_metadata is None:
-                    bar.message(
-                        f"  Skipped file {raw_path} (metadata format not supported)"
-                    )
+                    logger.info(f"  Skipped file {raw_path} (metadata format not supported)")
                     continue
 
                 exp_data, acq = raw_metadata
@@ -450,7 +445,6 @@ class Database:
 
                     if cur.fetchone()[0]:
                         logger.info("Experiment already in DB.")
-                        bar.end()
                         return
 
                     experiment = exp_data
@@ -460,8 +454,6 @@ class Database:
                     h5_paths = list(exp_path.glob("[!.]?*.h5"))
 
                     if len(h5_paths) > 1:
-                        bar.end()
-
                         logger.warning(
                             f"There is more than one H5 file in this experiment folder. {CROSS}"
                         )
@@ -484,21 +476,18 @@ class Database:
                         key=lambda x: x.stat().st_mtime,
                     )
 
-                    bar.message(f"Found {len(event_files)} olfactometer event files.")
+                    logger.info(f"Found {len(event_files)} olfactometer event files.")
 
                 elif last_exp_data != exp_data:
                     checks_failed += 1
 
-                    bar.message(
+                    logger.warning(
                         f"  '{raw_path.relative_to(self.main_folder)}' "
                         "metadata is inconsistent with the previous acquisition."
                     )
 
                 last_exp_data = exp_data
                 acquisitions.append(acq)
-                bar.step()
-
-            bar.end()
 
             if checks_failed > 0:
                 logger.warning(

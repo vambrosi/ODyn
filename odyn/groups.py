@@ -413,13 +413,12 @@ class Group:
         with self.db.con as con:
             logger.info("Saving mcor files...")
 
-            bar = ProgressBar(len(self.mc.mmap_file))
-            bar.show()
-
             # Load mmap files and save them as TIFFs
             # TODO: Confirm that mmap_file and fname have the same order
-            for acq_id, mmap_path, raw_path in zip(
-                acquisitions_slice.index, self.mc.mmap_file, self.mc.fname
+            for acq_id, mmap_path, raw_path in tqdm(
+                zip(acquisitions_slice.index, self.mc.mmap_file, self.mc.fname),
+                desc="Saving mcor files",
+                total=len(self.mc.mmap_file),
             ):
                 # Create folder if it doesn't exist
                 mcor_folder = raw_path.parent.parent / "processed" / "mcor"
@@ -453,9 +452,6 @@ class Group:
                         self.current_call_id,
                     ],
                 )
-
-                bar.step()
-            bar.end()
 
             # Reset mcor DataFrames
             self._mcor_files = None
@@ -746,20 +742,15 @@ class LazyMovie:
                 f"Adding {len(movie_paths)} {movie_type.value} files to the movie."
             )
 
-            bar = ProgressBar(len(movie_paths))
-            bar.show()
+            movie_chain = None
+            for path in tqdm(movie_paths, desc=f"Loading {movie_type.value} movies"):
+                movie = cm.load(path).resize(1, 1, downsample_ratio)
+                movie_chain = (
+                    movie if movie_chain is None
+                    else cm.concatenate([movie_chain, movie], axis=0)
+                )
+                logger.info(f"  {path}")
 
-            movie_chain = cm.load(movie_paths[0]).resize(1, 1, downsample_ratio)
-            bar.message(f"  {movie_paths[0]}")
-            bar.step()
-
-            for filename in movie_paths[1:]:
-                movie = cm.load(filename).resize(1, 1, downsample_ratio)
-                movie_chain = cm.concatenate([movie_chain, movie], axis=0)
-                bar.message(f"  {filename}")
-                bar.step()
-
-            bar.end()
             movie_chains.append(movie_chain)
 
         movie_chain = cm.concatenate(movie_chains, axis=2)

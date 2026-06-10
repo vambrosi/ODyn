@@ -5,21 +5,19 @@ import json
 import logging
 import subprocess
 
-from dataclasses import dataclass
 from enum import Enum, IntEnum
 from io import StringIO
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .database import Database
     from .groups import Group
 
+from tqdm.auto import tqdm
+
 CHECK = "\033[1;32m✔\033[0m"
 CROSS = "\033[1;31m✘\033[0m"
-
-# Used only by ProgressBar — not exported
-_INFO = "[\033[1;34mINFO\033[0m]"
 
 ODYN_FOLDER = ".odyn"
 INFO_FOLDER = ".odyn/olfactometer/Log/Info"
@@ -178,37 +176,6 @@ def record_call(func):
                 )
 
     return wrapper
-
-
-# TODO: - Fix the logging interaction with this class
-@dataclass
-class ProgressBar:
-    total: int
-    current: int = 0
-
-    def show(self) -> None:
-        filled_squares = int(40 * self.current / self.total)
-
-        progress_str = f"{_INFO} [ \033[1;34m"
-        progress_str += "█" * filled_squares
-        progress_str += "-" * (40 - filled_squares)
-        progress_str += f"\033[0m ] {self.current:03d}/{self.total:03d} Files processed"
-
-        print(progress_str, end="\r")
-
-    def message(self, msg: str) -> None:
-        print(f"{msg:<120}")
-        self.show()
-
-    def step(self) -> None:
-        self.current = min(self.current + 1, self.total)
-        self.show()
-
-    def end(self, msg: Optional[str] = None) -> None:
-        if msg is None:
-            msg = f"{_INFO} {self.total} files processed sucessfully."
-
-        print(f"{msg:<120}")
 
 
 def um_to_pixels(values_um, um_per_pixels):
