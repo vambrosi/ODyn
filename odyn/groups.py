@@ -79,6 +79,7 @@ class Group:
         self._programs: Optional[pd.DataFrame] = None
         self._trials: Optional[pd.DataFrame] = None
 
+        self._call_id_stack: list[int] = []
         self._raw_mmap_pairs: Optional[tuple[list[str], list[str]]] = None
         self.movies: dict[tuple[MovieType, ...], LazyMovie] = {}
 
@@ -247,6 +248,14 @@ class Group:
         self._trials.set_index("trial_id", inplace=True)
 
         return self._trials
+
+    @property
+    def current_call_id(self) -> int:
+        assert self._call_id_stack, (
+            "Empty call stack — 'current_call_id' is only available inside a "
+            "method decorated with '@record_call'."
+        )
+        return self._call_id_stack[-1]
 
     def _reset_caches(self) -> None:
         self._acquisitions = None
@@ -441,7 +450,7 @@ class Group:
                     [
                         acq_id,
                         str(mcor_path.relative_to(self.db.main_folder)),
-                        self._current_call_id,
+                        self.current_call_id,
                     ],
                 )
 

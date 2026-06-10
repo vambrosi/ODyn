@@ -120,8 +120,9 @@ def record_call(func):
     Records the call, captures all log output during execution, and saves it
     to call_log when the method returns (even on exception).
 
-    Sets self._current_call_id for the duration of the call so the function
-    body can reference its own method_call_id (e.g. to store in a foreign key).
+    Pushes the call_id onto self._call_id_stack for the duration of the call,
+    so the function body can read self.current_call_id to get its own
+    method_call_id (e.g. to store in a foreign key). Supports nested calls.
     """
 
     @functools.wraps(func)
@@ -161,13 +162,13 @@ def record_call(func):
         if self.group_id != 0:
             db._method_calls = None
 
-        self._current_call_id = call_id
+        self._call_id_stack.append(call_id)
 
         try:
             return func(self, **kwargs)
 
         finally:
-            del self._current_call_id
+            self._call_id_stack.pop()
             logger.removeHandler(handler)
 
             with db.con:

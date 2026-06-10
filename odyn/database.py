@@ -105,6 +105,7 @@ class Database:
         self.group_id: Final[int] = 0
 
         # Initialize "private" variables
+        self._call_id_stack: list[int] = []
         self._acquisitions: Optional[pd.DataFrame] = None
         self._events: Optional[pd.DataFrame] = None
         self._experiments: Optional[pd.DataFrame] = None
@@ -345,6 +346,14 @@ class Database:
         }
 
         return experiment, acquisition
+
+    @property
+    def current_call_id(self) -> int:
+        assert self._call_id_stack, (
+            "Empty call stack — 'current_call_id' is only available inside a "
+            "method decorated with '@record_call'."
+        )
+        return self._call_id_stack[-1]
 
     def _reset_caches(self) -> None:
         self._acquisitions = None
