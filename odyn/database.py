@@ -63,7 +63,7 @@ from .utils import *
 type InsertData = dict[str, Any]
 
 TIMEDELTA_MS = timedelta(milliseconds=1)
-H5_TOLERANCE = timedelta(milliseconds=100)
+H5_TOLERANCE = timedelta(milliseconds=10)
 
 # TODO: Make program types part of the database
 PROGRAM_TYPES = [
@@ -880,7 +880,7 @@ def _load_event_data(
                 trial["outcome"] = "hit"
 
             elif event_type == "Trial" and event_tag == "Interval":
-                assert trial is not None, "Trial end without trial"
+                assert trial is not None, "Trial end without trial data"
                 trial_phase = TrialPhase.TRIAL_END
 
                 if program_type != "passive" and trial["outcome"] != "hit":
@@ -892,11 +892,29 @@ def _load_event_data(
             # that didn't end) — in that case the insertion step maps it to NULL.
             events.append((current_trial_idx, event_record))
 
-        # Finalize last trial only if it ended successfully.
-        # Otherwise current_trial_idx points to an index not in trials,
-        # and those events get inserted with trial_id = None.
-        if trial is not None and trial_phase == TrialPhase.TRIAL_END:
-            trials.append(trial)
+        # Attempts to adds last trial
+        if trial is not None:
+
+            # Trials that didn't reach INTERVAL are missing odor fields and cannot
+            # satisfy the DB constraints, so they are skipped with a warning.
+            if trial_phase < TrialPhase.INTERVAL:
+                logger.warning(
+                    f"Last trial discarded: ended at phase '{trial_phase.name}'"
+                    " before odor delivery window ending event."
+                )
+
+            # Otherwise, we finish as if "Trial Interval" was emitted
+            else:
+                if program_type != "passive" and trial["outcome"] != "hit":
+                    trial["outcome"] = "miss" if licks_count < 3 else "false choice"
+                licks_count = 0
+
+                if trial_phase < TrialPhase.RESPONSE_WINDOW:
+                    logger.warning(
+                        f"Last trial added with incomplete phase '{trial_phase.name}'."
+                    )
+
+                trials.append(trial)
 
         programs.append(
             {
@@ -918,7 +936,7 @@ def _match_acq_to_h5(
 
     Returns dict: h5_idx -> (acq_idx, delta_ms)
     """
-    h5_times = [_to_datetime(t) for t in h5_data["trial_starts"]]
+    h5_dts = [_to_datetime(t) for t in h5_data["trial_starts"]]
     matches: dict[int, tuple[int, float]] = {}
     h5_ptr = 0
 
@@ -926,16 +944,14 @@ def _match_acq_to_h5(
         acq_start: datetime = acq["acq_start"]
 
         # Advance h5 pointer past trials clearly before this acquisition
-        while (
-            h5_ptr < len(h5_times) - 1 and h5_times[h5_ptr] < acq_start - H5_TOLERANCE
-        ):
+        while h5_ptr < len(h5_dts) - 1 and h5_dts[h5_ptr] < acq_start - H5_TOLERANCE:
             h5_ptr += 1
 
-        if h5_ptr < len(h5_times):
-            delta = acq_start - h5_times[h5_ptr]
+        if h5_ptr < len(h5_dts):
+            delta = acq_start - h5_dts[h5_ptr]
             if abs(delta) < H5_TOLERANCE:
                 matches[h5_ptr] = (acq_idx, delta / TIMEDELTA_MS)
-                h5_ptr += 1  # each H5 trial matched at most once
+                h5_ptr += 1  # each H5 trial matches at most once
 
     return matches
 

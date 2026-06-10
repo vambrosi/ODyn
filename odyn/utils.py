@@ -6,7 +6,7 @@ import logging
 import subprocess
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 from io import StringIO
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
@@ -25,7 +25,7 @@ ODYN_FOLDER = ".odyn"
 INFO_FOLDER = ".odyn/olfactometer/Log/Info"
 
 
-class TrialPhase(Enum):
+class TrialPhase(IntEnum):
     NOT_IN_TRIAL = 0
     TRIAL_START = 1
     ODOR_WINDOW = 2
