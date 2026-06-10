@@ -384,8 +384,8 @@ class Experiment:
             layout = bpl.row(
                 bpl.column(
                     p,
-                    bpl.row(stride_x, stride_y),
-                    bpl.row(overlap_x, overlap_y),
+                    bpl.row(overlap_y, overlap_x),
+                    bpl.row(stride_y, stride_x),
                     save_button,
                 ),
             )
