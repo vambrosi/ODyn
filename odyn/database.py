@@ -426,7 +426,9 @@ class Database:
                 raw_metadata = self._get_raw_metadata(raw_path)
 
                 if raw_metadata is None:
-                    logger.info(f"  Skipped file {raw_path} (metadata format not supported)")
+                    logger.info(
+                        f"  Skipped file {raw_path} (metadata format not supported)"
+                    )
                     continue
 
                 exp_data, acq = raw_metadata

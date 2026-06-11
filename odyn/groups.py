@@ -534,7 +534,7 @@ class Group:
         # the most recent *previous* call with the same grid.
         play_movie_calls = self.method_calls[
             (self.method_calls["method_name"] == "Group.play_movie")
-            & (self.method_calls.index != self._current_call_id)
+            & (self.method_calls.index != self.current_call_id)
         ]
         last_call_id = play_movie_calls[
             play_movie_calls["parameters"].apply(lambda x: x["grid"] == grid)
@@ -746,7 +746,8 @@ class LazyMovie:
             for path in tqdm(movie_paths, desc=f"Loading {movie_type.value} movies"):
                 movie = cm.load(path).resize(1, 1, downsample_ratio)
                 movie_chain = (
-                    movie if movie_chain is None
+                    movie
+                    if movie_chain is None
                     else cm.concatenate([movie_chain, movie], axis=0)
                 )
                 logger.info(f"  {path}")

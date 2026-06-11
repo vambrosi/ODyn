@@ -181,6 +181,8 @@ def record_call(func):
                     [buf.getvalue(), call_id],
                 )
 
+    # NOTE: This is to make memorize_params work
+    wrapper.__kwdefaults__ = func.__kwdefaults__
     return wrapper
 
 
