@@ -63,7 +63,7 @@ from .utils import *
 type InsertData = dict[str, Any]
 
 TIMEDELTA_MS = timedelta(milliseconds=1)
-H5_TOLERANCE = timedelta(milliseconds=10)
+H5_TOLERANCE = timedelta(milliseconds=100)
 
 # TODO: Make program types part of the database
 PROGRAM_TYPES = [
