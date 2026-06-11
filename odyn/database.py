@@ -454,7 +454,7 @@ class Database:
                     h5_paths = list(exp_path.glob("[!.]?*.h5"))
 
                     if len(h5_paths) > 1:
-                        logger.warning(
+                        logger.error(
                             f"There is more than one H5 file in this experiment folder. {CROSS}"
                         )
 
@@ -490,7 +490,7 @@ class Database:
                 acquisitions.append(acq)
 
             if checks_failed > 0:
-                logger.warning(
+                logger.error(
                     f"TIFF metadata changed {checks_failed} or more times in the raw folder. {CROSS}"
                 )
                 logger.info("Are there multiple loops or grabs in the same folder?")
@@ -831,7 +831,7 @@ def _load_event_data(
                 try:
                     int(event_tag)
                 except ValueError as e:
-                    logger.warning(f"Unexpected event: {event_name}")
+                    logger.error(f"Unexpected event: {event_name}")
                     logger.warning("Experiment will not be added to the DB.")
                     raise e
 

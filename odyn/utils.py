@@ -49,7 +49,13 @@ class _ColorFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         color = self._COLORS.get(record.levelno, "")
-        return f"[{color}{record.levelname}{self._RESET}] {record.getMessage()}"
+        result = f"[{color}{record.levelname}{self._RESET}] {record.getMessage()}"
+        if record.exc_info:
+            if not record.exc_text:
+                record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            result += "\n" + record.exc_text
+        return result
 
 
 _plain_formatter = logging.Formatter("[%(levelname)s] %(message)s")
