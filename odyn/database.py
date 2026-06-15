@@ -6,37 +6,22 @@
 #   - Not in metadata: Odor Dilution (%v/v), Odor Made in Date
 #   - Inconsistent a:b and a/b usage
 #   - Record vial to odor association
-#   - GUI for strides and overlaps
-#
-# NOTE (Olfactometer vs Acquisition shift)
-#   - Seems consistent across programs, but not whole experiments.
 #
 # TODO:
-#   - Change h5 timing data assert position
 #   - Add mcors that where already made to DB.
 #   - Assert that non-passive trials have a non "na" outcome
-#   - Possibly change to "nothing fails, just skip and log"
-#   - Use logging module instead of print (console + log file)
-#   - Add log table and every method_call stores a log
 #   - Start a test suite (so far only for DB tests)
 #   - Add quality control plots for ported MATLAB code
-#   - ProgressBar is increasing sometimes
 #
 #   - What to do about some particular experiments?
 #       - '20250703/SID200' has more trials in .csv than in H5
 #
-# NOTE:
-#   How to deal with output files being in various computers and analysis
-#   running locally? Given speed concerns and the different workflows of the
-#   lab members, this should be a requirement. Possible solutions and steps:
-#       - Add 'computer' column/prefix when there is a folder in the table.
-#         ( Paths starting with "." should be still relative to the
-#           main_folder which is independent of the computer )
-#       - Maybe use some env/global variables like $SERVER, $COMPUTER_NAME.
-#       - Maybe should add small db for consolidation in folders that are
-#         not relative.
-#
 # MAYBE TODO:
+#   - Add 'computer' column/prefix when there is a folder in the table.
+#   ( Paths starting with "." should be still relative to the
+#       main_folder which is independent of the computer )
+#   - Maybe use some env/global variables like $SERVER, $COMPUTER_NAME.
+#   - Maybe should add small db for consolidation in folders that are not relative.
 #   - Add git hash to every db entry? (To help db updates...)
 #   - Make a function that creates .py file containing the whole
 #     processing/analysis pipeline, to run on the server.
@@ -422,7 +407,7 @@ class Database:
 
             assert raw_paths, "Did not find any raw/*.tif files."
 
-            for raw_path in tqdm(raw_paths, desc="Loading TIFFs"):
+            for raw_path in tqdm(raw_paths, desc="Loading TIFF Metadata"):
                 raw_metadata = self._get_raw_metadata(raw_path)
 
                 if raw_metadata is None:
@@ -464,7 +449,7 @@ class Database:
                             relative_path = path.relative_to(self.main_folder).resolve()
                             logger.warning(f"  {relative_path}")
 
-                        logger.warning("Experiment will not be added to the DB.")
+                        logger.error("Experiment will not be added to the DB.")
                         return
 
                     h5_data = (
@@ -484,8 +469,8 @@ class Database:
                     checks_failed += 1
 
                     logger.warning(
-                        f"  '{raw_path.relative_to(self.main_folder)}' "
-                        "metadata is inconsistent with the previous acquisition."
+                        f"'{raw_path.relative_to(self.main_folder)}' metadata"
+                        " is inconsistent with the previous acquisition."
                     )
 
                 last_exp_data = exp_data
@@ -496,7 +481,7 @@ class Database:
                     f"TIFF metadata changed {checks_failed} or more times in the raw folder. {CROSS}"
                 )
                 logger.info("Are there multiple loops or grabs in the same folder?")
-                logger.warning("Experiment will not be added to the DB.")
+                logger.error("Experiment will not be added to the DB.")
                 return
 
             logger.info(f"Passed all TIFF metadata checks! {CHECK}")
@@ -737,6 +722,7 @@ class Database:
         for path in experiments:
             try:
                 self.add_experiment(rel_path=path, rel_raw_paths=experiments[path])
+
             except Exception:
                 logger.exception("Failed to add experiment")
 
@@ -832,9 +818,10 @@ def _load_event_data(
                 # Stop processing if tag is not an integer
                 try:
                     int(event_tag)
+
                 except ValueError as e:
                     logger.error(f"Unexpected event: {event_name}")
-                    logger.warning("Experiment will not be added to the DB.")
+                    logger.error("Experiment will not be added to the DB.")
                     raise e
 
                 current_trial_idx = len(trials)
