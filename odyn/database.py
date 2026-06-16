@@ -571,9 +571,9 @@ class Database:
                     acq = {
                         **acquisitions[acq_idx],
                         "exp_id": exp_id,
-                        "acq_start": acq["acq_start"].strftime(DT_FORMAT),
-                        "odor_start": _to_datetime(h5_data["odor_starts"][h5_idx]),
-                        "odor_end": _to_datetime(h5_data["odor_ends"][h5_idx]),
+                        "acq_start": acquisitions[acq_idx]["acq_start"].strftime(DT_FORMAT),
+                        "odor_start": _to_datetime_str(h5_data["odor_starts"][h5_idx]),
+                        "odor_end": _to_datetime_str(h5_data["odor_ends"][h5_idx]),
                         "h5_to_acq_ms": delta_ms,
                     }
                     h5_to_acq_id[h5_idx] = _db_insert(cur, "acquisitions", acq)
@@ -1021,7 +1021,11 @@ def _db_insert(
 
 def _to_datetime(dt: np.datetime64) -> datetime:
     dt_str = np.datetime_as_string(dt).item()
-    return datetime.fromisoformat(dt_str).strftime(DT_FORMAT)
+    return datetime.fromisoformat(dt_str)
+
+
+def _to_datetime_str(dt: np.datetime64) -> str:
+    return _to_datetime(dt).strftime(DT_FORMAT)
 
 
 def _get_h5_metadata(path: Path, exp_start: str) -> Optional[dict[str, np.ndarray]]:
