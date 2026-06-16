@@ -49,6 +49,7 @@ type InsertData = dict[str, Any]
 
 TIMEDELTA_MS = timedelta(milliseconds=1)
 H5_TOLERANCE = timedelta(milliseconds=100)
+DT_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 
 # TODO: Make program types part of the database
 PROGRAM_TYPES = [
@@ -511,43 +512,47 @@ class Database:
             # Phase 2: Match
             # --------------------------------------------------------------- #
 
-            # Acquisitions <-> H5 trials (same imaging clock, tight tolerance)
-            # Result: h5_idx -> (acq_idx, delta_ms)
+            # Acquisitions <-> H5 trials
+            # Result: h5_idx -> (acq_idx, h5_to_acq_ms)
             acq_to_h5: dict[int, tuple[int, float]] = {}
 
             if h5_data and acquisitions:
                 acq_to_h5 = _match_acq_to_h5(acquisitions, h5_data)
 
-            # Pool all event trial starts across programs (keeping program/trial indices)
+            # Pool all event trial starts across programs
             # event_trial_pool[i] = (program_idx, trial_idx, trial_start)
-            event_trial_pool: list[tuple[int, int, datetime]] = [
-                (p_idx, t_idx, trial["trial_start"])
-                for p_idx, p in enumerate(programs_data)
-                for t_idx, trial in enumerate(p["trials"])
+            trials: list[tuple[int, int, datetime]] = [
+                (program_idx, trial_idx, trial["trial_start"])
+                for program_idx, program in enumerate(programs_data)
+                for trial_idx, trial in enumerate(program["trials"])
             ]
 
-            # Event trials <-> H5 trials (different clocks, find constant offset)
-            # Result: pool_idx -> (h5_idx, timedelta_ms)
-            event_to_h5: dict[int, tuple[int, float]] = {}
+            # Event trials <-> H5 trials
+            # Result: pool_idx -> (h5_idx, h5_to_trial_ms)
+            trial_to_h5: dict[int, tuple[int, float]] = {}
 
-            if h5_data and event_trial_pool:
-                event_starts = [x[2] for x in event_trial_pool]
-                event_to_h5 = _match_events_to_h5(event_starts, h5_data)
+            if h5_data and trials:
+                trial_starts = [x[2] for x in trials]
+                trial_to_h5 = _match_trials_to_h5(trial_starts, h5_data)
 
-            # Build lookup: (p_idx, t_idx) -> (h5_idx, timedelta_ms)
+            # Build lookup: (program_idx, trial_idx) -> (h5_idx, h5_to_trial_ms)
             trial_to_h5: dict[tuple[int, int], tuple[int, float]] = {
-                (event_trial_pool[pool_idx][0], event_trial_pool[pool_idx][1]): (
+                (trials[pool_idx][0], trials[pool_idx][1]): (
                     h5_idx,
-                    timedelta_ms,
+                    h5_to_trial_ms,
                 )
-                for pool_idx, (h5_idx, timedelta_ms) in event_to_h5.items()
+                for pool_idx, (h5_idx, h5_to_trial_ms) in trial_to_h5.items()
             }
 
             # --------------------------------------------------------------- #
             # Phase 3: Insert
             # --------------------------------------------------------------- #
 
-            exp_id = _db_insert(cur, "experiments", experiment)
+            # Fix datetime format to include microseconds
+            exp_start_str = experiment["exp_start"].strftime(DT_FORMAT)
+            exp_id = _db_insert(
+                cur, "experiments", {**experiment, "exp_start": exp_start_str}
+            )
 
             cur.execute("INSERT INTO groups DEFAULT VALUES;")
             group_id = cur.lastrowid
@@ -566,9 +571,10 @@ class Database:
                     acq = {
                         **acquisitions[acq_idx],
                         "exp_id": exp_id,
+                        "acq_start": acq["acq_start"].strftime(DT_FORMAT),
                         "odor_start": _to_datetime(h5_data["odor_starts"][h5_idx]),
                         "odor_end": _to_datetime(h5_data["odor_ends"][h5_idx]),
-                        "h5_timedelta_ms": delta_ms,
+                        "h5_to_acq_ms": delta_ms,
                     }
                     h5_to_acq_id[h5_idx] = _db_insert(cur, "acquisitions", acq)
                     matched_acq_indices.add(acq_idx)
@@ -579,44 +585,42 @@ class Database:
                     _db_insert(cur, "acquisitions", {**acq, "exp_id": exp_id})
 
             # Insert programs, trials, and events
-            for p_idx, p_data in enumerate(programs_data):
+            for program_idx, program_data in enumerate(programs_data):
                 program_id = _db_insert(
-                    cur, "programs", {**p_data["meta"], "exp_id": exp_id}
+                    cur, "programs", {**program_data["metadata"], "exp_id": exp_id}
                 )
 
                 # Pass 1: insert trials, collect trial_ids by index
                 trial_ids: dict[int, int] = {}
 
-                for t_idx, trial in enumerate(p_data["trials"]):
+                for trial_idx, trial in enumerate(program_data["trials"]):
                     acq_id = None
-                    acq_timedelta_ms = None
+                    h5_to_trial_ms = None
 
-                    if (p_idx, t_idx) in trial_to_h5:
-                        h5_idx, timedelta_ms = trial_to_h5[(p_idx, t_idx)]
+                    if (program_idx, trial_idx) in trial_to_h5:
+                        h5_idx, delta_ms = trial_to_h5[(program_idx, trial_idx)]
                         acq_id = h5_to_acq_id.get(h5_idx)
                         if acq_id is not None:
-                            acq_timedelta_ms = timedelta_ms
+                            h5_to_trial_ms = delta_ms
 
-                    trial_ids[t_idx] = _db_insert(
+                    trial_ids[trial_idx] = _db_insert(
                         cur,
                         "trials",
                         {
-                            "trial_start": trial["trial_start"],
-                            "odor_start": trial["odor_start"],
-                            "odor_end": trial["odor_end"],
+                            "trial_start": trial["trial_start"].strftime(DT_FORMAT),
+                            "odor_start": trial["odor_start"].strftime(DT_FORMAT),
+                            "odor_end": trial["odor_end"].strftime(DT_FORMAT),
                             "odor_id": trial["odor_id"],
                             "outcome": trial["outcome"],
                             "acq_id": acq_id,
-                            "acq_timedelta_ms": acq_timedelta_ms,
+                            "h5_to_trial_ms": h5_to_trial_ms,
                             "program_id": program_id,
                             "exp_id": exp_id,
                         },
                     )
 
-                # Pass 2: insert all events in timeline order
-                # trial_ids.get(trial_idx) returns None for orphans and
-                # unfinalized last trials, preserving timeline order.
-                for trial_idx, event in p_data["events"]:
+                # Pass 2: insert all events in order
+                for trial_idx, event in program_data["events"]:
                     _db_insert(
                         cur,
                         "events",
@@ -637,14 +641,15 @@ class Database:
 
                 if n_matched_acq < n_h5:
                     logger.warning(
-                        f"{n_h5 - n_matched_acq} H5 trials without matching acquisition. {CROSS}"
+                        f"{n_h5 - n_matched_acq} H5 trials without "
+                        f"matching acquisition. {CROSS}"
                     )
                 else:
                     logger.info(f"All H5 trials matched to acquisitions. {CHECK}")
 
-            if event_trial_pool:
-                n_events = len(event_trial_pool)
-                n_matched = len(event_to_h5)
+            if trials:
+                n_events = len(trials)
+                n_matched = len(trial_to_h5)
 
                 if n_matched < n_events:
                     logger.info(f"{n_events - n_matched} trials without H5 match.")
@@ -657,7 +662,8 @@ class Database:
 
                 if n_with_acq < n_matched:
                     logger.warning(
-                        f"{n_matched - n_with_acq} trials matched to H5 but no acquisition. {CROSS}"
+                        f"{n_matched - n_with_acq} trials matched "
+                        f"to H5 but no acquisition. {CROSS}"
                     )
                 elif event_files:
                     logger.info(f"All matched trials have acquisitions. {CHECK}")
@@ -753,12 +759,12 @@ def _load_event_data(
     Parse all event files into structured program/trial/event dicts.
 
     Returns a list of program dicts, each containing:
-        "meta":   fields for the programs table (no exp_id yet)
-        "trials": list of trial dicts (no events key)
-        "events": list of (trial_idx, event_record) in timeline order.
-                  trial_idx is the index into "trials" for that event's trial,
-                  or None for events before the first trial or after an
-                  incomplete last trial.
+        "metadata": fields for the programs table (no exp_id yet)
+        "trials":   list of trial dicts (no events key)
+        "events":   list of (trial_idx, event_record) in timeline order.
+                    trial_idx is the index into "trials" for that event's trial,
+                    or None for events before the first trial or after an
+                    incomplete last trial.
     """
     programs = []
 
@@ -779,7 +785,7 @@ def _load_event_data(
             if t in program_name:
                 program_type = t
 
-        meta = {
+        metadata = {
             "program_name": program_name,
             "program_type": program_type,
             "program_start": program_start,
@@ -805,7 +811,7 @@ def _load_event_data(
 
             # Build event record for storage
             event_record: InsertData = {
-                "event_time": event_time,
+                "event_time": event_time.strftime(DT_FORMAT),
                 "event_type": event_type,
                 "event_tag": event_tag,
             }
@@ -896,7 +902,7 @@ def _load_event_data(
 
         programs.append(
             {
-                "meta": meta,
+                "metadata": metadata,
                 "trials": trials,
                 "events": events,
             }
@@ -910,9 +916,11 @@ def _match_acq_to_h5(
     h5_data: dict[str, np.ndarray],
 ) -> dict[int, tuple[int, float]]:
     """
-    Match acquisitions to H5 trials by nearest timestamp (same imaging clock).
+    Match acquisitions to H5 trials by nearest timestamp.
 
-    Returns dict: h5_idx -> (acq_idx, delta_ms)
+    h5_to_acq_ms stores the signed difference (acq_start - h5_trial_start) in ms.
+
+    Returns dict: h5_idx -> (acq_idx, h5_to_acq_ms)
     """
     h5_dts = [_to_datetime(t) for t in h5_data["trial_starts"]]
     matches: dict[int, tuple[int, float]] = {}
@@ -929,31 +937,29 @@ def _match_acq_to_h5(
             delta = acq_start - h5_dts[h5_ptr]
             if abs(delta) < H5_TOLERANCE:
                 matches[h5_ptr] = (acq_idx, delta / TIMEDELTA_MS)
-                h5_ptr += 1  # each H5 trial matches at most once
+                h5_ptr += 1
 
     return matches
 
 
-def _match_events_to_h5(
-    event_starts: list[datetime],
+def _match_trials_to_h5(
+    trial_starts: list[datetime],
     h5_data: dict[str, np.ndarray],
 ) -> dict[int, tuple[int, float]]:
     """
-    Find the best alignment of event trial starts with H5 trial starts.
+    Find the best alignment of CSV trial starts with H5 trial starts.
 
-    The olfactometer and imaging clocks have a constant offset (possibly seconds).
-    This function searches for the starting position k in the event list such that
-    event_starts[k:k+n_h5] best aligns with h5 trial starts (minimizing std of
-    pairwise differences). Unmatched events at the boundaries are left out.
+    This function searches for the starting position k in the trial_starts list
+    such that trial_starts[k:k+n_h5] best aligns with h5 trial starts (minimizing
+    std of pairwise differences). Unmatched trials at the boundaries are left out.
 
-    acq_timedelta_ms stores the signed raw difference (event_time - h5_time) in ms,
-    so the clock offset is recoverable via e.g. median(acq_timedelta_ms).
+    h5_to_trial_ms stores the signed difference (trial_start - h5_start) in ms.
 
-    Returns dict: pool_idx -> (h5_idx, timedelta_ms)
+    Returns dict: pool_idx -> (h5_idx, h5_to_trial_ms)
     """
-    h5_times = [_to_datetime(t) for t in h5_data["trial_starts"]]
-    n_h5 = len(h5_times)
-    n_events = len(event_starts)
+    h5_starts = [_to_datetime(t) for t in h5_data["trial_starts"]]
+    n_h5 = len(h5_starts)
+    n_events = len(trial_starts)
 
     if n_events == 0 or n_h5 == 0:
         return {}
@@ -966,27 +972,26 @@ def _match_events_to_h5(
         n_h5 = n_events
 
     # Use offsets from the first H5 trial for numerical stability
-    base = h5_times[0]
-    h5_ms = np.array([(t - base).total_seconds() * 1000 for t in h5_times[:n_h5]])
-    event_ms = np.array([(t - base).total_seconds() * 1000 for t in event_starts])
+    base = h5_starts[0]
+    h5_ms = np.array([(t - base).total_seconds() * 1000 for t in h5_starts[:n_h5]])
+    trial_ms = np.array([(t - base).total_seconds() * 1000 for t in trial_starts])
 
     best_k = 0
     best_std = float("inf")
 
     for k in range(n_events - n_h5 + 1):
-        std = float(np.std(event_ms[k : k + n_h5] - h5_ms))
+        std = float(np.std(trial_ms[k : k + n_h5] - h5_ms))
         if std < best_std:
             best_std = std
             best_k = k
 
-    diffs = event_ms[best_k : best_k + n_h5] - h5_ms
+    diffs = trial_ms[best_k : best_k + n_h5] - h5_ms
 
     logger.info(
         f"Average clock offset (event - h5):"
         f" {float(np.mean(diffs)):.1f} ms, std: {best_std:.1f} ms"
     )
 
-    # Store signed raw difference so offset is recoverable from a query
     return {best_k + j: (j, float(diffs[j])) for j in range(n_h5)}
 
 
@@ -1016,7 +1021,7 @@ def _db_insert(
 
 def _to_datetime(dt: np.datetime64) -> datetime:
     dt_str = np.datetime_as_string(dt).item()
-    return datetime.fromisoformat(dt_str)
+    return datetime.fromisoformat(dt_str).strftime(DT_FORMAT)
 
 
 def _get_h5_metadata(path: Path, exp_start: str) -> Optional[dict[str, np.ndarray]]:
