@@ -447,7 +447,7 @@ class Database:
                         )
 
                         for path in h5_paths:
-                            relative_path = path.relative_to(self.main_folder).resolve()
+                            relative_path = path.relative_to(self.main_folder)
                             logger.warning(f"  {relative_path}")
 
                         logger.error("Experiment will not be added to the DB.")
