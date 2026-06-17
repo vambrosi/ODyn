@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 
 from dataclasses import dataclass
-from typing import Final, Optional, TYPE_CHECKING
+from typing import cast, Final, TYPE_CHECKING
 
 from pathlib import Path
 
@@ -39,6 +39,7 @@ from caiman.motion_correction import MotionCorrect
 from caiman.paths import get_tempdir
 
 from .utils import *
+from .utils import CallFrame
 
 if TYPE_CHECKING:
     from .database import Database
@@ -71,16 +72,16 @@ class Group:
         self.db = db
 
         # Initialize "private" variables
-        self._acquisitions: Optional[pd.DataFrame] = None
-        self._events: Optional[pd.DataFrame] = None
-        self._experiments: Optional[pd.DataFrame] = None
-        self._mcor_files: Optional[pd.DataFrame] = None
-        self._method_calls: Optional[pd.DataFrame] = None
-        self._programs: Optional[pd.DataFrame] = None
-        self._trials: Optional[pd.DataFrame] = None
+        self._acquisitions: None | pd.DataFrame = None
+        self._events: None | pd.DataFrame = None
+        self._experiments: None | pd.DataFrame = None
+        self._mcor_files: None | pd.DataFrame = None
+        self._method_calls: None | pd.DataFrame = None
+        self._programs: None | pd.DataFrame = None
+        self._trials: None | pd.DataFrame = None
 
-        self._call_id_stack: list[int] = []
-        self._raw_mmap_pairs: Optional[tuple[list[str], list[str]]] = None
+        self._call_stack: list[CallFrame] = []
+        self._raw_mmap_pairs: None | tuple[list[str], list[str]] = None
         self.movies: dict[tuple[MovieType, ...], LazyMovie] = {}
 
         if Group.is_first:
@@ -207,6 +208,9 @@ class Group:
         self._method_calls["parameters"] = self._method_calls["parameters"].apply(
             json.loads
         )
+        self._method_calls["call_output"] = self._method_calls["call_output"].apply(
+            lambda s: json.loads(s) if isinstance(s, str) else None
+        )
 
         return self._method_calls
 
@@ -251,11 +255,36 @@ class Group:
 
     @property
     def current_call_id(self) -> int:
-        assert self._call_id_stack, (
+        assert self._call_stack, (
             "Empty call stack — 'current_call_id' is only available inside a "
             "method decorated with '@record_call'."
         )
-        return self._call_id_stack[-1]
+        return self._call_stack[-1].call_id
+
+    def add_flag(self, flag) -> None:
+        """Set bits on the current call's flag (bitwise OR). Use inside @record_call."""
+        self._call_stack[-1].flag |= int(flag)
+
+    def set_output(self, output: Object) -> None:
+        """Record this call's output as JSON. Last write wins."""
+        self._call_stack[-1].output = output
+
+    def fail(self, flag, message: str = "") -> None:
+        """Flag the current call and abort it by raising RuntimeError."""
+        self.add_flag(flag)
+        raise RuntimeError(message)
+
+    def latest_output(self, method_name: str) -> None | Object:
+        """Return the parsed output of the most recent call to 'method_name'."""
+        row = self.db.con.execute(
+            """
+            SELECT call_output FROM method_calls
+             WHERE group_id = ? AND method_name = ? AND call_output IS NOT NULL
+             ORDER BY method_call_id DESC LIMIT 1
+            """,
+            [self.group_id, method_name],
+        ).fetchone()
+        return json.loads(row["call_output"]) if row else None
 
     def _reset_caches(self) -> None:
         self._acquisitions = None
@@ -278,11 +307,28 @@ class Group:
     # Motion Correction functions
     # ----------------------------------------------------------------------- #
 
+    @record_call
+    def pick_mcor_parameters(self) -> dict:
+        """
+        Open a GUI to pick motion-correction parameters and record them.
+
+        The picked values are stored so
+            run_motion_correction(use_gui_parameters=True)
+        can read them back via latest_output("Group.pick_mcor_parameters").
+        """
+
+        # TODO: integrate the GUI prototype here (blocks until "Pick").
+        params: dict = {}
+
+        self.set_output(params)
+        return params
+
     @memorize_params
     @record_call
     def run_motion_correction(
         self,
         *,
+        use_gui_parameters: bool = True,
         is_test: bool = True,
         first_acq: int = 0,
         step_acq: int = 1,
@@ -308,6 +354,7 @@ class Group:
         \033[1;34mLIST OF PARAMETERS\033[0m (WITH DEFAULT VALUES)
 
             \033[0;32mBasic Parameters\033[0m
+            use_gui_parameters  = True              Override parameters with latest pick_mcor_parameters() values
             use_last_parameters = False             Use parameters from last run as the defaults
             is_test             = True              Whether to use a limited range of acquisitions in this run
 
@@ -329,6 +376,26 @@ class Group:
         \033[1;34mEXAMPLES\033[0m
             group.run_motion_correction(is_test=True, last_acq=10)
         """
+
+        # --- Optionally override parameters with GUI-picked values --- #
+        # These override both the passed arguments and use_last_parameters.
+
+        if use_gui_parameters:
+            gui = self.latest_output("Group.pick_mcor_parameters")
+
+            if gui is None:
+                logger.warning(
+                    "use_gui_parameters=True but no saved parameters found; "
+                    "run pick_mcor_parameters() first. Using provided values."
+                )
+            else:
+                logger.info("Loaded motion-correction parameters from the GUI.")
+                max_deviation_um = cast(
+                    float, gui.get("max_deviation_um", max_deviation_um)
+                )
+                max_shift_um = cast(list[float], gui.get("max_shift_um", max_shift_um))
+                overlap_um = cast(list[float], gui.get("overlap_um", overlap_um))
+                strides_um = cast(list[float], gui.get("strides_um", strides_um))
 
         # --- Validate and adjust parameters to reasonable values --- #
 
@@ -684,7 +751,7 @@ class LazyMovie:
 
     owner: Group
     types: tuple[MovieType, ...]
-    movie: Optional[cm.movie] = None
+    movie: None | cm.movie = None
 
     def mark_as_outdated(self):
         self.movie = None

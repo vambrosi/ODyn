@@ -37,7 +37,7 @@ from pathlib import Path
 from scipy.signal import find_peaks
 from sqlite3 import Cursor
 from tifffile import TiffFile, TiffPage
-from typing import Final, Optional
+from typing import Final
 
 import h5py
 import numpy as np
@@ -45,6 +45,7 @@ import pandas as pd
 
 from .groups import Group
 from .utils import *
+from .utils import CallFrame
 
 TIMEDELTA_MS = timedelta(milliseconds=1)
 H5_TOLERANCE = timedelta(milliseconds=100)
@@ -60,6 +61,22 @@ PROGRAM_TYPES = [
     "warm-up",
     "short",
 ]
+
+
+class ExpFlag(IntFlag):
+    """
+    call_flag bits for Database.add_experiment (bit 0 reserved by CallFlag.RAISED).
+
+    A non-zero call_flag means the experiment was skipped or added with caveats;
+    query with e.g. `call_flag & {AddExpFlag.MULTIPLE_H5.value}` to find them.
+    """
+
+    ALREADY_IN_DB = 1 << 1  # experiment already present, nothing inserted
+    MULTIPLE_H5 = 1 << 2  # more than one H5 file in the folder, skipped
+    UNSUPPORTED_METADATA = 1 << 3  # TIFF does not have expected metadata format
+    METADATA_CHANGED = 1 << 4  # TIFF metadata changed too often, skipped
+    H5_UNMATCHED_ACQ = 1 << 5  # some H5 trials had no matching acquisition
+    TRIAL_NO_ACQ = 1 << 6  # some trials matched H5 but had no acquisition
 
 
 class Database:
@@ -90,16 +107,16 @@ class Database:
         self.group_id: Final[int] = 0
 
         # Initialize "private" variables
-        self._call_id_stack: list[int] = []
-        self._acquisitions: Optional[pd.DataFrame] = None
-        self._events: Optional[pd.DataFrame] = None
-        self._experiments: Optional[pd.DataFrame] = None
-        self._groups: Optional[list[Group]] = None
-        self._mcor_files: Optional[pd.DataFrame] = None
-        self._method_calls: Optional[pd.DataFrame] = None
-        self._odors: Optional[pd.DataFrame] = None
-        self._programs: Optional[pd.DataFrame] = None
-        self._trials: Optional[pd.DataFrame] = None
+        self._call_stack: list[CallFrame] = []
+        self._acquisitions: None | pd.DataFrame = None
+        self._events: None | pd.DataFrame = None
+        self._experiments: None | pd.DataFrame = None
+        self._groups: None | list[Group] = None
+        self._mcor_files: None | pd.DataFrame = None
+        self._method_calls: None | pd.DataFrame = None
+        self._odors: None | pd.DataFrame = None
+        self._programs: None | pd.DataFrame = None
+        self._trials: None | pd.DataFrame = None
 
         # Get connection and create database if needed
         if not self.path.exists():
@@ -221,6 +238,9 @@ class Database:
         self._method_calls["parameters"] = self._method_calls["parameters"].apply(
             json.loads
         )
+        self._method_calls["call_output"] = self._method_calls["call_output"].apply(
+            lambda s: json.loads(s) if isinstance(s, str) else None
+        )
 
         return self._method_calls
 
@@ -264,7 +284,7 @@ class Database:
 
         return self._trials
 
-    def _get_raw_metadata(self, path: Path) -> Optional[tuple[Object, Object]]:
+    def _get_raw_metadata(self, path: Path) -> None | tuple[Object, Object]:
         tif = TiffFile(path)
 
         if (
@@ -334,11 +354,37 @@ class Database:
 
     @property
     def current_call_id(self) -> int:
-        assert self._call_id_stack, (
+        assert self._call_stack, (
             "Empty call stack — 'current_call_id' is only available inside a "
             "method decorated with '@record_call'."
         )
-        return self._call_id_stack[-1]
+        return self._call_stack[-1].call_id
+
+    def add_flag(self, flag) -> None:
+        """Set bits on the current call's flag (bitwise OR). Use inside @record_call."""
+        self._call_stack[-1].flag |= int(flag)
+
+    def set_output(self, output: Object) -> None:
+        """Record this call's output as JSON. Only keeps the latest write."""
+        self._call_stack[-1].output = output
+
+    def fail(self, flag, message: str = "") -> None:
+        """Flag the current call and abort it by raising RuntimeError."""
+        self.add_flag(flag)
+        raise RuntimeError(message)
+
+    def latest_output(self, method_name: str) -> None | Object:
+        """Return the parsed output of the most recent call to 'method_name'."""
+        db = getattr(self, "db", self)
+        row = db.con.execute(
+            """
+            SELECT call_output FROM method_calls
+             WHERE group_id = ? AND method_name = ? AND call_output IS NOT NULL
+             ORDER BY method_call_id DESC LIMIT 1
+            """,
+            [self.group_id, method_name],
+        ).fetchone()
+        return json.loads(row["call_output"]) if row else None
 
     def _reset_caches(self) -> None:
         self._acquisitions = None
@@ -369,7 +415,7 @@ class Database:
         self,
         *,
         rel_path: str,
-        rel_raw_paths: Optional[list[str]] = None,
+        rel_raw_paths: None | list[str] = None,
     ) -> None:
 
         logger.info("Adding experiment to database...")
@@ -397,12 +443,12 @@ class Database:
             # Phase 1: Load
             # --------------------------------------------------------------- #
 
-            experiment: Optional[Object] = None
+            experiment: None | Object = None
             acquisitions: list[Object] = []
-            h5_data: Optional[dict] = None
+            h5_data: None | dict = None
             event_files: list[Path] = []
 
-            last_exp_data: Optional[Object] = None
+            last_exp_data: None | Object = None
             checks_failed = 0
 
             assert raw_paths, "Did not find any raw/*.tif files."
@@ -414,6 +460,7 @@ class Database:
                     logger.info(
                         f"  Skipped file {raw_path} (metadata format not supported)"
                     )
+                    self.add_flag(ExpFlag.UNSUPPORTED_METADATA)
                     continue
 
                 exp_data, acq = raw_metadata
@@ -432,6 +479,7 @@ class Database:
 
                     if cur.fetchone()[0]:
                         logger.info("Experiment already in DB.")
+                        self.add_flag(ExpFlag.ALREADY_IN_DB)
                         return
 
                     experiment = exp_data
@@ -450,6 +498,7 @@ class Database:
                             logger.warning(f"  {relative_path}")
 
                         logger.error("Experiment will not be added to the DB.")
+                        self.add_flag(ExpFlag.MULTIPLE_H5)
                         return
 
                     # Type checking because Object is too generic
@@ -480,6 +529,7 @@ class Database:
                 )
                 logger.info("Are there multiple loops or grabs in the same folder?")
                 logger.error("Experiment will not be added to the DB.")
+                self.add_flag(ExpFlag.METADATA_CHANGED)
                 return
 
             logger.info(f"Passed all TIFF metadata checks! {CHECK}")
@@ -643,6 +693,7 @@ class Database:
                 n_matched_acq = len(acq_to_h5)
 
                 if n_matched_acq < n_h5:
+                    self.add_flag(ExpFlag.H5_UNMATCHED_ACQ)
                     logger.warning(
                         f"{n_h5 - n_matched_acq} H5 trials without "
                         f"matching acquisition. {CROSS}"
@@ -664,6 +715,7 @@ class Database:
                 )
 
                 if n_with_acq < n_matched:
+                    self.add_flag(ExpFlag.TRIAL_NO_ACQ)
                     logger.warning(
                         f"{n_matched - n_with_acq} trials matched "
                         f"to H5 but no acquisition. {CROSS}"
@@ -798,10 +850,10 @@ def _load_event_data(
         df = _parse_event_file(event_file, program_start)
 
         trials: list[dict] = []
-        events: list[tuple[Optional[int], Object]] = []
+        events: list[tuple[None | int, Object]] = []
 
-        trial: Optional[dict] = None
-        current_trial_idx: Optional[int] = None
+        trial: None | dict = None
+        current_trial_idx: None | int = None
         trial_phase = TrialPhase.NOT_IN_TRIAL
         licks_count = 0
 
@@ -1037,7 +1089,7 @@ def _to_datetime_str(dt: np.datetime64) -> str:
 
 def _get_h5_metadata(
     paths: list[Path], exp_start: datetime
-) -> Optional[dict[str, np.ndarray]]:
+) -> None | dict[str, np.ndarray]:
     # There must be at most one path
     if not paths:
         return None

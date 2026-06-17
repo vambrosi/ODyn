@@ -5,7 +5,8 @@ import json
 import logging
 import subprocess
 
-from enum import Enum, IntEnum
+from dataclasses import dataclass
+from enum import Enum, IntEnum, IntFlag
 from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -25,6 +26,27 @@ INFO_FOLDER = ".odyn/olfactometer/Log/Info"
 
 type BasicTypes = None | bool | int | float | str | datetime
 type Object = dict[str, BasicTypes | Object | list[Object]]
+
+
+class CallFlag(IntFlag):
+    """
+    Flags set automatically by @record_call.
+
+    Bit 0 is reserved here. Per-function flag enums (e.g. ExpFlag) should
+    define their own bits starting at 1 << 1 so they never collide with RAISED.
+    """
+
+    SUCCESS = 0
+    RAISED = 1 << 0  # the decorated call raised an exception
+
+
+@dataclass
+class CallFrame:
+    """Per-call scratch state pushed onto self._call_stack by @record_call."""
+
+    call_id: int
+    flag: int = 0
+    output: Object | None = None
 
 
 class TrialPhase(IntEnum):
@@ -131,9 +153,11 @@ def record_call(func):
     Records the call, captures all log output during execution, and saves it
     to call_log when the method returns (even on exception).
 
-    Pushes the call_id onto self._call_id_stack for the duration of the call,
-    so the function body can read self.current_call_id to get its own
-    method_call_id (e.g. to store in a foreign key). Supports nested calls.
+    Pushes a CallFrame onto self._call_stack for the duration of the call, so
+    the function body can read self.current_call_id (e.g. for a foreign key) and
+    record results via self.add_flag(...) / self.set_output(...). On exception
+    the CallFlag.RAISED bit is set. The flag and output are written to the
+    method_calls row when the call returns (even on exception). Supports nesting.
     """
 
     @functools.wraps(func)
@@ -173,19 +197,32 @@ def record_call(func):
         if self.group_id != 0:
             db._method_calls = None
 
-        self._call_id_stack.append(call_id)
+        frame = CallFrame(call_id)
+        self._call_stack.append(frame)
 
         try:
             return func(self, **kwargs)
 
+        except Exception:
+            frame.flag |= int(CallFlag.RAISED)
+            raise
+
         finally:
-            self._call_id_stack.pop()
+            self._call_stack.pop()
             logger.removeHandler(handler)
+
+            call_output = (
+                json.dumps(frame.output) if frame.output is not None else None
+            )
 
             with db.con:
                 db.con.execute(
-                    "UPDATE method_calls SET call_log = ? WHERE method_call_id = ?",
-                    [buf.getvalue(), call_id],
+                    """
+                    UPDATE method_calls
+                        SET call_log = ?, call_flag = ?, call_output = ?
+                        WHERE method_call_id = ?
+                    """,
+                    [buf.getvalue(), int(frame.flag), call_output, call_id],
                 )
 
     # NOTE: This is to make memorize_params work

@@ -123,7 +123,8 @@ CREATE TABLE IF NOT EXISTS method_calls
     , parameters        TEXT NOT NULL CHECK(json_valid(parameters))
     , git_commit        TEXT NOT NULL
     , call_log          TEXT NOT NULL DEFAULT ''
-    -- , call_flag         INTEGER NOT NULL
+    , call_flag         INTEGER NOT NULL DEFAULT 0
+    , call_output       TEXT CHECK(call_output IS NULL OR json_valid(call_output))
 
     , FOREIGN KEY (group_id) REFERENCES groups(group_id)
     ) STRICT;
