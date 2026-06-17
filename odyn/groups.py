@@ -295,7 +295,7 @@ class Group:
         max_shift_um: list[float] = [128.0, 128.0],
         overlap_um: list[float] = [96.0, 96.0],
         strides_um: list[float] = [128.0, 128.0],
-    ):
+    ) -> None:
         """
         \033[1;35mRUN_MOTION_CORRECTION\033[0m
         Method that does test/final motion correction

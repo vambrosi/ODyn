@@ -12,6 +12,7 @@
 #   - Assert that non-passive trials have a non "na" outcome
 #   - Start a test suite (so far only for DB tests)
 #   - Add quality control plots for ported MATLAB code
+#   - Add pavlovian reward to warm ups
 #
 #   - What to do about some particular experiments?
 #       - '20250703/SID200' has more trials in .csv than in H5
@@ -527,13 +528,13 @@ class Database:
                 for trial_idx, trial in enumerate(program["trials"])
             ]
 
-            # Event trials <-> H5 trials
+            # CSV trials <-> H5 trials
             # Result: pool_idx -> (h5_idx, h5_to_trial_ms)
-            trial_to_h5: dict[int, tuple[int, float]] = {}
+            csv_to_h5: dict[int, tuple[int, float]] = {}
 
             if h5_data and trials:
                 trial_starts = [x[2] for x in trials]
-                trial_to_h5 = _match_trials_to_h5(trial_starts, h5_data)
+                csv_to_h5 = _match_csv_to_h5(trial_starts, h5_data)
 
             # Build lookup: (program_idx, trial_idx) -> (h5_idx, h5_to_trial_ms)
             trial_to_h5: dict[tuple[int, int], tuple[int, float]] = {
@@ -541,7 +542,7 @@ class Database:
                     h5_idx,
                     h5_to_trial_ms,
                 )
-                for pool_idx, (h5_idx, h5_to_trial_ms) in trial_to_h5.items()
+                for pool_idx, (h5_idx, h5_to_trial_ms) in csv_to_h5.items()
             }
 
             # --------------------------------------------------------------- #
@@ -571,7 +572,9 @@ class Database:
                     acq = {
                         **acquisitions[acq_idx],
                         "exp_id": exp_id,
-                        "acq_start": acquisitions[acq_idx]["acq_start"].strftime(DT_FORMAT),
+                        "acq_start": acquisitions[acq_idx]["acq_start"].strftime(
+                            DT_FORMAT
+                        ),
                         "odor_start": _to_datetime_str(h5_data["odor_starts"][h5_idx]),
                         "odor_end": _to_datetime_str(h5_data["odor_ends"][h5_idx]),
                         "h5_to_acq_ms": delta_ms,
@@ -649,7 +652,7 @@ class Database:
 
             if trials:
                 n_events = len(trials)
-                n_matched = len(trial_to_h5)
+                n_matched = len(csv_to_h5)
 
                 if n_matched < n_events:
                     logger.info(f"{n_events - n_matched} trials without H5 match.")
@@ -712,7 +715,7 @@ class Database:
         logger.info(f"Found {len(raw_paths)} raw TIFF files.")
 
         # Split files into experiments
-        experiments: defaultdict[str, list[Path]] = defaultdict(list)
+        experiments: defaultdict[str, list[str]] = defaultdict(list)
 
         for raw_path in raw_paths:
             exp_path = raw_path.parent.parent
@@ -942,24 +945,24 @@ def _match_acq_to_h5(
     return matches
 
 
-def _match_trials_to_h5(
-    trial_starts: list[datetime],
+def _match_csv_to_h5(
+    csv_starts: list[datetime],
     h5_data: dict[str, np.ndarray],
 ) -> dict[int, tuple[int, float]]:
     """
     Find the best alignment of CSV trial starts with H5 trial starts.
 
-    This function searches for the starting position k in the trial_starts list
-    such that trial_starts[k:k+n_h5] best aligns with h5 trial starts (minimizing
+    This function searches for the starting position k in the csv_starts list
+    such that csv_starts[k:k+n_h5] best aligns with h5 trial starts (minimizing
     std of pairwise differences). Unmatched trials at the boundaries are left out.
 
-    h5_to_trial_ms stores the signed difference (trial_start - h5_start) in ms.
+    h5_to_trial_ms stores the signed difference (csv_start - h5_start) in ms.
 
     Returns dict: pool_idx -> (h5_idx, h5_to_trial_ms)
     """
     h5_starts = [_to_datetime(t) for t in h5_data["trial_starts"]]
     n_h5 = len(h5_starts)
-    n_events = len(trial_starts)
+    n_events = len(csv_starts)
 
     if n_events == 0 or n_h5 == 0:
         return {}
@@ -974,7 +977,7 @@ def _match_trials_to_h5(
     # Use offsets from the first H5 trial for numerical stability
     base = h5_starts[0]
     h5_ms = np.array([(t - base).total_seconds() * 1000 for t in h5_starts[:n_h5]])
-    trial_ms = np.array([(t - base).total_seconds() * 1000 for t in trial_starts])
+    trial_ms = np.array([(t - base).total_seconds() * 1000 for t in csv_starts])
 
     best_k = 0
     best_std = float("inf")
@@ -997,7 +1000,7 @@ def _match_trials_to_h5(
 
 def _db_insert(
     cur: Cursor, table_name: str, data: InsertData | list[InsertData]
-) -> Optional[int]:
+) -> int:
     # HACK:
     #   ONLY FOR INTERNAL USE (CAN BE USED FOR SQL INJECTION)
     #   Column names are not validated, for simplicity
@@ -1016,7 +1019,11 @@ def _db_insert(
     else:
         cur.execute(insertion_query, data)
 
-    return cur.lastrowid
+    # Check to make output type == int
+    lastrowid = cur.lastrowid
+    assert lastrowid is not None
+
+    return lastrowid
 
 
 def _to_datetime(dt: np.datetime64) -> datetime:
