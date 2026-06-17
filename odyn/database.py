@@ -37,7 +37,7 @@ from pathlib import Path
 from scipy.signal import find_peaks
 from sqlite3 import Cursor
 from tifffile import TiffFile, TiffPage
-from typing import Any, Final, Optional
+from typing import Final, Optional
 
 import h5py
 import numpy as np
@@ -45,8 +45,6 @@ import pandas as pd
 
 from .groups import Group
 from .utils import *
-
-type InsertData = dict[str, Any]
 
 TIMEDELTA_MS = timedelta(milliseconds=1)
 H5_TOLERANCE = timedelta(milliseconds=100)
@@ -266,7 +264,7 @@ class Database:
 
         return self._trials
 
-    def _get_raw_metadata(self, path: Path) -> Optional[tuple[InsertData, InsertData]]:
+    def _get_raw_metadata(self, path: Path) -> Optional[tuple[Object, Object]]:
         tif = TiffFile(path)
 
         if (
@@ -284,7 +282,7 @@ class Database:
         # Get the data that must be the same across the experiment
         file_stem_parts = path.stem.split("_")
 
-        experiment: InsertData = {
+        experiment: Object = {
             "exp_name": "_".join(file_stem_parts[:-1]),
             "exp_type": SI_metadata["SI.acqState"],
             "mouse_id": file_stem_parts[1],
@@ -327,7 +325,7 @@ class Database:
         delta_sec = float(image_description["frameTimestamps_sec"])
         acquisition_time = loop_start + timedelta(seconds=delta_sec)
 
-        acquisition: InsertData = {
+        acquisition: Object = {
             "raw_path": str(path.relative_to(self.main_folder)),
             "acq_start": acquisition_time,
         }
@@ -399,12 +397,12 @@ class Database:
             # Phase 1: Load
             # --------------------------------------------------------------- #
 
-            experiment: Optional[InsertData] = None
-            acquisitions: list[InsertData] = []
+            experiment: Optional[Object] = None
+            acquisitions: list[Object] = []
             h5_data: Optional[dict] = None
             event_files: list[Path] = []
 
-            last_exp_data: Optional[InsertData] = None
+            last_exp_data: Optional[Object] = None
             checks_failed = 0
 
             assert raw_paths, "Did not find any raw/*.tif files."
@@ -454,11 +452,9 @@ class Database:
                         logger.error("Experiment will not be added to the DB.")
                         return
 
-                    h5_data = (
-                        _get_h5_metadata(h5_paths[0], experiment["exp_start"])
-                        if h5_paths
-                        else None
-                    )
+                    # Type checking because Object is too generic
+                    assert isinstance(experiment["exp_start"], datetime)
+                    h5_data = _get_h5_metadata(h5_paths, experiment["exp_start"])
 
                     event_files = sorted(
                         exp_path.rglob("[!.]?*Events.csv"),
@@ -550,7 +546,9 @@ class Database:
             # --------------------------------------------------------------- #
 
             # Fix datetime format to include microseconds
+            assert isinstance(experiment["exp_start"], datetime)
             exp_start_str = experiment["exp_start"].strftime(DT_FORMAT)
+
             exp_id = _db_insert(
                 cur, "experiments", {**experiment, "exp_start": exp_start_str}
             )
@@ -569,12 +567,14 @@ class Database:
 
             if h5_data:
                 for h5_idx, (acq_idx, delta_ms) in acq_to_h5.items():
+                    # Type checking because Object is too generic
+                    acq_start = acquisitions[acq_idx]["acq_start"]
+                    assert isinstance(acq_start, datetime)
+
                     acq = {
                         **acquisitions[acq_idx],
                         "exp_id": exp_id,
-                        "acq_start": acquisitions[acq_idx]["acq_start"].strftime(
-                            DT_FORMAT
-                        ),
+                        "acq_start": acq_start.strftime(DT_FORMAT),
                         "odor_start": _to_datetime_str(h5_data["odor_starts"][h5_idx]),
                         "odor_end": _to_datetime_str(h5_data["odor_ends"][h5_idx]),
                         "h5_to_acq_ms": delta_ms,
@@ -798,7 +798,7 @@ def _load_event_data(
         df = _parse_event_file(event_file, program_start)
 
         trials: list[dict] = []
-        events: list[tuple[Optional[int], InsertData]] = []
+        events: list[tuple[Optional[int], Object]] = []
 
         trial: Optional[dict] = None
         current_trial_idx: Optional[int] = None
@@ -813,7 +813,7 @@ def _load_event_data(
                 continue
 
             # Build event record for storage
-            event_record: InsertData = {
+            event_record: Object = {
                 "event_time": event_time.strftime(DT_FORMAT),
                 "event_type": event_type,
                 "event_tag": event_tag,
@@ -915,7 +915,7 @@ def _load_event_data(
 
 
 def _match_acq_to_h5(
-    acquisitions: list[InsertData],
+    acquisitions: list[Object],
     h5_data: dict[str, np.ndarray],
 ) -> dict[int, tuple[int, float]]:
     """
@@ -930,7 +930,9 @@ def _match_acq_to_h5(
     h5_ptr = 0
 
     for acq_idx, acq in enumerate(acquisitions):
-        acq_start: datetime = acq["acq_start"]
+        # Type checking because Object is too generic
+        acq_start = acq["acq_start"]
+        assert isinstance(acq_start, datetime)
 
         # Advance h5 pointer past trials clearly before this acquisition
         while h5_ptr < len(h5_dts) - 1 and h5_dts[h5_ptr] < acq_start - H5_TOLERANCE:
@@ -998,9 +1000,7 @@ def _match_csv_to_h5(
     return {best_k + j: (j, float(diffs[j])) for j in range(n_h5)}
 
 
-def _db_insert(
-    cur: Cursor, table_name: str, data: InsertData | list[InsertData]
-) -> int:
+def _db_insert(cur: Cursor, table_name: str, data: Object | list[Object]) -> int:
     # HACK:
     #   ONLY FOR INTERNAL USE (CAN BE USED FOR SQL INJECTION)
     #   Column names are not validated, for simplicity
@@ -1035,7 +1035,15 @@ def _to_datetime_str(dt: np.datetime64) -> str:
     return _to_datetime(dt).strftime(DT_FORMAT)
 
 
-def _get_h5_metadata(path: Path, exp_start: str) -> Optional[dict[str, np.ndarray]]:
+def _get_h5_metadata(
+    paths: list[Path], exp_start: datetime
+) -> Optional[dict[str, np.ndarray]]:
+    # There must be at most one path
+    if not paths:
+        return None
+
+    path = paths[0]
+
     # Very similar to getScopeH5Timestamps
     logger.info(f"Getting timing data from: '{path}'")
 

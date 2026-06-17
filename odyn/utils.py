@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .database import Database
     from .groups import Group
+    from datetime import datetime
 
 from tqdm.auto import tqdm
 
@@ -21,6 +22,9 @@ CROSS = "\033[1;31m✘\033[0m"
 
 ODYN_FOLDER = ".odyn"
 INFO_FOLDER = ".odyn/olfactometer/Log/Info"
+
+type BasicTypes = None | bool | int | float | str | datetime
+type Object = dict[str, BasicTypes | Object | list[Object]]
 
 
 class TrialPhase(IntEnum):
@@ -50,11 +54,14 @@ class _ColorFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         color = self._COLORS.get(record.levelno, "")
         result = f"[{color}{record.levelname}{self._RESET}] {record.getMessage()}"
+
+        # Add error stack trace to log
         if record.exc_info:
             if not record.exc_text:
                 record.exc_text = self.formatException(record.exc_info)
         if record.exc_text:
             result += "\n" + record.exc_text
+
         return result
 
 
