@@ -386,6 +386,19 @@ class Database:
         ).fetchone()
         return json.loads(row["call_output"]) if row else None
 
+    def add_output_file(self, path: str | Path) -> None:
+        """
+        Record a file artifact produced by the current call in the outputs table.
+        Use inside @record_call. The path is stored relative to main_folder so it
+        stays valid across computers.
+        """
+        rel_path = str(Path(path).relative_to(self.main_folder))
+        with self.con as con:
+            con.execute(
+                "INSERT INTO outputs (method_call_id, file_path, removed) VALUES (?, ?, FALSE);",
+                [self.current_call_id, rel_path],
+            )
+
     def _reset_caches(self) -> None:
         self._acquisitions = None
         self._events = None
