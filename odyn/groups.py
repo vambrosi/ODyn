@@ -45,6 +45,12 @@ if TYPE_CHECKING:
     from .database import Database
 
 
+# Default motion-correction patch geometry (microns). Single source shared by
+# run_motion_correction and pick_mcor_parameters so the two never drift.
+DEFAULT_STRIDES_UM = [128.0, 128.0]
+DEFAULT_OVERLAP_UM = [96.0, 96.0]
+
+
 class Group:
     """
     \033[1;35mGROUP\033[0m
@@ -321,20 +327,173 @@ class Group:
     # ----------------------------------------------------------------------- #
 
     @record_call
-    def pick_mcor_parameters(self) -> dict:
+    def pick_mcor_parameters(self, *, frame_fraction: float = 0.1) -> None:
         """
-        Open a GUI to pick motion-correction parameters and record them.
-
-        The picked values are stored so
-            run_motion_correction(use_gui_parameters=True)
-        can read them back via latest_output("Group.pick_mcor_parameters").
+        Open a GUI to pick motion-correction parameters.
         """
+        import sys
 
-        # TODO: integrate the GUI prototype here (blocks until "Pick").
-        params: dict = {}
+        import numpy as np
+        import bokeh.plotting as bpl
 
-        self.set_output(params)
-        return params
+        from threading import Thread
+        from bokeh.io import output_notebook
+        from bokeh.io.state import curstate
+        from bokeh.models import (
+            Button,
+            ColumnDataSource,
+            Slider,
+            Div,
+            LinearColorMapper,
+        )
+        from bokeh.palettes import Greys256
+        from caiman.motion_correction import sliding_window_dims
+
+        if "ipykernel" in sys.modules and not curstate().notebook:
+            import os
+
+            os.environ["BOKEH_ALLOW_WS_ORIGIN"] = "*"  # HACK: render inside VSCode
+            output_notebook()
+
+        # --- metadata known WITHOUT loading the movie -> lets us draw instantly ---
+        exp = self.experiments.iloc[0]
+        dims = (int(exp["height_px"]), int(exp["width_px"]))  # (rows, cols) = (y, x)
+        um_per_px = (exp["height_um"] / dims[0], exp["width_um"] / dims[1])
+        raw_path = self.db.main_folder / self.acquisitions["raw_path"].iloc[0]
+        step = max(1, round(1 / frame_fraction))
+
+        # Seed from the last pick, or the shared defaults on first use.
+        prev = self.latest_output("Group.pick_mcor_parameters")
+        strides_um = prev["strides_um"] if prev else DEFAULT_STRIDES_UM
+        overlap_um = prev["overlap_um"] if prev else DEFAULT_OVERLAP_UM
+
+        # Capture now (frame is live). @record_call writes call_output=NULL on
+        # return; the Save click below records the chosen parameters into this row.
+        call_id = self.current_call_id
+        con = self.db.con
+
+        init = {
+            "sy": clamp(int(strides_um[0] / um_per_px[0]), 1, dims[0] // 2),
+            "sx": clamp(int(strides_um[1] / um_per_px[1]), 1, dims[1] // 2),
+            "oy": clamp(int(overlap_um[0] / um_per_px[0]), 1, dims[0] // 2),
+            "ox": clamp(int(overlap_um[1] / um_per_px[1]), 1, dims[1] // 2),
+        }
+
+        def patch_data(sy, sx, oy, ox):
+            # SAME primitive tile_and_correct() uses; follows caiman if it changes.
+            xs, ys, ws, hs = [], [], [], []
+            for _inds, (r0, c0), (h, w) in sliding_window_dims(
+                dims, (oy, ox), (sy, sx)
+            ):
+                ys.append(r0 + h / 2)
+                xs.append(c0 + w / 2)
+                hs.append(h)
+                ws.append(w)
+            return dict(x=xs, y=ys, w=ws, h=hs)
+
+        def modify_doc(doc):
+            # ---- everything here is cheap; render immediately ----
+            p = bpl.figure(
+                x_range=(0, dims[1]), y_range=(dims[0], 0), width=600, height=600
+            )
+            p.xaxis.visible = p.yaxis.visible = False
+
+            cmap = LinearColorMapper(palette=Greys256, low=0.0, high=1.0)
+            img = ColumnDataSource(data=dict(image=[np.zeros(dims, dtype="float32")]))
+            p.image(
+                image="image",
+                source=img,
+                x=0,
+                y=0,
+                dw=dims[1],
+                dh=dims[0],
+                color_mapper=cmap,
+            )
+
+            patches = ColumnDataSource(data=patch_data(**init))
+            p.rect(
+                x="x",
+                y="y",
+                width="w",
+                height="h",
+                source=patches,
+                alpha=0.2,
+                line_color="white",
+                selection_color="red",
+            )
+            p.add_tools("tap")
+
+            sy = Slider(start=1, end=dims[0] // 2, value=init["sy"], title="Stride y")
+            sx = Slider(start=1, end=dims[1] // 2, value=init["sx"], title="Stride x")
+            oy = Slider(start=1, end=dims[0] // 2, value=init["oy"], title="Overlap y")
+            ox = Slider(start=1, end=dims[1] // 2, value=init["ox"], title="Overlap x")
+            status = Div(text="<i>Loading background image…</i>")
+
+            def on_change(attr, old, new):
+                patches.data = patch_data(sy.value, sx.value, oy.value, ox.value)
+
+            for s in (sy, sx, oy, ox):
+                s.on_change("value", on_change)
+
+            save = Button(label="Save Parameters", button_type="success")
+
+            def save_callback():
+                output = {
+                    "strides_um": [
+                        float(sy.value * um_per_px[0]),
+                        float(sx.value * um_per_px[1]),
+                    ],
+                    "overlap_um": [
+                        float(oy.value * um_per_px[0]),
+                        float(ox.value * um_per_px[1]),
+                    ],
+                }
+                with con:
+                    con.execute(
+                        "UPDATE method_calls SET call_output = ? WHERE method_call_id = ?",
+                        [json.dumps(output), call_id],
+                    )
+                status.text = (
+                    "Saved — run_motion_correction(use_gui_parameters=True) "
+                    "will use these."
+                )
+
+            save.on_click(save_callback)
+
+            doc.add_root(
+                bpl.row(bpl.column(p, bpl.row(oy, ox), bpl.row(sy, sx), save, status))
+            )
+
+            # ---- load the subsampled movie off the UI thread, update when ready ----
+            def load_background():
+                cache = (
+                    self.db.main_folder
+                    / ODYN_FOLDER
+                    / f"corr_{raw_path.stem}_{step}.npy"
+                )
+                if cache.exists():
+                    corr = np.load(cache)
+                else:
+                    # subindices reads every Nth page, not the whole stack
+                    movie = cm.load(str(raw_path), subindices=slice(None, None, step))
+                    corr = cm.local_correlations(movie, swap_dim=False)
+                    corr[np.isnan(corr)] = 0
+                    np.save(cache, corr)
+
+                lo, hi = float(np.quantile(corr, 0.01)), float(np.quantile(corr, 0.99))
+
+                def apply():
+                    img.data = dict(image=[corr])
+                    cmap.low, cmap.high = lo, hi
+                    status.text = "Ready."
+
+                doc.add_next_tick_callback(apply)  # thread-safe UI update
+
+            doc.add_next_tick_callback(
+                lambda: Thread(target=load_background, daemon=True).start()
+            )
+
+        bpl.show(modify_doc)
 
     @memorize_params
     @record_call
@@ -352,8 +511,8 @@ class Group:
         shifts_opencv: bool = False,
         max_deviation_um: float = 12.0,
         max_shift_um: list[float] = [128.0, 128.0],
-        overlap_um: list[float] = [96.0, 96.0],
-        strides_um: list[float] = [128.0, 128.0],
+        overlap_um: list[float] = DEFAULT_OVERLAP_UM,
+        strides_um: list[float] = DEFAULT_STRIDES_UM,
     ) -> None:
         """
         \033[1;35mRUN_MOTION_CORRECTION\033[0m
