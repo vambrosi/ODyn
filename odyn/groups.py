@@ -45,10 +45,12 @@ if TYPE_CHECKING:
     from .database import Database
 
 
-# Default motion-correction patch geometry (microns). Single source shared by
+# Default motion-correction parameters (in um). Single source shared by
 # run_motion_correction and pick_mcor_parameters so the two never drift.
 DEFAULT_STRIDES_UM = [128.0, 128.0]
 DEFAULT_OVERLAP_UM = [96.0, 96.0]
+DEFAULT_MAX_SHIFT_UM = [128.0, 128.0]
+DEFAULT_MAX_DEVIATION_UM = 12.0
 
 
 class Group:
@@ -341,6 +343,7 @@ class Group:
         from bokeh.io.state import curstate
         from bokeh.models import (
             Button,
+            CheckboxGroup,
             ColumnDataSource,
             Slider,
             Div,
@@ -362,21 +365,28 @@ class Group:
         raw_path = self.db.main_folder / self.acquisitions["raw_path"].iloc[0]
         step = max(1, round(1 / frame_fraction))
 
-        # Seed from the last pick, or the shared defaults on first use.
-        prev = self.latest_output("Group.pick_mcor_parameters")
-        strides_um = prev["strides_um"] if prev else DEFAULT_STRIDES_UM
-        overlap_um = prev["overlap_um"] if prev else DEFAULT_OVERLAP_UM
+        # Seed from the last pick, or the shared defaults
+        prev = self.latest_output("Group.pick_mcor_parameters") or {}
+        strides_um = prev.get("strides_um", DEFAULT_STRIDES_UM)
+        overlap_um = prev.get("overlap_um", DEFAULT_OVERLAP_UM)
+        max_shift_um = prev.get("max_shift_um", DEFAULT_MAX_SHIFT_UM)
+        max_deviation_um = prev.get("max_deviation_um", DEFAULT_MAX_DEVIATION_UM)
 
         # Capture now (frame is live). @record_call writes call_output=NULL on
         # return; the Save click below records the chosen parameters into this row.
         call_id = self.current_call_id
         con = self.db.con
 
+        # Shift limits are capped at dim/4 (caiman needs 2 * max_shift < dim, and
+        # run_motion_correction clamps max_shift to dim/4 anyway).
         init = {
             "sy": clamp(int(strides_um[0] / um_per_px[0]), 1, dims[0] // 2),
             "sx": clamp(int(strides_um[1] / um_per_px[1]), 1, dims[1] // 2),
             "oy": clamp(int(overlap_um[0] / um_per_px[0]), 1, dims[0] // 2),
             "ox": clamp(int(overlap_um[1] / um_per_px[1]), 1, dims[1] // 2),
+            "my": clamp(int(max_shift_um[0] / um_per_px[0]), 1, dims[0] // 4),
+            "mx": clamp(int(max_shift_um[1] / um_per_px[1]), 1, dims[1] // 4),
+            "dev": clamp(int(max_deviation_um / min(um_per_px)), 1, min(dims) // 4),
         }
 
         def patch_data(sy, sx, oy, ox):
@@ -410,7 +420,9 @@ class Group:
                 color_mapper=cmap,
             )
 
-            patches = ColumnDataSource(data=patch_data(**init))
+            patches = ColumnDataSource(
+                data=patch_data(init["sy"], init["sx"], init["oy"], init["ox"])
+            )
             p.rect(
                 x="x",
                 y="y",
@@ -423,30 +435,73 @@ class Group:
             )
             p.add_tools("tap")
 
-            sy = Slider(start=1, end=dims[0] // 2, value=init["sy"], title="Stride y")
-            sx = Slider(start=1, end=dims[1] // 2, value=init["sx"], title="Stride x")
-            oy = Slider(start=1, end=dims[0] // 2, value=init["oy"], title="Overlap y")
-            ox = Slider(start=1, end=dims[1] // 2, value=init["ox"], title="Overlap x")
+            # Each linkable pair: a canonical (y) slider always shown, plus an x
+            # slider revealed only when x/y are unlinked.
+            def make_pair(base, end_y, end_x, val_y, val_x):
+                y = Slider(start=1, end=end_y, value=val_y, title=base)
+                x = Slider(
+                    start=1, end=end_x, value=val_x, title=f"{base} x", visible=False
+                )
+                return y, x, base
+
+            link = CheckboxGroup(labels=["Link x / y"], active=[0])  # linked default
+            stride = make_pair(
+                "Stride", dims[0] // 2, dims[1] // 2, init["sy"], init["sx"]
+            )
+            overlap = make_pair(
+                "Overlap", dims[0] // 2, dims[1] // 2, init["oy"], init["ox"]
+            )
+            shift = make_pair(
+                "Max shift", dims[0] // 4, dims[1] // 4, init["my"], init["mx"]
+            )
+            deviation = Slider(
+                start=1, end=min(dims) // 4, value=init["dev"], title="Max deviation"
+            )
             status = Div(text="<i>Loading background image…</i>")
 
-            def on_change(attr, old, new):
-                patches.data = patch_data(sy.value, sx.value, oy.value, ox.value)
+            def linked():
+                return 0 in link.active
 
-            for s in (sy, sx, oy, ox):
-                s.on_change("value", on_change)
+            def axis_values(pair):
+                y, x, _ = pair
+                return y.value, (y.value if linked() else x.value)
+
+            def update_patches():
+                sy, sx = axis_values(stride)
+                oy, ox = axis_values(overlap)
+                patches.data = patch_data(sy, sx, oy, ox)
+
+            def on_geom(attr, old, new):
+                update_patches()
+
+            for y, x, _ in (stride, overlap):  # only geometry drives the overlay
+                y.on_change("value", on_geom)
+                x.on_change("value", on_geom)
+
+            def on_link(attr, old, new):
+                for y, x, base in (stride, overlap, shift):
+                    x.visible = not linked()
+                    y.title = base if linked() else f"{base} y"
+                    if linked():
+                        x.value = min(y.value, x.end)
+                update_patches()
+
+            link.on_change("active", on_link)
 
             save = Button(label="Save Parameters", button_type="success")
 
             def save_callback():
+                sy, sx = axis_values(stride)
+                oy, ox = axis_values(overlap)
+                my, mx = axis_values(shift)
                 output = {
-                    "strides_um": [
-                        float(sy.value * um_per_px[0]),
-                        float(sx.value * um_per_px[1]),
+                    "strides_um": [float(sy * um_per_px[0]), float(sx * um_per_px[1])],
+                    "overlap_um": [float(oy * um_per_px[0]), float(ox * um_per_px[1])],
+                    "max_shift_um": [
+                        float(my * um_per_px[0]),
+                        float(mx * um_per_px[1]),
                     ],
-                    "overlap_um": [
-                        float(oy.value * um_per_px[0]),
-                        float(ox.value * um_per_px[1]),
-                    ],
+                    "max_deviation_um": float(deviation.value * min(um_per_px)),
                 }
                 with con:
                     con.execute(
@@ -461,7 +516,22 @@ class Group:
             save.on_click(save_callback)
 
             doc.add_root(
-                bpl.row(bpl.column(p, bpl.row(oy, ox), bpl.row(sy, sx), save, status))
+                bpl.row(
+                    bpl.column(
+                        p,
+                        link,
+                        bpl.row(
+                            bpl.column(stride[0], stride[1]),
+                            bpl.column(overlap[0], overlap[1]),
+                        ),
+                        bpl.row(
+                            bpl.column(shift[0], shift[1]),
+                            bpl.column(deviation),
+                        ),
+                        save,
+                        status,
+                    )
+                )
             )
 
             # ---- load the subsampled movie off the UI thread, update when ready ----
@@ -509,8 +579,8 @@ class Group:
         nonneg_movie: bool = False,
         pw_rigid: bool = True,
         shifts_opencv: bool = False,
-        max_deviation_um: float = 12.0,
-        max_shift_um: list[float] = [128.0, 128.0],
+        max_deviation_um: float = DEFAULT_MAX_DEVIATION_UM,
+        max_shift_um: list[float] = DEFAULT_MAX_SHIFT_UM,
         overlap_um: list[float] = DEFAULT_OVERLAP_UM,
         strides_um: list[float] = DEFAULT_STRIDES_UM,
     ) -> None:
@@ -580,8 +650,10 @@ class Group:
         # max_shift_um has to less than size of image (in μm / 4)
         height_um = self.experiments["height_um"].min()
         width_um = self.experiments["width_um"].min()
-        max_shift_um[0] = clamp(max_shift_um[0], 0, height_um / 4)
-        max_shift_um[1] = clamp(max_shift_um[1], 0, width_um / 4)
+        max_shift_um = [
+            clamp(max_shift_um[0], 0, height_um / 4),
+            clamp(max_shift_um[1], 0, width_um / 4),
+        ]
 
         # --- Make sure movies will be updated next time they are played --- #
 
