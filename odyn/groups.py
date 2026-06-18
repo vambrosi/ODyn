@@ -341,13 +341,17 @@ class Group:
         from threading import Thread
         from bokeh.io import output_notebook
         from bokeh.io.state import curstate
+        from bokeh.events import MouseMove
         from bokeh.models import (
             Button,
-            CheckboxGroup,
             ColumnDataSource,
-            Slider,
+            CustomJS,
             Div,
             LinearColorMapper,
+            PointDrawTool,
+            RadioButtonGroup,
+            Spinner,
+            TapTool,
         )
         from bokeh.palettes import Greys256
         from caiman.motion_correction import sliding_window_dims
@@ -365,15 +369,15 @@ class Group:
         raw_path = self.db.main_folder / self.acquisitions["raw_path"].iloc[0]
         step = max(1, round(1 / frame_fraction))
 
-        # Seed from the last pick, or the shared defaults
+        # Initial values from the last pick or the shared defaults
         prev = self.latest_output("Group.pick_mcor_parameters") or {}
         strides_um = prev.get("strides_um", DEFAULT_STRIDES_UM)
         overlap_um = prev.get("overlap_um", DEFAULT_OVERLAP_UM)
         max_shift_um = prev.get("max_shift_um", DEFAULT_MAX_SHIFT_UM)
         max_deviation_um = prev.get("max_deviation_um", DEFAULT_MAX_DEVIATION_UM)
 
-        # Capture now (frame is live). @record_call writes call_output=NULL on
-        # return; the Save click below records the chosen parameters into this row.
+        # @record_call writes call_output=NULL on return, and Save button
+        # updates the records with the chosen parameters.
         call_id = self.current_call_id
         con = self.db.con
 
@@ -402,7 +406,7 @@ class Group:
             return dict(x=xs, y=ys, w=ws, h=hs)
 
         def modify_doc(doc):
-            # ---- everything here is cheap; render immediately ----
+            # ---- Render immediately and the background is added later ----
             p = bpl.figure(
                 x_range=(0, dims[1]), y_range=(dims[0], 0), width=600, height=600
             )
@@ -420,88 +424,371 @@ class Group:
                 color_mapper=cmap,
             )
 
-            patches = ColumnDataSource(
-                data=patch_data(init["sy"], init["sx"], init["oy"], init["ox"])
-            )
-            p.rect(
-                x="x",
-                y="y",
+            def empty():
+                return dict(x=[], y=[], w=[], h=[])
+
+            # Patches-view layers
+            grid = ColumnDataSource(data=empty())  # full faint patch grid
+            grid_r = p.rect(
+                "x",
+                "y",
                 width="w",
                 height="h",
-                source=patches,
+                source=grid,
+                alpha=0.1,
+                line_color="white",
+            )
+
+            # Select-view layer: click to highlight (red)
+            select_r = p.rect(
+                "x",
+                "y",
+                width="w",
+                height="h",
+                source=grid,
                 alpha=0.2,
                 line_color="white",
                 selection_color="red",
             )
-            p.add_tools("tap")
 
-            # Each linkable pair: a canonical (y) slider always shown, plus an x
-            # slider revealed only when x/y are unlinked.
-            def make_pair(base, end_y, end_x, val_y, val_x):
-                y = Slider(start=1, end=end_y, value=val_y, title=base)
-                x = Slider(
-                    start=1, end=end_x, value=val_x, title=f"{base} x", visible=False
+            overlap = ColumnDataSource(data=empty())  # shaded patch overlap
+            overlap_r = p.rect(
+                "x",
+                "y",
+                width="w",
+                height="h",
+                source=overlap,
+                fill_color="orange",
+                fill_alpha=0.35,
+                line_alpha=0,
+            )
+
+            # Shifts-view layers
+            band = ColumnDataSource(data=empty())  # max_shift border strip
+            band_r = p.rect(
+                "x",
+                "y",
+                width="w",
+                height="h",
+                source=band,
+                fill_color="red",
+                fill_alpha=0.12,
+                line_alpha=0,
+            )
+
+            halo = ColumnDataSource(data=empty())  # max_deviation wiggle room
+            halo_r = p.rect(
+                "x",
+                "y",
+                width="w",
+                height="h",
+                source=halo,
+                fill_alpha=0,
+                line_color="lime",
+                line_dash="dashed",
+            )
+
+            # Patches view: the solid representative (anchor) patch
+            anchor = ColumnDataSource(data=empty())
+            anchor_r = p.rect(
+                "x",
+                "y",
+                width="w",
+                height="h",
+                source=anchor,
+                fill_alpha=0,
+                line_color="yellow",
+                line_width=2,
+            )
+
+            # Shifts view: same patch dashed at its actual position, plus a solid
+            # copy shifted so its top-left sits on the red max_shift handle.
+            actual_r = p.rect(
+                "x",
+                "y",
+                width="w",
+                height="h",
+                source=anchor,
+                fill_alpha=0,
+                line_color="yellow",
+                line_dash="dashed",
+            )
+            moved = ColumnDataSource(data=empty())
+            moved_r = p.rect(
+                "x",
+                "y",
+                width="w",
+                height="h",
+                source=moved,
+                fill_alpha=0,
+                line_color="yellow",
+                line_width=2,
+            )
+
+            def handle(color):
+                src = ColumnDataSource(data=dict(x=[0], y=[0]))
+                r = p.scatter(
+                    "x", "y", source=src, size=12, fill_color=color, line_color="black"
                 )
-                return y, x, base
+                return src, r
 
-            link = CheckboxGroup(labels=["Link x / y"], active=[0])  # linked default
-            stride = make_pair(
-                "Stride", dims[0] // 2, dims[1] // 2, init["sy"], init["sx"]
+            h_size, r_sz = handle("yellow")  # corner: size = stride + overlap (x, y)
+            h_overlap, r_ov = handle("orange")  # interior: overlap (x, y)
+            h_shift, r_ms = handle("red")  # corner: max_shift (x, y)
+            drag = PointDrawTool(renderers=[r_sz, r_ov, r_ms], add=False)
+            tap = TapTool(renderers=[select_r])  # Select view: click patches
+            p.add_tools(drag, tap)
+            p.toolbar.active_drag = drag
+
+            # --- Spinners for fine-tuning and readout ---
+            def spinner(value, hi, title):
+                return Spinner(
+                    low=0, high=hi, step=1, value=value, title=title, width=110
+                )
+
+            sp_sx = spinner(
+                init["sx"] * um_per_px[1], dims[1] * um_per_px[1], "Stride x (µm)"
             )
-            overlap = make_pair(
-                "Overlap", dims[0] // 2, dims[1] // 2, init["oy"], init["ox"]
+            sp_sy = spinner(
+                init["sy"] * um_per_px[0], dims[0] * um_per_px[0], "Stride y (µm)"
             )
-            shift = make_pair(
-                "Max shift", dims[0] // 4, dims[1] // 4, init["my"], init["mx"]
+            sp_ox = spinner(
+                init["ox"] * um_per_px[1], dims[1] * um_per_px[1], "Overlap x (µm)"
             )
-            deviation = Slider(
-                start=1, end=min(dims) // 4, value=init["dev"], title="Max deviation"
+            sp_oy = spinner(
+                init["oy"] * um_per_px[0], dims[0] * um_per_px[0], "Overlap y (µm)"
             )
+            sp_mx = spinner(
+                init["mx"] * um_per_px[1],
+                (dims[1] // 2) * um_per_px[1],
+                "Max shift x (µm)",
+            )
+            sp_my = spinner(
+                init["my"] * um_per_px[0],
+                (dims[0] // 2) * um_per_px[0],
+                "Max shift y (µm)",
+            )
+            sp_dev = spinner(
+                init["dev"] * min(um_per_px),
+                (min(dims) // 4) * min(um_per_px),
+                "Max deviation (µm)",
+            )
+
+            view = RadioButtonGroup(labels=["Patches", "Shifts", "Select"], active=0)
+            save = Button(label="Save Parameters", button_type="success")
             status = Div(text="<i>Loading background image…</i>")
 
-            def linked():
-                return 0 in link.active
+            def apply_view():
+                mode = view.active  # 0 = Patches, 1 = Shifts, 2 = Select
+                grid_r.visible = overlap_r.visible = mode == 0
+                r_sz.visible = r_ov.visible = mode == 0  # size / overlap handles
+                anchor_r.visible = mode == 0  # solid patch (Patches only)
+                actual_r.visible = moved_r.visible = mode == 1  # dashed + shifted
+                band_r.visible = halo_r.visible = r_ms.visible = mode == 1
+                select_r.visible = mode == 2  # click-to-highlight grid
+                if mode == 2:  # Select -> tap tool; Patches/Shifts -> drag tool
+                    p.toolbar.active_drag = None
+                    p.toolbar.active_tap = tap
+                else:
+                    p.toolbar.active_drag = drag
+                    p.toolbar.active_tap = None
 
-            def axis_values(pair):
-                y, x, _ = pair
-                return y.value, (y.value if linked() else x.value)
+            view.on_change("active", lambda attr, old, new: apply_view())
 
-            def update_patches():
-                sy, sx = axis_values(stride)
-                oy, ox = axis_values(overlap)
-                patches.data = patch_data(sy, sx, oy, ox)
+            # --- All relevant data (in pixels) ---
+            S = {k: init[k] for k in ("sx", "sy", "ox", "oy", "mx", "my", "dev")}
+            flags = {"sync": False}
 
-            def on_geom(attr, old, new):
-                update_patches()
+            def clamp_state():
+                S["sx"] = clamp(S["sx"], 1, dims[1])
+                S["sy"] = clamp(S["sy"], 1, dims[0])
+                S["ox"] = clamp(S["ox"], 0, dims[1] - S["sx"])
+                S["oy"] = clamp(S["oy"], 0, dims[0] - S["sy"])
+                S["mx"] = clamp(S["mx"], 1, dims[1] // 2 - 1)
+                S["my"] = clamp(S["my"], 1, dims[0] // 2 - 1)
+                S["dev"] = clamp(S["dev"], 0, min(dims) // 4)
 
-            for y, x, _ in (stride, overlap):  # only geometry drives the overlay
-                y.on_change("value", on_geom)
-                x.on_change("value", on_geom)
+            def redraw():
+                clamp_state()
+                ww, wh = S["sx"] + S["ox"], S["sy"] + S["oy"]
+                H, W = dims
 
-            def on_link(attr, old, new):
-                for y, x, base in (stride, overlap, shift):
-                    x.visible = not linked()
-                    y.title = base if linked() else f"{base} y"
-                    if linked():
-                        x.value = min(y.value, x.end)
-                update_patches()
+                grid.data = patch_data(S["sy"], S["sx"], S["oy"], S["ox"])
+                anchor.data = dict(x=[ww / 2], y=[wh / 2], w=[ww], h=[wh])
 
-            link.on_change("active", on_link)
+                ov = empty()  # overlap rects only when overlap is positive
+                if S["ox"] > 0:
+                    ov["x"].append((S["sx"] + ww) / 2)
+                    ov["y"].append(wh / 2)
+                    ov["w"].append(S["ox"])
+                    ov["h"].append(wh)
+                if S["oy"] > 0:
+                    ov["x"].append(ww / 2)
+                    ov["y"].append((S["sy"] + wh) / 2)
+                    ov["w"].append(ww)
+                    ov["h"].append(S["oy"])
+                overlap.data = ov
 
-            save = Button(label="Save Parameters", button_type="success")
+                # shifted copy: top-left on the max_shift handle (mx, my)
+                mxc, myc = S["mx"] + ww / 2, S["my"] + wh / 2
+                moved.data = dict(x=[mxc], y=[myc], w=[ww], h=[wh])
+                halo.data = dict(
+                    x=[mxc],
+                    y=[myc],
+                    w=[ww + 2 * S["dev"]],
+                    h=[wh + 2 * S["dev"]],
+                )
+                band.data = dict(
+                    x=[W / 2, W / 2, S["mx"] / 2, W - S["mx"] / 2],
+                    y=[S["my"] / 2, H - S["my"] / 2, H / 2, H / 2],
+                    w=[W, W, S["mx"], S["mx"]],
+                    h=[S["my"], S["my"], H, H],
+                )
+
+                flags["sync"] = True  # programmatic updates must not re-fire
+                h_size.data = dict(x=[ww], y=[wh])  # lower-right corner of anchor
+                h_overlap.data = dict(x=[S["sx"]], y=[S["sy"]])  # neighbor onsets
+                h_shift.data = dict(x=[S["mx"]], y=[S["my"]])
+                sp_sx.value = S["sx"] * um_per_px[1]
+                sp_sy.value = S["sy"] * um_per_px[0]
+                sp_ox.value = S["ox"] * um_per_px[1]
+                sp_oy.value = S["oy"] * um_per_px[0]
+                sp_mx.value = S["mx"] * um_per_px[1]
+                sp_my.value = S["my"] * um_per_px[0]
+                sp_dev.value = S["dev"] * min(um_per_px)
+                flags["sync"] = False
+
+            # --- handle drags: each rule changes one thing, keeps the rest fixed ---
+            def on_size(attr, old, new):
+                # corner sets size (stride + overlap); stride stays, overlap absorbs
+                if flags["sync"]:
+                    return
+                cx = clamp(round(h_size.data["x"][0]), S["sx"], dims[1])
+                cy = clamp(round(h_size.data["y"][0]), S["sy"], dims[0])
+                S["ox"] = cx - S["sx"]
+                S["oy"] = cy - S["sy"]
+                redraw()
+
+            def on_overlap(attr, old, new):
+                # interior sets neighbor onset (stride); size stays, overlap absorbs
+                if flags["sync"]:
+                    return
+                ww, wh = S["sx"] + S["ox"], S["sy"] + S["oy"]
+                ix = clamp(round(h_overlap.data["x"][0]), 1, ww)
+                iy = clamp(round(h_overlap.data["y"][0]), 1, wh)
+                S["sx"], S["ox"] = ix, ww - ix
+                S["sy"], S["oy"] = iy, wh - iy
+                redraw()
+
+            def on_shift(attr, old, new):
+                if flags["sync"]:
+                    return
+                S["mx"] = round(h_shift.data["x"][0])
+                S["my"] = round(h_shift.data["y"][0])
+                redraw()
+
+            h_size.on_change("data", on_size)
+            h_overlap.on_change("data", on_overlap)
+            h_shift.on_change("data", on_shift)
+
+            # --- Preview while dragging ---
+            # PointDrawTool only emits its 'data' change on release, but MouseMove
+            # fires continuously and the handle coordinates are mutated in place,
+            # so we read them on every move and redraw just the dragged primitives.
+            # The full grid and spinners still settle on release (Python callbacks).
+            p.js_on_event(
+                MouseMove,
+                CustomJS(
+                    args=dict(
+                        size=h_size,
+                        inter=h_overlap,
+                        shift=h_shift,
+                        dev=sp_dev,
+                        view=view,
+                        anchor=anchor,
+                        overlap=overlap,
+                        moved=moved,
+                        halo=halo,
+                        band=band,
+                        H=dims[0],
+                        W=dims[1],
+                        minfac=min(um_per_px),
+                    ),
+                    code="""
+                const mode = view.active;  // 0 Patches, 1 Shifts, 2 Select
+                if (mode === 2) return;
+
+                // geometry straight from the (live) handle positions, in pixels
+                let sx = Math.round(inter.data['x'][0]);
+                let sy = Math.round(inter.data['y'][0]);
+                const ww = Math.max(sx, Math.min(Math.round(size.data['x'][0]), W));
+                const wh = Math.max(sy, Math.min(Math.round(size.data['y'][0]), H));
+                sx = Math.max(1, Math.min(sx, ww));
+                sy = Math.max(1, Math.min(sy, wh));
+                const mx = Math.max(1, Math.min(Math.round(shift.data['x'][0]), Math.floor(W/2)-1));
+                const my = Math.max(1, Math.min(Math.round(shift.data['y'][0]), Math.floor(H/2)-1));
+                const devpx = Math.round(dev.value / minfac);
+
+                // skip redundant work (e.g. plain hover, no handle moved)
+                const sig = mode+':'+ww+','+wh+','+sx+','+sy+','+mx+','+my+','+devpx;
+                if (view.__sig === sig) return;
+                view.__sig = sig;
+
+                if (mode === 0) {  // Patches: anchor + overlap shading
+                    anchor.data = {x:[ww/2], y:[wh/2], w:[ww], h:[wh]};
+                    anchor.change.emit();
+                    const xs=[], ys=[], ws=[], hs=[];
+                    if (ww - sx > 0) { xs.push((sx+ww)/2); ys.push(wh/2); ws.push(ww-sx); hs.push(wh); }
+                    if (wh - sy > 0) { xs.push(ww/2); ys.push((sy+wh)/2); ws.push(ww); hs.push(wh-sy); }
+                    overlap.data = {x:xs, y:ys, w:ws, h:hs};
+                    overlap.change.emit();
+                } else {  // Shifts: shifted copy + halo + border band
+                    const cx = mx + ww/2, cy = my + wh/2;
+                    moved.data = {x:[cx], y:[cy], w:[ww], h:[wh]};
+                    moved.change.emit();
+                    halo.data = {x:[cx], y:[cy], w:[ww+2*devpx], h:[wh+2*devpx]};
+                    halo.change.emit();
+                    band.data = {x:[W/2, W/2, mx/2, W-mx/2], y:[my/2, H-my/2, H/2, H/2],
+                                 w:[W, W, mx, mx], h:[my, my, H, H]};
+                    band.change.emit();
+                }
+                """,
+                ),
+            )
+
+            # --- Spinner edits (um -> pixels) ---
+            def on_spinner(key, factor):
+                def cb(attr, old, new):
+                    if flags["sync"] or new is None:
+                        return
+                    S[key] = round(new / factor)
+                    redraw()
+
+                return cb
+
+            sp_sx.on_change("value", on_spinner("sx", um_per_px[1]))
+            sp_sy.on_change("value", on_spinner("sy", um_per_px[0]))
+            sp_ox.on_change("value", on_spinner("ox", um_per_px[1]))
+            sp_oy.on_change("value", on_spinner("oy", um_per_px[0]))
+            sp_mx.on_change("value", on_spinner("mx", um_per_px[1]))
+            sp_my.on_change("value", on_spinner("my", um_per_px[0]))
+            sp_dev.on_change("value", on_spinner("dev", min(um_per_px)))
 
             def save_callback():
-                sy, sx = axis_values(stride)
-                oy, ox = axis_values(overlap)
-                my, mx = axis_values(shift)
                 output = {
-                    "strides_um": [float(sy * um_per_px[0]), float(sx * um_per_px[1])],
-                    "overlap_um": [float(oy * um_per_px[0]), float(ox * um_per_px[1])],
-                    "max_shift_um": [
-                        float(my * um_per_px[0]),
-                        float(mx * um_per_px[1]),
+                    "strides_um": [
+                        float(S["sy"] * um_per_px[0]),
+                        float(S["sx"] * um_per_px[1]),
                     ],
-                    "max_deviation_um": float(deviation.value * min(um_per_px)),
+                    "overlap_um": [
+                        float(S["oy"] * um_per_px[0]),
+                        float(S["ox"] * um_per_px[1]),
+                    ],
+                    "max_shift_um": [
+                        float(S["my"] * um_per_px[0]),
+                        float(S["mx"] * um_per_px[1]),
+                    ],
+                    "max_deviation_um": float(S["dev"] * min(um_per_px)),
                 }
                 with con:
                     con.execute(
@@ -509,32 +796,33 @@ class Group:
                         [json.dumps(output), call_id],
                     )
                 status.text = (
-                    "Saved — run_motion_correction(use_gui_parameters=True) "
-                    "will use these."
+                    "Saved! run_motion_correction() will use these parameters "
+                    "by default (use_gui_parameters=False to override)."
                 )
 
             save.on_click(save_callback)
 
+            redraw()  # initialise every glyph, handle and spinner from S
+            apply_view()  # set initial layer visibility for the active view
+
             doc.add_root(
-                bpl.row(
-                    bpl.column(
+                bpl.column(
+                    view,
+                    bpl.row(
                         p,
-                        link,
-                        bpl.row(
-                            bpl.column(stride[0], stride[1]),
-                            bpl.column(overlap[0], overlap[1]),
+                        bpl.column(
+                            bpl.row(sp_sx, sp_sy),
+                            bpl.row(sp_ox, sp_oy),
+                            bpl.row(sp_mx, sp_my),
+                            sp_dev,
+                            save,
+                            status,
                         ),
-                        bpl.row(
-                            bpl.column(shift[0], shift[1]),
-                            bpl.column(deviation),
-                        ),
-                        save,
-                        status,
-                    )
+                    ),
                 )
             )
 
-            # ---- load the subsampled movie off the UI thread, update when ready ----
+            # ---- Load the subsampled movie in a different thread ----
             def load_background():
                 cache = (
                     self.db.main_folder
