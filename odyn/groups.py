@@ -263,10 +263,9 @@ class Group:
 
     @property
     def current_call_id(self) -> int:
-        assert self._call_stack, (
-            "Empty call stack — 'current_call_id' is only available inside a "
-            "method decorated with '@record_call'."
-        )
+        assert (
+            self._call_stack
+        ), "'current_call_id' is only available inside a '@record_call'"
         return self._call_stack[-1].call_id
 
     def add_flag(self, flag) -> None:
@@ -282,23 +281,53 @@ class Group:
         self.add_flag(flag)
         raise RuntimeError(message)
 
+    def latest_calls(self, method_name: str) -> None | Object:
+        """Return Dataframe with all calls to 'method_name'."""
+
+        query = """
+            SELECT * FROM method_calls
+                WHERE group_id = ? AND method_name LIKE ?
+                ORDER BY method_call_id DESC
+            """
+        df = pd.read_sql_query(
+            query, self.db.con, params=[self.group_id, f"%{method_name}"]
+        )
+        df.set_index("method_call_id", inplace=True)
+
+        df.parameters = df.parameters.apply(json.loads)
+        df.call_output = df.call_output.apply(
+            lambda s: json.loads(s) if isinstance(s, str) else None
+        )
+
+        df_parameters = pd.json_normalize(df.parameters).set_index(df.index)
+        df_output = pd.json_normalize(df.call_output).set_index(df.index)
+
+        return pd.concat(
+            [
+                df.drop(columns=["parameters", "call_output"]),
+                df_parameters,
+                df_output,
+            ],
+            axis=1,
+        )
+
     def latest_output(self, method_name: str) -> None | Object:
-        """Return the parsed output of the most recent call to 'method_name'."""
+        """Return output of the most recent call to 'method_name'."""
+
         row = self.db.con.execute(
             """
             SELECT call_output FROM method_calls
-             WHERE group_id = ? AND method_name = ? AND call_output IS NOT NULL
-             ORDER BY method_call_id DESC LIMIT 1
+                WHERE group_id = ? AND method_name = ? AND call_output IS NOT NULL
+                ORDER BY method_call_id DESC LIMIT 1
             """,
             [self.group_id, method_name],
         ).fetchone()
+
         return json.loads(row["call_output"]) if row else None
 
     def add_output_file(self, path: str | Path) -> None:
         """
-        Record a file artifact produced by the current call in the outputs table.
-        Use inside @record_call. The path is stored relative to main_folder so it
-        stays valid across computers.
+        Record an output file in the outputs table. Use inside @record_call.
         """
         rel_path = str(Path(path).relative_to(self.db.main_folder))
         with self.db.con as con:

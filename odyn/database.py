@@ -66,15 +66,12 @@ PROGRAM_TYPES = [
 class ExpFlag(IntFlag):
     """
     call_flag bits for Database.add_experiment (bit 0 reserved by CallFlag.RAISED).
-
-    A non-zero call_flag means the experiment was skipped or added with caveats;
-    query with e.g. `call_flag & {AddExpFlag.MULTIPLE_H5.value}` to find them.
     """
 
     ALREADY_IN_DB = 1 << 1  # experiment already present, nothing inserted
     MULTIPLE_H5 = 1 << 2  # more than one H5 file in the folder, skipped
     UNSUPPORTED_METADATA = 1 << 3  # TIFF does not have expected metadata format
-    METADATA_CHANGED = 1 << 4  # TIFF metadata changed too often, skipped
+    METADATA_CHANGED = 1 << 4  # TIFF metadata changed, skipped
     H5_UNMATCHED_ACQ = 1 << 5  # some H5 trials had no matching acquisition
     TRIAL_NO_ACQ = 1 << 6  # some trials matched H5 but had no acquisition
 
@@ -354,10 +351,9 @@ class Database:
 
     @property
     def current_call_id(self) -> int:
-        assert self._call_stack, (
-            "Empty call stack — 'current_call_id' is only available inside a "
-            "method decorated with '@record_call'."
-        )
+        assert (
+            self._call_stack
+        ), "'current_call_id' is only available inside a '@record_call'"
         return self._call_stack[-1].call_id
 
     def add_flag(self, flag) -> None:
@@ -373,24 +369,51 @@ class Database:
         self.add_flag(flag)
         raise RuntimeError(message)
 
+    def latest_calls(self, method_name: str) -> None | Object:
+        """Return Dataframe with all calls to 'method_name'."""
+
+        query = """
+            SELECT * FROM method_calls
+                WHERE method_name LIKE ?
+                ORDER BY method_call_id DESC
+            """
+        df = pd.read_sql_query(query, self.con, params=[f"%{method_name}"])
+        df.set_index("method_call_id", inplace=True)
+
+        df.parameters = df.parameters.apply(json.loads)
+        df.call_output = df.call_output.apply(
+            lambda s: json.loads(s) if isinstance(s, str) else None
+        )
+
+        df_parameters = pd.json_normalize(df.parameters).set_index(df.index)
+        df_output = pd.json_normalize(df.call_output).set_index(df.index)
+
+        return pd.concat(
+            [
+                df.drop(columns=["parameters", "call_output"]),
+                df_parameters,
+                df_output,
+            ],
+            axis=1,
+        )
+
     def latest_output(self, method_name: str) -> None | Object:
-        """Return the parsed output of the most recent call to 'method_name'."""
-        db = getattr(self, "db", self)
-        row = db.con.execute(
+        """Return output of the most recent call to 'method_name'."""
+
+        row = self.con.execute(
             """
             SELECT call_output FROM method_calls
-             WHERE group_id = ? AND method_name = ? AND call_output IS NOT NULL
-             ORDER BY method_call_id DESC LIMIT 1
+                WHERE group_id = ? AND method_name = ? AND call_output IS NOT NULL
+                ORDER BY method_call_id DESC LIMIT 1
             """,
             [self.group_id, method_name],
         ).fetchone()
+
         return json.loads(row["call_output"]) if row else None
 
     def add_output_file(self, path: str | Path) -> None:
         """
-        Record a file artifact produced by the current call in the outputs table.
-        Use inside @record_call. The path is stored relative to main_folder so it
-        stays valid across computers.
+        Record an output file in the outputs table. Use inside @record_call.
         """
         rel_path = str(Path(path).relative_to(self.main_folder))
         with self.con as con:

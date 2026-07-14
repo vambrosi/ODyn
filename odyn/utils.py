@@ -32,12 +32,11 @@ class CallFlag(IntFlag):
     """
     Flags set automatically by @record_call.
 
-    Bit 0 is reserved here. Per-function flag enums (e.g. ExpFlag) should
-    define their own bits starting at 1 << 1 so they never collide with RAISED.
+    Bit 0 is reserved. Per-function enums should start at 1 << 1.
     """
 
     SUCCESS = 0
-    RAISED = 1 << 0  # the decorated call raised an exception
+    RAISED = 1 << 0
 
 
 @dataclass
