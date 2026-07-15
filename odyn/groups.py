@@ -7,7 +7,6 @@
 #   - Add movies to outputs
 #   - Add support for files (outputs) not in server (computer prefix?)
 #   - Integrate docstrings with default values, to avoid copy-paste.
-#   - Split docstrings and help functions to make VSCode hints usable.
 #   - Remove added stuff in docstrings
 #   - Use validated defaults on docstrings?
 #   - Add help for expected file name and folder structure?
@@ -86,8 +85,6 @@ class Group:
     ```
     """
 
-    is_first = True
-
     def __init__(self, group_id: int, db: Database) -> None:
         self.group_id: Final[int] = group_id
         self.db = db
@@ -105,10 +102,6 @@ class Group:
         self._raw_mmap_pairs: None | tuple[list[str], list[str]] = None
         self.movies: dict[tuple[MovieType, ...], LazyMovie] = {}
 
-        if Group.is_first:
-            Group.short_help()
-            Group.is_first = False
-
     def __repr__(self):
         msg = f"Group {self.group_id}"
 
@@ -117,23 +110,6 @@ class Group:
             msg += f" (exp_name = {self.experiments["exp_name"].iloc[0]})"
 
         return msg
-
-    @staticmethod
-    def help(name="Group"):
-        if name.lower() == "group":
-            return print(Group.__doc__)
-
-        attr = getattr(Group, name, None)
-
-        if attr is not None:
-            return print(attr.__doc__)
-
-        return logger.info("Method not found!")
-
-    @staticmethod
-    def short_help():
-        logger.info("Run Group.help() to get a list of useful functions.")
-        logger.info("Run Group.help('function_name') to know more about a function.")
 
     # ----------------------------------------------------------------------- #
     # Database Interaction

@@ -158,18 +158,6 @@ class Database:
     def __del__(self):
         self.con.close()
 
-    @staticmethod
-    def help(name="Database"):
-        if name.lower() == "database":
-            return print(Database.__doc__)
-
-        attr = getattr(Database, name, None)
-
-        if attr is not None:
-            return print(attr.__doc__)
-
-        logger.info("Method not found!")
-
     @property
     def acquisitions(self) -> pd.DataFrame:
         """`DataFrame` with acquisition metadata"""
