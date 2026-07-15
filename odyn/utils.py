@@ -66,7 +66,7 @@ class MovieType(Enum):
 class _ColorFormatter(logging.Formatter):
     _COLORS = {
         logging.DEBUG: "\033[0;37m",  # grey
-        logging.INFO: "**",  # bold blue
+        logging.INFO: "\033[1;34m",  # bold blue
         logging.WARNING: "\033[1;33m",  # bold yellow
         logging.ERROR: "\033[1;31m",  # bold red
     }
