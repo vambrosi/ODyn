@@ -378,7 +378,7 @@ class Database:
         raise RuntimeError(message)
 
     def latest_calls(self, method_name: str) -> None | Object:
-        """Return Dataframe with all calls to 'method_name'."""
+        """Return DataFrame with all calls to 'method_name'."""
 
         query = """
             SELECT * FROM method_calls
@@ -854,18 +854,54 @@ class Database:
 
         logger.info("Database updated!")
 
-    def from_query(self, query: str):
+    def from_query(self, query: str) -> pd.DataFrame:
         """
         Creates a pandas DataFrame from a SQL query.
 
         **USAGE**
-            db = Database(main_folder)
-            df = db.from_query(query_as_a_string)
+        ```python
+        db = Database(main_folder)
+        df = db.from_query(query_as_a_string)
+        ```
 
         **EXAMPLE**
-            db.from_query("SELECT exp_id, exp_name FROM experiments;")
+        ```python
+        db.from_query("SELECT exp_id, exp_name FROM experiments;")
+        ```
         """
         return pd.read_sql_query(query, self.con)
+
+    def run_query(self, query: str) -> Cursor:
+        """
+        Run SQL query (be careful!).
+
+        **USAGE**
+        ```python
+        db = Database(main_folder)
+        db.run_query(query_as_a_string)
+        ```
+
+        **EXAMPLE**
+        ```python
+        db.run_query(\"\"\"
+            UPDATE experiments
+                SET exp_name = "test"
+                WHERE exp_id = 10;
+        \"\"\")
+        ````
+        """
+
+        cur = self.con.execute(query)
+
+
+        return cur
+
+    def commit_changes(self):
+        self.con.commit()
+
+    def rollback_changes(self):
+        self._reset_caches()
+        self.con.rollback()
 
 
 def _load_event_data(

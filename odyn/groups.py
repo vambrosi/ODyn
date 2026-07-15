@@ -278,7 +278,7 @@ class Group:
         raise RuntimeError(message)
 
     def latest_calls(self, method_name: str) -> None | Object:
-        """Return Dataframe with all calls to `method_name`."""
+        """Return DataFrame with all calls to `method_name`."""
 
         query = """
             SELECT * FROM method_calls
