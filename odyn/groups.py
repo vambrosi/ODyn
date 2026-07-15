@@ -55,22 +55,35 @@ DEFAULT_MAX_DEVIATION_UM = 12.0
 
 class Group:
     """
-    \033[1;35mGROUP\033[0m
     Class that runs data processing/analysis.
 
-    \033[1;34mUSAGE\033[0m
-        db  = Database(main_folder)
-        group = db.groups[some_index]
+    **USAGE**
+    ```python
+    db    = Database(main_folder)
+    group = db.groups[some_index]
+    ```
 
-    \033[1;34mRELEVANT METHODS\033[0m
+    **RELEVANT PROPERTIES**
+    ```python
+        group.acquisitions      # `DataFrame` with acquisition metadata
+        group.events            # `DataFrame` with olfactometer events
+        group.experiments       # `DataFrame` with experiment metadata
+        group.mcor_files        # `DataFrame` with mcor files metadata
+        group.method_calls      # `DataFrame` with `@record_call` functions
+        group.programs          # `DataFrame` with one entry per _Event.csv_ file
+        group.trials            # `DataFrame` with all olfactometer trials
+    ```
+
+    **RELEVANT METHODS**
+    ```python
+        group.latest_calls(method_name)
+
+        group.pick_mcor_parameters(...)
         group.run_motion_correction(...)
-        group.play_movie(...)
+
         group.delete_temp_files()
-
-    Run Group.help('method_name') to know more about one of the methods above.
-
-    \033[1;34mEXAMPLE\033[0m
-        Group.help('play_movie')
+        group.play_movie(...)
+    ```
     """
 
     is_first = True
@@ -128,6 +141,7 @@ class Group:
 
     @property
     def acquisitions(self) -> pd.DataFrame:
+        """`DataFrame` with acquisition metadata"""
         if self._acquisitions is not None:
             return self._acquisitions
 
@@ -147,6 +161,7 @@ class Group:
 
     @property
     def events(self) -> pd.DataFrame:
+        """`DataFrame` with olfactometer events"""
         if self._events is not None:
             return self._events
 
@@ -165,6 +180,7 @@ class Group:
 
     @property
     def experiments(self) -> pd.DataFrame:
+        """`DataFrame` with experiment metadata"""
         if self._experiments is not None:
             return self._experiments
 
@@ -182,6 +198,7 @@ class Group:
 
     @property
     def mcor_files(self) -> pd.DataFrame:
+        """`DataFrame` with mcor files metadata"""
         if self._mcor_files is not None:
             return self._mcor_files
 
@@ -200,6 +217,7 @@ class Group:
 
     @property
     def method_calls(self) -> pd.DataFrame:
+        """`DataFrame` with `@record_call` functions"""
         if self._method_calls is not None:
             return self._method_calls
 
@@ -224,6 +242,7 @@ class Group:
 
     @property
     def programs(self) -> pd.DataFrame:
+        """`DataFrame` with one entry per _Event.csv_ file"""
         if self._programs is not None:
             return self._programs
 
@@ -243,6 +262,7 @@ class Group:
 
     @property
     def trials(self) -> pd.DataFrame:
+        """`DataFrame` with all olfactometer trials"""
         if self._trials is not None:
             return self._trials
 
@@ -269,7 +289,7 @@ class Group:
         return self._call_stack[-1].call_id
 
     def add_flag(self, flag) -> None:
-        """Set bits on the current call's flag (bitwise OR). Use inside @record_call."""
+        """Set bits on the current call's flag (bitwise OR). Use inside `@record_call`."""
         self._call_stack[-1].flag |= int(flag)
 
     def set_output(self, output: Object) -> None:
@@ -282,7 +302,7 @@ class Group:
         raise RuntimeError(message)
 
     def latest_calls(self, method_name: str) -> None | Object:
-        """Return Dataframe with all calls to 'method_name'."""
+        """Return Dataframe with all calls to `method_name`."""
 
         query = """
             SELECT * FROM method_calls
@@ -360,7 +380,11 @@ class Group:
     @record_call
     def pick_mcor_parameters(self, *, frame_fraction: float = 0.1) -> None:
         """
-        Open a GUI to pick motion-correction parameters.
+        Open a GUI to pick motion-correction parameters
+
+        **PARAMETERS**
+        - `frame_fraction`: percentage of frames (of the first raw file) to
+        use in the preview.
         """
         import sys
 
@@ -391,7 +415,7 @@ class Group:
             os.environ["BOKEH_ALLOW_WS_ORIGIN"] = "*"  # HACK: render inside VSCode
             output_notebook()
 
-        # --- metadata known WITHOUT loading the movie -> lets us draw instantly ---
+        # Metadata from the database
         exp = self.experiments.iloc[0]
         dims = (int(exp["height_px"]), int(exp["width_px"]))  # (rows, cols) = (y, x)
         um_per_px = (exp["height_um"] / dims[0], exp["width_um"] / dims[1])
@@ -423,7 +447,7 @@ class Group:
         }
 
         def patch_data(sy, sx, oy, ox):
-            # SAME primitive tile_and_correct() uses; follows caiman if it changes.
+            # same tile_and_correct() that caiman uses
             xs, ys, ws, hs = [], [], [], []
             for _inds, (r0, c0), (h, w) in sliding_window_dims(
                 dims, (oy, ox), (sy, sx)
@@ -435,7 +459,7 @@ class Group:
             return dict(x=xs, y=ys, w=ws, h=hs)
 
         def modify_doc(doc):
-            # ---- Render immediately and the background is added later ----
+            # render immediately and the background is added later
             p = bpl.figure(
                 x_range=(0, dims[1]), y_range=(dims[0], 0), width=600, height=600
             )
@@ -468,7 +492,7 @@ class Group:
                 line_color="white",
             )
 
-            # Select-view layer: click to highlight (red)
+            # Select-view layer (click to highlight)
             select_r = p.rect(
                 "x",
                 "y",
@@ -517,7 +541,7 @@ class Group:
                 line_dash="dashed",
             )
 
-            # Patches view: the solid representative (anchor) patch
+            # Patches view: the solid color patch
             anchor = ColumnDataSource(data=empty())
             anchor_r = p.rect(
                 "x",
@@ -564,12 +588,13 @@ class Group:
             h_size, r_sz = handle("yellow")  # corner: size = stride + overlap (x, y)
             h_overlap, r_ov = handle("orange")  # interior: overlap (x, y)
             h_shift, r_ms = handle("red")  # corner: max_shift (x, y)
+
             drag = PointDrawTool(renderers=[r_sz, r_ov, r_ms], add=False)
-            tap = TapTool(renderers=[select_r])  # Select view: click patches
+            tap = TapTool(renderers=[select_r])
             p.add_tools(drag, tap)
             p.toolbar.active_drag = drag
 
-            # --- Spinners for fine-tuning and readout ---
+            # Spinners for fine-tuning and readout
             def spinner(value, hi, title):
                 return Spinner(
                     low=0, high=hi, step=1, value=value, title=title, width=110
@@ -608,23 +633,31 @@ class Group:
             status = Div(text="<i>Loading background image…</i>")
 
             def apply_view():
-                mode = view.active  # 0 = Patches, 1 = Shifts, 2 = Select
+                # 0 = Patches, 1 = Shifts, 2 = Select
+                mode = view.active
+
                 grid_r.visible = overlap_r.visible = mode == 0
                 r_sz.visible = r_ov.visible = mode == 0  # size / overlap handles
+
                 anchor_r.visible = mode == 0  # solid patch (Patches only)
                 actual_r.visible = moved_r.visible = mode == 1  # dashed + shifted
                 band_r.visible = halo_r.visible = r_ms.visible = mode == 1
+
                 select_r.visible = mode == 2  # click-to-highlight grid
-                if mode == 2:  # Select -> tap tool; Patches/Shifts -> drag tool
+
+                # Select -> tap tool
+                if mode == 2:
                     p.toolbar.active_drag = None
                     p.toolbar.active_tap = tap
+
+                # Patches/Shifts -> drag tool
                 else:
                     p.toolbar.active_drag = drag
                     p.toolbar.active_tap = None
 
             view.on_change("active", lambda attr, old, new: apply_view())
 
-            # --- All relevant data (in pixels) ---
+            # All relevant data (in pixels)
             S = {k: init[k] for k in ("sx", "sy", "ox", "oy", "mx", "my", "dev")}
             flags = {"sync": False}
 
@@ -687,7 +720,7 @@ class Group:
                 sp_dev.value = S["dev"] * min(um_per_px)
                 flags["sync"] = False
 
-            # --- handle drags: each rule changes one thing, keeps the rest fixed ---
+            # handle drags
             def on_size(attr, old, new):
                 # corner sets size (stride + overlap); stride stays, overlap absorbs
                 if flags["sync"]:
@@ -725,6 +758,7 @@ class Group:
             # fires continuously and the handle coordinates are mutated in place,
             # so we read them on every move and redraw just the dragged primitives.
             # The full grid and spinners still settle on release (Python callbacks).
+
             p.js_on_event(
                 MouseMove,
                 CustomJS(
@@ -785,7 +819,7 @@ class Group:
                 ),
             )
 
-            # --- Spinner edits (um -> pixels) ---
+            # Spinner edits (um -> pixels)
             def on_spinner(key, factor):
                 def cb(attr, old, new):
                     if flags["sync"] or new is None:
@@ -851,17 +885,19 @@ class Group:
                 )
             )
 
-            # ---- Load the subsampled movie in a different thread ----
+            # Load the subsampled movie in a different thread
             def load_background():
                 cache = (
                     self.db.main_folder
                     / ODYN_FOLDER
                     / f"corr_{raw_path.stem}_{step}.npy"
                 )
+
                 if cache.exists():
                     corr = np.load(cache)
+
                 else:
-                    # subindices reads every Nth page, not the whole stack
+                    # subindices reads every Nth page
                     movie = cm.load(str(raw_path), subindices=slice(None, None, step))
                     corr = cm.local_correlations(movie, swap_dim=False)
                     corr[np.isnan(corr)] = 0
@@ -902,38 +938,45 @@ class Group:
         strides_um: list[float] = DEFAULT_STRIDES_UM,
     ) -> None:
         """
-        \033[1;35mRUN_MOTION_CORRECTION\033[0m
         Method that does test/final motion correction
 
-        \033[1;34mUSAGE\033[0m
-            db    = Database(main_folder)
-            group = db.groups[some_index]
-            group.run_motion_correction(...)
+        **USAGE**
+        ````python
+        db    = Database(main_folder)
+        group = db.groups[some_index]
+        group.run_motion_correction(...)
+        ```
 
-        \033[1;34mLIST OF PARAMETERS\033[0m (WITH DEFAULT VALUES)
+        **LIST OF PARAMETERS**
 
-            \033[0;32mBasic Parameters\033[0m
-            use_gui_parameters  = True              Override parameters with latest pick_mcor_parameters() values
-            use_last_parameters = False             Use parameters from last run as the defaults
-            is_test             = True              Whether to use a limited range of acquisitions in this run
+        *Basic Parameters*
+        - `use_gui_parameters`: Override parameters with latest `pick_mcor_parameters()` values
+        - `use_last_parameters`: Use parameters from last run as the defaults
+        - `is_test`: Whether to use a limited range of acquisitions in this run
 
-            \033[0;32mParameters in this section will be ignored if is_test == False\033[0m
-            first_acq           = 0                 Index of the first acquisition to motion correct
-            step_acq            = 1                 Get one acquisition for every 'step_acq' acquisitions
-            last_acq            = 3                 Index of the last acquisition to motion correct
+        *Parameters in this section will be ignored if* `is_test == False`
+        - `first_acq`: Index of the first acquisition to motion correct
+        - `step_acq`: Get one acquisition for every 'step_acq' acquisitions
+        - `last_acq`: Index of the last acquisition to motion correct
 
-            \033[0;32mCaImAn motion correction parameters (before metadata adjustments)\033[0m
-            border_nan          = "copy"            copy along the boundary (if True, fill in with NaN)
-            nonneg_movie        = False             make SAVED movie mostly non-negative
-            pw_rigid            = True              Piecewise-rigid (True) or rigid motion correction
-            shifts_opencv       = False             True = bicubic, False = FFT (True is faster)
-            max_deviation_um    = 12.0              max deviation for patch with respect to rigid shifts
-            max_shift_um        = [128.0, 128.0]    max allowed rigid shift
-            overlap_um          = [96.0, 96.0]      overlap between patches (patch = strides + overlaps)
-            strides_um          = [128.0, 128.0]    start a new patch every x or y um (only for pw-rigid)
+        *CaImAn motion correction parameters (before metadata adjustments)*
+        - `border_nan`: copy along the boundary (if `True`, fill in with NaN)
+        - `nonneg_movie`: make SAVED movie mostly non-negative
+        - `pw_rigid`: Piecewise-rigid (`True`) or rigid motion correction
+        - `shifts_opencv`: `True` = bicubic, `False` = FFT (True is faster)
+        - `max_deviation_um`: max deviation for patch with respect to rigid shifts
+        - `max_shift_um`: max allowed rigid shift
+        - `overlap_um`: overlap between patches (patch = strides + overlaps)
+        - `strides_um`: start a new patch every x or y um (only for pw-rigid)
 
-        \033[1;34mEXAMPLES\033[0m
-            group.run_motion_correction(is_test=True, last_acq=10)
+        **EXAMPLES**
+        ```python
+        group.run_motion_correction(
+            is_test=False,
+            use_gui_parameters=False,
+            overlap = [48.0, 48.0]
+        )
+        ```
         """
 
         # --- Optionally override parameters with GUI-picked values --- #
@@ -1104,43 +1147,47 @@ class Group:
         q_min: float = 0.05,
     ) -> None:
         """
-        \033[1;35mPLAY_MOVIE\033[0m
         Play and save movies for quality control
 
-        \033[1;34mUSAGE\033[0m
-            group = Group(experimentFolder)
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
             group.play_movie(...)
+        ```
 
-        \033[1;34mLIST OF PARAMETERS\033[0m (WITH DEFAULT VALUES)
+        **PARAMETERS**
 
-            \033[0;32mBasic settings\033[0m
-            use_last_parameters = False             Use parameters from last run as the defaults
-            grid                = ["raw", "mcor"]   How to concatenate movies horizontally.
-                                                    ("raw", "mcor", "test" in some order)
+        *Basic settings*
+        - `use_last_parameters`: Use parameters from last run as the defaults
+        - `grid`: How to concatenate movies horizontally ("raw", "mcor", "test" in some order)
 
-            \033[0;32mMovie loading settings\033[0m
-            downsample_ratio    = 0.03              Percentage of frames to keep
+        *Movie loading settings*
+        - `downsample_ratio`: Percentage of frames to keep
 
-            \033[0;32mVideo saving\033[0m
-            opencv_codec        = "MJPG"            Codec used to encode the saved video
-            save_movie          = True              Put "true" if you want to save the preview video to a file
-            save_folder         = r"./movies"       "." is the main_folder (r is to use \\ in the path)
+        *Video saving*
+        - `opencv_codec`: Codec used to encode the saved video
+        - `save_movie`: Put `True` if you want to save the preview video to a file
+        - `save_folder`: `"."` is the main_folder (r is to use \\ in the path)
 
-            \033[0;32mVideo settings\033[0m
-            backend             = "embed_opencv"    "opencv" for popup and "embed_opencv" for inline player
-            do_loop             = false             Loop the video or not
-            fr                  = 30                How fast to play the video (frames/s)
-            magnification       = 1                 Magnification of video
-            plot_text           = true              Add current frame label on the video
-            q_max               = 99.5              Quantile to consider as white
-            q_min               = 0.05              Quantile to consider as black
+        *Video settings*
+        - `backend`: "opencv" for popup and "embed_opencv" for inline player
+        - `do_loop`: Loop the video or not
+        - `fr`: How fast to play the video (frames/s)
+        - `magnification`: Magnification of video
+        - `plot_text`: Add current frame label on the video
+        - `q_max`: Quantile to consider as white
+        - `q_min`: Quantile to consider as black
 
-        \033[1;34mEXAMPLES\033[0m
-            group.play_movie(grid=["raw"], save_folder="~/TempData/20260101/e1/movies")
-                Running this command would save a compilation of all raw movies
+        **EXAMPLES**
+        - Running this command would save a compilation of all raw movies
+        ```python
+        group.play_movie(grid=["raw"], save_folder="~/TempData/20260101/e1/movies")
+        ```
 
-            group.play_movie(grid=["raw", "test"])
-                This would save a video with raw movies on the left and test on the right
+        - This would save a video with raw movies on the left and test on the right
+        ```python
+        group.play_movie(grid=["raw", "test"])
+        ```
         """
         # --- Validate parameters --- #
 
@@ -1216,14 +1263,14 @@ class Group:
 
     def delete_temp_files(self) -> None:
         """
-        \033[1;35mDELETE_TEMP_FILES\033[0m
+        \033[1;35mDELETE_TEMP_FILES**
         Deletes all temp files associated with this experiment
 
-        \033[1;34mUSAGE\033[0m
+        **USAGE*
             group = Group(experimentFolder)
             group.delete_temp_files()
 
-        \033[1;34mEXAMPLES\033[0m
+        **EXAMPLES*
             group.delete_temp_files()
         """
 

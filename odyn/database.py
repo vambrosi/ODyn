@@ -65,7 +65,7 @@ PROGRAM_TYPES = [
 
 class ExpFlag(IntFlag):
     """
-    call_flag bits for Database.add_experiment (bit 0 reserved by CallFlag.RAISED).
+    call_flag bits for `Database.add_experiment` (bit 0 reserved by `CallFlag.RAISED`).
     """
 
     ALREADY_IN_DB = 1 << 1  # experiment already present, nothing inserted
@@ -78,22 +78,33 @@ class ExpFlag(IntFlag):
 
 class Database:
     """
-    \033[1;35mDATABASE\033[0m
     Creates and connects you to the database.
 
-    \033[1;34mUSAGE\033[0m
-        db = Database(main_folder)
+    **USAGE**
+    ```python
+    db = Database(main_folder)
+    ```
 
-    \033[1;34mRELEVANT PROPRIETIES/METHODS\033[0m
-        db.groups          <- Return list of Groups for processing/analysis
-        db.experiments     <- Returns DataFrame with experiment metadata
-        db.acquisitions    <- Returns DataFrame with acquisition metadata
-        db.mcor_files      <- Returns DataFrame with mcor files metadata
+    **RELEVANT PROPERTIES**
+    ```python
+        db.groups             # `List` of `Group`s for processing/analysis
 
-    Run Database.help('method_name') to know more about one of the methods above.
+        db.acquisitions       # `DataFrame` with acquisition metadata
+        db.events             # `DataFrame` with olfactometer events
+        db.experiments        # `DataFrame` with experiment metadata
+        db.mcor_files         # `DataFrame` with mcor files metadata
+        db.method_calls       # `DataFrame` with `@record_call` functions
+        db.odors              # `DataFrame` with current list of odors
+        db.programs           # `DataFrame` with one entry per _Event.csv_ file
+        db.trials             # `DataFrame` with all olfactometer trials
+    ```
 
-    \033[1;34mEXAMPLE\033[0m
-        Database.help('experiment')
+    **RELEVANT METHODS**
+    ```python
+        db.add_experiment(...)          # Add a new experiment folder
+        db.update(...)                  # Find and add all experiment folders
+        db.latest_calls(method_name)    # `DataFrame` with `method_name` calls
+    ```
     """
 
     def __init__(self, path: str | Path, update=False):
@@ -161,6 +172,7 @@ class Database:
 
     @property
     def acquisitions(self) -> pd.DataFrame:
+        """`DataFrame` with acquisition metadata"""
         if self._acquisitions is not None:
             return self._acquisitions
 
@@ -174,6 +186,7 @@ class Database:
 
     @property
     def events(self) -> pd.DataFrame:
+        """`DataFrame` with olfactometer events"""
         if self._events is not None:
             return self._events
 
@@ -186,6 +199,7 @@ class Database:
 
     @property
     def experiments(self) -> pd.DataFrame:
+        """`DataFrame` with experiment metadata"""
         if self._experiments is not None:
             return self._experiments
 
@@ -199,6 +213,7 @@ class Database:
 
     @property
     def groups(self) -> list[Group]:
+        """`List` of `Group`s for processing/analysis"""
         if self._groups is not None:
             return self._groups
 
@@ -212,6 +227,7 @@ class Database:
 
     @property
     def mcor_files(self) -> pd.DataFrame:
+        """`DataFrame` with mcor files metadata"""
         if self._mcor_files is not None:
             return self._mcor_files
 
@@ -223,6 +239,7 @@ class Database:
 
     @property
     def method_calls(self) -> pd.DataFrame:
+        """`DataFrame` with `@record_call` functions"""
         if self._method_calls is not None:
             return self._method_calls
 
@@ -243,6 +260,7 @@ class Database:
 
     @property
     def odors(self) -> pd.DataFrame:
+        """`DataFrame` with current list of odors"""
         if self._odors is not None:
             return self._odors
 
@@ -255,6 +273,7 @@ class Database:
 
     @property
     def programs(self) -> pd.DataFrame:
+        """`DataFrame` with one entry per _Event.csv_ file"""
         if self._programs is not None:
             return self._programs
 
@@ -269,6 +288,7 @@ class Database:
 
     @property
     def trials(self) -> pd.DataFrame:
+        """`DataFrame` with all olfactometer trials"""
         if self._trials is not None:
             return self._trials
 
@@ -453,6 +473,18 @@ class Database:
         rel_path: str,
         rel_raw_paths: None | list[str] = None,
     ) -> None:
+        """
+        Add a new experiment folder to the database
+
+        **PARAMETERS**
+        - `rel_path` is the experiment folder path relative to the `main_folder`
+        - `rel_raw_paths` is the raw files list (if None it searches the raw folder)
+
+        **EXAMPLE**
+        ```python
+        db.add_experiment(rel_path="20260623/m462/e2")
+        ```
+        """
 
         logger.info("Adding experiment to database...")
 
@@ -763,6 +795,15 @@ class Database:
 
     @record_call
     def update(self) -> None:
+        """
+        Find and add all experiments folders in the `main_folder` to the database.
+
+        Experiment folders are folders that contain a `raw` subfolder with
+        ScanImage TIFFs.
+
+        It skips the ones that are already included in database.
+        """
+
         # ----------------------------------------------------------------------- #
         #
         # Collect all TIFF files that satisfy:
@@ -827,14 +868,13 @@ class Database:
 
     def from_query(self, query: str):
         """
-        \033[1;35mFROM_QUERY\033[0m
         Creates a pandas DataFrame from a SQL query.
 
-        \033[1;34mUSAGE\033[0m
+        **USAGE**
             db = Database(main_folder)
             df = db.from_query(query_as_a_string)
 
-        \033[1;34mEXAMPLE\033[0m
+        **EXAMPLE**
             db.from_query("SELECT exp_id, exp_name FROM experiments;")
         """
         return pd.read_sql_query(query, self.con)
