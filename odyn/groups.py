@@ -598,36 +598,51 @@ class Group:
             p.toolbar.active_drag = drag
 
             # Spinners for fine-tuning and readout
-            def spinner(value, hi, title):
+            def spinner(value, hi, step, title):
                 return Spinner(
-                    low=0, high=hi, step=1, value=value, title=title, width=110
+                    low=0, high=hi, step=step, value=value, title=title, width=110
                 )
 
             sp_sx = spinner(
-                init["sx"] * um_per_px[1], dims[1] * um_per_px[1], "Stride x (µm)"
+                init["sx"] * um_per_px[1],
+                dims[1] * um_per_px[1],
+                um_per_px[1],
+                "Stride x (µm)",
             )
             sp_sy = spinner(
-                init["sy"] * um_per_px[0], dims[0] * um_per_px[0], "Stride y (µm)"
+                init["sy"] * um_per_px[0],
+                dims[0] * um_per_px[0],
+                um_per_px[0],
+                "Stride y (µm)",
             )
             sp_ox = spinner(
-                init["ox"] * um_per_px[1], dims[1] * um_per_px[1], "Overlap x (µm)"
+                init["ox"] * um_per_px[1],
+                dims[1] * um_per_px[1],
+                um_per_px[1],
+                "Overlap x (µm)",
             )
             sp_oy = spinner(
-                init["oy"] * um_per_px[0], dims[0] * um_per_px[0], "Overlap y (µm)"
+                init["oy"] * um_per_px[0],
+                dims[0] * um_per_px[0],
+                um_per_px[0],
+                "Overlap y (µm)",
             )
             sp_mx = spinner(
                 init["mx"] * um_per_px[1],
                 (dims[1] // 2) * um_per_px[1],
+                um_per_px[1],
                 "Max shift x (µm)",
             )
             sp_my = spinner(
                 init["my"] * um_per_px[0],
                 (dims[0] // 2) * um_per_px[0],
+                um_per_px[0],
                 "Max shift y (µm)",
             )
             sp_dev = spinner(
                 init["dev"] * min(um_per_px),
                 (min(dims) // 4) * min(um_per_px),
+                max(um_per_px),
                 "Max deviation (µm)",
             )
 
