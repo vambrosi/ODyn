@@ -123,6 +123,7 @@ class Database:
         self._mcor_files: None | pd.DataFrame = None
         self._method_calls: None | pd.DataFrame = None
         self._odors: None | pd.DataFrame = None
+        self._outputs: None | pd.DataFrame = None
         self._programs: None | pd.DataFrame = None
         self._trials: None | pd.DataFrame = None
 
@@ -258,6 +259,19 @@ class Database:
         self._odors.set_index("odor_id", inplace=True)
 
         return self._odors
+
+    @property
+    def outputs(self) -> pd.DataFrame:
+        """`DataFrame` with output files of functions"""
+        if self._outputs is not None:
+            return self._outputs
+
+        query = "SELECT * FROM outputs;"
+
+        self._outputs = pd.read_sql_query(query, self.con)
+        self._outputs.set_index("output_id", inplace=True)
+
+        return self._outputs
 
     @property
     def programs(self) -> pd.DataFrame:
@@ -430,12 +444,15 @@ class Database:
                 [self.current_call_id, rel_path],
             )
 
+        self._outputs = None
+
     def _reset_caches(self) -> None:
         self._acquisitions = None
         self._events = None
         self._experiments = None
         self._mcor_files = None
         self._method_calls = None
+        self._outputs = None
         self._programs = None
         self._trials = None
 
@@ -449,6 +466,7 @@ class Database:
             group._experiments = None
             group._mcor_files = None
             group._method_calls = None
+            group._outputs = None
             group._programs = None
             group._trials = None
 

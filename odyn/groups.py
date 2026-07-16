@@ -95,6 +95,7 @@ class Group:
         self._experiments: None | pd.DataFrame = None
         self._mcor_files: None | pd.DataFrame = None
         self._method_calls: None | pd.DataFrame = None
+        self._outputs: None | pd.DataFrame = None
         self._programs: None | pd.DataFrame = None
         self._trials: None | pd.DataFrame = None
 
@@ -221,6 +222,24 @@ class Group:
         return self._method_calls
 
     @property
+    def outputs(self) -> pd.DataFrame:
+        """`DataFrame` with output files of functions"""
+        if self._outputs is not None:
+            return self._outputs
+
+        query = f"""
+            SELECT o.* FROM group_experiments AS ge
+                JOIN method_calls AS mc ON ge.group_id = mc.group_id
+                JOIN outputs AS o ON mc.method_call_id = o.method_call_id
+                WHERE ge.group_id = {self.group_id};
+        """
+
+        self._outputs = pd.read_sql_query(query, self.db.con)
+        self._outputs.set_index("output_id", inplace=True)
+
+        return self._outputs
+
+    @property
     def programs(self) -> pd.DataFrame:
         """`DataFrame` with one entry per _Event.csv_ file"""
         if self._programs is not None:
@@ -336,12 +355,15 @@ class Group:
                 [self.current_call_id, rel_path],
             )
 
+        self._outputs = None
+
     def _reset_caches(self) -> None:
         self._acquisitions = None
         self._events = None
         self._experiments = None
         self._mcor_files = None
         self._method_calls = None
+        self._outputs = None
         self._programs = None
         self._trials = None
 
@@ -350,6 +372,7 @@ class Group:
         self.db._experiments = None
         self.db._mcor_files = None
         self.db._method_calls = None
+        self.db._outputs = None
         self.db._programs = None
         self.db._trials = None
 
