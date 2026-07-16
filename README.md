@@ -32,4 +32,6 @@ where `ODYN_PATH` is the folder where you installed `odyn`.
 
 ## Usage
 
-Create a notebook file (extension `.ipynb`) in VS Code, and run `from odyn import Database` in a cell. You will get more instructions after that. You will also need to select `caiman` as your _Python Environment_ and install the Jupyter extension (you will get prompts after you try to run a notebook cell).
+Create a notebook file (extension `.ipynb`) in VS Code, and run `from odyn import Database, Group` in a cell. You will get more instructions after that. You will also need to select `caiman` as your _Python Environment_ and install the Jupyter extension (you will get prompts after you try to run a notebook cell).
+
+Check the `notebooks` folder to get more detailed examples.
