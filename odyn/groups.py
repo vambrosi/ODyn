@@ -116,6 +116,10 @@ class Group:
     # ----------------------------------------------------------------------- #
 
     @property
+    def main_folder(self):
+        return self.db.main_folder
+
+    @property
     def acquisitions(self) -> pd.DataFrame:
         """`DataFrame` with acquisition metadata"""
         if self._acquisitions is not None:

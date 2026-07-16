@@ -1,8 +1,8 @@
 from .database import Database
 from .groups import Group
-from .utils import logger
+from .utils import logger, record_call
 
-__all__ = ["Database", "Group"]
+__all__ = ["Database", "Group", "record_call"]
 
 # Print a helpful string when user imports this library
 logger.info("Import Database and Group classes for db UI and help functions!")
