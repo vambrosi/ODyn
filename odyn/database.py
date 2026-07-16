@@ -390,7 +390,7 @@ class Database:
 
         df.parameters = df.parameters.apply(json.loads)
         df.call_output = df.call_output.apply(
-            lambda s: json.loads(s) if isinstance(s, str) else None
+            lambda s: json.loads(s) if isinstance(s, str) else {}
         )
 
         df_parameters = pd.json_normalize(df.parameters).set_index(df.index)
