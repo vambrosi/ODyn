@@ -892,7 +892,7 @@ class Database:
         """
 
         cur = self.con.execute(query)
-
+        self._reset_caches()
 
         return cur
 

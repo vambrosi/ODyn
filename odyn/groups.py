@@ -1120,7 +1120,7 @@ class Group:
         magnification: float = 1,
         plot_text: bool = True,
         q_max: float = 99.5,
-        q_min: float = 0.05,
+        q_min: float = 0.00,
     ) -> None:
         """
         Play and save movies for quality control
