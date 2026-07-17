@@ -892,9 +892,9 @@ class Group:
                     bpl.row(
                         p,
                         bpl.column(
-                            bpl.row(sp_sx, sp_sy),
-                            bpl.row(sp_ox, sp_oy),
-                            bpl.row(sp_mx, sp_my),
+                            bpl.row(sp_sy, sp_sx),
+                            bpl.row(sp_oy, sp_ox),
+                            bpl.row(sp_my, sp_mx),
                             sp_dev,
                             save,
                             status,
