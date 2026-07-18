@@ -47,6 +47,10 @@ from .groups import Group
 from .utils import *
 from .utils import CallFrame
 
+# --------------------------------------------------------------------------- #
+# Constants
+# --------------------------------------------------------------------------- #
+
 TIMEDELTA_MS = timedelta(milliseconds=1)
 H5_TOLERANCE = timedelta(milliseconds=100)
 DT_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
@@ -74,6 +78,20 @@ class ExpFlag(IntFlag):
     METADATA_CHANGED = 1 << 4  # TIFF metadata changed, skipped
     H5_UNMATCHED_ACQ = 1 << 5  # some H5 trials had no matching acquisition
     TRIAL_NO_ACQ = 1 << 6  # some trials matched H5 but had no acquisition
+
+
+class TrialPhase(IntEnum):
+    NOT_IN_TRIAL = 0
+    TRIAL_START = 1
+    ODOR_WINDOW = 2
+    INTERVAL = 3
+    RESPONSE_WINDOW = 4
+    TRIAL_END = 5
+
+
+# --------------------------------------------------------------------------- #
+# Main UI Class
+# --------------------------------------------------------------------------- #
 
 
 class Database:
@@ -158,6 +176,10 @@ class Database:
 
     def __del__(self):
         self.con.close()
+
+    # ----------------------------------------------------------------------- #
+    # SQLite Tables as DataFrames
+    # ----------------------------------------------------------------------- #
 
     @property
     def acquisitions(self) -> pd.DataFrame:
@@ -303,6 +325,10 @@ class Database:
 
         return self._trials
 
+    # ----------------------------------------------------------------------- #
+    # Private Methods
+    # ----------------------------------------------------------------------- #
+
     def _get_raw_metadata(self, path: Path) -> None | tuple[Object, Object]:
         tif = TiffFile(path)
 
@@ -371,6 +397,36 @@ class Database:
 
         return experiment, acquisition
 
+    def _reset_caches(self) -> None:
+        self._acquisitions = None
+        self._events = None
+        self._experiments = None
+        self._mcor_files = None
+        self._method_calls = None
+        self._outputs = None
+        self._programs = None
+        self._trials = None
+
+        if self._groups is None:
+            return
+
+        # In case a specific group can still be accessed
+        for group in self._groups:
+            group._acquisitions = None
+            group._events = None
+            group._experiments = None
+            group._mcor_files = None
+            group._method_calls = None
+            group._outputs = None
+            group._programs = None
+            group._trials = None
+
+        self._groups = None
+
+    # ----------------------------------------------------------------------- #
+    # Related to Records of Method Calls
+    # ----------------------------------------------------------------------- #
+
     @property
     def current_call_id(self) -> int:
         assert (
@@ -382,16 +438,51 @@ class Database:
         """Set bits on the current call's flag (bitwise OR). Use inside @record_call."""
         self._call_stack[-1].flag |= int(flag)
 
-    def set_output(self, output: Object) -> None:
-        """Record this call's output as JSON. Only keeps the latest write."""
-        self._call_stack[-1].output = output
+    def add_output_file(self, path: str | Path) -> None:
+        """
+        Record an output file in the outputs table. Use inside @record_call.
+        """
+        rel_path = str(Path(path).relative_to(self.main_folder))
+        with self.con as con:
+            con.execute(
+                "INSERT INTO outputs (method_call_id, file_path, removed) VALUES (?, ?, FALSE);",
+                [self.current_call_id, rel_path],
+            )
+
+        self._outputs = None
 
     def fail(self, flag, message: str = "") -> None:
         """Flag the current call and abort it by raising RuntimeError."""
         self.add_flag(flag)
         raise RuntimeError(message)
 
-    def latest_calls(self, method_name: str) -> None | Object:
+    def set_output(self, output: Object) -> None:
+        """Record this call's output as JSON. Only keeps the latest write."""
+        self._call_stack[-1].output = output
+
+    # ----------------------------------------------------------------------- #
+    # Database Queries
+    # ----------------------------------------------------------------------- #
+
+    def from_query(self, query: str) -> pd.DataFrame:
+        """
+        Creates a pandas DataFrame from a SQL query.
+        Use db.run_query() for inserts/updates.
+
+        **USAGE**
+        ```python
+        db = Database(main_folder)
+        df = db.from_query(query_as_a_string)
+        ```
+
+        **EXAMPLE**
+        ```python
+        db.from_query("SELECT exp_id, exp_name FROM experiments;")
+        ```
+        """
+        return pd.read_sql_query(query, self.con)
+
+    def latest_calls(self, method_name: str) -> pd.DataFrame:
         """Return DataFrame with all calls to 'method_name'."""
 
         query = """
@@ -433,44 +524,45 @@ class Database:
 
         return json.loads(row["call_output"]) if row else None
 
-    def add_output_file(self, path: str | Path) -> None:
+    # ----------------------------------------------------------------------- #
+    # Custom SQL INSERT/UPDATE
+    # ----------------------------------------------------------------------- #
+
+    def commit_changes(self):
+        self.con.commit()
+
+    def rollback_changes(self):
+        self._reset_caches()
+        self.con.rollback()
+
+    def run_query(self, query: str) -> Cursor:
         """
-        Record an output file in the outputs table. Use inside @record_call.
+        Run SQL query (be careful!).
+
+        **USAGE**
+        ```python
+        db = Database(main_folder)
+        db.run_query(query_as_a_string)
+        ```
+
+        **EXAMPLE**
+        ```python
+        db.run_query(\"\"\"
+            UPDATE experiments
+                SET exp_name = "test"
+                WHERE exp_id = 10;
+        \"\"\")
+        ````
         """
-        rel_path = str(Path(path).relative_to(self.main_folder))
-        with self.con as con:
-            con.execute(
-                "INSERT INTO outputs (method_call_id, file_path, removed) VALUES (?, ?, FALSE);",
-                [self.current_call_id, rel_path],
-            )
 
-        self._outputs = None
+        cur = self.con.execute(query)
+        self._reset_caches()
 
-    def _reset_caches(self) -> None:
-        self._acquisitions = None
-        self._events = None
-        self._experiments = None
-        self._mcor_files = None
-        self._method_calls = None
-        self._outputs = None
-        self._programs = None
-        self._trials = None
+        return cur
 
-        if self._groups is None:
-            return
-
-        # In case a specific group can still be accessed
-        for group in self._groups:
-            group._acquisitions = None
-            group._events = None
-            group._experiments = None
-            group._mcor_files = None
-            group._method_calls = None
-            group._outputs = None
-            group._programs = None
-            group._trials = None
-
-        self._groups = None
+    # ----------------------------------------------------------------------- #
+    # Updating the Database
+    # ----------------------------------------------------------------------- #
 
     @record_call
     def add_experiment(
@@ -872,54 +964,110 @@ class Database:
 
         logger.info("Database updated!")
 
-    def from_query(self, query: str) -> pd.DataFrame:
-        """
-        Creates a pandas DataFrame from a SQL query.
 
-        **USAGE**
-        ```python
-        db = Database(main_folder)
-        df = db.from_query(query_as_a_string)
-        ```
+def _db_insert(cur: Cursor, table_name: str, data: Object | list[Object]) -> int:
+    # HACK:
+    #   ONLY FOR INTERNAL USE (CAN BE USED FOR SQL INJECTION)
+    #   Column names are not validated, for simplicity
 
-        **EXAMPLE**
-        ```python
-        db.from_query("SELECT exp_id, exp_name FROM experiments;")
-        ```
-        """
-        return pd.read_sql_query(query, self.con)
+    template = data[0] if isinstance(data, list) else data
 
-    def run_query(self, query: str) -> Cursor:
-        """
-        Run SQL query (be careful!).
+    insertion_query = (
+        f"INSERT INTO {table_name} "
+        f"({", ".join(template.keys())}) "
+        f"VALUES (:{", :".join(template.keys())});"
+    )
 
-        **USAGE**
-        ```python
-        db = Database(main_folder)
-        db.run_query(query_as_a_string)
-        ```
+    if isinstance(data, list):
+        cur.executemany(insertion_query, data)
 
-        **EXAMPLE**
-        ```python
-        db.run_query(\"\"\"
-            UPDATE experiments
-                SET exp_name = "test"
-                WHERE exp_id = 10;
-        \"\"\")
-        ````
-        """
+    else:
+        cur.execute(insertion_query, data)
 
-        cur = self.con.execute(query)
-        self._reset_caches()
+    # Check to make output type == int
+    lastrowid = cur.lastrowid
+    assert lastrowid is not None
 
-        return cur
+    return lastrowid
 
-    def commit_changes(self):
-        self.con.commit()
 
-    def rollback_changes(self):
-        self._reset_caches()
-        self.con.rollback()
+# --------------------------------------------------------------------------- #
+# Data Parsing and Matching
+# --------------------------------------------------------------------------- #
+
+
+def _get_h5_metadata(
+    paths: list[Path], exp_start: datetime
+) -> None | dict[str, np.ndarray]:
+    # There must be at most one path
+    if not paths:
+        return None
+
+    path = paths[0]
+
+    # Very similar to getScopeH5Timestamps
+    logger.info(f"Getting timing data from: '{path}'")
+
+    # Parse experiment start time
+    exp_start_np = np.datetime64(exp_start)
+
+    with h5py.File(path) as f:
+        samplerate = f.attrs["samplerate"]
+
+        imaging_TTL = f["ImagingWindow"][:]
+        odor_TTL = f["OdorDelivery"][:]
+
+        # TODO: (Vinicius)
+        #   Maybe change the way we find starts? Because adding the distance argument
+        #   picks the highest and not the first choice (both in MATLAB and Python).
+
+        # NOTE: (Priscilla, from MATLAB code, adapted)
+        #   Added distance to deal with problematic file where
+        #   code found 2 peaks right next to each other
+
+        trial_starts, _ = find_peaks(
+            np.diff(imaging_TTL), height=2.0, distance=samplerate / 2
+        )
+        odor_starts, _ = find_peaks(
+            np.diff(odor_TTL), height=2.0, distance=samplerate / 10
+        )
+        odor_ends, _ = find_peaks(
+            -np.diff(odor_TTL), height=2.0, distance=samplerate / 10
+        )
+
+        # Returns None if no trials where found
+        if len(trial_starts) == 0:
+            logger.info("No trial triggers found in this H5 file.")
+            return None
+
+        # Shift everything by first trial start, to match FrameTimestamp_sec data
+        # FrameTimestamp_sec always starts at zero, so they almost exactly match
+        shift = trial_starts[0]
+
+        trial_starts -= shift
+        odor_starts -= shift
+        odor_ends -= shift
+
+        assert len(trial_starts) == len(odor_starts) == len(odor_ends), (
+            f"The following do not match:\n"
+            f"    Number of trials {len(trial_starts)}\n"
+            f"    Odor presentation starts {len(odor_starts)}\n"
+            f"    Odor presentation ends {len(odor_ends)}"
+        )
+
+        logger.info(f"Found {len(trial_starts)} trial starts in the H5 file.")
+
+        # Convert to timedeltas
+        trial_starts = (trial_starts / samplerate * 1e9).astype("timedelta64[ns]")
+        odor_starts = (odor_starts / samplerate * 1e9).astype("timedelta64[ns]")
+        odor_ends = (odor_ends / samplerate * 1e9).astype("timedelta64[ns]")
+
+        # Return the datetimes to be matched with acquisition frame times
+        return {
+            "trial_starts": exp_start_np + trial_starts,
+            "odor_starts": exp_start_np + odor_starts,
+            "odor_ends": exp_start_np + odor_ends,
+        }
 
 
 def _load_event_data(
@@ -1170,115 +1318,6 @@ def _match_csv_to_h5(
     return {best_k + j: (j, float(diffs[j])) for j in range(n_h5)}
 
 
-def _db_insert(cur: Cursor, table_name: str, data: Object | list[Object]) -> int:
-    # HACK:
-    #   ONLY FOR INTERNAL USE (CAN BE USED FOR SQL INJECTION)
-    #   Column names are not validated, for simplicity
-
-    template = data[0] if isinstance(data, list) else data
-
-    insertion_query = (
-        f"INSERT INTO {table_name} "
-        f"({", ".join(template.keys())}) "
-        f"VALUES (:{", :".join(template.keys())});"
-    )
-
-    if isinstance(data, list):
-        cur.executemany(insertion_query, data)
-
-    else:
-        cur.execute(insertion_query, data)
-
-    # Check to make output type == int
-    lastrowid = cur.lastrowid
-    assert lastrowid is not None
-
-    return lastrowid
-
-
-def _to_datetime(dt: np.datetime64) -> datetime:
-    dt_str = np.datetime_as_string(dt).item()
-    return datetime.fromisoformat(dt_str)
-
-
-def _to_datetime_str(dt: np.datetime64) -> str:
-    return _to_datetime(dt).strftime(DT_FORMAT)
-
-
-def _get_h5_metadata(
-    paths: list[Path], exp_start: datetime
-) -> None | dict[str, np.ndarray]:
-    # There must be at most one path
-    if not paths:
-        return None
-
-    path = paths[0]
-
-    # Very similar to getScopeH5Timestamps
-    logger.info(f"Getting timing data from: '{path}'")
-
-    # Parse experiment start time
-    exp_start_np = np.datetime64(exp_start)
-
-    with h5py.File(path) as f:
-        samplerate = f.attrs["samplerate"]
-
-        imaging_TTL = f["ImagingWindow"][:]
-        odor_TTL = f["OdorDelivery"][:]
-
-        # TODO: (Vinicius)
-        #   Maybe change the way we find starts? Because adding the distance argument
-        #   picks the highest and not the first choice (both in MATLAB and Python).
-
-        # NOTE: (Priscilla, from MATLAB code, adapted)
-        #   Added distance to deal with problematic file where
-        #   code found 2 peaks right next to each other
-
-        trial_starts, _ = find_peaks(
-            np.diff(imaging_TTL), height=2.0, distance=samplerate / 2
-        )
-        odor_starts, _ = find_peaks(
-            np.diff(odor_TTL), height=2.0, distance=samplerate / 10
-        )
-        odor_ends, _ = find_peaks(
-            -np.diff(odor_TTL), height=2.0, distance=samplerate / 10
-        )
-
-        # Returns None if no trials where found
-        if len(trial_starts) == 0:
-            logger.info("No trial triggers found in this H5 file.")
-            return None
-
-        # Shift everything by first trial start, to match FrameTimestamp_sec data
-        # FrameTimestamp_sec always starts at zero, so they almost exactly match
-        shift = trial_starts[0]
-
-        trial_starts -= shift
-        odor_starts -= shift
-        odor_ends -= shift
-
-        assert len(trial_starts) == len(odor_starts) == len(odor_ends), (
-            f"The following do not match:\n"
-            f"    Number of trials {len(trial_starts)}\n"
-            f"    Odor presentation starts {len(odor_starts)}\n"
-            f"    Odor presentation ends {len(odor_ends)}"
-        )
-
-        logger.info(f"Found {len(trial_starts)} trial starts in the H5 file.")
-
-        # Convert to timedeltas
-        trial_starts = (trial_starts / samplerate * 1e9).astype("timedelta64[ns]")
-        odor_starts = (odor_starts / samplerate * 1e9).astype("timedelta64[ns]")
-        odor_ends = (odor_ends / samplerate * 1e9).astype("timedelta64[ns]")
-
-        # Return the datetimes to be matched with acquisition frame times
-        return {
-            "trial_starts": exp_start_np + trial_starts,
-            "odor_starts": exp_start_np + odor_starts,
-            "odor_ends": exp_start_np + odor_ends,
-        }
-
-
 def _parse_event_file(path: Path, program_start: datetime) -> pd.DataFrame:
     """
     Perform simple parsing into a DataFrame to be iterated over.
@@ -1342,3 +1381,12 @@ def _parse_program_starts(db: Database, start: datetime) -> list[tuple[datetime,
                     starts.append((dt, program_name))
 
     return starts
+
+
+def _to_datetime(dt: np.datetime64) -> datetime:
+    dt_str = np.datetime_as_string(dt).item()
+    return datetime.fromisoformat(dt_str)
+
+
+def _to_datetime_str(dt: np.datetime64) -> str:
+    return _to_datetime(dt).strftime(DT_FORMAT)

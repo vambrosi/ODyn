@@ -43,6 +43,9 @@ from .utils import CallFrame
 if TYPE_CHECKING:
     from .database import Database
 
+# --------------------------------------------------------------------------- #
+# Constants
+# --------------------------------------------------------------------------- #
 
 # Default motion-correction parameters (in um). Single source shared by
 # run_motion_correction and pick_mcor_parameters so the two never drift.
@@ -50,6 +53,17 @@ DEFAULT_STRIDES_UM = [128.0, 128.0]
 DEFAULT_OVERLAP_UM = [96.0, 96.0]
 DEFAULT_MAX_SHIFT_UM = [128.0, 128.0]
 DEFAULT_MAX_DEVIATION_UM = 12.0
+
+
+class MovieType(Enum):
+    RAW = "raw"
+    MCOR = "mcor"
+    TEST = "test"
+
+
+# --------------------------------------------------------------------------- #
+# Main Data Processing\Analysis Class
+# --------------------------------------------------------------------------- #
 
 
 class Group:
@@ -112,13 +126,13 @@ class Group:
 
         return msg
 
-    # ----------------------------------------------------------------------- #
-    # Database Interaction
-    # ----------------------------------------------------------------------- #
-
     @property
     def main_folder(self):
         return self.db.main_folder
+
+    # ----------------------------------------------------------------------- #
+    # SQLite Tables as DataFrames
+    # ----------------------------------------------------------------------- #
 
     @property
     def acquisitions(self) -> pd.DataFrame:
@@ -280,6 +294,10 @@ class Group:
 
         return self._trials
 
+    # ----------------------------------------------------------------------- #
+    # Related to Records of Method Calls
+    # ----------------------------------------------------------------------- #
+
     @property
     def current_call_id(self) -> int:
         assert (
@@ -291,16 +309,33 @@ class Group:
         """Set bits on the current call's flag (bitwise OR). Use inside `@record_call`."""
         self._call_stack[-1].flag |= int(flag)
 
-    def set_output(self, output: Object) -> None:
-        """Record this call's output as JSON. Last write wins."""
-        self._call_stack[-1].output = output
+    def add_output_file(self, path: str | Path) -> None:
+        """
+        Record an output file in the outputs table. Use inside @record_call.
+        """
+        rel_path = str(Path(path).relative_to(self.db.main_folder))
+        with self.db.con as con:
+            con.execute(
+                "INSERT INTO outputs (method_call_id, file_path, removed) VALUES (?, ?, FALSE);",
+                [self.current_call_id, rel_path],
+            )
+
+        self._outputs = None
 
     def fail(self, flag, message: str = "") -> None:
         """Flag the current call and abort it by raising RuntimeError."""
         self.add_flag(flag)
         raise RuntimeError(message)
 
-    def latest_calls(self, method_name: str) -> None | Object:
+    def set_output(self, output: Object) -> None:
+        """Record this call's output as JSON. Last write wins."""
+        self._call_stack[-1].output = output
+
+    # ----------------------------------------------------------------------- #
+    # Database Queries
+    # ----------------------------------------------------------------------- #
+
+    def latest_calls(self, method_name: str) -> pd.DataFrame:
         """Return DataFrame with all calls to `method_name`."""
 
         query = """
@@ -344,18 +379,9 @@ class Group:
 
         return json.loads(row["call_output"]) if row else None
 
-    def add_output_file(self, path: str | Path) -> None:
-        """
-        Record an output file in the outputs table. Use inside @record_call.
-        """
-        rel_path = str(Path(path).relative_to(self.db.main_folder))
-        with self.db.con as con:
-            con.execute(
-                "INSERT INTO outputs (method_call_id, file_path, removed) VALUES (?, ?, FALSE);",
-                [self.current_call_id, rel_path],
-            )
-
-        self._outputs = None
+    # ----------------------------------------------------------------------- #
+    # Private Methods
+    # ----------------------------------------------------------------------- #
 
     def _reset_caches(self) -> None:
         self._acquisitions = None
@@ -379,6 +405,46 @@ class Group:
     # ----------------------------------------------------------------------- #
     # Motion Correction functions
     # ----------------------------------------------------------------------- #
+
+    def delete_temp_files(self) -> None:
+        """
+        \033[1;35mDELETE_TEMP_FILES**
+        Deletes all temp files associated with this experiment
+
+        **USAGE*
+            group = Group(experimentFolder)
+            group.delete_temp_files()
+
+        **EXAMPLES*
+            group.delete_temp_files()
+        """
+
+        # Get file paths for mmaps in the temp folder
+        path = Path(get_tempdir())
+
+        exp_movies = []
+        for exp_name in self.experiments["exp_name"]:
+            exp_movies.append((exp_name, sorted(path.glob(f"{exp_name}*.mmap"))))
+
+        # Remove files
+        for exp_name, movie_paths in exp_movies:
+            logger.info(f"Removing .mmap files that start with {exp_name}...")
+            if movie_paths:
+                total_size = 0.0  # in bytes
+                for movie_path in movie_paths:
+                    total_size += movie_path.stat().st_size
+                    movie_path.unlink(missing_ok=True)
+
+                total_size = total_size / (1_000_000_000)  # in GBs
+                ending = "s" if len(movie_paths) > 1 else ""
+                logger.info(
+                    f"Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB)."
+                )
+
+            else:
+                logger.info("No .mmap files found.")
+
+        self._raw_mmap_pairs = None
 
     @record_call
     def pick_mcor_parameters(self, *, frame_fraction: float = 0.1) -> None:
@@ -938,6 +1004,139 @@ class Group:
 
     @memorize_params
     @record_call
+    def play_movie(
+        self,
+        *,
+        grid: list[str] = ["raw", "mcor"],
+        downsample_ratio: float = 0.03,
+        opencv_codec: str = "MJPG",
+        save_movie: bool = True,
+        save_folder: str = r"./movies",
+        backend: str = "embed_opencv",
+        do_loop: bool = False,
+        fr: float = 30,
+        magnification: float = 1,
+        plot_text: bool = True,
+        q_max: float = 99.5,
+        q_min: float = 0.00,
+    ) -> None:
+        """
+        Play and save movies for quality control
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            group.play_movie(...)
+        ```
+
+        **PARAMETERS**
+
+        *Basic settings*
+        - `use_last_parameters`: Use parameters from last run as the defaults
+        - `grid`: How to concatenate movies horizontally ("raw", "mcor", "test" in some order)
+
+        *Movie loading settings*
+        - `downsample_ratio`: Percentage of frames to keep
+
+        *Video saving*
+        - `opencv_codec`: Codec used to encode the saved video
+        - `save_movie`: Put `True` if you want to save the preview video to a file
+        - `save_folder`: `"."` is the main_folder (r is to use \\ in the path)
+
+        *Video settings*
+        - `backend`: "opencv" for popup and "embed_opencv" for inline player
+        - `do_loop`: Loop the video or not
+        - `fr`: How fast to play the video (frames/s)
+        - `magnification`: Magnification of video
+        - `plot_text`: Add current frame label on the video
+        - `q_max`: Quantile to consider as white
+        - `q_min`: Quantile to consider as black
+
+        **EXAMPLES**
+        - Running this command would save a compilation of all raw movies
+        ```python
+        group.play_movie(grid=["raw"], save_folder="~/TempData/20260101/e1/movies")
+        ```
+
+        - This would save a video with raw movies on the left and test on the right
+        ```python
+        group.play_movie(grid=["raw", "test"])
+        ```
+        """
+        # --- Validate parameters --- #
+
+        # Check grid input
+        assert len(grid) == 1 or (
+            len(grid) == 2
+            and MovieType.RAW.value in grid
+            and (MovieType.MCOR.value in grid or MovieType.TEST.value in grid)
+        ), """The parameter 'grid' must be one of the following:
+                ['raw'], ['mcor'], ['test'],
+                ['raw', 'test'], ['raw', 'mcor'],
+                ['test', 'raw'], ['mcor', 'raw']"""
+
+        params = locals()
+
+        # --- Check if movie needs to be updated --- #
+
+        # Exclude the current call (already recorded by decorator) so we find
+        # the most recent *previous* call with the same grid.
+        play_movie_calls = self.method_calls[
+            (self.method_calls["method_name"] == "Group.play_movie")
+            & (self.method_calls.index != self.current_call_id)
+        ]
+        last_call_id = play_movie_calls[
+            play_movie_calls["parameters"].apply(lambda x: x["grid"] == grid)
+        ].index.max()
+
+        # Trigger recompute if the parameters changed from the last call
+        movie_types = tuple(MovieType(s) for s in grid)
+        params.pop("self", None)
+
+        if movie_types not in self.movies:
+            self.movies[movie_types] = LazyMovie(self, movie_types)
+
+        elif play_movie_calls.loc[last_call_id, "parameters"] != params:
+            self.movies[movie_types].mark_as_outdated()
+
+        # --- Transform parameters --- #
+
+        # TODO: Change name and default folder
+        movie_type_str = "_".join(t.value for t in movie_types)
+        first_exp_name = self.experiments.iloc[0]["exp_name"]
+        filename = f"Group_{self.group_id}_{first_exp_name}_{movie_type_str}.avi"
+
+        filepath = (
+            (self.db.main_folder / save_folder / filename).resolve()
+            if save_folder[0] == "."
+            else (Path(save_folder) / filename).resolve()
+        )
+
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        # --- Play and maybe update movies --- #
+        # Only updated if run_motion_correction was called invalidating the
+        # relevant files (raw or mcor TIFFs, or test MMAPs)
+        movie_name = str(filepath)
+
+        if save_movie:
+            logger.info(f"Saving movie to {movie_name}")
+
+        self.movies[movie_types].maybe_update(downsample_ratio).play(
+            backend=backend,
+            do_loop=do_loop,
+            fr=fr,
+            magnification=magnification,
+            plot_text=plot_text,
+            q_max=q_max,
+            q_min=q_min,
+            opencv_codec=opencv_codec,
+            save_movie=save_movie,
+            movie_name=movie_name,
+        )
+
+    @memorize_params
+    @record_call
     def run_motion_correction(
         self,
         *,
@@ -1146,179 +1345,6 @@ class Group:
             self._mcor_files = None
             self.db._mcor_files = None
 
-    @memorize_params
-    @record_call
-    def play_movie(
-        self,
-        *,
-        grid: list[str] = ["raw", "mcor"],
-        downsample_ratio: float = 0.03,
-        opencv_codec: str = "MJPG",
-        save_movie: bool = True,
-        save_folder: str = r"./movies",
-        backend: str = "embed_opencv",
-        do_loop: bool = False,
-        fr: float = 30,
-        magnification: float = 1,
-        plot_text: bool = True,
-        q_max: float = 99.5,
-        q_min: float = 0.00,
-    ) -> None:
-        """
-        Play and save movies for quality control
-
-        **USAGE**
-        ```python
-            group = db.groups[some_index]
-            group.play_movie(...)
-        ```
-
-        **PARAMETERS**
-
-        *Basic settings*
-        - `use_last_parameters`: Use parameters from last run as the defaults
-        - `grid`: How to concatenate movies horizontally ("raw", "mcor", "test" in some order)
-
-        *Movie loading settings*
-        - `downsample_ratio`: Percentage of frames to keep
-
-        *Video saving*
-        - `opencv_codec`: Codec used to encode the saved video
-        - `save_movie`: Put `True` if you want to save the preview video to a file
-        - `save_folder`: `"."` is the main_folder (r is to use \\ in the path)
-
-        *Video settings*
-        - `backend`: "opencv" for popup and "embed_opencv" for inline player
-        - `do_loop`: Loop the video or not
-        - `fr`: How fast to play the video (frames/s)
-        - `magnification`: Magnification of video
-        - `plot_text`: Add current frame label on the video
-        - `q_max`: Quantile to consider as white
-        - `q_min`: Quantile to consider as black
-
-        **EXAMPLES**
-        - Running this command would save a compilation of all raw movies
-        ```python
-        group.play_movie(grid=["raw"], save_folder="~/TempData/20260101/e1/movies")
-        ```
-
-        - This would save a video with raw movies on the left and test on the right
-        ```python
-        group.play_movie(grid=["raw", "test"])
-        ```
-        """
-        # --- Validate parameters --- #
-
-        # Check grid input
-        assert len(grid) == 1 or (
-            len(grid) == 2
-            and MovieType.RAW.value in grid
-            and (MovieType.MCOR.value in grid or MovieType.TEST.value in grid)
-        ), """The parameter 'grid' must be one of the following:
-                ['raw'], ['mcor'], ['test'],
-                ['raw', 'test'], ['raw', 'mcor'],
-                ['test', 'raw'], ['mcor', 'raw']"""
-
-        params = locals()
-
-        # --- Check if movie needs to be updated --- #
-
-        # Exclude the current call (already recorded by decorator) so we find
-        # the most recent *previous* call with the same grid.
-        play_movie_calls = self.method_calls[
-            (self.method_calls["method_name"] == "Group.play_movie")
-            & (self.method_calls.index != self.current_call_id)
-        ]
-        last_call_id = play_movie_calls[
-            play_movie_calls["parameters"].apply(lambda x: x["grid"] == grid)
-        ].index.max()
-
-        # Trigger recompute if the parameters changed from the last call
-        movie_types = tuple(MovieType(s) for s in grid)
-        params.pop("self", None)
-
-        if movie_types not in self.movies:
-            self.movies[movie_types] = LazyMovie(self, movie_types)
-
-        elif play_movie_calls.loc[last_call_id, "parameters"] != params:
-            self.movies[movie_types].mark_as_outdated()
-
-        # --- Transform parameters --- #
-
-        # TODO: Change name and default folder
-        movie_type_str = "_".join(t.value for t in movie_types)
-        first_exp_name = self.experiments.iloc[0]["exp_name"]
-        filename = f"Group_{self.group_id}_{first_exp_name}_{movie_type_str}.avi"
-
-        filepath = (
-            (self.db.main_folder / save_folder / filename).resolve()
-            if save_folder[0] == "."
-            else (Path(save_folder) / filename).resolve()
-        )
-
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-
-        # --- Play and maybe update movies --- #
-        # Only updated if run_motion_correction was called invalidating the
-        # relevant files (raw or mcor TIFFs, or test MMAPs)
-        movie_name = str(filepath)
-
-        if save_movie:
-            logger.info(f"Saving movie to {movie_name}")
-
-        self.movies[movie_types].maybe_update(downsample_ratio).play(
-            backend=backend,
-            do_loop=do_loop,
-            fr=fr,
-            magnification=magnification,
-            plot_text=plot_text,
-            q_max=q_max,
-            q_min=q_min,
-            opencv_codec=opencv_codec,
-            save_movie=save_movie,
-            movie_name=movie_name,
-        )
-
-    def delete_temp_files(self) -> None:
-        """
-        \033[1;35mDELETE_TEMP_FILES**
-        Deletes all temp files associated with this experiment
-
-        **USAGE*
-            group = Group(experimentFolder)
-            group.delete_temp_files()
-
-        **EXAMPLES*
-            group.delete_temp_files()
-        """
-
-        # Get file paths for mmaps in the temp folder
-        path = Path(get_tempdir())
-
-        exp_movies = []
-        for exp_name in self.experiments["exp_name"]:
-            exp_movies.append((exp_name, sorted(path.glob(f"{exp_name}*.mmap"))))
-
-        # Remove files
-        for exp_name, movie_paths in exp_movies:
-            logger.info(f"Removing .mmap files that start with {exp_name}...")
-            if movie_paths:
-                total_size = 0.0  # in bytes
-                for movie_path in movie_paths:
-                    total_size += movie_path.stat().st_size
-                    movie_path.unlink(missing_ok=True)
-
-                total_size = total_size / (1_000_000_000)  # in GBs
-                ending = "s" if len(movie_paths) > 1 else ""
-                logger.info(
-                    f"Deleted {len(movie_paths)} file{ending} ({total_size:.1f} GB)."
-                )
-
-            else:
-                logger.info("No .mmap files found.")
-
-        self._raw_mmap_pairs = None
-
     # ----------------------------------------------------------------------- #
     # Data Analysis
     # ----------------------------------------------------------------------- #
@@ -1367,6 +1393,11 @@ class Group:
     #     z_score = (dFF - dFF.mean()) / dFF.std()
 
     #     return z_score
+
+
+# --------------------------------------------------------------------------- #
+# Auxiliary Classes
+# --------------------------------------------------------------------------- #
 
 
 @dataclass

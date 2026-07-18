@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 
 from tqdm.auto import tqdm
 
+# --------------------------------------------------------------------------- #
+# Constants
+# --------------------------------------------------------------------------- #
+
 CHECK = "\033[1;32m✔\033[0m"
 CROSS = "\033[1;31m✘\033[0m"
 
@@ -26,6 +30,11 @@ INFO_FOLDER = ".odyn/olfactometer/Log/Info"
 
 type BasicTypes = None | bool | int | float | str | datetime
 type Object = dict[str, BasicTypes | Object | list[Object]]
+
+
+# --------------------------------------------------------------------------- #
+# Logging
+# --------------------------------------------------------------------------- #
 
 
 class CallFlag(IntFlag):
@@ -46,21 +55,6 @@ class CallFrame:
     call_id: int
     flag: int = 0
     output: Object | None = None
-
-
-class TrialPhase(IntEnum):
-    NOT_IN_TRIAL = 0
-    TRIAL_START = 1
-    ODOR_WINDOW = 2
-    INTERVAL = 3
-    RESPONSE_WINDOW = 4
-    TRIAL_END = 5
-
-
-class MovieType(Enum):
-    RAW = "raw"
-    MCOR = "mcor"
-    TEST = "test"
 
 
 class _ColorFormatter(logging.Formatter):
@@ -210,9 +204,7 @@ def record_call(func):
             self._call_stack.pop()
             logger.removeHandler(handler)
 
-            call_output = (
-                json.dumps(frame.output) if frame.output is not None else None
-            )
+            call_output = json.dumps(frame.output) if frame.output is not None else None
 
             with db.con:
                 db.con.execute(
@@ -227,6 +219,11 @@ def record_call(func):
     # NOTE: This is to make memorize_params work
     wrapper.__kwdefaults__ = func.__kwdefaults__
     return wrapper
+
+
+# --------------------------------------------------------------------------- #
+# Numerical Functions
+# --------------------------------------------------------------------------- #
 
 
 def um_to_pixels(values_um, um_per_pixels):
