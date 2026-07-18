@@ -45,7 +45,7 @@ import pandas as pd
 
 from .groups import Group
 from .utils import *
-from .utils import CallFrame
+from .utils import CallFrame, _method_calls_dataframe
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -490,25 +490,7 @@ class Database:
                 WHERE method_name LIKE ?
                 ORDER BY method_call_id DESC
             """
-        df = pd.read_sql_query(query, self.con, params=[f"%{method_name}"])
-        df.set_index("method_call_id", inplace=True)
-
-        df.parameters = df.parameters.apply(json.loads)
-        df.call_output = df.call_output.apply(
-            lambda s: json.loads(s) if isinstance(s, str) else {}
-        )
-
-        df_parameters = pd.json_normalize(df.parameters).set_index(df.index)
-        df_output = pd.json_normalize(df.call_output).set_index(df.index)
-
-        return pd.concat(
-            [
-                df.drop(columns=["parameters", "call_output"]),
-                df_parameters,
-                df_output,
-            ],
-            axis=1,
-        )
+        return _method_calls_dataframe(self.con, query, [f"%{method_name}"])
 
     def latest_output(self, method_name: str) -> None | Object:
         """Return output of the most recent call to 'method_name'."""

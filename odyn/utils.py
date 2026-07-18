@@ -15,6 +15,9 @@ if TYPE_CHECKING:
     from .database import Database
     from .groups import Group
     from datetime import datetime
+    from sqlite3 import Connection
+
+import pandas as pd
 
 from tqdm.auto import tqdm
 
@@ -219,6 +222,40 @@ def record_call(func):
     # NOTE: This is to make memorize_params work
     wrapper.__kwdefaults__ = func.__kwdefaults__
     return wrapper
+
+
+def _method_calls_dataframe(
+    con: Connection, query: str, params: list
+) -> pd.DataFrame:
+    """
+    Run `query` against method_calls and expand its JSON columns into columns.
+
+    Shared body of Database.latest_calls / Group.latest_calls. `query` must
+    select from method_calls and return the method_call_id column.
+
+    NOTE: json_normalize raises on None on macOS but yields no columns on
+    Windows, so missing JSON is coerced to {} (no columns, every OS).
+    """
+
+    df = pd.read_sql_query(query, con, params=params)
+    df.set_index("method_call_id", inplace=True)
+
+    df.parameters = df.parameters.apply(json.loads)
+    df.call_output = df.call_output.apply(
+        lambda s: json.loads(s) if isinstance(s, str) else {}
+    )
+
+    df_parameters = pd.json_normalize(df.parameters).set_index(df.index)
+    df_output = pd.json_normalize(df.call_output).set_index(df.index)
+
+    return pd.concat(
+        [
+            df.drop(columns=["parameters", "call_output"]),
+            df_parameters,
+            df_output,
+        ],
+        axis=1,
+    )
 
 
 # --------------------------------------------------------------------------- #

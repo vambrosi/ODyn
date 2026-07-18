@@ -38,6 +38,7 @@ from caiman.motion_correction import MotionCorrect
 from caiman.paths import get_tempdir
 
 from .utils import *
+from .utils import _method_calls_dataframe
 from .utils import CallFrame
 
 if TYPE_CHECKING:
@@ -343,26 +344,8 @@ class Group:
                 WHERE group_id = ? AND method_name LIKE ?
                 ORDER BY method_call_id DESC
             """
-        df = pd.read_sql_query(
-            query, self.db.con, params=[self.group_id, f"%{method_name}"]
-        )
-        df.set_index("method_call_id", inplace=True)
-
-        df.parameters = df.parameters.apply(json.loads)
-        df.call_output = df.call_output.apply(
-            lambda s: json.loads(s) if isinstance(s, str) else None
-        )
-
-        df_parameters = pd.json_normalize(df.parameters).set_index(df.index)
-        df_output = pd.json_normalize(df.call_output).set_index(df.index)
-
-        return pd.concat(
-            [
-                df.drop(columns=["parameters", "call_output"]),
-                df_parameters,
-                df_output,
-            ],
-            axis=1,
+        return _method_calls_dataframe(
+            self.db.con, query, [self.group_id, f"%{method_name}"]
         )
 
     def latest_output(self, method_name: str) -> None | Object:
