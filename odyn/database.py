@@ -491,6 +491,10 @@ class Database:
         """Record this call's output as JSON. Only keeps the latest write."""
         self._call_stack[-1].output = output
 
+    def update_parameters_used(self, params: Object) -> None:
+        """Merge values into this call's parameters_used. Use inside @record_call."""
+        self._call_stack[-1].used.update(params)
+
     # ----------------------------------------------------------------------- #
     # Database Queries
     # ----------------------------------------------------------------------- #

@@ -333,6 +333,10 @@ class Group:
         """Record this call's output as JSON. Last write wins."""
         self._call_stack[-1].output = output
 
+    def update_parameters_used(self, params: Object) -> None:
+        """Merge values into this call's parameters_used. Use inside `@record_call`."""
+        self._call_stack[-1].used.update(params)
+
     # ----------------------------------------------------------------------- #
     # Database Queries
     # ----------------------------------------------------------------------- #
@@ -1220,6 +1224,21 @@ class Group:
             clamp(max_shift_um[0], 0, height_um / 4),
             clamp(max_shift_um[1], 0, width_um / 4),
         ]
+
+        # Record the values actually used (after GUI overrides, is_test
+        # adjustments, and clamping) so the run is reproducible from
+        # parameters_used, even if it fails below.
+        self.update_parameters_used(
+            {
+                "first_acq": first_acq,
+                "step_acq": step_acq,
+                "last_acq": last_acq,
+                "max_deviation_um": max_deviation_um,
+                "max_shift_um": max_shift_um,
+                "overlap_um": overlap_um,
+                "strides_um": strides_um,
+            }
+        )
 
         # --- Make sure movies will be updated next time they are played --- #
 
