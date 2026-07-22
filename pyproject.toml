@@ -11,3 +11,6 @@ dependencies = ["tomlkit"]
 
 [tool.setuptools]
 packages = ["odyn"]
+
+[tool.setuptools.package-data]
+odyn = ["*.sql"]

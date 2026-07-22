@@ -5,7 +5,7 @@ import json
 import logging
 import subprocess
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, IntEnum, IntFlag
 from io import StringIO
 from pathlib import Path
@@ -58,6 +58,7 @@ class CallFrame:
     call_id: int
     flag: int = 0
     output: Object | None = None
+    used: Object = field(default_factory=dict)
 
 
 class _ColorFormatter(logging.Formatter):
@@ -166,6 +167,10 @@ def record_call(func):
         handler.setFormatter(_plain_formatter)
         logger.addHandler(handler)
 
+        # parameters_used starts as defaults plus whatever was passed.
+        # methods may change them during the call.
+        parameters_used = {**(func.__kwdefaults__ or {}), **kwargs}
+
         with db.con as con:
             cur = con.cursor()
             cur.execute(
@@ -173,15 +178,17 @@ def record_call(func):
                 INSERT INTO method_calls
                     ( group_id
                     , method_name
-                    , parameters
+                    , parameter_inputs
                     , git_commit
-                    ) VALUES (?, ?, ?, ?);
+                    , parameters_used
+                    ) VALUES (?, ?, ?, ?, ?);
                 """,
                 [
                     self.group_id,
                     f"{type(self).__name__}.{func.__name__}",
                     json.dumps(kwargs),
                     get_git_hash(),
+                    json.dumps(parameters_used),
                 ],
             )
             call_id = cur.lastrowid
@@ -193,7 +200,7 @@ def record_call(func):
         if self.group_id != 0:
             db._method_calls = None
 
-        frame = CallFrame(call_id)
+        frame = CallFrame(call_id, used=dict(parameters_used))
         self._call_stack.append(frame)
 
         try:
@@ -213,10 +220,19 @@ def record_call(func):
                 db.con.execute(
                     """
                     UPDATE method_calls
-                        SET call_log = ?, call_flag = ?, call_output = ?
+                        SET call_log = ?
+                          , call_flag = ?
+                          , call_output = ?
+                          , parameters_used = ?
                         WHERE method_call_id = ?
                     """,
-                    [buf.getvalue(), int(frame.flag), call_output, call_id],
+                    [
+                        buf.getvalue(),
+                        int(frame.flag),
+                        call_output,
+                        json.dumps(frame.used),
+                        call_id,
+                    ],
                 )
 
     # NOTE: This is to make memorize_params work
@@ -240,18 +256,19 @@ def _method_calls_dataframe(
     df = pd.read_sql_query(query, con, params=params)
     df.set_index("method_call_id", inplace=True)
 
-    df.parameters = df.parameters.apply(json.loads)
+    df.parameter_inputs = df.parameter_inputs.apply(json.loads)
+    df.parameters_used = df.parameters_used.apply(json.loads)
     df.call_output = df.call_output.apply(
         lambda s: json.loads(s) if isinstance(s, str) else {}
     )
 
-    df_parameters = pd.json_normalize(df.parameters).set_index(df.index)
+    df_parameters_used = pd.json_normalize(df.parameters_used).set_index(df.index)
     df_output = pd.json_normalize(df.call_output).set_index(df.index)
 
     return pd.concat(
         [
-            df.drop(columns=["parameters", "call_output"]),
-            df_parameters,
+            df.drop(columns=["parameters_used", "call_output"]),
+            df_parameters_used,
             df_output,
         ],
         axis=1,

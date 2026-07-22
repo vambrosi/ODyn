@@ -217,19 +217,20 @@ class Group:
         if self._method_calls is not None:
             return self._method_calls
 
-        query = f"""
-            SELECT mc.* FROM group_experiments AS ge
-                JOIN method_calls AS mc ON ge.group_id = mc.group_id
-                WHERE ge.group_id = {self.group_id};
-        """
+        query = f"SELECT * FROM method_calls WHERE group_id = {self.group_id};"
 
         self._method_calls = pd.read_sql_query(
             query, self.db.con, parse_dates=["called_at"]
         )
         self._method_calls.set_index("method_call_id", inplace=True)
-        self._method_calls["parameters"] = self._method_calls["parameters"].apply(
-            json.loads
-        )
+
+        self._method_calls["parameter_inputs"] = self._method_calls[
+            "parameter_inputs"
+        ].apply(json.loads)
+        self._method_calls["parameters_used"] = self._method_calls[
+            "parameters_used"
+        ].apply(json.loads)
+
         self._method_calls["call_output"] = self._method_calls["call_output"].apply(
             lambda s: json.loads(s) if isinstance(s, str) else None
         )
@@ -1069,7 +1070,7 @@ class Group:
             & (self.method_calls.index != self.current_call_id)
         ]
         last_call_id = play_movie_calls[
-            play_movie_calls["parameters"].apply(lambda x: x["grid"] == grid)
+            play_movie_calls["parameters_used"].apply(lambda x: x.get("grid") == grid)
         ].index.max()
 
         # Trigger recompute if the parameters changed from the last call
@@ -1079,7 +1080,12 @@ class Group:
         if movie_types not in self.movies:
             self.movies[movie_types] = LazyMovie(self, movie_types)
 
-        elif play_movie_calls.loc[last_call_id, "parameters"] != params:
+        # Recompute if there is no comparable earlier call
+        # (e.g. for rows that were backfilled by a migration)
+        elif (
+            pd.isna(last_call_id)
+            or play_movie_calls.loc[last_call_id, "parameters_used"] != params
+        ):
             self.movies[movie_types].mark_as_outdated()
 
         # --- Transform parameters --- #

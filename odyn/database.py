@@ -44,6 +44,7 @@ import numpy as np
 import pandas as pd
 
 from .groups import Group
+from .migrate import SCHEMA_VERSION
 from .utils import *
 from .utils import CallFrame, _method_calls_dataframe
 
@@ -158,6 +159,9 @@ class Database:
                 with open(Path(__file__).parent / "create.sql") as f:
                     con.executescript(f.read())
 
+                # Fresh DB is already at the latest schema
+                con.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+
                 # Insert default database group
                 query = "INSERT OR IGNORE INTO groups (group_id) VALUES (?);"
                 con.execute(query, [self.group_id])
@@ -167,6 +171,7 @@ class Database:
         else:
             self.con = sqlite3.connect(self.path)
             logger.info(f"Connected to the database at: '{self.path.resolve()}'")
+            self._check_schema_version()
 
         self.con.execute("PRAGMA foreign_keys = ON;")
         self.con.row_factory = sqlite3.Row
@@ -176,6 +181,27 @@ class Database:
 
     def __del__(self):
         self.con.close()
+
+    def _check_schema_version(self) -> None:
+        """
+        Throws error if DB schema version is not what the code expects.
+        """
+
+        version = self.con.execute("PRAGMA user_version;").fetchone()[0]
+        if version == SCHEMA_VERSION:
+            return
+
+        if version < SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Database schema is v{version} but the code expects "
+                f"v{SCHEMA_VERSION}. Run the migration:\n"
+                f"    python -m odyn.migrate '{self.main_folder}'"
+            )
+
+        raise RuntimeError(
+            f"Database schema is v{version} but the code expects v{SCHEMA_VERSION}. "
+            "Your code is out of date! Pull the latest version!"
+        )
 
     # ----------------------------------------------------------------------- #
     # SQLite Tables as DataFrames
@@ -260,9 +286,14 @@ class Database:
             query, self.con, parse_dates=["called_at"]
         )
         self._method_calls.set_index("method_call_id", inplace=True)
-        self._method_calls["parameters"] = self._method_calls["parameters"].apply(
-            json.loads
-        )
+
+        self._method_calls["parameter_inputs"] = self._method_calls[
+            "parameter_inputs"
+        ].apply(json.loads)
+        self._method_calls["parameters_used"] = self._method_calls[
+            "parameters_used"
+        ].apply(json.loads)
+
         self._method_calls["call_output"] = self._method_calls["call_output"].apply(
             lambda s: json.loads(s) if isinstance(s, str) else None
         )

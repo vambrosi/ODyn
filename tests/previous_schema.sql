@@ -1,4 +1,3 @@
--- CREATE DATABASE WITH SCHEMA v1
 CREATE TABLE IF NOT EXISTS mice
     ( mouse_id          TEXT PRIMARY KEY
     , mouse_sex         TEXT NOT NULL CHECK(mouse_sex IN ('M', 'F'))
@@ -121,12 +120,11 @@ CREATE TABLE IF NOT EXISTS method_calls
     , group_id          INTEGER NOT NULL
     , called_at         TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     , method_name       TEXT NOT NULL
-    , parameter_inputs  TEXT NOT NULL CHECK(json_valid(parameter_inputs))
+    , parameters        TEXT NOT NULL CHECK(json_valid(parameters))
     , git_commit        TEXT NOT NULL
     , call_log          TEXT NOT NULL DEFAULT ''
     , call_flag         INTEGER NOT NULL DEFAULT 0
     , call_output       TEXT CHECK(call_output IS NULL OR json_valid(call_output))
-    , parameters_used   TEXT NOT NULL CHECK(json_valid(parameters_used))
 
     , FOREIGN KEY (group_id) REFERENCES groups(group_id)
     ) STRICT;
