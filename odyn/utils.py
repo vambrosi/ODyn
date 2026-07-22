@@ -36,7 +36,7 @@ type Object = dict[str, BasicTypes | Object | list[Object]]
 
 
 # --------------------------------------------------------------------------- #
-# Logging
+# Call Recording
 # --------------------------------------------------------------------------- #
 
 
@@ -61,86 +61,91 @@ class CallFrame:
     used: Object = field(default_factory=dict)
 
 
-class _ColorFormatter(logging.Formatter):
-    _COLORS = {
-        logging.DEBUG: "\033[0;37m",  # grey
-        logging.INFO: "\033[1;34m",  # bold blue
-        logging.WARNING: "\033[1;33m",  # bold yellow
-        logging.ERROR: "\033[1;31m",  # bold red
-    }
-    _RESET = "\033[0m"
+class CallRecorder:
+    """
+    `@record_call` helpers shared by `Database` and `Group`.
 
-    def format(self, record: logging.LogRecord) -> str:
-        color = self._COLORS.get(record.levelno, "")
-        result = f"[{color}{record.levelname}{self._RESET}] {record.getMessage()}"
+    Subclasses initialize `_call_stack` and `_outputs`.
+    """
 
-        # Add error stack trace to log
-        if record.exc_info:
-            if not record.exc_text:
-                record.exc_text = self.formatException(record.exc_info)
-        if record.exc_text:
-            result += "\n" + record.exc_text
+    _call_stack: list[CallFrame]
 
-        return result
+    @property
+    def _recording_db(self) -> Database:
+        """The `Database` that owns the connection (self for `Database`)."""
+        return getattr(self, "db", self)
+
+    @property
+    def current_call_id(self) -> int:
+        assert (
+            self._call_stack
+        ), "'current_call_id' is only available inside a '@record_call'"
+        return self._call_stack[-1].call_id
+
+    def add_flag(self, flag) -> None:
+        """Set bits on the current call's flag (bitwise OR). Use inside `@record_call`."""
+        self._call_stack[-1].flag |= int(flag)
+
+    def set_output(self, output: Object) -> None:
+        """Record this call's output as JSON. Overwrite previous outputs."""
+        self._call_stack[-1].output = output
+
+    def update_parameters_used(self, params: Object) -> None:
+        """Merge values into this call's parameters_used. Use inside `@record_call`."""
+        self._call_stack[-1].used.update(params)
+
+    def fail(self, flag, message: str = "") -> None:
+        """Flag the current call and abort it by raising RuntimeError."""
+        self.add_flag(flag)
+        raise RuntimeError(message)
+
+    def add_output_file(self, path: str | Path) -> None:
+        """Record a file in `outputs` (path relative to main_folder)."""
+        db = self._recording_db
+        rel_path = str(Path(path).relative_to(db.main_folder))
+
+        with db.con as con:
+            con.execute(
+                "INSERT INTO outputs (method_call_id, file_path, removed) VALUES (?, ?, FALSE);",
+                [self.current_call_id, rel_path],
+            )
+
+        # The outputs table is shared, so drop both cached views.
+        self._outputs = None
+        db._outputs = None
 
 
-_plain_formatter = logging.Formatter("[%(levelname)s] %(message)s")
+def _method_calls_dataframe(con: Connection, query: str, params: list) -> pd.DataFrame:
+    """
+    Run `query` against method_calls and expand its JSON columns into columns.
 
-logger = logging.getLogger("odyn")
-logger.setLevel(logging.DEBUG)
-logger.propagate = False
+    Shared body of Database.latest_calls / Group.latest_calls. `query` must
+    select from method_calls and return the method_call_id column.
 
-if not logger.handlers:
-    _console_handler = logging.StreamHandler()
-    _console_handler.setFormatter(_ColorFormatter())
-    logger.addHandler(_console_handler)
+    NOTE: json_normalize raises on None on macOS but yields no columns on
+    Windows, so missing JSON is coerced to {} (no columns, every OS).
+    """
 
+    df = pd.read_sql_query(query, con, params=params)
+    df.set_index("method_call_id", inplace=True)
 
-# TODO: - Add failsafe in case git is not on the path
-#       - Embed commit hash in pip installation
-def get_git_hash():
-    try:
-        # Get odyn path
-        package_root = Path(__file__).resolve().parent.parent
+    df.parameter_inputs = df.parameter_inputs.apply(json.loads)
+    df.parameters_used = df.parameters_used.apply(json.loads)
+    df.call_output = df.call_output.apply(
+        lambda s: json.loads(s) if isinstance(s, str) else {}
+    )
 
-        # Get commit hash for that directory
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=package_root,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
+    df_parameters_used = pd.json_normalize(df.parameters_used).set_index(df.index)
+    df_output = pd.json_normalize(df.call_output).set_index(df.index)
 
-    except Exception:
-        return "unknown-hash"
-
-
-def memorize_params(method):
-    # NOTE: - Fails if there is no required keyword argument
-    #       - Positional arguments will be ignored silently
-
-    params = {}
-
-    @functools.wraps(method)
-    def wrapper(self, *, use_last_parameters=False, **kwargs):
-        assert method.__kwdefaults__ is not None, "Must have a parameter default."
-
-        # If user is passing invalid arguments, just pass
-        # them to the method so it can report the error
-        if not kwargs.keys() <= method.__kwdefaults__.keys():
-            return method(self, **kwargs)
-
-        # Clear chached parameters if caller is not using them
-        if not use_last_parameters:
-            params.clear()
-
-        # Add kwargs (possibly overwriting) to last params
-        params.update(kwargs)
-
-        # INVARIANT: params are the kwargs of the last valid method call.
-        return method(self, **params)
-
-    return wrapper
+    return pd.concat(
+        [
+            df.drop(columns=["parameters_used", "call_output"]),
+            df_parameters_used,
+            df_output,
+        ],
+        axis=1,
+    )
 
 
 def record_call(func):
@@ -240,39 +245,96 @@ def record_call(func):
     return wrapper
 
 
-def _method_calls_dataframe(
-    con: Connection, query: str, params: list
-) -> pd.DataFrame:
-    """
-    Run `query` against method_calls and expand its JSON columns into columns.
+# --------------------------------------------------------------------------- #
+# Logging
+# --------------------------------------------------------------------------- #
 
-    Shared body of Database.latest_calls / Group.latest_calls. `query` must
-    select from method_calls and return the method_call_id column.
 
-    NOTE: json_normalize raises on None on macOS but yields no columns on
-    Windows, so missing JSON is coerced to {} (no columns, every OS).
-    """
+class _ColorFormatter(logging.Formatter):
+    _COLORS = {
+        logging.DEBUG: "\033[0;37m",  # grey
+        logging.INFO: "\033[1;34m",  # bold blue
+        logging.WARNING: "\033[1;33m",  # bold yellow
+        logging.ERROR: "\033[1;31m",  # bold red
+    }
+    _RESET = "\033[0m"
 
-    df = pd.read_sql_query(query, con, params=params)
-    df.set_index("method_call_id", inplace=True)
+    def format(self, record: logging.LogRecord) -> str:
+        color = self._COLORS.get(record.levelno, "")
+        result = f"[{color}{record.levelname}{self._RESET}] {record.getMessage()}"
 
-    df.parameter_inputs = df.parameter_inputs.apply(json.loads)
-    df.parameters_used = df.parameters_used.apply(json.loads)
-    df.call_output = df.call_output.apply(
-        lambda s: json.loads(s) if isinstance(s, str) else {}
-    )
+        # Add error stack trace to log
+        if record.exc_info:
+            if not record.exc_text:
+                record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            result += "\n" + record.exc_text
 
-    df_parameters_used = pd.json_normalize(df.parameters_used).set_index(df.index)
-    df_output = pd.json_normalize(df.call_output).set_index(df.index)
+        return result
 
-    return pd.concat(
-        [
-            df.drop(columns=["parameters_used", "call_output"]),
-            df_parameters_used,
-            df_output,
-        ],
-        axis=1,
-    )
+
+_plain_formatter = logging.Formatter("[%(levelname)s] %(message)s")
+
+logger = logging.getLogger("odyn")
+logger.setLevel(logging.DEBUG)
+logger.propagate = False
+
+if not logger.handlers:
+    _console_handler = logging.StreamHandler()
+    _console_handler.setFormatter(_ColorFormatter())
+    logger.addHandler(_console_handler)
+
+
+# TODO: - Add failsafe in case git is not on the path
+#       - Embed commit hash in pip installation
+def get_git_hash():
+    try:
+        # Get odyn path
+        package_root = Path(__file__).resolve().parent.parent
+
+        # Get commit hash for that directory
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=package_root,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+
+    except Exception:
+        return "unknown-hash"
+
+
+# --------------------------------------------------------------------------- #
+# Other Features
+# --------------------------------------------------------------------------- #
+
+
+def memorize_params(method):
+    # NOTE: - Fails if there is no required keyword argument
+    #       - Positional arguments will be ignored silently
+
+    params = {}
+
+    @functools.wraps(method)
+    def wrapper(self, *, use_last_parameters=False, **kwargs):
+        assert method.__kwdefaults__ is not None, "Must have a parameter default."
+
+        # If user is passing invalid arguments, just pass
+        # them to the method so it can report the error
+        if not kwargs.keys() <= method.__kwdefaults__.keys():
+            return method(self, **kwargs)
+
+        # Clear chached parameters if caller is not using them
+        if not use_last_parameters:
+            params.clear()
+
+        # Add kwargs (possibly overwriting) to last params
+        params.update(kwargs)
+
+        # INVARIANT: params are the kwargs of the last valid method call.
+        return method(self, **params)
+
+    return wrapper
 
 
 # --------------------------------------------------------------------------- #

@@ -39,7 +39,7 @@ from caiman.paths import get_tempdir
 
 from .utils import *
 from .utils import _method_calls_dataframe
-from .utils import CallFrame
+from .utils import CallFrame, CallRecorder
 
 if TYPE_CHECKING:
     from .database import Database
@@ -67,7 +67,7 @@ class MovieType(Enum):
 # --------------------------------------------------------------------------- #
 
 
-class Group:
+class Group(CallRecorder):
     """
     Class that runs data processing/analysis.
 
@@ -295,47 +295,6 @@ class Group:
         self._trials.set_index("trial_id", inplace=True)
 
         return self._trials
-
-    # ----------------------------------------------------------------------- #
-    # Related to Records of Method Calls
-    # ----------------------------------------------------------------------- #
-
-    @property
-    def current_call_id(self) -> int:
-        assert (
-            self._call_stack
-        ), "'current_call_id' is only available inside a '@record_call'"
-        return self._call_stack[-1].call_id
-
-    def add_flag(self, flag) -> None:
-        """Set bits on the current call's flag (bitwise OR). Use inside `@record_call`."""
-        self._call_stack[-1].flag |= int(flag)
-
-    def add_output_file(self, path: str | Path) -> None:
-        """
-        Record an output file in the outputs table. Use inside @record_call.
-        """
-        rel_path = str(Path(path).relative_to(self.db.main_folder))
-        with self.db.con as con:
-            con.execute(
-                "INSERT INTO outputs (method_call_id, file_path, removed) VALUES (?, ?, FALSE);",
-                [self.current_call_id, rel_path],
-            )
-
-        self._outputs = None
-
-    def fail(self, flag, message: str = "") -> None:
-        """Flag the current call and abort it by raising RuntimeError."""
-        self.add_flag(flag)
-        raise RuntimeError(message)
-
-    def set_output(self, output: Object) -> None:
-        """Record this call's output as JSON. Last write wins."""
-        self._call_stack[-1].output = output
-
-    def update_parameters_used(self, params: Object) -> None:
-        """Merge values into this call's parameters_used. Use inside `@record_call`."""
-        self._call_stack[-1].used.update(params)
 
     # ----------------------------------------------------------------------- #
     # Database Queries
