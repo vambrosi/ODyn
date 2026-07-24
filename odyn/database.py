@@ -138,7 +138,8 @@ class Database(CallRecorder):
         self._acquisitions: None | pd.DataFrame = None
         self._events: None | pd.DataFrame = None
         self._experiments: None | pd.DataFrame = None
-        self._groups: None | list[Group] = None
+        self._groups: dict[int, Group] = {}  # Caches groups one-by-one
+        self._group_experiments: None | pd.DataFrame = None
         self._mcor_files: None | pd.DataFrame = None
         self._method_calls: None | pd.DataFrame = None
         self._odors: None | pd.DataFrame = None
@@ -176,6 +177,8 @@ class Database(CallRecorder):
         self.con.execute("PRAGMA foreign_keys = ON;")
         self.con.row_factory = sqlite3.Row
 
+        self._data_version = self.con.execute("PRAGMA data_version;").fetchone()[0]
+
         if update:
             self.update()
 
@@ -210,6 +213,8 @@ class Database(CallRecorder):
     @property
     def acquisitions(self) -> pd.DataFrame:
         """`DataFrame` with acquisition metadata"""
+        self._refresh_if_stale()
+
         if self._acquisitions is not None:
             return self._acquisitions
 
@@ -224,6 +229,8 @@ class Database(CallRecorder):
     @property
     def events(self) -> pd.DataFrame:
         """`DataFrame` with olfactometer events"""
+        self._refresh_if_stale()
+
         if self._events is not None:
             return self._events
 
@@ -237,6 +244,8 @@ class Database(CallRecorder):
     @property
     def experiments(self) -> pd.DataFrame:
         """`DataFrame` with experiment metadata"""
+        self._refresh_if_stale()
+
         if self._experiments is not None:
             return self._experiments
 
@@ -249,22 +258,47 @@ class Database(CallRecorder):
         return self._experiments
 
     @property
-    def groups(self) -> list[Group]:
-        """`List` of `Group`s for processing/analysis"""
-        if self._groups is not None:
-            return self._groups
+    def groups(self) -> dict[int, Group]:
+        """`Group`s (indexed by `group_id`) for processing/analysis."""
+        self._refresh_if_stale()
 
         query = "SELECT group_id FROM groups WHERE group_id != ?;"
-        res = self.con.execute(query, [self.group_id])
+        rows = self.con.execute(query, [self.group_id]).fetchall()
 
-        group_ids = sorted(exp["group_id"] for exp in res.fetchall())
-        self._groups = [Group(group_id, self) for group_id in group_ids]
+        return {row["group_id"]: self._group(row["group_id"]) for row in rows}
 
-        return self._groups
+    def _group(self, group_id: int) -> Group:
+        """Return the cached `Group` for `group_id`, creating it if missing."""
+        if group_id not in self._groups:
+            self._groups[group_id] = Group(group_id, self)
+
+        return self._groups[group_id]
+
+    @property
+    def group_experiments(self) -> pd.DataFrame:
+        """`DataFrame` with both group and experiment data"""
+        self._refresh_if_stale()
+
+        if self._group_experiments is not None:
+            return self._group_experiments
+
+        query = """
+            SELECT group_id, e.* FROM group_experiments AS ge
+                JOIN experiments AS e ON e.exp_id = ge.exp_id
+                WHERE group_id != ?;
+        """
+        self._group_experiments = pd.read_sql_query(
+            query, self.con, params=[self.group_id]
+        )
+        self._group_experiments.set_index("group_id", inplace=True)
+
+        return self._group_experiments
 
     @property
     def mcor_files(self) -> pd.DataFrame:
         """`DataFrame` with mcor files metadata"""
+        self._refresh_if_stale()
+
         if self._mcor_files is not None:
             return self._mcor_files
 
@@ -277,6 +311,8 @@ class Database(CallRecorder):
     @property
     def method_calls(self) -> pd.DataFrame:
         """`DataFrame` with `@record_call` functions"""
+        self._refresh_if_stale()
+
         if self._method_calls is not None:
             return self._method_calls
 
@@ -303,6 +339,8 @@ class Database(CallRecorder):
     @property
     def odors(self) -> pd.DataFrame:
         """`DataFrame` with current list of odors"""
+        self._refresh_if_stale()
+
         if self._odors is not None:
             return self._odors
 
@@ -316,6 +354,8 @@ class Database(CallRecorder):
     @property
     def outputs(self) -> pd.DataFrame:
         """`DataFrame` with output files of functions"""
+        self._refresh_if_stale()
+
         if self._outputs is not None:
             return self._outputs
 
@@ -329,6 +369,8 @@ class Database(CallRecorder):
     @property
     def programs(self) -> pd.DataFrame:
         """`DataFrame` with one entry per _Event.csv_ file"""
+        self._refresh_if_stale()
+
         if self._programs is not None:
             return self._programs
 
@@ -344,6 +386,8 @@ class Database(CallRecorder):
     @property
     def trials(self) -> pd.DataFrame:
         """`DataFrame` with all olfactometer trials"""
+        self._refresh_if_stale()
+
         if self._trials is not None:
             return self._trials
 
@@ -428,21 +472,27 @@ class Database(CallRecorder):
 
         return experiment, acquisition
 
+    def _refresh_if_stale(self) -> None:
+        """Reset caches if another connection has committed since the last check."""
+        version = self.con.execute("PRAGMA data_version;").fetchone()[0]
+
+        if version != self._data_version:
+            self._data_version = version
+            self._reset_caches()
+
     def _reset_caches(self) -> None:
         self._acquisitions = None
         self._events = None
         self._experiments = None
+        self._group_experiments = None
         self._mcor_files = None
         self._method_calls = None
         self._outputs = None
         self._programs = None
         self._trials = None
 
-        if self._groups is None:
-            return
-
         # In case a specific group can still be accessed
-        for group in self._groups:
+        for group in self._groups.values():
             group._acquisitions = None
             group._events = None
             group._experiments = None
@@ -452,11 +502,79 @@ class Database(CallRecorder):
             group._programs = None
             group._trials = None
 
-        self._groups = None
+        self._groups.clear()
 
     # ----------------------------------------------------------------------- #
     # Database Queries
     # ----------------------------------------------------------------------- #
+
+    def add_group(self, exp_ids=None, exp_names=None) -> Group:
+        """
+        Add a group with the experiments listed and return it.
+
+        **USAGE**
+        ```python
+        db = Database(main_folder)
+        group = db.add_group(list of exp_ids or exp_names)
+        ```
+
+        **EXAMPLES**
+        ```python
+        group = db.add_group(
+                    exp_names=[
+                        "20250303_sid172_e1",
+                        "20250303_sid172_e2"
+                    ]
+                )
+
+        group = db.add_group(exp_ids=[3,10,12])
+        """
+
+        if (exp_ids is None) == (exp_names is None):
+            raise ValueError("Provide exactly one of exp_ids or exp_names.")
+
+        if exp_names is not None:
+            missing = set(exp_names) - set(self.experiments["exp_name"])
+            if missing:
+                raise ValueError(f"No experiments named: {sorted(missing)}")
+
+            matched = self.experiments[self.experiments["exp_name"].isin(exp_names)]
+            target = frozenset(int(e) for e in matched.index)
+
+        else:
+            missing = set(exp_ids) - set(self.experiments.index)
+            if missing:
+                raise ValueError(f"No experiments with ids: {sorted(missing)}")
+
+            target = frozenset(int(e) for e in exp_ids)
+
+        # Check if there is a group with exactly those experiments
+        members: dict[int, set[int]] = {}
+        for group_id, exp_id in self.group_experiments["exp_id"].items():
+            members.setdefault(group_id, set()).add(int(exp_id))
+
+        for group_id, member_ids in members.items():
+            if member_ids == set(target):
+                logger.info(
+                    f"Group already exists (group_id = {group_id}), returning it."
+                )
+                return self._group(group_id)
+
+        with self.con as con:
+            cur = con.cursor()
+
+            cur.execute("INSERT INTO groups DEFAULT VALUES;")
+            group_id = cur.lastrowid
+
+            cur.executemany(
+                "INSERT INTO group_experiments (group_id, exp_id) VALUES (?, ?);",
+                [(group_id, exp_id) for exp_id in target],
+            )
+
+        # Reset group_experiments cache
+        self._group_experiments = None
+
+        return self._group(group_id)
 
     def from_query(self, query: str) -> pd.DataFrame:
         """

@@ -138,6 +138,8 @@ class Group(CallRecorder):
     @property
     def acquisitions(self) -> pd.DataFrame:
         """`DataFrame` with acquisition metadata"""
+        self.db._refresh_if_stale()
+
         if self._acquisitions is not None:
             return self._acquisitions
 
@@ -158,6 +160,8 @@ class Group(CallRecorder):
     @property
     def events(self) -> pd.DataFrame:
         """`DataFrame` with olfactometer events"""
+        self.db._refresh_if_stale()
+
         if self._events is not None:
             return self._events
 
@@ -177,6 +181,8 @@ class Group(CallRecorder):
     @property
     def experiments(self) -> pd.DataFrame:
         """`DataFrame` with experiment metadata"""
+        self.db._refresh_if_stale()
+
         if self._experiments is not None:
             return self._experiments
 
@@ -195,6 +201,8 @@ class Group(CallRecorder):
     @property
     def mcor_files(self) -> pd.DataFrame:
         """`DataFrame` with mcor files metadata"""
+        self.db._refresh_if_stale()
+
         if self._mcor_files is not None:
             return self._mcor_files
 
@@ -214,6 +222,8 @@ class Group(CallRecorder):
     @property
     def method_calls(self) -> pd.DataFrame:
         """`DataFrame` with `@record_call` functions"""
+        self.db._refresh_if_stale()
+
         if self._method_calls is not None:
             return self._method_calls
 
@@ -240,6 +250,8 @@ class Group(CallRecorder):
     @property
     def outputs(self) -> pd.DataFrame:
         """`DataFrame` with output files of functions"""
+        self.db._refresh_if_stale()
+
         if self._outputs is not None:
             return self._outputs
 
@@ -258,6 +270,8 @@ class Group(CallRecorder):
     @property
     def programs(self) -> pd.DataFrame:
         """`DataFrame` with one entry per _Event.csv_ file"""
+        self.db._refresh_if_stale()
+
         if self._programs is not None:
             return self._programs
 
@@ -278,6 +292,8 @@ class Group(CallRecorder):
     @property
     def trials(self) -> pd.DataFrame:
         """`DataFrame` with all olfactometer trials"""
+        self.db._refresh_if_stale()
+
         if self._trials is not None:
             return self._trials
 
