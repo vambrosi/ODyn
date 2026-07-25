@@ -18,7 +18,7 @@ import sys
 
 from pathlib import Path
 
-from .utils import ODYN_FOLDER, logger
+from .utils import DB_TIMEOUT_S, ODYN_FOLDER, logger
 
 # When adding a new migration you should:
 # - Overwrite latest.sql with the latest migration;
@@ -38,7 +38,7 @@ def migrate(main_folder: str | Path) -> None:
         raise FileNotFoundError(f"No database at '{db_path}'.")
 
     # Can wait longer than usual and manages transactions explicitly
-    con = sqlite3.connect(db_path, timeout=30)
+    con = sqlite3.connect(db_path, timeout=DB_TIMEOUT_S * 4)
     con.isolation_level = None
 
     # Connection `con` "context manager"

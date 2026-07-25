@@ -1281,41 +1281,42 @@ class Group(CallRecorder):
             )
             return
 
-        with self.db.con as con:
-            logger.info("Saving mcor files...")
+        logger.info("Saving mcor files...")
 
-            # Load mmap files and save them as TIFFs
-            # TODO: Confirm that mmap_file and fname have the same order
-            for acq_id, mmap_path, raw_path in tqdm(
-                zip(acquisitions_slice.index, self.mc.mmap_file, self.mc.fname),
-                desc="Saving mcor files",
-                total=len(self.mc.mmap_file),
-            ):
-                # Create folder if it doesn't exist
-                mcor_folder = raw_path.parent.parent / "processed" / "mcor"
-                mcor_folder.mkdir(parents=True, exist_ok=True)
+        insertion_query = """
+            INSERT OR REPLACE INTO mcor_files
+                ( acq_id
+                , mcor_path
+                , last_updated_by
+                ) VALUES (?, ?, ?);
+        """
 
-                mcor_path = mcor_folder / (raw_path.stem + "_mcor.tif")
+        # Load mmap files and save them as TIFFs
+        # TODO: Confirm that mmap_file and fname have the same order
+        for acq_id, mmap_path, raw_path in tqdm(
+            zip(acquisitions_slice.index, self.mc.mmap_file, self.mc.fname),
+            desc="Saving mcor files",
+            total=len(self.mc.mmap_file),
+        ):
+            # Create folder if it doesn't exist
+            mcor_folder = raw_path.parent.parent / "processed" / "mcor"
+            mcor_folder.mkdir(parents=True, exist_ok=True)
 
-                mc = cm.load(mmap_path)
+            mcor_path = mcor_folder / (raw_path.stem + "_mcor.tif")
 
-                # Saving TIFFs directly because caiman saves them as 64-bit
-                with tifffile.TiffWriter(mcor_path) as tif:
-                    tif.write(
-                        [mc[i].copy() for i in range(mc.shape[0])],
-                        shape=mc[0].shape,
-                        dtype=mc.dtype,
-                    )
+            mc = cm.load(mmap_path)
 
-                # Update the database with the latest mcor files
-                insertion_query = """
-                    INSERT OR REPLACE INTO mcor_files
-                        ( acq_id
-                        , mcor_path
-                        , last_updated_by
-                        ) VALUES (?, ?, ?);
-                """
-                con.execute(
+            # Saving TIFFs directly because caiman saves them as 64-bit
+            with tifffile.TiffWriter(mcor_path) as tif:
+                tif.write(
+                    [mc[i].copy() for i in range(mc.shape[0])],
+                    shape=mc[0].shape,
+                    dtype=mc.dtype,
+                )
+
+            # Record each file separately to not lock the DB.
+            with self.db.con:
+                self.db.con.execute(
                     insertion_query,
                     [
                         acq_id,
@@ -1324,9 +1325,9 @@ class Group(CallRecorder):
                     ],
                 )
 
-            # Reset mcor DataFrames
-            self._mcor_files = None
-            self.db._mcor_files = None
+        # Reset mcor DataFrames
+        self._mcor_files = None
+        self.db._mcor_files = None
 
     # ----------------------------------------------------------------------- #
     # Data Analysis

@@ -31,6 +31,9 @@ CROSS = "\033[1;31m✘\033[0m"
 ODYN_FOLDER = ".odyn"
 INFO_FOLDER = ".odyn/olfactometer/Log/Info"
 
+# Default wait before "database locked"
+DB_TIMEOUT_S = 30
+
 type BasicTypes = None | bool | int | float | str | datetime
 type Object = dict[str, BasicTypes | Object | list[Object]]
 

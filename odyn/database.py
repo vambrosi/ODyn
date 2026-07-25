@@ -153,7 +153,7 @@ class Database(CallRecorder):
             logger.info("Creating database...")
 
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.con = sqlite3.connect(self.path)
+            self.con = sqlite3.connect(self.path, timeout=DB_TIMEOUT_S)
 
             # Create schema and add default values
             with self.con as con:
@@ -170,7 +170,7 @@ class Database(CallRecorder):
             logger.info(f"Database created at: '{self.path.resolve()}'")
 
         else:
-            self.con = sqlite3.connect(self.path)
+            self.con = sqlite3.connect(self.path, timeout=DB_TIMEOUT_S)
             logger.info(f"Connected to the database at: '{self.path.resolve()}'")
             self._check_schema_version()
 
