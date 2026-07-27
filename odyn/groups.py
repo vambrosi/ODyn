@@ -500,7 +500,10 @@ class Group(CallRecorder):
         def modify_doc(doc):
             # render immediately and the background is added later
             p = bpl.figure(
-                x_range=(0, dims[1]), y_range=(dims[0], 0), width=600, height=600
+                x_range=(0, dims[1]),
+                y_range=(dims[0], 0),
+                height=800,
+                aspect_ratio="auto",
             )
             p.xaxis.visible = p.yaxis.visible = False
 
