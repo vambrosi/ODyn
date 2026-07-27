@@ -410,13 +410,16 @@ class Group(CallRecorder):
         self._raw_mmap_pairs = None
 
     @record_call
-    def pick_mcor_parameters(self, *, frame_fraction: float = 0.1) -> None:
+    def pick_mcor_parameters(
+        self, *, frame_fraction: float = 0.1, image_type: str = "avg"
+    ) -> None:
         """
         Open a GUI to pick motion-correction parameters
 
         **PARAMETERS**
         - `frame_fraction`: percentage of frames (of the first raw file) to
         use in the preview.
+        - `image_type`: "avg" for average projection and "corr" for local correlations.
         """
         import sys
 
@@ -460,6 +463,10 @@ class Group(CallRecorder):
         overlap_um = prev.get("overlap_um", DEFAULT_OVERLAP_UM)
         max_shift_um = prev.get("max_shift_um", DEFAULT_MAX_SHIFT_UM)
         max_deviation_um = prev.get("max_deviation_um", DEFAULT_MAX_DEVIATION_UM)
+
+        # Check if it is one of the supported options
+        if image_type not in ["avg", "corr"]:
+            raise ValueError("image_type must be 'avg' or 'corr'.")
 
         # @record_call writes call_output=NULL on return, and Save button
         # updates the records with the chosen parameters.
@@ -937,23 +944,33 @@ class Group(CallRecorder):
                 cache = (
                     self.db.main_folder
                     / ODYN_FOLDER
-                    / f"corr_{raw_path.stem}_{step}.npy"
+                    / "previews"
+                    / f"{image_type}_{raw_path.stem}_{step}.npy"
                 )
 
                 if cache.exists():
-                    corr = np.load(cache)
+                    bg_image = np.load(cache)
 
                 else:
                     # subindices reads every Nth page
                     movie = cm.load(str(raw_path), subindices=slice(None, None, step))
-                    corr = cm.local_correlations(movie, swap_dim=False)
-                    corr[np.isnan(corr)] = 0
-                    np.save(cache, corr)
 
-                lo, hi = float(np.quantile(corr, 0.01)), float(np.quantile(corr, 0.99))
+                    bg_image = (
+                        cm.local_correlations(movie, swap_dim=False)
+                        if image_type == "corr"
+                        else movie.mean(axis=0)
+                    )
+                    bg_image[np.isnan(bg_image)] = 0
+
+                    cache.parent.mkdir(exist_ok=True)
+                    np.save(cache, bg_image)
+
+                lo, hi = float(np.quantile(bg_image, 0.01)), float(
+                    np.quantile(bg_image, 0.99)
+                )
 
                 def apply():
-                    img.data = dict(image=[corr])
+                    img.data = dict(image=[bg_image])
                     cmap.low, cmap.high = lo, hi
                     status.text = "Ready."
 
