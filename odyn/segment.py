@@ -1,19 +1,17 @@
 # --------------------------------------------------------------------------- #
 #
-# STATUS: standalone prototype. It does not touch the database yet, so it can
-# be thrown away or replaced by a segmentation package without affecting the
-# rest of ODyn. `pick_rois` writes a JSON file whose shape maps 1-to-1 onto a
-# future `rois` table (one row per polygon).
+# STATUS: standalone prototype, i.e. no DB interaction. `pick_rois` writes
+# a JSON file that maps onto a future `rois` table (one row per polygon).
 #
 # TODO:
-#   - Exclusion polygons (blood vessels, edges) instead of deleting one by one
-#   - Feed the response map straight from the database instead of a file
+#   - Add exclusion polygons instead of deleting one by one
+#   - Use database mcor file paths directly
 #   - Reload the last saved ROIs when the GUI opens
 #
 # --------------------------------------------------------------------------- #
 
 """
-Quick segmentation of glomeruli from a response map (e.g. a z-score image).
+Quick segmentation of glomeruli from an image (e.g. z-scores).
 """
 
 from __future__ import annotations
@@ -35,24 +33,26 @@ from .utils import logger
 # Constants
 # --------------------------------------------------------------------------- #
 
-# Defaults shared by find_rois and the GUI so the two never drift.
+# Defaults shared by find_rois and the GUI.
 DEFAULT_DIAMETER_UM = 60.0
-DEFAULT_MIN_ZSCORE = 2.0
+DEFAULT_THRESHOLD = 2.0
 DEFAULT_MIN_AREA_FRACTION = 0.2
 DEFAULT_BORDER_UM = 0.0
 
-# The excluded strip is off (0 µm tall) until the user opens it up. It covers
-# the gap between the bulbs, which has no glomeruli and stays wobbly after
-# motion correction.
+# The excluded strip is off (0 µm tall) by default.
+# The goal is to cover the midline sinus.
 DEFAULT_STRIP_HEIGHT_UM = 0.0
 
-# How ROIs are drawn: normal, and greyed out while inside the excluded strip.
+# Drawing parameters
+#   - ROIs excluded by the strip will have the EXCLUDED_COLOR.
+#   - STRIP_COLOR is the color of the overlaid strip.
 ROI_FILL_ALPHA = 0.15
 EXCLUDED_COLOR = "#909090"
 STRIP_COLOR = "#cccc00"
 
 # Ratio between the two Gaussians of the difference-of-Gaussians filter.
-# 1.6 is the usual approximation to a Laplacian-of-Gaussian.
+# A ratio of 1.6 gives an approximation to the Laplacian-of-Gaussian filter.
+#       (Check https://en.wikipedia.org/wiki/Difference_of_Gaussians.)
 DOG_RATIO = 1.6
 
 # Colors of the diverging colormap (same ones used in the MATLAB figures).
@@ -102,25 +102,27 @@ def find_rois(
     *,
     um_per_px: float = 1.0,
     diameter_um: float = DEFAULT_DIAMETER_UM,
-    min_zscore: float = DEFAULT_MIN_ZSCORE,
+    threshold: float = DEFAULT_THRESHOLD,
     min_area_fraction: float = DEFAULT_MIN_AREA_FRACTION,
     border_um: float = DEFAULT_BORDER_UM,
+    omit_messages: bool = False,
 ) -> list[Polygon]:
     """
-    Find glomeruli in a response map and return them as polygons.
+    Find ROIs in an image and return them as polygons.
 
     **PARAMETERS**
-    - `image`: signed response map (z-scores), array or path to `.npy`/`.tif`
+    - `image`: signed image (e.g. z-scores), array, or path to `.npy`/`.tif`
     - `um_per_px`: size of a pixel, used to read every other parameter in um
-    - `diameter_um`: typical glomerulus diameter (the main knob)
-    - `min_zscore`: how strong a response has to be to count
-    - `min_area_fraction`: drop ROIs smaller than this fraction of a circle of
-    `diameter_um` (0 keeps everything, 1 keeps only full-sized glomeruli)
+    - `diameter_um`: typical ROI diameter
+    - `threshold`: exclude responses around zero (-threshold < z < threshold)
+    - `min_area_fraction`: drop ROIs smaller than this fraction of the typical
+            ROI (0 keeps everything)
     - `border_um`: drop ROIs that come within this distance of the image edge
+    - `omit_messages`: omit logging messages (used in the GUI).
 
     **EXAMPLES**
     ```python
-    rois = find_rois("envelope.npy", diameter_um=50, min_zscore=2.5)
+    rois = find_rois("envelope.npy", diameter_um=50, threshold=2.5)
     ```
     """
 
@@ -130,24 +132,27 @@ def find_rois(
     if radius_px < 1:
         raise ValueError("'diameter_um' is smaller than two pixels.")
 
-    # Glomeruli can respond in either direction, so we look for blobs in the
-    # magnitude of the response and keep the sign only for display.
+    # Look for ROIs around peaks in either direction.
+    # Keep the sign only for display purposes.
     response = np.abs(array)
 
-    # Difference of Gaussians tuned to the glomerular scale. This does the job
-    # of the old blur slider (removing pixel noise) *and* gives us a surface
-    # that peaks at the center of each glomerulus and dips between neighbors.
+    # Difference of Gaussians tuned to the ROI scale.
+    #
+    # Goals:
+    #   - Removes small-scale noise;
+    #   - Gives peaks near ROI centers.
+
     sigma = radius_px / np.sqrt(2)
     smooth = gaussian_filter(response, sigma)
     dog = smooth - gaussian_filter(response, sigma * DOG_RATIO)
 
-    mask = smooth > min_zscore
+    mask = smooth > threshold
 
     if not mask.any():
-        logger.warning(f"Nothing above min_zscore = {min_zscore}.")
+        logger.warning(f"Nothing above threshold = {threshold}.")
         return []
 
-    # One seed per glomerulus: peaks closer than a radius are the same blob.
+    # One seed per ROI: peaks closer than a radius are "merged".
     peaks = peak_local_max(
         dog,
         min_distance=max(1, round(radius_px)),
@@ -162,7 +167,7 @@ def find_rois(
     markers = np.zeros(dog.shape, dtype="int32")
     markers[tuple(peaks.T)] = np.arange(1, len(peaks) + 1)
 
-    # Splits touching glomeruli along the dim valley between their centers.
+    # Splits touching ROIs along the dim valley between their centers.
     labels = watershed(-dog, markers, mask=mask)
 
     # --- Filter and convert each region to a polygon --- #
@@ -209,7 +214,8 @@ def find_rois(
     # Number ROIs in reading order so they stay comparable between runs
     polygons.sort(key=lambda item: item[0])
 
-    logger.info(f"Found {len(polygons)} ROIs.")
+    if not omit_messages:
+        logger.info(f"Found {len(polygons)} ROIs.")
 
     return [polygon for _centroid, polygon in polygons]
 
@@ -351,7 +357,7 @@ def pick_rois(
     um_per_px: float = 1.0,
     save_path: str | Path = "rois.json",
     diameter_um: float = DEFAULT_DIAMETER_UM,
-    min_zscore: float = DEFAULT_MIN_ZSCORE,
+    threshold: float = DEFAULT_THRESHOLD,
     min_area_fraction: float = DEFAULT_MIN_AREA_FRACTION,
     border_um: float = DEFAULT_BORDER_UM,
     strip_center_um: float | None = None,
@@ -360,17 +366,15 @@ def pick_rois(
     max_preview_px: int = 1024,
 ) -> None:
     """
-    Open a GUI to segment glomeruli and fix the result by hand.
+    Open a GUI to fine tune the segmentation algorithm.
 
-    Change the parameters until most glomeruli are outlined, click the ones
+    Change the parameters until most ROIs are outlined, click the ones
     that came out wrong to delete them, draw any that are missing, and press
     _Save ROIs_. The ROIs are written to `save_path` as JSON.
 
     **EXCLUDED STRIP**
-    The yellow band covers the gap between the bulbs. ROIs touching it turn
-    grey and are left out when you save, but they are not thrown away: move or
-    resize the band and they come back, so you can slide it around and watch
-    what falls in and out.
+    The yellow band covers the midline sinus. ROIs touching it turn grey
+    and are left out of the saved file.
 
     **DRAWING**
     - _Delete_: click an ROI (use _Undo_ if it was the wrong one)
@@ -383,7 +387,7 @@ def pick_rois(
     - `image`: signed response map (z-scores), array or path to `.npy`/`.tif`
     - `um_per_px`: size of a pixel, used to read every other parameter in um
     - `save_path`: where to write the ROIs
-    - `diameter_um`, `min_zscore`, `min_area_fraction`, `border_um`: starting
+    - `diameter_um`, `threshold`, `min_area_fraction`, `border_um`: starting
     values for the sliders (see `find_rois`)
     - `strip_center_um`: where the excluded strip starts (middle of the image
     by default)
@@ -450,7 +454,7 @@ def pick_rois(
         p = bpl.figure(
             x_range=(0, width),
             y_range=(height, 0),  # row 0 on top, like imshow
-            height=800,
+            width=800,
             aspect_ratio="auto",
         )
         p.xaxis.visible = p.yaxis.visible = False
@@ -528,7 +532,7 @@ def pick_rois(
             return Spinner(low=low, step=step, value=value, title=title, width=130)
 
         sp_diameter = spinner(diameter_um, "Diameter (µm)", 1.0, low=2 * um_per_px)
-        sp_zscore = spinner(min_zscore, "Min z-score", 0.1)
+        sp_threshold = spinner(threshold, "Min threshold", 0.1)
         sp_area = spinner(min_area_fraction, "Min area (fraction)", 0.05)
         sp_border = spinner(border_um, "Border margin (µm)", 5.0)
         sp_color = spinner(color_limit, "Color limit (z)", 0.5, low=0.1)
@@ -641,7 +645,9 @@ def pick_rois(
                     data = {key: list(values) for key, values in src.data.items()}
 
                     for index in sorted(new, reverse=True):
-                        removed = {key: values.pop(index) for key, values in data.items()}
+                        removed = {
+                            key: values.pop(index) for key, values in data.items()
+                        }
                         deleted.append((src, removed))
 
                     src.data = data
@@ -678,7 +684,7 @@ def pick_rois(
 
             parameters = dict(
                 diameter_um=sp_diameter.value,
-                min_zscore=sp_zscore.value,
+                threshold=sp_threshold.value,
                 min_area_fraction=sp_area.value,
                 border_um=sp_border.value,
             )
@@ -687,7 +693,9 @@ def pick_rois(
 
             def work():
                 try:
-                    polygons = find_rois(array, um_per_px=um_per_px, **parameters)
+                    polygons = find_rois(
+                        array, um_per_px=um_per_px, omit_messages=True, **parameters
+                    )
                     data, message = to_source(polygons, "white"), ""
 
                 except Exception as error:
@@ -709,7 +717,7 @@ def pick_rois(
         def on_parameter(attr, old, new):
             recompute()
 
-        for widget in (sp_diameter, sp_zscore, sp_area, sp_border):
+        for widget in (sp_diameter, sp_threshold, sp_area, sp_border):
             widget.on_change("value_throttled", on_parameter)
 
         def on_color(attr, old, new):
@@ -724,9 +732,7 @@ def pick_rois(
 
             for source, src in (("auto", auto_src), ("manual", manual_src)):
                 data = src.data
-                for xs, ys, excluded in zip(
-                    data["xs"], data["ys"], data["excluded"]
-                ):
+                for xs, ys, excluded in zip(data["xs"], data["ys"], data["excluded"]):
                     # This is where the strip stops being a preview
                     if excluded:
                         continue
@@ -744,7 +750,7 @@ def pick_rois(
                 "um_per_px": um_per_px,
                 "parameters": {
                     "diameter_um": sp_diameter.value,
-                    "min_zscore": sp_zscore.value,
+                    "threshold": sp_threshold.value,
                     "min_area_fraction": sp_area.value,
                     "border_um": sp_border.value,
                     "strip_center_um": sl_center.value,
@@ -770,7 +776,7 @@ def pick_rois(
                 p,
                 bpl.column(
                     sp_diameter,
-                    sp_zscore,
+                    sp_threshold,
                     sp_area,
                     sp_border,
                     sp_color,
@@ -798,6 +804,8 @@ def _diverging_palette(n: int = 256) -> list[str]:
             for t in np.linspace(0, 1, count)
         ]
 
-    colors = ramp(COLOR_LOW, COLOR_MID, n // 2) + ramp(COLOR_MID, COLOR_HIGH, n - n // 2)
+    colors = ramp(COLOR_LOW, COLOR_MID, n // 2) + ramp(
+        COLOR_MID, COLOR_HIGH, n - n // 2
+    )
 
     return [f"#{r:02x}{g:02x}{b:02x}" for r, g, b in colors]
