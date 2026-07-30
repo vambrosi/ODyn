@@ -11,7 +11,7 @@
 # --------------------------------------------------------------------------- #
 
 """
-Quick segmentation of glomeruli from an image (e.g. z-scores).
+Quick segmentation of ROIs from an image (e.g. z-score image).
 """
 
 from __future__ import annotations
@@ -39,16 +39,8 @@ DEFAULT_THRESHOLD = 2.0
 DEFAULT_MIN_AREA_FRACTION = 0.2
 DEFAULT_BORDER_UM = 0.0
 
-# The excluded strip is off (0 µm tall) by default.
-# The goal is to cover the midline sinus.
-DEFAULT_STRIP_HEIGHT_UM = 0.0
-
-# Drawing parameters
-#   - ROIs excluded by the strip will have the EXCLUDED_COLOR.
-#   - STRIP_COLOR is the color of the overlaid strip.
+# How solid the inside of an ROI looks (0 would be outline only).
 ROI_FILL_ALPHA = 0.15
-EXCLUDED_COLOR = "#909090"
-STRIP_COLOR = "#cccc00"
 
 # Ratio between the two Gaussians of the difference-of-Gaussians filter.
 # A ratio of 1.6 gives an approximation to the Laplacian-of-Gaussian filter.
@@ -221,132 +213,6 @@ def find_rois(
 
 
 # --------------------------------------------------------------------------- #
-# Test Images
-# --------------------------------------------------------------------------- #
-
-
-def test_images(
-    *,
-    shape: tuple[int, int] = (600, 600),
-    um_per_px: float = 1.0,
-    diameter_um: float = 45.0,
-    spacing_um: float | None = None,
-    overlap_fraction: float = 0.4,
-    negative_fraction: float = 0.25,
-    gap_um: float = 120.0,
-    gap_noise: float = 2.5,
-    noise: float = 0.8,
-    noise_um: float = 4.0,
-    seed: int | None = 0,
-) -> np.ndarray:
-    """
-    Generated image, to try the GUI out without opening real data.
-
-    Draws a grid of jittered ovals of mixed sign, some of them overlapping,
-    with an empty noisy band across the middle standing in for the midline
-    sinus (for testing the excluded strip).
-
-    **PARAMETERS**
-    - `shape`, `um_per_px`: size of the picture
-    - `diameter_um`: typical glomerulus size
-    - `spacing_um`: distance between neighbors (2.5 diameters by default)
-    - `overlap_fraction`: how often a glomerulus gets a partner on top of it
-    - `negative_fraction`: how often a glomerulus responds downwards
-    - `gap_um`: height of the empty band in the middle (0 removes it)
-    - `gap_noise`: how much extra noise lives inside that band. The default is
-    strong enough to produce junk ROIs there on purpose, which is what the
-    excluded strip is for; set it to 0 for a clean picture
-    - `noise`, `noise_um`: strength and grain size of the background noise
-    - `seed`: change it for a different picture (`None` for a random one)
-
-    **EXAMPLES**
-    ```python
-    pick_rois(test_images(), diameter_um=45)
-    ```
-    """
-
-    rng = np.random.default_rng(seed)
-    height, width = shape
-
-    radius_px = 0.5 * diameter_um / um_per_px
-    spacing_px = (spacing_um or 2.5 * diameter_um) / um_per_px
-    gap_px = gap_um / um_per_px
-
-    image = np.zeros(shape, dtype="float32")
-
-    # Grid of centers, jittered, with the middle band left empty
-    margin = 1.5 * radius_px
-    rows = np.arange(margin, height - margin, spacing_px)
-    columns = np.arange(margin, width - margin, spacing_px)
-
-    centers = []
-    for row in rows:
-        for column in columns:
-            centers.append((row, column))
-
-            # A partner close enough to touch, to exercise the splitting
-            if rng.random() < overlap_fraction:
-                angle = rng.uniform(0, 2 * np.pi)
-                distance = rng.uniform(1.1, 1.6) * radius_px
-                centers.append(
-                    (row + distance * np.sin(angle), column + distance * np.cos(angle))
-                )
-
-    for center_row, center_column in centers:
-        # Jitter, and skip anything that falls inside the gap
-        center_row += rng.uniform(-0.2, 0.2) * spacing_px
-        center_column += rng.uniform(-0.2, 0.2) * spacing_px
-
-        if abs(center_row - height / 2) < gap_px / 2 + radius_px:
-            continue
-
-        # Ovals: two different semi-axes, at a random angle
-        semi_major = radius_px * rng.uniform(0.8, 1.2)
-        semi_minor = semi_major * rng.uniform(0.6, 0.9)
-        angle = rng.uniform(0, np.pi)
-
-        sign = -1.0 if rng.random() < negative_fraction else 1.0
-        amplitude = sign * rng.uniform(3.0, 9.0)
-
-        # Only evaluate near the center, so big images stay quick
-        reach = int(np.ceil(2.5 * semi_major))
-        row0 = max(0, int(center_row) - reach)
-        row1 = min(height, int(center_row) + reach + 1)
-        column0 = max(0, int(center_column) - reach)
-        column1 = min(width, int(center_column) + reach + 1)
-
-        if row0 >= row1 or column0 >= column1:
-            continue
-
-        rows_px, columns_px = np.mgrid[row0:row1, column0:column1]
-        delta_row = rows_px - center_row
-        delta_column = columns_px - center_column
-
-        along = delta_column * np.cos(angle) + delta_row * np.sin(angle)
-        across = -delta_column * np.sin(angle) + delta_row * np.cos(angle)
-
-        image[row0:row1, column0:column1] += amplitude * np.exp(
-            -((along / semi_major) ** 2 + (across / semi_minor) ** 2)
-        )
-
-    # Real z-score maps are grainy rather than pixel-noisy, so the noise is
-    # smoothed and then scaled back up to the strength that was asked for.
-    def grainy(strength: float) -> np.ndarray:
-        sigma = max(noise_um / um_per_px, 1e-6)
-        field = gaussian_filter(rng.normal(0, 1, shape).astype("float32"), sigma)
-        return strength * field / (field.std() or 1.0)
-
-    image += grainy(noise)
-
-    # The gap between the bulbs stays wobbly after motion correction
-    if gap_px and gap_noise:
-        band = slice(int((height - gap_px) / 2), int((height + gap_px) / 2))
-        image[band] += grainy(gap_noise)[band]
-
-    return image
-
-
-# --------------------------------------------------------------------------- #
 # GUI
 # --------------------------------------------------------------------------- #
 
@@ -360,8 +226,6 @@ def pick_rois(
     threshold: float = DEFAULT_THRESHOLD,
     min_area_fraction: float = DEFAULT_MIN_AREA_FRACTION,
     border_um: float = DEFAULT_BORDER_UM,
-    strip_center_um: float | None = None,
-    strip_height_um: float = DEFAULT_STRIP_HEIGHT_UM,
     color_limit: float = 5.0,
     max_preview_px: int = 1024,
 ) -> None:
@@ -371,10 +235,6 @@ def pick_rois(
     Change the parameters until most ROIs are outlined, click the ones
     that came out wrong to delete them, draw any that are missing, and press
     _Save ROIs_. The ROIs are written to `save_path` as JSON.
-
-    **EXCLUDED STRIP**
-    The yellow band covers the midline sinus. ROIs touching it turn grey
-    and are left out of the saved file.
 
     **DRAWING**
     - _Delete_: click an ROI (use _Undo_ if it was the wrong one)
@@ -388,11 +248,8 @@ def pick_rois(
     - `um_per_px`: size of a pixel, used to read every other parameter in um
     - `save_path`: where to write the ROIs
     - `diameter_um`, `threshold`, `min_area_fraction`, `border_um`: starting
-    values for the sliders (see `find_rois`)
-    - `strip_center_um`: where the excluded strip starts (middle of the image
-    by default)
-    - `strip_height_um`: how tall the excluded strip starts (0 turns it off)
-    - `color_limit`: z-score shown as fully blue or fully red
+    values for the parameter boxes (see `find_rois`)
+    - `color_limit`: value shown as fully blue or fully red
     - `max_preview_px`: the picture is shrunk to this size before being sent to
     the browser (ROIs are still found on the full image)
 
@@ -416,7 +273,6 @@ def pick_rois(
         LinearColorMapper,
         PolyDrawTool,
         PolyEditTool,
-        Slider,
         Spinner,
         TapTool,
     )
@@ -437,15 +293,10 @@ def pick_rois(
     step = max(1, max(array.shape) // max_preview_px)
     preview = array[::step, ::step]
 
-    def to_source(polygons: list[Polygon], color: str) -> dict:
-        # `excluded`, `line_color` and `fill_alpha` are per-ROI so that the
-        # excluded strip can grey ROIs out without removing them.
+    def to_source(polygons: list[Polygon]) -> dict:
         return {
             "xs": [polygon[:, 0].tolist() for polygon in polygons],
             "ys": [polygon[:, 1].tolist() for polygon in polygons],
-            "excluded": [False] * len(polygons),
-            "line_color": [color] * len(polygons),
-            "fill_alpha": [ROI_FILL_ALPHA] * len(polygons),
         }
 
     def modify_doc(doc):
@@ -464,45 +315,30 @@ def pick_rois(
         )
         p.image(image=[preview], x=0, y=0, dw=width, dh=height, color_mapper=cmap)
 
-        # --- Excluded strip --- #
-        # Spans the full width; only its vertical extent is adjustable.
-
-        strip_src = ColumnDataSource(data=dict(top=[0.0], bottom=[0.0]))
-        p.quad(
-            left=0,
-            right=width,
-            top="top",
-            bottom="bottom",
-            source=strip_src,
-            fill_color=STRIP_COLOR,
-            fill_alpha=0.25,
-            line_alpha=0,
-        )
-
         # --- ROI layers --- #
         # Two sources so that recomputing replaces the automatic ROIs without
         # touching anything drawn by hand.
 
-        auto_src = ColumnDataSource(data=to_source([], "white"))
+        auto_src = ColumnDataSource(data=to_source([]))
         auto_r = p.patches(
             "xs",
             "ys",
             source=auto_src,
             fill_color="white",
-            fill_alpha="fill_alpha",
-            line_color="line_color",
+            fill_alpha=ROI_FILL_ALPHA,
+            line_color="white",
             line_width=2,
             selection_fill_alpha=0.5,
         )
 
-        manual_src = ColumnDataSource(data=to_source([], "lime"))
+        manual_src = ColumnDataSource(data=to_source([]))
         manual_r = p.patches(
             "xs",
             "ys",
             source=manual_src,
             fill_color="lime",
-            fill_alpha="fill_alpha",
-            line_color="line_color",
+            fill_alpha=ROI_FILL_ALPHA,
+            line_color="lime",
             line_width=2,
             selection_fill_alpha=0.5,
         )
@@ -537,26 +373,6 @@ def pick_rois(
         sp_border = spinner(border_um, "Border margin (µm)", 5.0)
         sp_color = spinner(color_limit, "Color limit (z)", 0.5, low=0.1)
 
-        image_height_um = height * um_per_px
-        center = image_height_um / 2 if strip_center_um is None else strip_center_um
-
-        sl_center = Slider(
-            start=0,
-            end=image_height_um,
-            value=min(max(center, 0.0), image_height_um),
-            step=um_per_px,
-            title="Excluded strip center (µm)",
-            width=260,
-        )
-        sl_height = Slider(
-            start=0,
-            end=image_height_um / 2,
-            value=min(max(strip_height_um, 0.0), image_height_um / 2),
-            step=um_per_px,
-            title="Excluded strip height (µm)",
-            width=260,
-        )
-
         undo = Button(label="Undo delete", button_type="warning")
         save = Button(label="Save ROIs", button_type="success")
         status = Div(text="")
@@ -567,71 +383,19 @@ def pick_rois(
         flags = {"busy": False}
         run = {"id": 0}
 
-        def count_excluded() -> int:
-            return sum(
-                sum(bool(flag) for flag in src.data["excluded"])
-                for src in (auto_src, manual_src)
-            )
-
         def update_status(message: str = "") -> None:
             total = len(auto_src.data["xs"]) + len(manual_src.data["xs"])
-            excluded = count_excluded()
             drawn = len(manual_src.data["xs"])
 
-            kept = f"<b>{total - excluded} ROIs</b>"
-            detail = f"{drawn} drawn by hand, {excluded} inside the strip"
-            status.text = f"{kept} ({detail}). {message}"
-
-        # --- Excluded strip --- #
-        # Nothing is deleted here: ROIs are only flagged and greyed out, so
-        # moving the strip brings them back. Saving is what makes it stick.
-
-        def apply_strip() -> None:
-            # Re-entrant: writing to a source re-triggers the data callback.
-            if flags["busy"]:
-                return
-
-            half = 0.5 * sl_height.value / um_per_px
-            middle = sl_center.value / um_per_px
-            top, bottom = middle - half, middle + half
-
-            flags["busy"] = True
-            try:
-                strip_src.data = dict(top=[top], bottom=[bottom])
-
-                for src, color in ((auto_src, "white"), (manual_src, "lime")):
-                    data = {key: list(values) for key, values in src.data.items()}
-
-                    # The strip spans the full width, so touching it is purely
-                    # a question of the ROI's vertical extent.
-                    data["excluded"] = [
-                        bool(half) and min(ys) <= bottom and max(ys) >= top
-                        for ys in data["ys"]
-                    ]
-                    data["line_color"] = [
-                        EXCLUDED_COLOR if flag else color for flag in data["excluded"]
-                    ]
-                    data["fill_alpha"] = [
-                        0.0 if flag else ROI_FILL_ALPHA for flag in data["excluded"]
-                    ]
-
-                    src.data = data
-
-            finally:
-                flags["busy"] = False
-
-            update_status()
+            status.text = f"<b>{total} ROIs</b> ({drawn} drawn by hand). {message}"
 
         # Bokeh rejects callbacks whose arguments have defaults, so the
         # widget callbacks are thin wrappers around the real functions.
-        def on_strip(attr, old, new):
-            apply_strip()
+        def on_manual(attr, old, new):
+            update_status()
 
-        sl_center.on_change("value", on_strip)
-        sl_height.on_change("value", on_strip)
-
-        # Keeps hand-drawn ROIs in sync as they are added or reshaped
-        manual_src.on_change("data", on_strip)
+        # Keeps the count in sync as ROIs are drawn by hand
+        manual_src.on_change("data", on_manual)
 
         # --- Delete on click --- #
 
@@ -672,7 +436,7 @@ def pick_rois(
                 key: list(values) + [removed[key]] for key, values in src.data.items()
             }
 
-            apply_strip()  # the restored ROI may land inside the strip
+            update_status()
 
         undo.on_click(undo_callback)
 
@@ -689,17 +453,17 @@ def pick_rois(
                 border_um=sp_border.value,
             )
 
-            status.text = "<i>Looking for glomeruli…</i>"
+            status.text = "<i>Looking for ROIs…</i>"
 
             def work():
                 try:
                     polygons = find_rois(
                         array, um_per_px=um_per_px, omit_messages=True, **parameters
                     )
-                    data, message = to_source(polygons, "white"), ""
+                    data, message = to_source(polygons), ""
 
                 except Exception as error:
-                    data, message = to_source([], "white"), f"<b>Failed:</b> {error}"
+                    data, message = to_source([]), f"<b>Failed:</b> {error}"
 
                 def apply():
                     # A newer run started while this one was still going
@@ -707,7 +471,6 @@ def pick_rois(
                         return
 
                     auto_src.data = data
-                    apply_strip()  # re-flag the new ROIs against the strip
                     update_status(message)
 
                 doc.add_next_tick_callback(apply)
@@ -731,12 +494,7 @@ def pick_rois(
             rois = []
 
             for source, src in (("auto", auto_src), ("manual", manual_src)):
-                data = src.data
-                for xs, ys, excluded in zip(data["xs"], data["ys"], data["excluded"]):
-                    # This is where the strip stops being a preview
-                    if excluded:
-                        continue
-
+                for xs, ys in zip(src.data["xs"], src.data["ys"]):
                     rois.append(
                         {
                             "label": len(rois) + 1,
@@ -753,8 +511,6 @@ def pick_rois(
                     "threshold": sp_threshold.value,
                     "min_area_fraction": sp_area.value,
                     "border_um": sp_border.value,
-                    "strip_center_um": sl_center.value,
-                    "strip_height_um": sl_height.value,
                 },
                 "rois": rois,
             }
@@ -762,10 +518,7 @@ def pick_rois(
             save_path.parent.mkdir(parents=True, exist_ok=True)
             save_path.write_text(json.dumps(payload, indent=2))
 
-            update_status(
-                f"Saved {len(rois)} ROIs to <code>{save_path}</code> "
-                f"({count_excluded()} left out)."
-            )
+            update_status(f"Saved {len(rois)} ROIs to <code>{save_path}</code>.")
 
         save.on_click(save_callback)
 
@@ -780,8 +533,6 @@ def pick_rois(
                     sp_area,
                     sp_border,
                     sp_color,
-                    sl_center,
-                    sl_height,
                     undo,
                     save,
                     status,
@@ -789,7 +540,6 @@ def pick_rois(
             )
         )
 
-        apply_strip()
         recompute()
 
     bpl.show(modify_doc)
