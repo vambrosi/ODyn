@@ -31,9 +31,12 @@ from typing import cast, Final, TYPE_CHECKING
 
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pandas as pd
 import tifffile
+
+from matplotlib import colormaps
 
 import caiman as cm
 from caiman.motion_correction import MotionCorrect
@@ -61,6 +64,10 @@ DEFAULT_MAX_DEVIATION_UM = 12.0
 DEFAULT_SMOOTHING_WINDOW_S = 0.5
 DEFAULT_PHOTOBLEACH_WINDOW_S = 1.0
 DEFAULT_BASELINE_GAP_S = 0.0
+
+# Movies are rendered through a fixed symmetric range so conditions stay
+# comparable by eye. Auto-scaling each one would undo the point of z-scoring.
+DEFAULT_DISPLAY_RANGE = 5.0
 
 # Experiments in one group must agree on frame rate to within this fraction.
 # Observed spread within a group is ~1.5e-4, so this is ~70x slack.
@@ -1494,8 +1501,12 @@ class Group(CallRecorder):
         self,
         acq_ids: Sequence[int],
         *,
-        geometry: ZScoreGeometry,
-        windows: ZScoreWindows,
+        smoothing_window_s: float = DEFAULT_SMOOTHING_WINDOW_S,
+        photobleach_window_s: float = DEFAULT_PHOTOBLEACH_WINDOW_S,
+        baseline_gap_s: float = DEFAULT_BASELINE_GAP_S,
+        frame_rate_tolerance: float = DEFAULT_FRAME_RATE_TOLERANCE,
+        movie_path: None | str | Path = None,
+        display_range: float = DEFAULT_DISPLAY_RANGE,
     ) -> ZScoreResult:
         """
         Z-score the average of a set of acquisitions.
@@ -1503,13 +1514,34 @@ class Group(CallRecorder):
         Each acquisition is cropped around **its own** odor onset before being
         added to the average, so onset jitter does not smear the response.
 
-        Only the frames the windows need are read. Peak memory is still about
-        twice one cropped movie (the running average plus the file being added),
-        which for the largest experiments is a few GB — hence one pass per
-        condition rather than one pass for the whole group.
+        Frames are timed from the whole group, not from `acq_ids`, so every
+        condition of a group comes out on the same window grid and the stacks
+        can be compared frame for frame.
+
+        Only the frames the windows need are read, but peak memory is still
+        about twice one cropped movie (the running average plus the file being
+        added) — a few GB for the largest experiments, hence one pass per
+        condition rather than one pass for a whole group.
+
+        Pass `movie_path` to also render the movie while the average is still in
+        memory.
         """
         acq_ids = list(acq_ids)
-        timing = self._onset_frames(acq_ids)
+        geometry = self._resolve_geometry(frame_rate_tolerance=frame_rate_tolerance)
+
+        # Windows come from every acquisition in the group so that conditions
+        # stay on a common grid; only acq_ids are actually read.
+        timing = self._onset_frames()
+        windows = _resolve_windows(
+            frame_rate=geometry.frame_rate,
+            onset_frames=timing["onset_frame"].tolist(),
+            odor_frames=timing["odor_frames"].tolist(),
+            frame_counts=timing["frame_count"].tolist(),
+            smoothing_window_s=smoothing_window_s,
+            photobleach_window_s=photobleach_window_s,
+            baseline_gap_s=baseline_gap_s,
+        )
+
         missing = [a for a in acq_ids if a not in self.mcor_files.index]
 
         if missing:
@@ -1519,9 +1551,8 @@ class Group(CallRecorder):
 
         # Frames needed so every window centre has a full smoothing window
         first_raw_frame = windows.first_frame - windows.half_frames
-        last_raw_frame = windows.last_frame + windows.half_frames
         shape = (
-            last_raw_frame - first_raw_frame + 1,
+            windows.last_frame + windows.half_frames - first_raw_frame + 1,
             geometry.height_px,
             geometry.width_px,
         )
@@ -1533,8 +1564,7 @@ class Group(CallRecorder):
         for acq_id, path in tqdm(
             zip(acq_ids, paths), desc="Loading mcor movies", total=len(acq_ids)
         ):
-            onset = int(timing.loc[acq_id, "onset_frame"])
-            start = onset + first_raw_frame
+            start = int(timing.loc[acq_id, "onset_frame"]) + first_raw_frame
 
             with tifffile.TiffFile(self.db.main_folder / path) as tif:
                 frames = tif.asarray(key=slice(start, start + shape[0]))
@@ -1553,22 +1583,27 @@ class Group(CallRecorder):
             average, first_raw_frame=first_raw_frame, windows=windows
         )
 
+        used = timing.loc[acq_ids]
         result.stats |= cast(
             Object,
             {
                 "n_acquisitions": len(acq_ids),
                 "acq_ids": [int(a) for a in acq_ids],
-                "onset_frames": {
-                    "min": int(timing["onset_frame"].min()),
-                    "median": float(timing["onset_frame"].median()),
-                    "max": int(timing["onset_frame"].max()),
-                },
-                "odor_frames": {
-                    "min": int(timing["odor_frames"].min()),
-                    "max": int(timing["odor_frames"].max()),
-                },
+                "onset_frame_min": int(used["onset_frame"].min()),
+                "onset_frame_max": int(used["onset_frame"].max()),
+                "odor_frames_min": int(used["odor_frames"].min()),
+                "odor_frames_max": int(used["odor_frames"].max()),
             },
         )
+
+        if movie_path is not None:
+            _write_movie(
+                Path(movie_path),
+                average,
+                result,
+                first_raw_frame=first_raw_frame,
+                display_range=display_range,
+            )
 
         return result
 
@@ -1628,6 +1663,8 @@ class ZScoreWindows:
     odor_first_k: int
     odor_last_k: int
     post_odor_first_k: int
+    odor_duration: int
+    """Frames from onset to the end of the *shortest* odor presentation."""
 
     @property
     def baseline_frames(self) -> int:
@@ -1687,6 +1724,7 @@ class ZScoreResult:
 
     baseline_mean: np.ndarray
     baseline_std: np.ndarray
+    windows: ZScoreWindows
     stats: Object
 
 
@@ -1797,6 +1835,7 @@ def _resolve_windows(
         odor_first_k=odor_first_k,
         odor_last_k=odor_last_k,
         post_odor_first_k=post_odor_first_k,
+        odor_duration=shortest_odor,
     )
 
 
@@ -1880,6 +1919,7 @@ def _z_score_from_average(
         odor_map=odor_map,
         baseline_mean=baseline_mean,
         baseline_std=baseline_std,
+        windows=windows,
         stats=cast(
             Object,
             {
@@ -1910,6 +1950,82 @@ def _z_score_from_average(
             },
         ),
     )
+
+
+def _write_movie(
+    path: Path,
+    average: np.ndarray,
+    result: ZScoreResult,
+    *,
+    first_raw_frame: int,
+    display_range: float = DEFAULT_DISPLAY_RANGE,
+    codec: str = "MJPG",
+) -> None:
+    """
+    Render the z-scored movie for visual inspection.
+
+    This is a *picture*, not data: values go through a colormap and a fixed
+    range, so nothing here should be measured off. The range is deliberately
+    not auto-scaled — scaling each condition to its own extremes would make two
+    odors look alike however different they are.
+
+    Frames are rendered one at a time. The whole z-movie is never held in
+    memory; for the largest experiments it would be another 3 GB.
+    """
+    windows = result.windows
+    half = windows.half_frames
+
+    # 8-bit lookup table beats mapping float RGBA per frame, which would be
+    # ~100 MB a frame at these sizes. coolwarm is Moreland's map, the same one
+    # divergingMap.m builds.
+    colors = colormaps["coolwarm"](np.linspace(0, 1, 256))
+    lut = (colors[:, 2::-1] * 255).astype(np.uint8)  # RGBA -> BGR
+
+    height, width = result.baseline_mean.shape
+    scale = np.where(result.baseline_std > 0, result.baseline_std, 1.0)
+    radius = max(4, height // 60)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(path),
+        cv2.VideoWriter_fourcc(*codec),
+        windows.frame_rate,
+        (width, height),
+    )
+
+    if not writer.isOpened():
+        raise RuntimeError(f"OpenCV could not open {path} with codec {codec!r}.")
+
+    try:
+        for frame in tqdm(
+            range(windows.first_frame, windows.last_frame + 1), desc="Rendering movie"
+        ):
+            index = frame - first_raw_frame
+            smoothed = average[index - half : index + half + 1].mean(axis=0)
+
+            z = np.nan_to_num(
+                (smoothed - result.baseline_mean) / scale,
+                nan=0.0,
+                posinf=display_range,
+                neginf=-display_range,
+            )
+
+            levels = np.clip(
+                (z + display_range) * (255 / (2 * display_range)), 0, 255
+            ).astype(np.uint8)
+
+            picture = lut[levels]
+
+            # Mark the odor, as zScoreMovieAll.m did
+            if 0 <= frame < windows.odor_duration:
+                cv2.circle(picture, (2 * radius, 2 * radius), radius, (0, 0, 255), -1)
+
+            writer.write(picture)
+
+    finally:
+        writer.release()
+
+    logger.info(f"Wrote {path}")
 
 
 # --------------------------------------------------------------------------- #
