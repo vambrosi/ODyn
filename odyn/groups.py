@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import json
 
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 from typing import cast, Final, TYPE_CHECKING
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import tifffile
 
@@ -55,6 +57,15 @@ DEFAULT_OVERLAP_UM = [96.0, 96.0]
 DEFAULT_MAX_SHIFT_UM = [128.0, 128.0]
 DEFAULT_MAX_DEVIATION_UM = 12.0
 
+# Default z-score parameters (in seconds). Shared by compute_z_score_movie(s).
+DEFAULT_SMOOTHING_WINDOW_S = 0.5
+DEFAULT_PHOTOBLEACH_WINDOW_S = 1.0
+DEFAULT_BASELINE_GAP_S = 0.0
+
+# Experiments in one group must agree on frame rate to within this fraction.
+# Observed spread within a group is ~1.5e-4, so this is ~70x slack.
+DEFAULT_FRAME_RATE_TOLERANCE = 0.01
+
 
 class MovieType(Enum):
     RAW = "raw"
@@ -71,6 +82,22 @@ class McorSource(Enum):
 
     CAIMAN = "caiman"
     PATCHWARP = "patchwarp"
+
+
+class ZScoreFlag(IntFlag):
+    """
+    Flags set by the z-score methods.
+
+    Bit 0 is reserved for `CallFlag.RAISED`.
+    """
+
+    SUCCESS = 0
+    DROPPED_ACQUISITIONS = 1 << 1
+    TOO_FEW_ACQUISITIONS = 1 << 2
+    UNAPPROVED_MCOR = 1 << 3
+    ZEROED_PIXELS = 1 << 4
+    CLIPPED_VALUES = 1 << 5
+    NOISE_FLOOR_OFF = 1 << 6
 
 
 # --------------------------------------------------------------------------- #
@@ -1366,6 +1393,103 @@ class Group(CallRecorder):
     # Data Analysis
     # ----------------------------------------------------------------------- #
 
+    def _resolve_geometry(
+        self, *, frame_rate_tolerance: float = DEFAULT_FRAME_RATE_TOLERANCE
+    ) -> ZScoreGeometry:
+        """
+        Frame geometry shared by every experiment in the group.
+
+        Averaging across acquisitions is pixel-wise, so the frame size must
+        match exactly. Frame rates only have to match to within
+        `frame_rate_tolerance` (they are measured, not set).
+        """
+        experiments = self.experiments
+
+        if experiments.empty:
+            raise ValueError(f"{self!r} has no experiments.")
+
+        # Pixel-wise averaging needs identical frames
+        for column in ("height_px", "width_px", "height_um", "width_um"):
+            values = experiments[column].unique().tolist()
+
+            if len(values) > 1:
+                names = ", ".join(sorted(set(experiments["exp_name"])))
+                raise ValueError(
+                    f"{self!r} mixes experiments with different {column} "
+                    f"({values}): {names}. A group processed together must be a "
+                    "single imaging session."
+                )
+
+        frame_rates = experiments["frame_rate"]
+        frame_rate = float(frame_rates.mean())
+        spread = float((frame_rates.max() - frame_rates.min()) / frame_rate)
+
+        if spread > frame_rate_tolerance:
+            raise ValueError(
+                f"{self!r} has frame rates spanning {spread:.3%}, over the "
+                f"{frame_rate_tolerance:.3%} tolerance "
+                f"({frame_rates.min():.4f}-{frame_rates.max():.4f} Hz)."
+            )
+
+        first = experiments.iloc[0]
+
+        return ZScoreGeometry(
+            height_px=int(first["height_px"]),
+            width_px=int(first["width_px"]),
+            frame_rate=frame_rate,
+            frame_rate_spread=spread,
+            um_per_px=(
+                float(first["height_um"]) / int(first["height_px"]),
+                float(first["width_um"]) / int(first["width_px"]),
+            ),
+        )
+
+    def _onset_frames(self, acq_ids: None | Sequence[int] = None) -> pd.DataFrame:
+        """
+        Odor timing of each acquisition in frames, from its own `frame_rate`.
+
+        Returns a `DataFrame` indexed by `acq_id` with `onset_frame`,
+        `odor_frames` and `frame_count`. Onset jitter within a group is well
+        under one frame, so rounding to the nearest frame is enough to align
+        acquisitions.
+        """
+        acquisitions = self.acquisitions
+
+        if acq_ids is not None:
+            acquisitions = acquisitions.loc[list(acq_ids)]
+
+        if acquisitions.empty:
+            raise ValueError(f"{self!r} has no acquisitions to align.")
+
+        undated = acquisitions.index[
+            acquisitions[["acq_start", "odor_start", "odor_end"]].isna().any(axis=1)
+        ]
+
+        if len(undated):
+            raise ValueError(
+                f"Acquisitions {list(undated)} have no odor timing, so they "
+                "cannot be aligned."
+            )
+
+        experiments = self.experiments.loc[acquisitions["exp_id"]]
+        frame_rate = experiments["frame_rate"].to_numpy()
+
+        def to_frames(delta: pd.Series) -> np.ndarray:
+            return np.rint(delta.dt.total_seconds().to_numpy() * frame_rate).astype(int)
+
+        return pd.DataFrame(
+            {
+                "onset_frame": to_frames(
+                    acquisitions["odor_start"] - acquisitions["acq_start"]
+                ),
+                "odor_frames": to_frames(
+                    acquisitions["odor_end"] - acquisitions["odor_start"]
+                ),
+                "frame_count": experiments["frame_count"].to_numpy().astype(int),
+            },
+            index=acquisitions.index,
+        )
+
     # def compute_z_scores(self) -> cm.movie:
     #     # Check an sync config
     #     self._sync_config()
@@ -1410,6 +1534,209 @@ class Group(CallRecorder):
     #     z_score = (dFF - dFF.mean()) / dFF.std()
 
     #     return z_score
+
+
+# --------------------------------------------------------------------------- #
+# Z-Score Geometry
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class ZScoreGeometry:
+    """Frame geometry shared by every experiment of a group."""
+
+    height_px: int
+    width_px: int
+    frame_rate: float
+    frame_rate_spread: float
+    um_per_px: tuple[float, float]
+
+    def as_dict(self) -> Object:
+        return cast(Object, asdict(self) | {"um_per_px": list(self.um_per_px)})
+
+
+@dataclass(frozen=True)
+class ZScoreWindows:
+    """
+    Every frame index the z-score needs, in frames **relative to odor onset**.
+
+    Onset is a different absolute frame in each acquisition, so windows are kept
+    relative and each acquisition converts them with its own onset frame. All
+    ranges are inclusive.
+
+    Frame indices are *centres* of the smoothing window: frame `c` is the mean
+    of raw frames `[c - half_frames, c + half_frames]`.
+
+    The "independent measurements" stack is the set of **non-overlapping**
+    windows tiled from onset: window `k` covers relative frames
+    `[k * w, (k + 1) * w - 1]`, so its centre is `k * w + half_frames`. `k` runs
+    negative too — those windows sit before the odor and are the visual null.
+
+    `odor_first_k`/`odor_last_k` are the stack windows lying entirely inside the
+    odor presentation; averaging them gives the 2D map.
+    """
+
+    frame_rate: float
+    smoothing_frames: int
+    half_frames: int
+    photobleach_frames: int
+    first_frame: int
+    last_frame: int
+    baseline_start: int
+    baseline_stop: int
+    stack_first_k: int
+    stack_last_k: int
+    odor_first_k: int
+    odor_last_k: int
+
+    @property
+    def baseline_frames(self) -> int:
+        """Number of smoothed frames averaged into the baseline."""
+        return self.baseline_stop - self.baseline_start + 1
+
+    @property
+    def effective_baseline_samples(self) -> float:
+        """
+        Independent samples behind the baseline SD.
+
+        Baseline frames are taken at stride 1, so neighbours share raw frames
+        and the honest sample count is roughly `baseline_frames / w`.
+        """
+        return self.baseline_frames / self.smoothing_frames
+
+    @property
+    def onset_window_index(self) -> int:
+        """Index of the first post-onset window (`k = 0`) inside the stack."""
+        return -self.stack_first_k
+
+    @property
+    def odor_windows(self) -> int:
+        """Number of stack windows averaged into the 2D map."""
+        return self.odor_last_k - self.odor_first_k + 1
+
+    @property
+    def stack_centres(self) -> list[int]:
+        """Relative frame of each stack window, in order."""
+        return [
+            k * self.smoothing_frames + self.half_frames
+            for k in range(self.stack_first_k, self.stack_last_k + 1)
+        ]
+
+    def as_dict(self) -> Object:
+        return cast(
+            Object,
+            asdict(self)
+            | {
+                "baseline_frames": self.baseline_frames,
+                "effective_baseline_samples": self.effective_baseline_samples,
+                "onset_window_index": self.onset_window_index,
+                "odor_windows": self.odor_windows,
+            },
+        )
+
+
+def _frames(seconds: float, frame_rate: float) -> int:
+    """Seconds to a whole number of frames."""
+    return int(round(seconds * frame_rate))
+
+
+def _resolve_windows(
+    *,
+    frame_rate: float,
+    onset_frames: Sequence[int],
+    odor_frames: Sequence[int],
+    frame_counts: Sequence[int],
+    smoothing_window_s: float = DEFAULT_SMOOTHING_WINDOW_S,
+    photobleach_window_s: float = DEFAULT_PHOTOBLEACH_WINDOW_S,
+    baseline_gap_s: float = DEFAULT_BASELINE_GAP_S,
+) -> ZScoreWindows:
+    """
+    Turn the z-score parameters (in seconds) into frame indices.
+
+    Pure function: every argument is a number, so this is the piece that gets
+    unit-tested. `onset_frames`, `odor_frames` and `frame_counts` are per
+    acquisition and give the windows that *every* acquisition can supply.
+    """
+    if frame_rate <= 0:
+        raise ValueError(f"frame_rate must be positive, got {frame_rate}.")
+
+    if len(onset_frames) == 0:
+        raise ValueError("No acquisitions to resolve windows for.")
+
+    if not len(onset_frames) == len(odor_frames) == len(frame_counts):
+        raise ValueError(
+            "onset_frames, odor_frames and frame_counts must have equal length."
+        )
+
+    # Odd windows keep the centre unambiguous. MATLAB's movmean uses an
+    # asymmetric window for even sizes, which is a silent half-frame shift.
+    smoothing_frames = max(1, _frames(smoothing_window_s, frame_rate))
+    smoothing_frames += 1 - smoothing_frames % 2
+    half_frames = smoothing_frames // 2
+
+    # Dropping fewer leading frames than half a window would leave the first
+    # frames averaged over a partial (so noisier) window.
+    photobleach_frames = max(_frames(photobleach_window_s, frame_rate), half_frames)
+
+    # Frames every acquisition can supply, relative to its own onset
+    first_frame = max(photobleach_frames + half_frames - o for o in onset_frames)
+    last_frame = min(
+        n - 1 - half_frames - o for n, o in zip(frame_counts, onset_frames)
+    )
+
+    if last_frame < first_frame:
+        raise ValueError(
+            "No frames are shared by every acquisition "
+            f"(onset frames {min(onset_frames)}-{max(onset_frames)}, "
+            f"frame counts {min(frame_counts)}-{max(frame_counts)}). "
+            "Lower photobleach_window_s or smoothing_window_s."
+        )
+
+    # The last baseline *centre* is half a window before onset, so no baseline
+    # window ever reaches past the odor.
+    baseline_start = first_frame
+    baseline_stop = -half_frames - 1 - _frames(baseline_gap_s, frame_rate)
+
+    if baseline_stop - baseline_start + 1 < 2 * smoothing_frames:
+        raise ValueError(
+            f"Baseline would be {max(0, baseline_stop - baseline_start + 1)} frames, "
+            f"under the {2 * smoothing_frames} needed for two independent samples. "
+            "Lower photobleach_window_s, smoothing_window_s or baseline_gap_s."
+        )
+
+    # Stack windows are the ones whose centre is a usable frame
+    stack_first_k = -((half_frames - first_frame) // smoothing_frames)
+    stack_last_k = (last_frame - half_frames) // smoothing_frames
+
+    # The 2D map averages the windows lying entirely inside the odor. Odor
+    # duration is taken from the DB rather than a parameter: it varies between
+    # experiments (1 s in some groups, 4 s in most), so no default would fit.
+    # The shortest presentation sets the bound, so no window ever runs past the
+    # odor in any acquisition.
+    odor_first_k = max(stack_first_k, 0)
+    odor_last_k = min(stack_last_k, min(odor_frames) // smoothing_frames - 1)
+
+    if odor_last_k < odor_first_k:
+        raise ValueError(
+            f"The shortest odor presentation ({min(odor_frames)} frames) holds "
+            f"no whole {smoothing_frames}-frame window. Lower "
+            "smoothing_window_s."
+        )
+
+    return ZScoreWindows(
+        frame_rate=frame_rate,
+        smoothing_frames=smoothing_frames,
+        half_frames=half_frames,
+        photobleach_frames=photobleach_frames,
+        first_frame=first_frame,
+        last_frame=last_frame,
+        baseline_start=baseline_start,
+        baseline_stop=baseline_stop,
+        stack_first_k=stack_first_k,
+        stack_last_k=stack_last_k,
+        odor_first_k=odor_first_k,
+        odor_last_k=odor_last_k,
+    )
 
 
 # --------------------------------------------------------------------------- #
