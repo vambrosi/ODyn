@@ -1490,50 +1490,87 @@ class Group(CallRecorder):
             index=acquisitions.index,
         )
 
-    # def compute_z_scores(self) -> cm.movie:
-    #     # Check an sync config
-    #     self._sync_config()
+    def _z_score_from_acquisitions(
+        self,
+        acq_ids: Sequence[int],
+        *,
+        geometry: ZScoreGeometry,
+        windows: ZScoreWindows,
+    ) -> ZScoreResult:
+        """
+        Z-score the average of a set of acquisitions.
 
-    #     # TODO: replace dummy values below
-    #     odor_onset = 2
-    #     odor_offset = 4
-    #     # END OF DUMMY VALUES ------------
+        Each acquisition is cropped around **its own** odor onset before being
+        added to the average, so onset jitter does not smear the response.
 
-    #     # Get config parameters
-    #     frame_rate = self.config["metadata"]["frame_rate"]
-    #     post_odor_interval = self.config["z-scores"]["post_odor_interval"]
-    #     baseline_pre_odor = self.config["z-scores"]["baseline_pre_odor"]
+        Only the frames the windows need are read. Peak memory is still about
+        twice one cropped movie (the running average plus the file being added),
+        which for the largest experiments is a few GB — hence one pass per
+        condition rather than one pass for the whole group.
+        """
+        acq_ids = list(acq_ids)
+        timing = self._onset_frames(acq_ids)
+        missing = [a for a in acq_ids if a not in self.mcor_files.index]
 
-    #     frame_odor_onset = int(odor_onset * frame_rate)
-    #     frame_onset = int((odor_onset + post_odor_interval) * frame_rate)
-    #     frame_offset = int((odor_offset + post_odor_interval) * frame_rate)
-    #     frame_duration = frame_offset - frame_onset + 1
+        if missing:
+            raise ValueError(f"Acquisitions {missing} have no motion-corrected file.")
 
-    #     frame_baseline_start = (
-    #         frame_odor_onset - frame_duration
-    #         if baseline_pre_odor
-    #         else frame_onset - frame_duration
-    #     )
+        paths = self.mcor_files.loc[acq_ids, "mcor_path"]
 
-    #     mcor_folder = self.path / self.config["experiment"]["mcor_folder"]
-    #     mcor_files = mcor_folder.glob(f"[!.]?*_mcor.tif")
+        # Frames needed so every window centre has a full smoothing window
+        first_raw_frame = windows.first_frame - windows.half_frames
+        last_raw_frame = windows.last_frame + windows.half_frames
+        shape = (
+            last_raw_frame - first_raw_frame + 1,
+            geometry.height_px,
+            geometry.width_px,
+        )
 
-    #     assert mcor_files, "No .tif files in the mcor folder."
+        logger.info(f"Averaging {len(acq_ids)} acquisitions ({shape[0]} frames each).")
 
-    #     # TIFFs were originally in int16, so we add 32768 to make then non-negative
-    #     baseline_range = range(frame_baseline_start, frame_duration)
-    #     baseline_avg = cm.load(mcor_files[0], subindices=baseline_range).mean(axis=0)
-    #     baseline_avg += 32768
+        average = np.zeros(shape, dtype=np.float32)
 
-    #     signal_range = range(frame_onset, frame_duration)
-    #     signal_avg = cm.load(mcor_files[0], subindices=signal_range).mean(axis=0)
-    #     signal_avg += 32768
+        for acq_id, path in tqdm(
+            zip(acq_ids, paths), desc="Loading mcor movies", total=len(acq_ids)
+        ):
+            onset = int(timing.loc[acq_id, "onset_frame"])
+            start = onset + first_raw_frame
 
-    #     # Computes z-score of dF/F
-    #     dFF = (signal_avg - baseline_avg) / baseline_avg
-    #     z_score = (dFF - dFF.mean()) / dFF.std()
+            with tifffile.TiffFile(self.db.main_folder / path) as tif:
+                frames = tif.asarray(key=slice(start, start + shape[0]))
 
-    #     return z_score
+            if frames.shape != shape:
+                raise ValueError(
+                    f"Acquisition {acq_id} ({path}) gave frames of shape "
+                    f"{frames.shape}, expected {shape}."
+                )
+
+            average += frames
+
+        average /= len(acq_ids)
+
+        result = _z_score_from_average(
+            average, first_raw_frame=first_raw_frame, windows=windows
+        )
+
+        result.stats |= cast(
+            Object,
+            {
+                "n_acquisitions": len(acq_ids),
+                "acq_ids": [int(a) for a in acq_ids],
+                "onset_frames": {
+                    "min": int(timing["onset_frame"].min()),
+                    "median": float(timing["onset_frame"].median()),
+                    "max": int(timing["onset_frame"].max()),
+                },
+                "odor_frames": {
+                    "min": int(timing["odor_frames"].min()),
+                    "max": int(timing["odor_frames"].max()),
+                },
+            },
+        )
+
+        return result
 
 
 # --------------------------------------------------------------------------- #
@@ -1573,7 +1610,9 @@ class ZScoreWindows:
     negative too — those windows sit before the odor and are the visual null.
 
     `odor_first_k`/`odor_last_k` are the stack windows lying entirely inside the
-    odor presentation; averaging them gives the 2D map.
+    odor presentation; averaging them gives the 2D map. `post_odor_first_k` is
+    the first window entirely *after* it — one further along whenever the odor
+    is not a whole number of windows, since that window straddles the offset.
     """
 
     frame_rate: float
@@ -1588,6 +1627,7 @@ class ZScoreWindows:
     stack_last_k: int
     odor_first_k: int
     odor_last_k: int
+    post_odor_first_k: int
 
     @property
     def baseline_frames(self) -> int:
@@ -1633,6 +1673,21 @@ class ZScoreWindows:
                 "odor_windows": self.odor_windows,
             },
         )
+
+
+@dataclass
+class ZScoreResult:
+    """What one condition produces. Arrays are `float32`."""
+
+    stack: np.ndarray
+    """`(windows, height, width)` — one frame per non-overlapping window."""
+
+    odor_map: np.ndarray
+    """`(height, width)` — mean of the stack windows inside the odor."""
+
+    baseline_mean: np.ndarray
+    baseline_std: np.ndarray
+    stats: Object
 
 
 def _frames(seconds: float, frame_rate: float) -> int:
@@ -1713,15 +1768,20 @@ def _resolve_windows(
     # experiments (1 s in some groups, 4 s in most), so no default would fit.
     # The shortest presentation sets the bound, so no window ever runs past the
     # odor in any acquisition.
+    shortest_odor = min(odor_frames)
     odor_first_k = max(stack_first_k, 0)
-    odor_last_k = min(stack_last_k, min(odor_frames) // smoothing_frames - 1)
+    odor_last_k = min(stack_last_k, shortest_odor // smoothing_frames - 1)
 
     if odor_last_k < odor_first_k:
         raise ValueError(
-            f"The shortest odor presentation ({min(odor_frames)} frames) holds "
+            f"The shortest odor presentation ({shortest_odor} frames) holds "
             f"no whole {smoothing_frames}-frame window. Lower "
             "smoothing_window_s."
         )
+
+    # Unless the odor is a whole number of windows, one window straddles the
+    # offset. It belongs to neither side.
+    post_odor_first_k = -((-shortest_odor) // smoothing_frames)
 
     return ZScoreWindows(
         frame_rate=frame_rate,
@@ -1736,6 +1796,119 @@ def _resolve_windows(
         stack_last_k=stack_last_k,
         odor_first_k=odor_first_k,
         odor_last_k=odor_last_k,
+        post_odor_first_k=post_odor_first_k,
+    )
+
+
+def _window_means(movie: np.ndarray, centres: Sequence[int], half: int) -> np.ndarray:
+    """
+    Centred moving mean of `movie` at `centres` only.
+
+    Only a handful of frames are ever needed (the baseline and the stack), so
+    this avoids materialising a whole smoothed movie — which for the largest
+    experiments would be another 3 GB.
+    """
+    means = np.empty((len(centres), *movie.shape[1:]), dtype=np.float32)
+
+    for i, centre in enumerate(centres):
+        np.mean(movie[centre - half : centre + half + 1], axis=0, out=means[i])
+
+    return means
+
+
+def _spread(stack: np.ndarray, usable: np.ndarray) -> None | float:
+    """
+    Spread of a run of stack windows, over usable pixels.
+
+    NOTE: a split-half version of this (re-scoring alternate pre-odor windows
+    against the others) was tried and dropped. With only the 7-8 pre-odor
+    windows these recordings allow, the diagnostic's own expected value is ~1.9
+    rather than 1 and its variance is barely defined, so it reported alarm on
+    perfectly good data. It needs ~20 windows to be worth reading.
+    """
+    return float(stack[:, usable].std()) if len(stack) >= 2 and usable.any() else None
+
+
+def _z_score_from_average(
+    average: np.ndarray, *, first_raw_frame: int, windows: ZScoreWindows
+) -> ZScoreResult:
+    """
+    Z-score an aligned, acquisition-averaged movie.
+
+    `average` holds the raw frames from `first_raw_frame` onward, relative to
+    odor onset. Pure array maths — no files, no database — so this is the piece
+    that gets unit-tested.
+
+    The numerator and the denominator are smoothed the same way on purpose. An
+    unsmoothed denominator leaves a hidden `sqrt(w / 2)` in every value, which
+    would make the whole movie change scale whenever `smoothing_window_s` — a
+    knob users read as cosmetic — is touched.
+    """
+    half = windows.half_frames
+
+    def indices(frames: Sequence[int]) -> list[int]:
+        return [frame - first_raw_frame for frame in frames]
+
+    baseline = _window_means(
+        average,
+        indices(range(windows.baseline_start, windows.baseline_stop + 1)),
+        half,
+    )
+
+    baseline_mean = baseline.mean(axis=0)
+    baseline_std = baseline.std(axis=0, ddof=1)
+    del baseline
+
+    # Pixels with no variation (masked borders, saturated regions) would divide
+    # by zero. They carry no signal, so they are flattened rather than dropped.
+    usable = np.isfinite(baseline_std) & (baseline_std > 0) & np.isfinite(baseline_mean)
+
+    stack = _window_means(average, indices(windows.stack_centres), half)
+    stack -= baseline_mean
+    stack /= np.where(usable, baseline_std, 1.0)
+    stack[:, ~usable] = 0.0
+
+    first_odor = windows.onset_window_index + windows.odor_first_k
+    after_odor = windows.onset_window_index + windows.post_odor_first_k
+    odor_map = stack[first_odor : first_odor + windows.odor_windows].mean(axis=0)
+
+    map_values = odor_map[usable]
+    percentiles = {"p1": 1.0, "p50": 50.0, "p99": 99.0, "p99_9": 99.9}
+
+    return ZScoreResult(
+        stack=stack,
+        odor_map=odor_map,
+        baseline_mean=baseline_mean,
+        baseline_std=baseline_std,
+        stats=cast(
+            Object,
+            {
+                "zeroed_pixel_fraction": float(1.0 - usable.mean()),
+                "baseline_std_median": float(np.median(baseline_std[usable]))
+                if usable.any()
+                else None,
+                "odor_map_percentiles": {
+                    name: float(np.percentile(map_values, p))
+                    for name, p in percentiles.items()
+                }
+                if map_values.size
+                else None,
+                "odor_map_max_abs": float(np.abs(map_values).max())
+                if map_values.size
+                else None,
+                # Sanity numbers. pre_odor_sd is in-sample (the baseline was
+                # fitted over that same period), so it sits at 1 by construction
+                # and only catches gross errors. post_odor_sd is held out: on
+                # pure noise it reads ~1.27 at the baseline length these
+                # recordings allow, falling to 1.0 as the baseline grows, so
+                # treat ~1.3 as the floor and not as a warning. Above that means
+                # drift, residual motion, or a response still decaying.
+                "pre_odor_sd": _spread(stack[: windows.onset_window_index], usable),
+                "pre_odor_windows": int(windows.onset_window_index),
+                "post_odor_sd": _spread(stack[after_odor:], usable),
+                "post_odor_windows": int(len(stack) - after_odor),
+            },
+        ),
     )
 
 

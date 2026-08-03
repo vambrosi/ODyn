@@ -217,6 +217,21 @@ def test_odor_windows_are_a_slice_of_the_stack():
     assert w.odor_windows == w.odor_last_k - w.odor_first_k + 1
 
 
+def test_no_gap_when_the_odor_is_a_whole_number_of_windows():
+    """56 frames of odor is exactly 8 windows of 7."""
+    w = windows()
+
+    assert w.post_odor_first_k == w.odor_last_k + 1
+
+
+def test_the_window_straddling_odor_offset_belongs_to_neither_side():
+    """51 frames of odor is 7 windows plus 2 frames, so window 7 is split."""
+    w = windows(odor_frames=[51])
+
+    assert w.odor_last_k == 6
+    assert w.post_odor_first_k == 8
+
+
 def test_shortest_odor_presentation_sets_the_bound():
     """No map window may run past the odor in *any* acquisition."""
     w = _resolve_windows(
