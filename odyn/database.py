@@ -466,7 +466,7 @@ class Database(CallRecorder):
         acquisition_time = loop_start + timedelta(seconds=delta_sec)
 
         acquisition: Object = {
-            "raw_path": str(path.relative_to(self.main_folder)),
+            "raw_path": path.relative_to(self.main_folder).as_posix(),
             "acq_start": acquisition_time,
         }
 
@@ -1044,8 +1044,8 @@ class Database(CallRecorder):
             # Path are relative to main_folder to be computer independent
             # This makes the DB method_call parameters reusable
 
-            rel_path = str(exp_path.relative_to(self.main_folder))
-            raw_path_rel = str(raw_path.relative_to(self.main_folder))
+            rel_path = exp_path.relative_to(self.main_folder).as_posix()
+            raw_path_rel = raw_path.relative_to(self.main_folder).as_posix()
             experiments[rel_path].append(raw_path_rel)
 
         # Add experiments to the database
@@ -1204,7 +1204,7 @@ def _load_event_data(
             "program_name": program_name,
             "program_type": program_type,
             "program_start": program_start,
-            "program_path": str(event_file.relative_to(main_folder)),
+            "program_path": event_file.relative_to(main_folder).as_posix(),
         }
 
         df = _parse_event_file(event_file, program_start)

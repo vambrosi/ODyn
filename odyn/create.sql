@@ -1,4 +1,4 @@
--- CREATE DATABASE WITH SCHEMA v1
+-- CREATE DATABASE WITH SCHEMA v2
 CREATE TABLE IF NOT EXISTS mice
     ( mouse_id          TEXT PRIMARY KEY
     , mouse_sex         TEXT NOT NULL CHECK(mouse_sex IN ('M', 'F'))
@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS acquisitions
 CREATE TABLE IF NOT EXISTS mcor_files
     ( acq_id            INTEGER PRIMARY KEY
     , mcor_path         TEXT NOT NULL
+    , source            TEXT NOT NULL CHECK(source IN ('caiman', 'patchwarp'))
     , approved          INTEGER NOT NULL DEFAULT FALSE
     , last_updated_by   INTEGER NOT NULL
 

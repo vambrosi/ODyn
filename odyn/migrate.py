@@ -31,7 +31,7 @@ from .utils import DB_TIMEOUT_S, ODYN_FOLDER, logger
 # - Bump the SCHEMA_VERSION to match;
 # - Run this script and test_migration.py.
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 LATEST_MIGRATION = Path(__file__).parent / "latest.sql"
 
 CREATE_SCRIPT = Path(__file__).parent / "create.sql"

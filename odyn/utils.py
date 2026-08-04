@@ -105,7 +105,7 @@ class CallRecorder:
     def add_output_file(self, path: str | Path) -> None:
         """Record a file in `outputs` (path relative to main_folder)."""
         db = self._recording_db
-        rel_path = str(Path(path).relative_to(db.main_folder))
+        rel_path = Path(path).relative_to(db.main_folder).as_posix()
 
         with db.con as con:
             con.execute(

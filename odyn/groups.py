@@ -62,6 +62,17 @@ class MovieType(Enum):
     TEST = "test"
 
 
+class McorSource(Enum):
+    """
+    What motion corrected an `mcor_files` row.
+
+    Must stay in step with the CHECK on `mcor_files.source` in `create.sql`.
+    """
+
+    CAIMAN = "caiman"
+    PATCHWARP = "patchwarp"
+
+
 # --------------------------------------------------------------------------- #
 # Main Data Processing\Analysis Class
 # --------------------------------------------------------------------------- #
@@ -1307,8 +1318,9 @@ class Group(CallRecorder):
             INSERT OR REPLACE INTO mcor_files
                 ( acq_id
                 , mcor_path
+                , source
                 , last_updated_by
-                ) VALUES (?, ?, ?);
+                ) VALUES (?, ?, ?, ?);
         """
 
         # Load mmap files and save them as TIFFs
@@ -1340,7 +1352,8 @@ class Group(CallRecorder):
                     insertion_query,
                     [
                         acq_id,
-                        str(mcor_path.relative_to(self.db.main_folder)),
+                        mcor_path.relative_to(self.db.main_folder).as_posix(),
+                        McorSource.CAIMAN.value,
                         self.current_call_id,
                     ],
                 )
