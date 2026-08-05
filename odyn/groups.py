@@ -1003,6 +1003,7 @@ class Group(CallRecorder):
         *,
         grid: list[str] = ["raw", "mcor"],
         downsample_ratio: float = 0.03,
+        downsample_type: str = "average",
         opencv_codec: str = "MJPG",
         save_movie: bool = True,
         save_folder: str = r"./movies",
@@ -1031,6 +1032,11 @@ class Group(CallRecorder):
 
         *Movie loading settings*
         - `downsample_ratio`: Percentage of frames to keep
+        - `downsample_type`: How to drop frames ("average" or "skip")
+
+        **ALERT:** "average" (the default) reads every frame and averages them down.
+        The result looks less noisy, but it smooths away residual motion. "skip" reads
+        only the frames it keeps, which is much faster over the network, but it is noisier.
 
         *Video saving*
         - `opencv_codec`: Codec used to encode the saved video
@@ -1068,6 +1074,12 @@ class Group(CallRecorder):
                 ['raw'], ['mcor'], ['test'],
                 ['raw', 'test'], ['raw', 'mcor'],
                 ['test', 'raw'], ['mcor', 'raw']"""
+
+        # Check downsample_type input
+        assert downsample_type in ("average", "skip"), (
+            "The parameter 'downsample_type' must be 'average' or 'skip', "
+            f"but instead got {downsample_type!r}."
+        )
 
         params = locals()
 
@@ -1121,7 +1133,7 @@ class Group(CallRecorder):
         if save_movie:
             logger.info(f"Saving movie to {movie_name}")
 
-        self.movies[movie_types].maybe_update(downsample_ratio).play(
+        self.movies[movie_types].maybe_update(downsample_ratio, downsample_type).play(
             backend=backend,
             do_loop=do_loop,
             fr=fr,
@@ -1430,7 +1442,7 @@ class LazyMovie:
     def mark_as_outdated(self):
         self.movie = None
 
-    def maybe_update(self, downsample_ratio) -> cm.movie:
+    def maybe_update(self, downsample_ratio, downsample_type="average") -> cm.movie:
         if self.movie is not None:
             logger.info("Using cached movie...")
             return self.movie
@@ -1483,14 +1495,24 @@ class LazyMovie:
                 f"Adding {len(movie_paths)} {movie_type.value} files to the movie."
             )
 
+            # "skip" reads only the frames it keeps, rather than reading a whole
+            # movie to average it away. Same number of frames out either way.
+            stride = max(1, round(1 / downsample_ratio)) if downsample_ratio > 0 else 1
+
             movie_chain = None
             for path in tqdm(movie_paths, desc=f"Loading {movie_type.value} movies"):
-                movie = cm.load(path).resize(1, 1, downsample_ratio)
+                movie = (
+                    cm.load(path, subindices=slice(None, None, stride))
+                    if downsample_type == "skip"
+                    else cm.load(path).resize(1, 1, downsample_ratio)
+                )
+
                 movie_chain = (
                     movie
                     if movie_chain is None
                     else cm.concatenate([movie_chain, movie], axis=0)
                 )
+
                 logger.info(f"  {path}")
 
             movie_chains.append(movie_chain)
