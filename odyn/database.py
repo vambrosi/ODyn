@@ -126,9 +126,21 @@ class Database(CallRecorder):
     ```
     """
 
-    def __init__(self, path: str | Path, update=False):
+    def __init__(self, path: str | Path, update=False, _is_test=False):
+        """
+        **PARAMETERS**
+        - `path` is the main folder holding the experiment folders
+        - `update` searches the main folder for experiments to add
+        """
+        # NOTE: _is_test is deliberately not documented above.
+        #       See _copy_for_test for more details.
         self.main_folder = Path(path)
-        self.path: Final[Path] = self.main_folder / ODYN_FOLDER / "odyn.db"
+        self._is_test: Final[bool] = _is_test
+        self.path: Final[Path] = (
+            self._copy_for_test()
+            if _is_test
+            else self.main_folder / ODYN_FOLDER / "odyn.db"
+        )
 
         # Database has a default group to record its calls
         self.group_id: Final[int] = 0
@@ -185,26 +197,6 @@ class Database(CallRecorder):
     def __del__(self):
         self.con.close()
 
-    def _check_schema_version(self) -> None:
-        """
-        Throws error if DB schema version is not what the code expects.
-        """
-
-        version = self.con.execute("PRAGMA user_version;").fetchone()[0]
-        if version == SCHEMA_VERSION:
-            return
-
-        if version < SCHEMA_VERSION:
-            raise RuntimeError(
-                f"Database schema is v{version} but the code expects "
-                f"v{SCHEMA_VERSION}. Run the migration:\n"
-                f"    python -m odyn.migrate '{self.main_folder}'"
-            )
-
-        raise RuntimeError(
-            f"Database schema is v{version} but the code expects v{SCHEMA_VERSION}. "
-            "Your code is out of date! Pull the latest version!"
-        )
 
     # ----------------------------------------------------------------------- #
     # SQLite Tables as DataFrames
@@ -403,6 +395,59 @@ class Database(CallRecorder):
     # ----------------------------------------------------------------------- #
     # Private Methods
     # ----------------------------------------------------------------------- #
+
+    def _check_schema_version(self) -> None:
+            """
+            Throws error if DB schema version is not what the code expects.
+            """
+
+            version = self.con.execute("PRAGMA user_version;").fetchone()[0]
+            if version == SCHEMA_VERSION:
+                return
+
+            if version < SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Database schema is v{version} but the code expects "
+                    f"v{SCHEMA_VERSION}. Run the migration:\n"
+                    f"    python -m odyn.migrate '{self.main_folder}'"
+                )
+
+            raise RuntimeError(
+                f"Database schema is v{version} but the code expects v{SCHEMA_VERSION}. "
+                "Your code is out of date! Pull the latest version!"
+            )
+
+    def _copy_for_test(self) -> Path:
+            """
+            Returns path to a fresh snapshot of the database.
+            For tests only, via `Database(main_folder, _is_test=True)`.
+
+            PROTECTS DATABASE, BUT ACCESS REAL DATA.
+            """
+            source = self.main_folder / ODYN_FOLDER / "odyn.db"
+
+            if not source.exists():
+                raise FileNotFoundError(f"No database at '{source}' to copy.")
+
+            copy = source.parent / "tests" / "odyn.db"
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.unlink(missing_ok=True)
+
+            # Use the online backup API rather than a file copy.
+            #   (In case the DB is in use.)
+            origin = sqlite3.connect(source, timeout=DB_TIMEOUT_S)
+            destination = sqlite3.connect(copy)
+
+            try:
+                origin.backup(destination)
+            finally:
+                destination.close()
+                origin.close()
+
+            logger.warning(f"TEST COPY: '{copy.resolve()}'")
+            logger.warning("The shared database will not see anything you do here.")
+
+            return copy
 
     def _get_raw_metadata(self, path: Path) -> None | tuple[Object, Object]:
         tif = TiffFile(path)
