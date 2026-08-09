@@ -30,10 +30,12 @@ from typing import cast, Final, TYPE_CHECKING
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import tifffile
 
 import caiman as cm
+from caiman.base.movies import get_file_size
 from caiman.motion_correction import MotionCorrect
 from caiman.paths import get_tempdir
 
@@ -1424,6 +1426,23 @@ class Group(CallRecorder):
     #     return z_score
 
 
+def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:
+    """
+    Which frames of `path` to read to downsample it by `downsample_ratio`.
+
+    Matches how many frames caiman's `resize` would leave, so that skipping and
+    averaging produce movies of the same length. It keeps `int(ratio * frames)`
+    of them (truncated, and never fewer than one).
+
+    NOTE: this must be an array. `caiman.load` reads a *list* of subindices as
+    one index per dimension, so a list would be taken as [time, y, x].
+    """
+    _, frames = get_file_size(path)
+    keep = max(1, min(int(frames), int(downsample_ratio * frames)))
+
+    return np.linspace(0, frames - 1, keep).round().astype(int)
+
+
 # --------------------------------------------------------------------------- #
 # Auxiliary Classes
 # --------------------------------------------------------------------------- #
@@ -1497,15 +1516,21 @@ class LazyMovie:
 
             # "skip" reads only the frames it keeps, rather than reading a whole
             # movie to average it away. Same number of frames out either way.
-            stride = max(1, round(1 / downsample_ratio)) if downsample_ratio > 0 else 1
-
             movie_chain = None
             for path in tqdm(movie_paths, desc=f"Loading {movie_type.value} movies"):
-                movie = (
-                    cm.load(path, subindices=slice(None, None, stride))
-                    if downsample_type == "skip"
-                    else cm.load(path).resize(1, 1, downsample_ratio)
-                )
+                if downsample_type == "skip":
+                    movie = cm.load(
+                        path, subindices=_frames_to_keep(path, downsample_ratio)
+                    )
+
+                    # Reading a single frame drops the time axis, and the movies
+                    # are stacked along it. Happens whenever the ratio is small
+                    # enough to keep one frame per file.
+                    if movie.ndim == 2:
+                        movie = movie[np.newaxis]
+
+                else:
+                    movie = cm.load(path).resize(1, 1, downsample_ratio)
 
                 movie_chain = (
                     movie
