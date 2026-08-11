@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from dataclasses import dataclass
 from typing import cast, Final, TYPE_CHECKING
@@ -72,11 +73,34 @@ class McorSource(Enum):
     """
     What motion corrected an `mcor_files` row.
 
-    Must stay in step with the CHECK on `mcor_files.source` in `create.sql`.
+    Must mirror the CHECK on `mcor_files.source` in `create.sql`.
     """
 
     CAIMAN = "caiman"
     PATCHWARP = "patchwarp"
+
+
+# mcor files folder, relative to the experiment folder, and what the library appends
+# to the raw file name. Should mirror McorSource enum and mcor_files.source CHECK.
+MCOR_LAYOUT = {
+    McorSource.CAIMAN: ("processed/mcor", "_mcor.tif"),
+    McorSource.PATCHWARP: ("processed/patchwarp/post_warp", "_corrected_warped.tif"),
+}
+
+
+class McorFlag(IntFlag):
+    """
+    call_flag bits for `Group.add_mcor_files` (bit 0 reserved by `CallFlag.RAISED`).
+    """
+
+    ALREADY_HAS_FILES = 1 << 1  # group was not empty, nothing added
+    REPLACED_EXISTING = 1 << 2  # previous files were dropped for these ones
+    OWNED_BY_OTHER_GROUP = 1 << 3  # another group motion corrected these files
+    SHARED_WITH_OTHER_GROUPS = 1 << 4  # other groups will see the new files
+    FILE_NOT_FOUND = 1 << 5  # no motion corrected file where one was expected
+    WRONG_SHAPE = 1 << 6  # frame size does not match the experiment
+    WRONG_FRAME_COUNT = 1 << 7  # frame count does not match the experiment
+    UNREADABLE = 1 << 8  # file is there but its header could not be read
 
 
 # --------------------------------------------------------------------------- #
@@ -1437,6 +1461,276 @@ class Group(CallRecorder):
         self._mcor_files = None
         self.db._mcor_files = None
 
+    @record_call
+    def add_mcor_files(
+        self,
+        *,
+        source: str = "caiman",
+        overwrite: bool = False,
+    ) -> None:
+        """
+        Add motion corrected files not created by `run_motion_correction`
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            group.add_mcor_files()
+        ```
+
+        **PARAMETERS**
+        - `source`: which tool made the files ("caiman" or "patchwarp")
+        - `overwrite`: drop the files the group has now and use these instead
+
+        **IMPORTANT WARNING**
+        A group's mcor files must all come from the same run, so either:
+            - This function does not change `group.mcor_files` at all;
+            - Or the whole `group.mcor_files` table is overwritten.
+
+        The first case happens when:
+            - `overwrite=False` and `group.mcor_files` is non-empty;
+            - or `overwrite=True` but no valid mcor files where found.
+
+        All other cases lead to dropping all `mcor_files` entries for this
+        group and the addition of the valid mcor files that where found.
+
+        Each experiment must be on only one "motion correction" group, and
+        this function SHOULD ONLY BE CALLED ON THAT GROUP.
+
+        **HOW IT WORKS**
+        For each raw file `raw/NAME.tif` in the group it expects a
+        ```
+            caiman     processed/mcor/NAME_mcor.tif
+            patchwarp  processed/patchwarp/post_warp/NAME_corrected_warped.tif
+        ```
+
+        An mcor file is only added if its frame size and frame count match the
+        raw file's. Anything missing or mismatched is reported and left out, so
+        a group can end up with files for only some of its acquisitions.
+        """
+        try:
+            mcor_source = McorSource(source)
+        except ValueError:
+            raise ValueError(
+                f"source must be one of {[s.value for s in McorSource]},"
+                f"but instead got {source!r}."
+            )
+
+        folder, suffix = MCOR_LAYOUT[mcor_source]
+
+        acquisitions = self.acquisitions
+        experiments = self.experiments
+        existing = self.mcor_files
+
+        # Nothing is read from disk in this case, which matters over the network
+        if len(existing) and not overwrite:
+            self.add_flag(McorFlag.ALREADY_HAS_FILES)
+            logger.warning(
+                f"{CROSS} {self!r} already has {len(existing)} "
+                "mcor files, so nothing was added."
+            )
+            logger.warning(
+                "Pass overwrite=True to drop the old files and add new ones."
+            )
+            self.set_output(cast(Object, {"source": mcor_source.value, "added": 0}))
+            return
+
+        rows: list[list] = []
+        report: dict[str, list[int]] = {
+            "added": [],
+            "file_not_found": [],
+            "wrong_shape": [],
+            "wrong_frame_count": [],
+            "unreadable": [],
+        }
+
+        listings: dict[Path, dict[str, int]] = {}
+
+        def sizes_in(mcor_folder: Path) -> dict[str, int]:
+            """Name and size of every file in a folder, for one round trip."""
+            if mcor_folder not in listings:
+                try:
+                    with os.scandir(mcor_folder) as entries:
+                        listings[mcor_folder] = {
+                            entry.name: entry.stat().st_size for entry in entries
+                        }
+
+                except OSError:
+                    listings[mcor_folder] = {}
+
+            return listings[mcor_folder]
+
+        for acq_id, acquisition in tqdm(
+            acquisitions.iterrows(), desc="Checking files", total=len(acquisitions)
+        ):
+            raw_path = Path(acquisition["raw_path"])
+            mcor_folder = self.db.main_folder / raw_path.parent.parent / folder
+            name = raw_path.stem + suffix
+
+            # Listing a folder costs about one stat but brings every size with
+            # it. Over the network that is one round trip per folder instead of
+            # two per acquisition (~6 ms each), so it saves seconds per import.
+            size = sizes_in(mcor_folder).get(name)
+
+            if size is None:
+                report["file_not_found"].append(acq_id)
+                continue
+
+            mcor_path = mcor_folder / name
+            experiment = experiments.loc[acquisition["exp_id"]]
+            expected = (int(experiment["height_px"]), int(experiment["width_px"]))
+
+            try:
+                shape, frames = _tiff_shape(
+                    mcor_path, size, int(experiment["frame_count"])
+                )
+
+            except Exception as error:
+                logger.warning(f"  Could not read '{mcor_path.name}': {error}")
+                report["unreadable"].append(acq_id)
+                continue
+
+            if shape != expected:
+                logger.warning(
+                    f"  '{mcor_path.name}' is {shape[0]}x{shape[1]}, "
+                    f"expected {expected[0]}x{expected[1]}."
+                )
+                report["wrong_shape"].append(acq_id)
+                continue
+
+            if frames != int(experiment["frame_count"]):
+                logger.warning(
+                    f"  '{mcor_path.name}' has {frames} frames, "
+                    f"expected {experiment['frame_count']}."
+                )
+                report["wrong_frame_count"].append(acq_id)
+                continue
+
+            rows.append(
+                [
+                    acq_id,
+                    mcor_path.relative_to(self.db.main_folder).as_posix(),
+                    mcor_source.value,
+                    self.current_call_id,
+                ]
+            )
+            report["added"].append(acq_id)
+
+        # --- Report and flag before touching the database --- #
+
+        for name, flag in (
+            ("file_not_found", McorFlag.FILE_NOT_FOUND),
+            ("wrong_shape", McorFlag.WRONG_SHAPE),
+            ("wrong_frame_count", McorFlag.WRONG_FRAME_COUNT),
+            ("unreadable", McorFlag.UNREADABLE),
+        ):
+            if report[name]:
+                self.add_flag(flag)
+                logger.warning(f"{name}: {len(report[name])} acquisitions")
+
+        self.set_output(
+            cast(
+                Object,
+                {
+                    "source": mcor_source.value,
+                    "replaced": len(existing) if rows else 0,
+                    **{name: len(ids) for name, ids in report.items()},
+                    "added_acq_ids": [int(a) for a in report["added"]],
+                },
+            )
+        )
+
+        # Nothing is dropped unless there is something to put in its place
+        if not rows:
+            logger.info(f"{CROSS} Found no valid files, so nothing was updated.")
+            return
+
+        dropped = [int(acq_id) for acq_id in existing.index]
+
+        if dropped:
+            self._warn_before_replacing(dropped)
+            self.add_flag(McorFlag.REPLACED_EXISTING)
+
+        with self.db.con as con:
+            if dropped:
+                con.execute(
+                    f"DELETE FROM mcor_files WHERE acq_id IN "
+                    f"({','.join('?' * len(dropped))});",
+                    dropped,
+                )
+
+            con.executemany(
+                """
+                INSERT INTO mcor_files
+                    ( acq_id
+                    , mcor_path
+                    , source
+                    , last_updated_by
+                    ) VALUES (?, ?, ?, ?);
+                """,
+                rows,
+            )
+
+        if dropped:
+            logger.info(f"Dropped {len(dropped)} mcor files from a previous run.")
+
+        logger.info(f"{CHECK} Added {len(rows)} {mcor_source.value} files.")
+
+        # Reset mcor DataFrames
+        self._mcor_files = None
+        self.db._mcor_files = None
+
+    def _warn_before_replacing(self, dropped: list[int]) -> None:
+        """
+        Say what replacing these mcor files disturbs.
+
+        Each experiment is motion corrected by exactly one group: its own
+        singleton, or the group made for a session that got split into several
+        experiments. Every other group holding that experiment is for analysis,
+        and those routinely span several runs, which is normal. So the thing
+        worth warning about is calling this from a group that did not do the
+        correction.
+        """
+        marks = ",".join("?" * len(dropped))
+
+        owners = self.db.con.execute(
+            f"""
+            SELECT DISTINCT mc.group_id
+                FROM mcor_files   AS m
+                JOIN method_calls AS mc ON mc.method_call_id = m.last_updated_by
+                WHERE m.acq_id    IN ({marks});
+            """,
+            dropped,
+        ).fetchall()
+
+        strangers = [
+            row["group_id"] for row in owners if row["group_id"] != self.group_id
+        ]
+
+        if strangers:
+            self.add_flag(McorFlag.OWNED_BY_OTHER_GROUP)
+            logger.warning(
+                f"These files were motion corrected by group(s) {strangers}, not "
+                f"by {self!r}, so this is probably not where to replace them."
+            )
+
+        users = self.db.con.execute(
+            f"""
+            SELECT DISTINCT ge.group_id
+                FROM mcor_files        AS m
+                JOIN acquisitions      AS a  ON a.acq_id = m.acq_id
+                JOIN group_experiments AS ge ON ge.exp_id = a.exp_id
+                WHERE m.acq_id IN ({marks}) AND ge.group_id != ?;
+            """,
+            [*dropped, self.group_id],
+        ).fetchall()
+
+        if users:
+            self.add_flag(McorFlag.SHARED_WITH_OTHER_GROUPS)
+            logger.warning(
+                f"Groups {[row['group_id'] for row in users]} also use these "
+                "files and will see the new ones."
+            )
+
     # ----------------------------------------------------------------------- #
     # Data Analysis
     # ----------------------------------------------------------------------- #
@@ -1504,6 +1798,39 @@ def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:
     keep = max(1, min(int(frames), int(downsample_ratio * frames)))
 
     return np.linspace(0, frames - 1, keep).round().astype(int)
+
+
+def _tiff_shape(
+    path: Path, size: int, expected_frames: int
+) -> tuple[tuple[int, int], int]:
+    """
+    Frame size and frame count of a TIFF, reading from disk as little as possible.
+
+    Returns `((height, width), frames)`. `size` is the file size, which the
+    caller already has from listing the folder.
+    """
+    with tifffile.TiffFile(path) as tif:
+        page = tif.pages[0]
+
+        # Uses tags as in add_experiment
+        height = int(page.tags["ImageLength"].value)
+        width = int(page.tags["ImageWidth"].value)
+
+        # Pixel data is usually most of the TIFF size, so you can cheaply
+        # get the frame count by using the approximation
+        #       size ~ size of frame * number of frames
+        frame_bytes = height * width * page.dtype.itemsize * page.samplesperpixel
+        frames = size // frame_bytes
+
+        if frames != expected_frames:
+            # Counting properly walks one directory per frame, which measured
+            # 471-5371 ms per file on the network share (patchwarp files carry
+            # a ScanImage header on every page). Only worth it to avoid
+            # rejecting a file the approximation cannot handle.
+            logger.info(f"  Counting pages of '{path.name}' (this is slow)...")
+            frames = len(tif.pages)
+
+    return (height, width), int(frames)
 
 
 # --------------------------------------------------------------------------- #
