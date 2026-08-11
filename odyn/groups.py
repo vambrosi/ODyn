@@ -57,6 +57,10 @@ DEFAULT_OVERLAP_UM = [96.0, 96.0]
 DEFAULT_MAX_SHIFT_UM = [128.0, 128.0]
 DEFAULT_MAX_DEVIATION_UM = 12.0
 
+# Limit used by tifffile.imwrite to switch to BigTIFF.
+# Classic TIFF 32-bit offsets overflow past this limit.
+BIGTIFF_BYTES = 2**32 - 2**25
+
 
 class MovieType(Enum):
     RAW = "raw"
@@ -1395,8 +1399,18 @@ class Group(CallRecorder):
 
             mc = cm.load(mmap_path)
 
+
+            # Threshold to switch to BigTIFF, checked against the size of the
+            # file actually being saved (since raw/mcor have different sizes).
+            # This needs to be checked because tifffile does not complain, it
+            # just writes a file that cannot be read back.
+            big = mc.nbytes > BIGTIFF_BYTES
+
+            if big:
+                logger.info(f"{mc.nbytes / 2**30:.1f} GB, saving as BigTIFF.")
+
             # Saving TIFFs directly because caiman saves them as 64-bit
-            with tifffile.TiffWriter(mcor_path) as tif:
+            with tifffile.TiffWriter(mcor_path, bigtiff=big) as tif:
                 tif.write(
                     [mc[i].copy() for i in range(mc.shape[0])],
                     shape=mc[0].shape,
