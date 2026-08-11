@@ -1812,6 +1812,113 @@ class Group(CallRecorder):
     # Data Analysis
     # ----------------------------------------------------------------------- #
 
+    def _z_score_frames(self, photobleach_window_s: float) -> tuple[int, int]:
+        """
+        Frames every acquisition can supply, counted from its own odor onset.
+
+        Returns `(first, last)`, relative to onset. Onset is a different
+        absolute frame in each acquisition, so working in relative frames is
+        what makes the results averageable.
+        """
+        acquisitions = self.acquisitions
+        experiments = self.experiments.loc[acquisitions["exp_id"]]
+
+        frame_rates = experiments["frame_rate"].to_numpy()
+        frame_counts = experiments["frame_count"].to_numpy()
+
+        delays = (
+            acquisitions["odor_start"] - acquisitions["acq_start"]
+        ).dt.total_seconds()
+        onsets = np.rint(delays.to_numpy() * frame_rates)
+
+        photobleach = round(photobleach_window_s * float(frame_rates.mean()))
+
+        first = int(np.max(photobleach - onsets))
+        last = int(np.min(frame_counts - 1 - onsets))
+
+        return first, last
+
+    def z_score_acquisition(
+        self, acq_id: int, *, photobleach_window_s: float = 1.0
+    ) -> np.ndarray:
+        """
+        Z-score one acquisition against its own pre-odor baseline
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            z = group.z_score_acquisition(some_acq_id)
+        ```
+
+        Each pixel is compared to how much it varied before the odor
+        presentation. Frames are counted from this acquisition's odor onset,
+        and the same range is used for every acquisition of the group, so the
+        results can be averaged.
+
+        Frames are not smoothed over time differently from the MATLAB script.
+        (Averaging leaves far fewer of frames to measure the noise from.)
+        """
+        first, last = self._z_score_frames(photobleach_window_s)
+
+        delay = self.acquisitions.loc[acq_id, "odor_start"]
+        delay -= self.acquisitions.loc[acq_id, "acq_start"]
+        frame_rate = float(self.experiments["frame_rate"].mean())
+        onset = int(round(delay.total_seconds() * frame_rate))
+
+        path = self.db.main_folder / self.mcor_files.loc[acq_id, "mcor_path"]
+
+        with tifffile.TiffFile(path) as tif:
+            movie = tif.asarray(
+                key=slice(onset + first, onset + last + 1)
+            ).astype(np.float32)
+
+        # The odor starts at index -first, so everything before it is baseline
+        baseline = movie[:-first]
+        spread = baseline.std(axis=0, ddof=1)
+
+        z_score = (movie - baseline.mean(axis=0)) / np.where(spread > 0, spread, 1)
+
+        return np.nan_to_num(z_score, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def z_score_average_movies(
+        self, *, photobleach_window_s: float = 1.0
+    ) -> dict[tuple[int, int, str], np.ndarray]:
+        """
+        Average z-scores over the acquisitions of each program, odor and outcome
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            z_score_movies = group.z_score_average_movies()
+            z_score_movies[(program_id, odor_id, outcome)]
+        ```
+
+        Every acquisition is z-scored on its own before being averaged, so a
+        noisier one counts for less. Averaging n of them would shrink the noise
+        to 1/sqrt(n), which would mean a different scale for every condition, so
+        the result is scaled back up.
+
+        ALERT: holds one movie per condition, so it is too RAM intensive
+        for large experiments.
+        """
+        trials = self.trials[self.trials["acq_id"].isin(self.mcor_files.index)]
+        conditions = {}
+
+        for condition, rows in trials.groupby(["program_id", "odor_id", "outcome"]):
+            acq_ids = rows["acq_id"].astype(int).unique()
+            total = None
+
+            for acq_id in tqdm(acq_ids, desc=f"{condition}"):
+                z_score = self.z_score_acquisition(
+                    acq_id, photobleach_window_s=photobleach_window_s
+                )
+                total = z_score if total is None else total + z_score
+
+            # Sum over sqrt(n), not mean, to keep one noise scale for them all
+            conditions[condition] = total / np.sqrt(len(acq_ids))
+
+        return conditions
+
     # def compute_z_scores(self) -> cm.movie:
     #     # Check an sync config
     #     self._sync_config()
