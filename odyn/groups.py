@@ -128,7 +128,6 @@ class Group(CallRecorder):
         self._trials: None | pd.DataFrame = None
 
         self._call_stack: list[CallFrame] = []
-        self._raw_mmap_pairs: None | tuple[list[str], list[str]] = None
         self.movies: dict[tuple[MovieType, ...], LazyMovie] = {}
 
     def __repr__(self):
@@ -359,6 +358,55 @@ class Group(CallRecorder):
     # Private Methods
     # ----------------------------------------------------------------------- #
 
+    def _latest_test_movies(self) -> tuple[list[Path], list[Path]]:
+        """
+        Raw files and their .mmap files, from the last test motion correction.
+
+        Returns `(raw_paths, mmap_paths)`, matched by file name and in
+        acquisition order. Read from `call_output` using `get_tempdir()`.
+
+        This function allows `play_movie` to be called on test runs even
+        after a kernel crash, as long as all relevant .mmap files are present.
+        """
+        calls = self.latest_calls("Group.run_motion_correction")
+
+        # These columns will only appear in future calls, so we guard against it.
+        if {"is_test", "mmap_names"} <= set(calls.columns):
+            tests = calls[calls["is_test"].eq(True) & calls["mmap_names"].notna()]
+
+        # Otherwise, make it empty to fail below.
+        else:
+            tests = calls.iloc[:0]
+
+        if tests.empty:
+            raise RuntimeError(f"{self!r} has no test motion correction. ")
+
+        temp_folder = Path(get_tempdir())
+        mmap_paths = [temp_folder / name for name in tests.iloc[0]["mmap_names"]]
+
+        # Pair .mmap with the raw file it came from by name
+        raw_paths: list[Path] = []
+        matched: list[Path] = []
+
+        for raw_path in map(Path, self.acquisitions["raw_path"]):
+            # Pick the first with the right name
+            for path in mmap_paths:
+                if path.name.startswith(f"{raw_path.stem}_") and path.is_file():
+                    raw_paths.append(self.db.main_folder / raw_path)
+                    matched.append(path)
+                    break
+
+        # A test run only covers some of the acquisitions, so the ones left over
+        # are expected. An .mmap with nothing to pair it to is not: either it
+        # was deleted or it belongs somewhere else.
+        if len(matched) != len(mmap_paths):
+            raise RuntimeError(
+                f"Some .mmap files are missing from '{temp_folder}'. "
+                "Rerun 'run_motion_correction(is_test=True)'."
+            )
+
+        return raw_paths, matched
+
     def _reset_caches(self) -> None:
         self._acquisitions = None
         self._events = None
@@ -419,8 +467,6 @@ class Group(CallRecorder):
 
             else:
                 logger.info("No .mmap files found.")
-
-        self._raw_mmap_pairs = None
 
     @record_call
     def pick_mcor_parameters(
@@ -1319,11 +1365,8 @@ class Group(CallRecorder):
 
         # --- Save the results in TIFF files (if it is not a test) --- #
         if is_test:
-            # Stores the list of raw and mmap paths to make a movie later
-            self._raw_mmap_pairs = (
-                [str(p) for p in raw_paths],
-                self.mc.mmap_file.copy(),
-            )
+            # Record what caiman wrote so play_movie can find it after a restart
+            self.set_output({"mmap_names": [Path(p).name for p in self.mc.mmap_file]})
             return
 
         logger.info("Saving mcor files...")
@@ -1470,27 +1513,21 @@ class LazyMovie:
 
         movie_chains = []
 
+        raw_paths: list[Path] = []
+        test_paths: list[Path] = []
+
+        # Raises if the test files are missing, before anything is loaded
         if MovieType.TEST in self.types:
-            # If test is included there must be test files
-            assert (
-                self.owner._raw_mmap_pairs is not None
-            ), "There are no cached 'test' file paths."
+            raw_paths, test_paths = self.owner._latest_test_movies()
 
         for movie_type in self.types:
             # Get the movie_paths
             if movie_type == MovieType.TEST:
-                self.owner.method_calls
-
-                # Redundant check for mypy
-                assert self.owner._raw_mmap_pairs is not None
-                _, movie_paths = self.owner._raw_mmap_pairs
+                movie_paths = test_paths
 
             elif MovieType.TEST in self.types:
-                # Redundant check for mypy
-                assert self.owner._raw_mmap_pairs is not None
-
                 # It must be raw in this case
-                movie_paths, _ = self.owner._raw_mmap_pairs
+                movie_paths = raw_paths
 
             # If there is no test always include all files
             elif movie_type == MovieType.RAW:
