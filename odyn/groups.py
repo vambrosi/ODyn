@@ -32,9 +32,12 @@ from typing import cast, Final, TYPE_CHECKING
 
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pandas as pd
 import tifffile
+
+from matplotlib import colormaps
 
 import caiman as cm
 from caiman.base.movies import get_file_size
@@ -595,7 +598,8 @@ class Group(CallRecorder):
         }
 
         def patch_data(sy, sx, oy, ox):
-            # same tile_and_correct() that caiman uses
+            # Same tiling caiman uses, so the drawing follows it rather than
+            # copying it, and breaks loudly if that API ever changes
             xs, ys, ws, hs = [], [], [], []
             for _inds, (r0, c0), (h, w) in sliding_window_dims(
                 dims, (oy, ox), (sy, sx)
@@ -923,7 +927,9 @@ class Group(CallRecorder):
             # PointDrawTool only emits its 'data' change on release, but MouseMove
             # fires continuously and the handle coordinates are mutated in place,
             # so we read them on every move and redraw just the dragged primitives.
-            # The full grid and spinners still settle on release (Python callbacks).
+            # The full grid and spinners still settle on release (Python
+            # callbacks), so the same geometry exists in Python and in JS:
+            # change one and change the other.
 
             p.js_on_event(
                 MouseMove,
@@ -1919,6 +1925,96 @@ class Group(CallRecorder):
 
         return conditions
 
+    def save_z_score_movies(
+        self,
+        *,
+        photobleach_window_s: float = 1.0,
+        save_folder: str = r"./movies",
+        display_range: float = 5.0,
+        codec: str = "mp4v",
+        extension: str = "mp4",
+        fr: float = 10,
+    ) -> list[Path]:
+        """
+        Save one z-score movie per program, odor and outcome
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            group.save_z_score_movies()
+        ```
+
+        **PARAMETERS**
+        - `photobleach_window_s`: how much to drop from the start of each movie
+        - `save_folder`: `"."` is the main_folder (r is to use \\ in the path)
+        - `display_range`: z-scores shown, from `-display_range` to `+display_range`
+        - `codec`, `extension`: how to encode (see ALERT below)
+        - `fr`: how fast to play the video (frames/s)
+
+        Same as `z_score_average_movies`, but only one condition is held at a
+        time, so it works on experiments too large to keep in RAM. Red marks
+        the odor.
+
+        ALERT: the range is fixed on purpose to make movies comparable.
+
+        ALERT: H.264 cannot be written by most OpenCV builds, so the default is
+        MPEG-4 part 2 ('mp4v'). Use `codec="MJPG", extension="avi"` to match
+        `play_movie`. VLC opens either one on any platform.
+        """
+        folder = (
+            (self.db.main_folder / save_folder).resolve()
+            if save_folder[0] == "."
+            else Path(save_folder).resolve()
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+
+        first_frame, _ = self._z_score_frames(photobleach_window_s)
+        frame_rate = float(self.experiments["frame_rate"].mean())
+        exp_name = self.experiments.iloc[0]["exp_name"]
+
+        trials = self.trials[self.trials["acq_id"].isin(self.mcor_files.index)]
+        saved = []
+
+        for condition, rows in trials.groupby(["program_id", "odor_id", "outcome"]):
+            acq_ids = rows["acq_id"].astype(int).unique()
+            total = None
+
+            for acq_id in tqdm(acq_ids, desc=f"{condition}"):
+                z_score = self.z_score_acquisition(
+                    acq_id, photobleach_window_s=photobleach_window_s
+                )
+                total = z_score if total is None else total + z_score
+
+            # Sum over sqrt(n), not mean, to keep one noise scale for them all
+            total /= np.sqrt(len(acq_ids))
+
+            program_id, odor_id, outcome = condition
+            path = folder / (
+                f"Group_{self.group_id}_{exp_name}_z_score"
+                f"_program_{program_id}_odor_{odor_id}"
+                f"_outcome_{outcome.replace(' ', '_')}.{extension}"
+            )
+
+            odor_seconds = (rows["odor_end"] - rows["odor_start"]).dt.total_seconds()
+            _write_z_score_movie(
+                path,
+                total,
+                odor_frames=range(
+                    -first_frame,
+                    -first_frame + round(odor_seconds.min() * frame_rate),
+                ),
+                display_range=display_range,
+                codec=codec,
+                fr=fr,
+            )
+
+            saved.append(path)
+
+            # Let this one go before the next average is built
+            del total, z_score
+
+        return saved
+
     # def compute_z_scores(self) -> cm.movie:
     #     # Check an sync config
     #     self._sync_config()
@@ -1963,6 +2059,61 @@ class Group(CallRecorder):
     #     z_score = (dFF - dFF.mean()) / dFF.std()
 
     #     return z_score
+
+
+def _write_z_score_movie(
+    path: Path,
+    z_score: np.ndarray,
+    *,
+    odor_frames: range,
+    display_range: float = 5.0,
+    codec: str = "mp4v",
+    fr: float = 10,
+) -> None:
+    """
+    Render a z-score movie for looking at.
+
+    This is a picture, not data: everything goes through a colormap and a fixed
+    range, so nothing should be measured off it. Blue is negative, white is
+    zero, red is positive, and the odor is marked with a red dot.
+
+    Deliberately standalone, and not shared with `play_movie`: that one reads
+    files and compares processing steps of the same acquisitions, this one
+    renders one average that already pooled them. Keeping the two apart costs a
+    little repetition and saves reconciling two ideas of what a movie is.
+    """
+    # An 8-bit lookup table beats mapping colours frame by frame. coolwarm is
+    # Moreland's map, the one the MATLAB scripts used.
+    colors = colormaps["coolwarm"](np.linspace(0, 1, 256))
+    lut = (colors[:, 2::-1] * 255).astype(np.uint8)  # RGBA -> BGR
+
+    frames, height, width = z_score.shape
+    radius = max(4, height // 60)
+
+    writer = cv2.VideoWriter(
+        str(path), cv2.VideoWriter_fourcc(*codec), fr, (width, height)
+    )
+
+    if not writer.isOpened():
+        raise RuntimeError(f"OpenCV could not write '{path}' with codec {codec!r}.")
+
+    try:
+        for frame in range(frames):
+            levels = np.clip(
+                (z_score[frame] + display_range) * (255 / (2 * display_range)), 0, 255
+            ).astype(np.uint8)
+
+            picture = lut[levels]
+
+            if frame in odor_frames:
+                cv2.circle(picture, (2 * radius, 2 * radius), radius, (0, 0, 255), -1)
+
+            writer.write(picture)
+
+    finally:
+        writer.release()
+
+    logger.info(f"Wrote {path}")
 
 
 def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:
