@@ -1929,11 +1929,11 @@ class Group(CallRecorder):
         self,
         *,
         photobleach_window_s: float = 1.0,
+        smoothing_s: float = 0.2,
         save_folder: str = r"./movies",
         display_range: float = 5.0,
         codec: str = "mp4v",
         extension: str = "mp4",
-        fr: float = 10,
     ) -> list[Path]:
         """
         Save one z-score movie per program, odor and outcome
@@ -1946,10 +1946,21 @@ class Group(CallRecorder):
 
         **PARAMETERS**
         - `photobleach_window_s`: how much to drop from the start of each movie
+        - `smoothing_s`: average this many seconds together, `0` for none
         - `save_folder`: `"."` is the main_folder (r is to use \\ in the path)
         - `display_range`: z-scores shown, from `-display_range` to `+display_range`
         - `codec`, `extension`: how to encode (see ALERT below)
-        - `fr`: how fast to play the video (frames/s)
+
+        The movie plays at the rate it was recorded at, so what you see takes as
+        long as the experiment did.
+
+        Averaging frames together is worth a lot here: the noise is white in
+        time while a response lasts for many frames, so a short window drops the
+        noise by about `sqrt(window)` and leaves the response where it was.
+        Unlike blurring in space, it costs no resolution -- which matters at
+        high magnification, where the structures are only a few pixels across.
+        The result is rescaled afterwards so the noise stays at 1 whatever the
+        window, and `display_range` keeps its meaning.
 
         Same as `z_score_average_movies`, but only one condition is held at a
         time, so it works on experiments too large to keep in RAM. Red marks
@@ -1988,6 +1999,19 @@ class Group(CallRecorder):
             # Sum over sqrt(n), not mean, to keep one noise scale for them all
             total /= np.sqrt(len(acq_ids))
 
+            # Odd, so the window has a middle frame and the odor keeps its place
+            window = max(1, round(smoothing_s * frame_rate))
+            window += 1 - window % 2
+            onset = -first_frame - window // 2
+
+            if window > 1:
+                total = _moving_mean(total, window)
+
+                # Averaging shrank the noise; put it back on the scale
+                # display_range is written in, measured rather than assumed so
+                # it holds however correlated the frames turn out to be.
+                total /= total[:onset].std()
+
             program_id, odor_id, outcome = condition
             path = folder / (
                 f"Group_{self.group_id}_{exp_name}_z_score"
@@ -2000,12 +2024,11 @@ class Group(CallRecorder):
                 path,
                 total,
                 odor_frames=range(
-                    -first_frame,
-                    -first_frame + round(odor_seconds.min() * frame_rate),
+                    onset, onset + round(odor_seconds.min() * frame_rate)
                 ),
                 display_range=display_range,
                 codec=codec,
-                fr=fr,
+                fr=frame_rate,
             )
 
             saved.append(path)
@@ -2016,14 +2039,26 @@ class Group(CallRecorder):
         return saved
 
 
+def _moving_mean(movie: np.ndarray, window: int) -> np.ndarray:
+    """
+    Centred moving mean along time, keeping only frames with a whole window.
+
+    Returns `len(movie) - window + 1` frames, so frame `i` of the result is
+    centred on frame `i + window // 2` of the input.
+    """
+    sums = np.cumsum(np.insert(movie, 0, 0.0, axis=0), axis=0)
+
+    return (sums[window:] - sums[:-window]) / window
+
+
 def _write_z_score_movie(
     path: Path,
     z_score: np.ndarray,
     *,
     odor_frames: range,
+    fr: float,
     display_range: float = 5.0,
     codec: str = "mp4v",
-    fr: float = 10,
 ) -> None:
     """
     Render a z-score movie for looking at.
