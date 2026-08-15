@@ -1818,34 +1818,40 @@ class Group(CallRecorder):
     # Data Analysis
     # ----------------------------------------------------------------------- #
 
-    def _z_score_frames(self, photobleach_window_s: float) -> tuple[int, int]:
+    def _z_score_frames(self, photobleach_window_s: float) -> tuple[int, int, float]:
         """
-        Frames every acquisition can supply, counted from its own odor onset.
+        Range of frames that can be compared across the group.
 
-        Returns `(first, last)`, relative to onset. Onset is a different
-        absolute frame in each acquisition, so working in relative frames is
-        what makes the results averageable.
+        Returns `(first, last, frame_rate)`, where:
+        - `first` and `last` are indices of frames relative to odor onsets;
+        - the range `[first, last]` is contained in all acquisitions;
+        - the interval above is the largest such interval;
+        - `frame_rate` is the mean frame rate across acquisitions.
         """
+
         acquisitions = self.acquisitions
         experiments = self.experiments.loc[acquisitions["exp_id"]]
 
         frame_rates = experiments["frame_rate"].to_numpy()
         frame_counts = experiments["frame_count"].to_numpy()
 
-        delays = (
-            acquisitions["odor_start"] - acquisitions["acq_start"]
-        ).dt.total_seconds()
-        onsets = np.rint(delays.to_numpy() * frame_rates)
+        onset_frames = np.rint(
+            (acquisitions["odor_start"] - acquisitions["acq_start"])
+            .dt.total_seconds()
+            .to_numpy()
+            * frame_rates
+        )
 
-        photobleach = round(photobleach_window_s * float(frame_rates.mean()))
+        frame_rate = float(frame_rates.mean())
+        photobleach_frame = round(photobleach_window_s * frame_rate)
 
-        first = int(np.max(photobleach - onsets))
-        last = int(np.min(frame_counts - 1 - onsets))
+        first = int(np.max(photobleach_frame - onset_frames))
+        last = int(np.min(frame_counts - 1 - onset_frames))
 
-        return first, last
+        return first, last, frame_rate
 
     def z_score_acquisition(
-        self, acq_id: int, *, photobleach_window_s: float = 1.0
+        self, *, acq_id: int, photobleach_window_s: float = 1.0
     ) -> np.ndarray:
         """
         Z-score one acquisition against its own pre-odor baseline
@@ -1853,30 +1859,31 @@ class Group(CallRecorder):
         **USAGE**
         ```python
             group = db.groups[some_index]
-            z = group.z_score_acquisition(some_acq_id)
+            z = group.z_score_acquisition(acq_id=some_acq_id)
         ```
 
         Each pixel is compared to how much it varied before the odor
-        presentation. Frames are counted from this acquisition's odor onset,
-        and the same range is used for every acquisition of the group, so the
-        results can be averaged.
+        presentation and after the photobleaching window. Frames indices are
+        relative to the acquisition odor onset, and the same range is used
+        for every acquisition of the group, so the results can be averaged.
 
-        Frames are not smoothed over time differently from the MATLAB script.
-        (Averaging leaves far fewer of frames to measure the noise from.)
+        Frames are not smoothed over time, differently from the MATLAB script.
+        (Averaging leaves far fewer frames to measure the noise from.)
         """
-        first, last = self._z_score_frames(photobleach_window_s)
+        # Redoes the computation for every acquisition, but that is fast.
+        first, last, frame_rate = self._z_score_frames(photobleach_window_s)
 
-        delay = self.acquisitions.loc[acq_id, "odor_start"]
-        delay -= self.acquisitions.loc[acq_id, "acq_start"]
-        frame_rate = float(self.experiments["frame_rate"].mean())
-        onset = int(round(delay.total_seconds() * frame_rate))
+        onset_s = cast(datetime, self.acquisitions.loc[acq_id, "odor_start"])
+        onset_s -= cast(datetime, self.acquisitions.loc[acq_id, "acq_start"])
 
-        path = self.db.main_folder / self.mcor_files.loc[acq_id, "mcor_path"]
+        onset_frame = int(round(onset_s.total_seconds() * frame_rate))
+
+        path = self.db.main_folder / cast(str, self.mcor_files.loc[acq_id, "mcor_path"])
 
         with tifffile.TiffFile(path) as tif:
-            movie = tif.asarray(key=slice(onset + first, onset + last + 1)).astype(
-                np.float32
-            )
+            movie = tif.asarray(
+                key=slice(onset_frame + first, onset_frame + last + 1)
+            ).astype(np.float32)
 
         # The odor starts at index -first, so everything before it is baseline
         baseline = movie[:-first]
@@ -1890,7 +1897,8 @@ class Group(CallRecorder):
         self, *, photobleach_window_s: float = 1.0
     ) -> dict[tuple[int, int, str], np.ndarray]:
         """
-        Average z-scores over the acquisitions of each program, odor and outcome
+        Normalized average z-scores over the acquisitions of each
+        program, odor and outcome
 
         **USAGE**
         ```python
@@ -1899,14 +1907,15 @@ class Group(CallRecorder):
             z_score_movies[(program_id, odor_id, outcome)]
         ```
 
-        Every acquisition is z-scored on its own before being averaged, so a
-        noisier one counts for less. Averaging n of them would shrink the noise
-        to 1/sqrt(n), which would mean a different scale for every condition, so
-        the result is scaled back up.
+        Every acquisition is z-scored against its own baseline, and then we
+        compute the normalized average across acquisitions (`average * sqrt(n)`).
+        We use this normalization so that conditions with different number of
+        acquisitions have similar noise levels (~1).
 
-        ALERT: holds one movie per condition, so it is too RAM intensive
+        ALERT: results holds one movie per condition, so it is too RAM intensive
         for large experiments.
         """
+
         trials = self.trials[self.trials["acq_id"].isin(self.mcor_files.index)]
         conditions = {}
 
@@ -1916,7 +1925,7 @@ class Group(CallRecorder):
 
             for acq_id in tqdm(acq_ids, desc=f"{condition}"):
                 z_score = self.z_score_acquisition(
-                    acq_id, photobleach_window_s=photobleach_window_s
+                    acq_id=acq_id, photobleach_window_s=photobleach_window_s
                 )
                 total = z_score if total is None else total + z_score
 
@@ -1952,21 +1961,20 @@ class Group(CallRecorder):
         - `codec`, `extension`: how to encode (see ALERT below)
 
         The movie plays at the rate it was recorded at, so what you see takes as
-        long as the experiment did.
+        long as the experiment did. Red marks the odor presentation.
 
-        Averaging frames together is worth a lot here: the noise is white in
-        time while a response lasts for many frames, so a short window drops the
-        noise by about `sqrt(window)` and leaves the response where it was.
-        Unlike blurring in space, it costs no resolution -- which matters at
-        high magnification, where the structures are only a few pixels across.
-        The result is rescaled afterwards so the noise stays at 1 whatever the
-        window, and `display_range` keeps its meaning.
+        This function is similar to `z_score_average_movies`, but only one movie
+        is held at a time, so it works on experiments too large to keep in RAM.
 
-        Same as `z_score_average_movies`, but only one condition is held at a
-        time, so it works on experiments too large to keep in RAM. Red marks
-        the odor.
+        Averaging in time (`smoothing_s`) is to reduce white noise that varies
+        in a smaller time scale than the signal responses. Try to use the
+        smallest acceptable value. We use this instead of spatial averaging
+        to preserve structures that are few pixels wide (e.g. neurites). Output
+        is rescaled afterwards so the noise level stays around 1 and
+        `display_range` keeps its meaning.
 
-        ALERT: the range is fixed on purpose to make movies comparable.
+        ALERT: the range is fixed on purpose to make movies comparable. It is
+        also symmetric so that saturation matches absolute value approximately.
 
         ALERT: H.264 cannot be written by most OpenCV builds, so the default is
         MPEG-4 part 2 ('mp4v'). Use `codec="MJPG", extension="avi"` to match
@@ -1979,27 +1987,33 @@ class Group(CallRecorder):
         )
         folder.mkdir(parents=True, exist_ok=True)
 
-        first_frame, _ = self._z_score_frames(photobleach_window_s)
-        frame_rate = float(self.experiments["frame_rate"].mean())
+        first_frame, _, frame_rate = self._z_score_frames(photobleach_window_s)
         exp_name = self.experiments.iloc[0]["exp_name"]
 
         trials = self.trials[self.trials["acq_id"].isin(self.mcor_files.index)]
         saved = []
 
         for condition, rows in trials.groupby(["program_id", "odor_id", "outcome"]):
-            acq_ids = rows["acq_id"].astype(int).unique()
-            total = None
+            program_id, odor_id, outcome = condition
 
-            for acq_id in tqdm(acq_ids, desc=f"{condition}"):
+            acq_ids = rows["acq_id"].astype(int).unique()
+            description = (
+                f"Program ID: {program_id}, "
+                f"Odor ID: {odor_id}, "
+                f"Outcome: {outcome}"
+            )
+
+            total = None
+            for acq_id in tqdm(acq_ids, desc=description):
                 z_score = self.z_score_acquisition(
-                    acq_id, photobleach_window_s=photobleach_window_s
+                    acq_id=acq_id, photobleach_window_s=photobleach_window_s
                 )
                 total = z_score if total is None else total + z_score
 
             # Sum over sqrt(n), not mean, to keep one noise scale for them all
             total /= np.sqrt(len(acq_ids))
 
-            # Odd, so the window has a middle frame and the odor keeps its place
+            # Odd sized window, so it has a middle frame and the odor keeps its place
             window = max(1, round(smoothing_s * frame_rate))
             window += 1 - window % 2
             onset = -first_frame - window // 2
@@ -2012,20 +2026,17 @@ class Group(CallRecorder):
                 # it holds however correlated the frames turn out to be.
                 total /= total[:onset].std()
 
-            program_id, odor_id, outcome = condition
             path = folder / (
                 f"Group_{self.group_id}_{exp_name}_z_score"
                 f"_program_{program_id}_odor_{odor_id}"
                 f"_outcome_{outcome.replace(' ', '_')}.{extension}"
             )
 
-            odor_seconds = (rows["odor_end"] - rows["odor_start"]).dt.total_seconds()
-            _write_z_score_movie(
+            odor_s = (rows["odor_end"] - rows["odor_start"]).dt.total_seconds()
+            _save_movie(
                 path,
                 total,
-                odor_frames=range(
-                    onset, onset + round(odor_seconds.min() * frame_rate)
-                ),
+                odor_frames=range(onset, onset + round(odor_s.min() * frame_rate)),
                 display_range=display_range,
                 codec=codec,
                 fr=frame_rate,
@@ -2051,9 +2062,9 @@ def _moving_mean(movie: np.ndarray, window: int) -> np.ndarray:
     return (sums[window:] - sums[:-window]) / window
 
 
-def _write_z_score_movie(
+def _save_movie(
     path: Path,
-    z_score: np.ndarray,
+    time_series: np.ndarray,
     *,
     odor_frames: range,
     fr: float,
@@ -2061,23 +2072,23 @@ def _write_z_score_movie(
     codec: str = "mp4v",
 ) -> None:
     """
-    Render a z-score movie for looking at.
+    Render a time-series into a movie (for visualization purposes only).
 
-    This is a picture, not data: everything goes through a colormap and a fixed
-    range, so nothing should be measured off it. Blue is negative, white is
-    zero, red is positive, and the odor is marked with a red dot.
-
-    Deliberately standalone, and not shared with `play_movie`: that one reads
-    files and compares processing steps of the same acquisitions, this one
-    renders one average that already pooled them. Keeping the two apart costs a
-    little repetition and saves reconciling two ideas of what a movie is.
+    Odor presentation frames are marked with a red dot in the corner. Colormap
+    is fixed such that blue is negative, white is zero, and red is positive.
+    Use a fixed `display_range` to make movies comparable.
     """
-    # An 8-bit lookup table beats mapping colours frame by frame. coolwarm is
-    # Moreland's map, the one the MATLAB scripts used.
+
+    # Kept deliberately separate from `play_movie` because that one reads files
+    # and compares processing steps and this just saves a preprocessed time-series.
+    # Costs some repetition but avoid interdependencies between processing paths.
+
+    # An 8-bit lookup table beats mapping colours frame by frame.
+    # coolwarm is the same colormap as the MATLAB scripts used.
     colors = colormaps["coolwarm"](np.linspace(0, 1, 256))
     lut = (colors[:, 2::-1] * 255).astype(np.uint8)  # RGBA -> BGR
 
-    frames, height, width = z_score.shape
+    frames, height, width = time_series.shape
     radius = max(4, height // 60)
 
     writer = cv2.VideoWriter(
@@ -2089,11 +2100,11 @@ def _write_z_score_movie(
 
     try:
         for frame in range(frames):
-            levels = np.clip(
-                (z_score[frame] + display_range) * (255 / (2 * display_range)), 0, 255
-            ).astype(np.uint8)
+            # Frame rescaled to be between 0-255
+            scaled = (time_series[frame] + display_range) * (255 / (2 * display_range))
+            scaled = np.clip(scaled, 0, 255).astype(np.uint8)
 
-            picture = lut[levels]
+            picture = lut[scaled]
 
             if frame in odor_frames:
                 cv2.circle(picture, (2 * radius, 2 * radius), radius, (0, 0, 255), -1)
