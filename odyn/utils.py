@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum, IntEnum, IntFlag
 from io import StringIO
 from pathlib import Path
+from tqdm.auto import tqdm
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,8 +20,6 @@ if TYPE_CHECKING:
     from sqlite3 import Connection
 
 import pandas as pd
-
-from tqdm.auto import tqdm
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -136,9 +135,9 @@ def _method_calls_dataframe(con: Connection, query: str, params: list) -> pd.Dat
     df = pd.read_sql_query(query, con, params=params)
     df.set_index("method_call_id", inplace=True)
 
-    df.parameter_inputs = df.parameter_inputs.apply(json.loads)
-    df.parameters_used = df.parameters_used.apply(json.loads)
-    df.call_output = df.call_output.apply(
+    df["parameter_inputs"] = df["parameter_inputs"].apply(json.loads)
+    df["parameters_used"] = df["parameters_used"].apply(json.loads)
+    df["call_output"] = df["call_output"].apply(
         lambda s: json.loads(s) if isinstance(s, str) else {}
     )
 
