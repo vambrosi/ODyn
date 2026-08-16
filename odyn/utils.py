@@ -5,6 +5,7 @@ import json
 import logging
 import subprocess
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum, IntFlag
 from io import StringIO
@@ -34,8 +35,11 @@ INFO_FOLDER = ".odyn/olfactometer/Log/Info"
 # Default wait before "database locked"
 DB_TIMEOUT_S = 30
 
+# List is invariant     => list[float] is not a list[Value]
+# Sequence is covariant => list[float] is a list[Value]
 type BasicTypes = None | bool | int | float | str | datetime
-type Object = dict[str, BasicTypes | Object | list[Object]]
+type Value = BasicTypes | Object | Sequence[Value]
+type Object = dict[str, Value]
 
 
 # --------------------------------------------------------------------------- #

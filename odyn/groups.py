@@ -522,10 +522,15 @@ class Group(CallRecorder):
 
         # Initial values from the last pick or the shared defaults
         prev = self.latest_output("Group.pick_mcor_parameters") or {}
-        strides_um = prev.get("strides_um", DEFAULT_STRIDES_UM)
-        overlap_um = prev.get("overlap_um", DEFAULT_OVERLAP_UM)
-        max_shift_um = prev.get("max_shift_um", DEFAULT_MAX_SHIFT_UM)
-        max_deviation_um = prev.get("max_deviation_um", DEFAULT_MAX_DEVIATION_UM)
+
+        # Anything read back out of a call_output is only known to be JSON, so
+        # these say what was written rather than making the reader work it out.
+        strides_um = cast(list[float], prev.get("strides_um", DEFAULT_STRIDES_UM))
+        overlap_um = cast(list[float], prev.get("overlap_um", DEFAULT_OVERLAP_UM))
+        max_shift_um = cast(list[float], prev.get("max_shift_um", DEFAULT_MAX_SHIFT_UM))
+        max_deviation_um = cast(
+            float, prev.get("max_deviation_um", DEFAULT_MAX_DEVIATION_UM)
+        )
 
         # Check if it is one of the supported options
         if image_type not in ["avg", "corr"]:
@@ -1399,7 +1404,6 @@ class Group(CallRecorder):
 
             mc = cm.load(mmap_path)
 
-
             # Threshold to switch to BigTIFF, checked against the size of the
             # file actually being saved (since raw/mcor have different sizes).
             # This needs to be checked because tifffile does not complain, it
@@ -1495,6 +1499,8 @@ def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:
     one index per dimension, so a list would be taken as [time, y, x].
     """
     _, frames = get_file_size(path)
+    frames = cast(int, frames)
+
     keep = max(1, min(int(frames), int(downsample_ratio * frames)))
 
     return np.linspace(0, frames - 1, keep).round().astype(int)
