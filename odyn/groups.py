@@ -1873,10 +1873,11 @@ class Group(CallRecorder):
         # Redoes the computation for every acquisition, but that is fast.
         first, last, frame_rate = self._z_score_frames(photobleach_window_s)
 
-        onset_s = cast(datetime, self.acquisitions.loc[acq_id, "odor_start"])
-        onset_s -= cast(datetime, self.acquisitions.loc[acq_id, "acq_start"])
+        onset_delay = cast(
+            datetime, self.acquisitions.loc[acq_id, "odor_start"]
+        ) - cast(datetime, self.acquisitions.loc[acq_id, "acq_start"])
 
-        onset_frame = int(round(onset_s.total_seconds() * frame_rate))
+        onset_frame = int(round(onset_delay.total_seconds() * frame_rate))
 
         path = self.db.main_folder / cast(str, self.mcor_files.loc[acq_id, "mcor_path"])
 
@@ -1917,9 +1918,11 @@ class Group(CallRecorder):
         """
 
         trials = self.trials[self.trials["acq_id"].isin(self.mcor_files.index)]
-        conditions = {}
+        conditions: dict[tuple[int, int, str], np.ndarray] = {}
 
-        for condition, rows in trials.groupby(["program_id", "odor_id", "outcome"]):
+        for key, rows in trials.groupby(["program_id", "odor_id", "outcome"]):
+            # groupby keys come back as a tuple of Hashable
+            condition = cast(tuple[int, int, str], key)
             acq_ids = rows["acq_id"].astype(int).unique()
             total = None
 
@@ -1993,8 +1996,9 @@ class Group(CallRecorder):
         trials = self.trials[self.trials["acq_id"].isin(self.mcor_files.index)]
         saved = []
 
-        for condition, rows in trials.groupby(["program_id", "odor_id", "outcome"]):
-            program_id, odor_id, outcome = condition
+        for key, rows in trials.groupby(["program_id", "odor_id", "outcome"]):
+            # groupby keys come back as a tuple of Hashable
+            program_id, odor_id, outcome = cast(tuple[int, int, str], key)
 
             acq_ids = rows["acq_id"].astype(int).unique()
             description = (
