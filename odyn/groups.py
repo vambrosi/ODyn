@@ -24,7 +24,6 @@
 from __future__ import annotations
 
 import json
-import os
 
 from dataclasses import dataclass
 from typing import cast, Final, TYPE_CHECKING
@@ -1467,6 +1466,7 @@ class Group(CallRecorder):
         *,
         source: str = "caiman",
         overwrite: bool = False,
+        _change_mcor_group: bool = False,
     ) -> None:
         """
         Add motion corrected files not created by `run_motion_correction`
@@ -1494,7 +1494,8 @@ class Group(CallRecorder):
         group and the addition of the valid mcor files that where found.
 
         Each experiment must be on only one "motion correction" group, and
-        this function SHOULD ONLY BE CALLED ON THAT GROUP.
+        this function SHOULD ONLY BE CALLED ON THAT GROUP. Calling it from
+        another group raises an error, and says which group to use instead.
 
         **HOW IT WORKS**
         For each raw file `raw/NAME.tif` in the group it expects a
@@ -1507,8 +1508,12 @@ class Group(CallRecorder):
         raw file's. Anything missing or mismatched is reported and left out, so
         a group can end up with files for only some of its acquisitions.
         """
+
+        # NOTE: _change_mcor_group is deliberately not documented above.
+        #       See _check_before_replacing for more details.
         try:
             mcor_source = McorSource(source)
+
         except ValueError:
             raise ValueError(
                 f"source must be one of {[s.value for s in McorSource]},"
@@ -1524,14 +1529,10 @@ class Group(CallRecorder):
         # Nothing is read from disk in this case, which matters over the network
         if len(existing) and not overwrite:
             self.add_flag(McorFlag.ALREADY_HAS_FILES)
-            logger.warning(
-                f"{CROSS} {self!r} already has {len(existing)} "
-                "mcor files, so nothing was added."
-            )
-            logger.warning(
-                "Pass overwrite=True to drop the old files and add new ones."
-            )
-            self.set_output(cast(Object, {"source": mcor_source.value, "added": 0}))
+
+            logger.warning(f"{self!r} has mcor files, so nothing was added. {CROSS}")
+            logger.warning("Pass overwrite=True to drop old files and add new ones.")
+            self.set_output({"source": mcor_source.value, "added": 0})
             return
 
         rows: list[list] = []
@@ -1543,46 +1544,22 @@ class Group(CallRecorder):
             "unreadable": [],
         }
 
-        listings: dict[Path, dict[str, int]] = {}
-
-        def sizes_in(mcor_folder: Path) -> dict[str, int]:
-            """Name and size of every file in a folder, for one round trip."""
-            if mcor_folder not in listings:
-                try:
-                    with os.scandir(mcor_folder) as entries:
-                        listings[mcor_folder] = {
-                            entry.name: entry.stat().st_size for entry in entries
-                        }
-
-                except OSError:
-                    listings[mcor_folder] = {}
-
-            return listings[mcor_folder]
-
         for acq_id, acquisition in tqdm(
             acquisitions.iterrows(), desc="Checking files", total=len(acquisitions)
         ):
             raw_path = Path(acquisition["raw_path"])
             mcor_folder = self.db.main_folder / raw_path.parent.parent / folder
-            name = raw_path.stem + suffix
 
-            # Listing a folder costs about one stat but brings every size with
-            # it. Over the network that is one round trip per folder instead of
-            # two per acquisition (~6 ms each), so it saves seconds per import.
-            size = sizes_in(mcor_folder).get(name)
-
-            if size is None:
-                report["file_not_found"].append(acq_id)
-                continue
-
-            mcor_path = mcor_folder / name
+            mcor_path = mcor_folder / (raw_path.stem + suffix)
             experiment = experiments.loc[acquisition["exp_id"]]
             expected = (int(experiment["height_px"]), int(experiment["width_px"]))
 
             try:
-                shape, frames = _tiff_shape(
-                    mcor_path, size, int(experiment["frame_count"])
-                )
+                shape, frames = _tiff_shape(mcor_path, int(experiment["frame_count"]))
+
+            except FileNotFoundError:
+                report["file_not_found"].append(acq_id)
+                continue
 
             except Exception as error:
                 logger.warning(f"  Could not read '{mcor_path.name}': {error}")
@@ -1628,26 +1605,23 @@ class Group(CallRecorder):
                 logger.warning(f"{name}: {len(report[name])} acquisitions")
 
         self.set_output(
-            cast(
-                Object,
-                {
-                    "source": mcor_source.value,
-                    "replaced": len(existing) if rows else 0,
-                    **{name: len(ids) for name, ids in report.items()},
-                    "added_acq_ids": [int(a) for a in report["added"]],
-                },
-            )
+            {
+                "source": mcor_source.value,
+                "replaced": len(existing) if rows else 0,
+                **{name: len(ids) for name, ids in report.items()},
+                "added_acq_ids": [int(a) for a in report["added"]],
+            },
         )
 
         # Nothing is dropped unless there is something to put in its place
         if not rows:
-            logger.info(f"{CROSS} Found no valid files, so nothing was updated.")
+            logger.info(f"Found no valid files, so nothing was updated. {CROSS}")
             return
 
         dropped = [int(acq_id) for acq_id in existing.index]
 
         if dropped:
-            self._warn_before_replacing(dropped)
+            self._check_before_replacing(dropped, _change_mcor_group)
             self.add_flag(McorFlag.REPLACED_EXISTING)
 
         with self.db.con as con:
@@ -1679,17 +1653,22 @@ class Group(CallRecorder):
         self._mcor_files = None
         self.db._mcor_files = None
 
-    def _warn_before_replacing(self, dropped: list[int]) -> None:
+    def _check_before_replacing(
+        self, dropped: list[int], change_mcor_group: bool
+    ) -> None:
         """
-        Say what replacing these mcor files disturbs.
+        Stop or warn, depending on what replacing these mcor files disturbs.
 
         Each experiment is motion corrected by exactly one group: its own
         singleton, or the group made for a session that got split into several
-        experiments. Every other group holding that experiment is for analysis,
-        and those routinely span several runs, which is normal. So the thing
-        worth warning about is calling this from a group that did not do the
-        correction.
+        experiments. Every other group holding that experiment is for analysis.
+
+        This method stops you from overwriting records from a group that is
+        not the "motion correcting" one (unless you pass `change_mcor_group`).
+        That parameter is private in the caller because this should be a rare
+        occasion. But, either way, an ownership change is visible via flags.
         """
+
         marks = ",".join("?" * len(dropped))
 
         owners = self.db.con.execute(
@@ -1702,15 +1681,23 @@ class Group(CallRecorder):
             dropped,
         ).fetchall()
 
-        strangers = [
+        would_take_from = [
             row["group_id"] for row in owners if row["group_id"] != self.group_id
         ]
 
-        if strangers:
+        # Flagged whether or not it is allowed, so "which groups had their mcor
+        # files taken over?" stays answerable from method_calls afterwards.
+        if would_take_from:
             self.add_flag(McorFlag.OWNED_BY_OTHER_GROUP)
+
+            if not change_mcor_group:
+                raise RuntimeError(
+                    f"These files were motion corrected by group(s) {would_take_from}, "
+                    f"not by {self!r}. Call this from those group(s) instead."
+                )
+
             logger.warning(
-                f"These files were motion corrected by group(s) {strangers}, not "
-                f"by {self!r}, so this is probably not where to replace them."
+                f"Taking these files over from group(s) {would_take_from}. {CROSS}"
             )
 
         users = self.db.con.execute(
@@ -1800,14 +1787,12 @@ def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:
     return np.linspace(0, frames - 1, keep).round().astype(int)
 
 
-def _tiff_shape(
-    path: Path, size: int, expected_frames: int
-) -> tuple[tuple[int, int], int]:
+def _tiff_shape(path: Path, expected_frames: int) -> tuple[tuple[int, int], int]:
     """
     Frame size and frame count of a TIFF, reading from disk as little as possible.
 
-    Returns `((height, width), frames)`. `size` is the file size, which the
-    caller already has from listing the folder.
+    Returns `((height, width), frames)`. Raises `FileNotFoundError` if the file
+    is not there, which is how the caller tells missing apart from unreadable.
     """
     with tifffile.TiffFile(path) as tif:
         page = tif.pages[0]
@@ -1819,14 +1804,14 @@ def _tiff_shape(
         # Pixel data is usually most of the TIFF size, so you can cheaply
         # get the frame count by using the approximation
         #       size ~ size of frame * number of frames
+        # The size comes off the open file, so it costs no extra round trip.
         frame_bytes = height * width * page.dtype.itemsize * page.samplesperpixel
-        frames = size // frame_bytes
+        frames = tif.filehandle.size // frame_bytes
 
+        # Fallback if the quick test fails. Counting properly walks one
+        # directory per frame, which can be slow over the network (patchwarp
+        # files carry a ScanImage header on every page).
         if frames != expected_frames:
-            # Counting properly walks one directory per frame, which measured
-            # 471-5371 ms per file on the network share (patchwarp files carry
-            # a ScanImage header on every page). Only worth it to avoid
-            # rejecting a file the approximation cannot handle.
             logger.info(f"  Counting pages of '{path.name}' (this is slow)...")
             frames = len(tif.pages)
 
