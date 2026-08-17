@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from dataclasses import dataclass
 from typing import cast, Final, TYPE_CHECKING
@@ -1378,8 +1379,12 @@ class Group(CallRecorder):
 
         logger.info("Starting motion correction...")
 
+        n_processes = _worker_count()
+        logger.info(f"Using {n_processes} workers.")
+        self.update_parameters_used({"n_processes": n_processes})
+
         _, dview, _ = cm.cluster.setup_cluster(
-            backend="multiprocessing", n_processes=None, single_thread=False
+            backend="multiprocessing", n_processes=n_processes, single_thread=False
         )
 
         try:
@@ -1785,6 +1790,27 @@ def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:
     keep = max(1, min(int(frames), int(downsample_ratio * frames)))
 
     return np.linspace(0, frames - 1, keep).round().astype(int)
+
+
+def _worker_count() -> int:
+    """
+    How many processes to hand caiman, which caiman gets wrong on its own.
+
+    Caiman default (`n_processes=None`) uses `os.cpu_count()`, which reports
+    the whole machine: a 12-core slurm job on a 28-core node measured 28, so it
+    would start 27 workers on 12 cores and split the job's memory between them.
+
+    ASSUMES Linux is the cluster and everything else is someone's own machine.
+    A cluster job owns its cores, so it uses all of them, and only Linux has
+    `sched_getaffinity` to report what the scheduler actually gave. A personal
+    machine keeps one core free for the user.
+    """
+
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0))
+
+    # cpu_count is documented to return None when it cannot tell
+    return max(1, (os.cpu_count() or 1) - 1)
 
 
 def _tiff_shape(path: Path, expected_frames: int) -> tuple[tuple[int, int], int]:
