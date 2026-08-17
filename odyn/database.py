@@ -134,7 +134,13 @@ class Database(CallRecorder):
         """
         # NOTE: _is_test is deliberately not documented above.
         #       See _copy_for_test for more details.
-        self.main_folder = Path(path)
+
+        # Resolved so that every path built from it is absolute and symlink
+        # free. Stored paths are relative to this, and the code that makes
+        # them relative resolves its side, so leaving this one as given makes
+        # relative_to fail on a relative main folder or through a symlink.
+        self.main_folder = Path(path).resolve()
+
         self._is_test: Final[bool] = _is_test
         self.path: Final[Path] = (
             self._copy_for_test()
