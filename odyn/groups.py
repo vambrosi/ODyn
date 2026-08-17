@@ -1827,9 +1827,20 @@ class Group(CallRecorder):
         - the range `[first, last]` is contained in all acquisitions;
         - the interval above is the largest such interval;
         - `frame_rate` is the mean frame rate across acquisitions.
+
+        Only uses approved acquisitions. The window is the intersection over
+        all of them, so leaving one out is also how you stop an odd one from
+        narrowing the window for the rest.
         """
 
-        acquisitions = self.acquisitions
+        acquisitions = self.acquisitions.loc[self.approved_mcor_files.index]
+
+        if not len(acquisitions):
+            raise RuntimeError(
+                f"{self!r} has no approved mcor files, so there is nothing to "
+                "z-score. Check the movies and run 'approve_mcor_files()'."
+            )
+
         experiments = self.experiments.loc[acquisitions["exp_id"]]
 
         frame_rates = experiments["frame_rate"].to_numpy()
@@ -1870,6 +1881,14 @@ class Group(CallRecorder):
         Frames are not smoothed over time, differently from the MATLAB script.
         (Averaging leaves far fewer frames to measure the noise from.)
         """
+        approved = self.approved_mcor_files
+
+        # Check here because .loc would only say "KeyError: <acq_id>"
+        if acq_id not in approved.index:
+            raise KeyError(
+                f"Acquisition {acq_id} has no approved mcor file in {self!r}."
+            )
+
         # Redoes the computation for every acquisition, but that is fast.
         first, last, frame_rate = self._z_score_frames(photobleach_window_s)
 
@@ -1879,7 +1898,7 @@ class Group(CallRecorder):
 
         onset_frame = int(round(onset_delay.total_seconds() * frame_rate))
 
-        path = self.db.main_folder / cast(str, self.mcor_files.loc[acq_id, "mcor_path"])
+        path = self.db.main_folder / cast(str, approved.loc[acq_id, "mcor_path"])
 
         with tifffile.TiffFile(path) as tif:
             movie = tif.asarray(
@@ -1917,7 +1936,7 @@ class Group(CallRecorder):
         for large experiments.
         """
 
-        trials = self.trials[self.trials["acq_id"].isin(self.mcor_files.index)]
+        trials = self.trials[self.trials["acq_id"].isin(self.approved_mcor_files.index)]
         conditions: dict[tuple[int, int, str], np.ndarray] = {}
 
         for key, rows in trials.groupby(["program_id", "odor_id", "outcome"]):
@@ -2013,7 +2032,7 @@ class Group(CallRecorder):
                 "saved but not recorded in the database."
             )
 
-        trials = self.trials[self.trials["acq_id"].isin(self.mcor_files.index)]
+        trials = self.trials[self.trials["acq_id"].isin(self.approved_mcor_files.index)]
         saved = []
         written: list[Object] = []
 
