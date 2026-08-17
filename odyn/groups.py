@@ -1937,6 +1937,7 @@ class Group(CallRecorder):
 
         return conditions
 
+    @record_call
     def save_z_score_movies(
         self,
         *,
@@ -1993,8 +1994,28 @@ class Group(CallRecorder):
         first_frame, _, frame_rate = self._z_score_frames(photobleach_window_s)
         exp_name = self.experiments.iloc[0]["exp_name"]
 
+        # Odd sized window, so it has a middle frame and the odor keeps its place
+        window = max(1, round(smoothing_s * frame_rate))
+        window += 1 - window % 2
+        onset = -first_frame - window // 2
+
+        self.update_parameters_used(
+            {"frame_rate": frame_rate, "smoothing_frames": window}
+        )
+
+        # outputs stores paths relative to main_folder so the database still
+        # works from another machine, so anywhere else cannot be recorded.
+        recordable = folder.is_relative_to(self.db.main_folder)
+
+        if not recordable:
+            logger.warning(
+                f"'{folder}' is outside the main folder, so the movies are "
+                "saved but not recorded in the database."
+            )
+
         trials = self.trials[self.trials["acq_id"].isin(self.mcor_files.index)]
         saved = []
+        written: list[Object] = []
 
         for key, rows in trials.groupby(["program_id", "odor_id", "outcome"]):
             # groupby keys come back as a tuple of Hashable
@@ -2016,11 +2037,6 @@ class Group(CallRecorder):
 
             # Sum over sqrt(n), not mean, to keep one noise scale for them all
             total /= np.sqrt(len(acq_ids))
-
-            # Odd sized window, so it has a middle frame and the odor keeps its place
-            window = max(1, round(smoothing_s * frame_rate))
-            window += 1 - window % 2
-            onset = -first_frame - window // 2
 
             if window > 1:
                 total = _moving_mean(total, window)
@@ -2048,8 +2064,26 @@ class Group(CallRecorder):
 
             saved.append(path)
 
+            if recordable:
+                self.add_output_file(path)
+
+            # int() because these come from pandas as numpy scalars, which
+            # json.dumps refuses -- and record_call dumps on the way out, so
+            # it would fail after the movies were already written.
+            written.append(
+                {
+                    "program_id": int(program_id),
+                    "odor_id": int(odor_id),
+                    "outcome": str(outcome),
+                    "acquisitions": len(acq_ids),
+                    "file": path.name,
+                }
+            )
+
             # Let this one go before the next average is built
             del total, z_score
+
+        self.set_output({"movies": written})
 
         return saved
 
