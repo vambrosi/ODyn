@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import cast, Final, TYPE_CHECKING
 
@@ -90,17 +91,23 @@ MCOR_LAYOUT = {
 
 class McorFlag(IntFlag):
     """
-    call_flag bits for `Group.add_mcor_files` (bit 0 reserved by `CallFlag.RAISED`).
+    call_flag bits for the `Group` methods that write `mcor_files`
+    (bit 0 reserved by `CallFlag.RAISED`).
+
+    One enum for all of them because they share `_check_mcor_group`, so its
+    bits have to mean the same thing whichever method set them.
     """
 
     ALREADY_HAS_FILES = 1 << 1  # group was not empty, nothing added
     REPLACED_EXISTING = 1 << 2  # previous files were dropped for these ones
     OWNED_BY_OTHER_GROUP = 1 << 3  # another group motion corrected these files
-    SHARED_WITH_OTHER_GROUPS = 1 << 4  # other groups will see the new files
+    SHARED_WITH_OTHER_GROUPS = 1 << 4  # other groups will see the change
     FILE_NOT_FOUND = 1 << 5  # no motion corrected file where one was expected
     WRONG_SHAPE = 1 << 6  # frame size does not match the experiment
     WRONG_FRAME_COUNT = 1 << 7  # frame count does not match the experiment
     UNREADABLE = 1 << 8  # file is there but its header could not be read
+    NOTHING_TO_APPROVE = 1 << 9  # group has no mcor files at all
+    SOME_NOT_APPROVED = 1 << 10  # approval left some acquisitions out
 
 
 # --------------------------------------------------------------------------- #
@@ -258,6 +265,16 @@ class Group(CallRecorder):
         self._mcor_files.set_index("acq_id", inplace=True)
 
         return self._mcor_files
+
+    @property
+    def approved_mcor_files(self) -> pd.DataFrame:
+        """
+        `DataFrame` with the mcor files approved for analysis
+
+        Use this unless you are doing motion-correction specific analysis.
+        Use `mcor_files` if you want ALL files from the latest mcor run.
+        """
+        return self.mcor_files[self.mcor_files["approved"].astype(bool)]
 
     @property
     def method_calls(self) -> pd.DataFrame:
@@ -1515,7 +1532,7 @@ class Group(CallRecorder):
         """
 
         # NOTE: _change_mcor_group is deliberately not documented above.
-        #       See _check_before_replacing for more details.
+        #       See _check_mcor_group for more details.
         try:
             mcor_source = McorSource(source)
 
@@ -1626,7 +1643,7 @@ class Group(CallRecorder):
         dropped = [int(acq_id) for acq_id in existing.index]
 
         if dropped:
-            self._check_before_replacing(dropped, _change_mcor_group)
+            self._check_mcor_group(dropped, _change_mcor_group)
             self.add_flag(McorFlag.REPLACED_EXISTING)
 
         with self.db.con as con:
@@ -1658,23 +1675,91 @@ class Group(CallRecorder):
         self._mcor_files = None
         self.db._mcor_files = None
 
-    def _check_before_replacing(
-        self, dropped: list[int], change_mcor_group: bool
+    @record_call
+    def approve_mcor_files(self, *, exclude_acq_ids: Sequence[int] = ()) -> None:
+        """
+        Approve this group's motion corrected files for further processing/analysis
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            group.approve_mcor_files()
+            group.approve_mcor_files(exclude_acq_ids=[7, 12])
+        ```
+
+        **PARAMETERS**
+        - `exclude_acq_ids`: acquisitions to leave out
+
+        **IMPORTANT**
+        - This call overwrites past calls, so ALL `acq_ids` in this group
+        that are not in the exclusion list will be marked as approved.
+        - Analysis functions reference  `group.approved_mcor_files`, so
+        anything left out here is skipped from then on.
+        """
+
+        existing = self.mcor_files
+
+        if not len(existing):
+            self.add_flag(McorFlag.NOTHING_TO_APPROVE)
+
+            logger.warning(f"{self!r} has no mcor files to approve. {CROSS}")
+            self.set_output({"approved": [], "excluded": []})
+            return
+
+        acq_ids = [int(acq_id) for acq_id in existing.index]
+        excluded = {int(acq_id) for acq_id in exclude_acq_ids}
+
+        # Raises if there are exclusions that are not actually part of this
+        # group mcors, since this usually implies a mistake upstream.
+        missing = sorted(excluded - set(acq_ids))
+
+        if missing:
+            raise ValueError(
+                f"{missing} are not acquisitions with mcor files in {self!r}. "
+                f"'approved' flag was not changed for any file."
+            )
+
+        self._check_mcor_group(acq_ids)
+
+        with self.db.con as con:
+            con.executemany(
+                "UPDATE mcor_files SET approved = ? WHERE acq_id = ?;",
+                [(acq_id not in excluded, acq_id) for acq_id in acq_ids],
+            )
+
+        approved = [acq_id for acq_id in acq_ids if acq_id not in excluded]
+
+        if excluded:
+            self.add_flag(McorFlag.SOME_NOT_APPROVED)
+            logger.warning(f"Left {len(excluded)} out: {sorted(excluded)}")
+
+        self.set_output({"approved": approved, "excluded": sorted(excluded)})
+        logger.info(f"{CHECK} Approved {len(approved)} of {len(acq_ids)} mcor files.")
+
+        # Reset mcor DataFrames
+        self._mcor_files = None
+        self.db._mcor_files = None
+
+    def _check_mcor_group(
+        self, acq_ids: list[int], change_mcor_group: bool = False
     ) -> None:
         """
-        Stop or warn, depending on what replacing these mcor files disturbs.
+        Stop or warn, depending on what changing these mcor files disturbs.
 
         Each experiment is motion corrected by exactly one group: its own
         singleton, or the group made for a session that got split into several
         experiments. Every other group holding that experiment is for analysis.
 
-        This method stops you from overwriting records from a group that is
+        This method stops you from changing records from a group that is
         not the "motion correcting" one (unless you pass `change_mcor_group`).
         That parameter is private in the caller because this should be a rare
         occasion. But, either way, an ownership change is visible via flags.
+
+        Shared by every method that writes `mcor_files`, so it says nothing
+        about what the caller is about to change.
         """
 
-        marks = ",".join("?" * len(dropped))
+        marks = ",".join("?" * len(acq_ids))
 
         owners = self.db.con.execute(
             f"""
@@ -1683,7 +1768,7 @@ class Group(CallRecorder):
                 JOIN method_calls AS mc ON mc.method_call_id = m.last_updated_by
                 WHERE m.acq_id    IN ({marks});
             """,
-            dropped,
+            acq_ids,
         ).fetchall()
 
         would_take_from = [
@@ -1713,14 +1798,14 @@ class Group(CallRecorder):
                 JOIN group_experiments AS ge ON ge.exp_id = a.exp_id
                 WHERE m.acq_id IN ({marks}) AND ge.group_id != ?;
             """,
-            [*dropped, self.group_id],
+            [*acq_ids, self.group_id],
         ).fetchall()
 
         if users:
             self.add_flag(McorFlag.SHARED_WITH_OTHER_GROUPS)
             logger.warning(
                 f"Groups {[row['group_id'] for row in users]} also use these "
-                "files and will see the new ones."
+                "files and will see this change."
             )
 
     # ----------------------------------------------------------------------- #
