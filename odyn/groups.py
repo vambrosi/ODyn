@@ -1251,6 +1251,189 @@ class Group(CallRecorder):
             movie_name=movie_name,
         )
 
+    @record_call
+    def save_preview_movie(
+        self,
+        *,
+        grid: list[str] = ["raw", "mcor"],
+        downsample_ratio: float = 0.03,
+        downsample_type: str = "average",
+        save_folder: str = r"./movies",
+        fr: float = 30,
+        q_min: float = 0.0,
+        q_max: float = 99.5,
+        codec: str = "MJPG",
+        extension: str = "avi",
+    ) -> Path:
+        """
+        Save a preview video of this group's movies, side by side
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            group.save_preview_movie()
+            group.save_preview_movie(grid=["raw"], downsample_ratio=0.1)
+        ```
+
+        **PARAMETERS**
+        *What goes in the movie*
+        - `grid`: which movies to show, one or two of "raw", "test", "mcor"
+        - `downsample_ratio`: fraction of frames to keep
+        - `downsample_type`: how to drop frames ("average" or "skip")
+
+        **ALERT:** "average" (the default) reads every frame and averages them
+        down, which looks less noisy but smooths away residual motion. "skip"
+        reads only the frames it keeps, which is much faster over the network,
+        but noisier.
+
+        *How it is saved*
+        - `save_folder`: `"."` is the main_folder (r is to use \\ in the path)
+        - `fr`: how fast to play the video (frames/s)
+        - `q_min`, `q_max`: percentiles shown as black and white
+        - `codec`, `extension`: how to encode
+
+        **EXAMPLES**
+        - Every raw movie of the group, one after the other
+        ```python
+        group.save_preview_movie(grid=["raw"])
+        ```
+
+        - Raw on the left, motion corrected on the right, to compare them
+        ```python
+        group.save_preview_movie(grid=["raw", "mcor"])
+        ```
+        """
+        assert len(grid) == 1 or (
+            len(grid) == 2
+            and MovieType.RAW.value in grid
+            and (MovieType.MCOR.value in grid or MovieType.TEST.value in grid)
+        ), """The parameter 'grid' must be one of the following:
+                ['raw'], ['mcor'], ['test'],
+                ['raw', 'test'], ['raw', 'mcor'],
+                ['test', 'raw'], ['mcor', 'raw']"""
+
+        assert downsample_type in ("average", "skip"), (
+            "The parameter 'downsample_type' must be 'average' or 'skip', "
+            f"but instead got {downsample_type!r}."
+        )
+
+        movie_types = tuple(MovieType(name) for name in grid)
+
+        folder = (
+            (self.db.main_folder / save_folder).resolve()
+            if save_folder[0] == "."
+            else Path(save_folder).resolve()
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+
+        path = folder / (
+            f"Group_{self.group_id}_{self.experiments.iloc[0]['exp_name']}"
+            f"_{'_'.join(t.value for t in movie_types)}.{extension}"
+        )
+
+        logger.info(f"Saving movie to {path}")
+
+        movie = self._load_preview_movie(
+            movie_types, downsample_ratio, downsample_type
+        )
+
+        _write_preview_movie(path, movie, fr=fr, q_min=q_min, q_max=q_max, codec=codec)
+
+        # outputs stores paths relative to main_folder, so a save_folder
+        # somewhere else cannot be recorded.
+        if path.is_relative_to(self.db.main_folder):
+            self.add_output_file(path)
+
+        self.set_output({"grid": list(grid), "file": path.name})
+        logger.info(f"{CHECK} Wrote {len(movie)} frames.")
+
+        return path
+
+    def _load_preview_movie(
+        self,
+        movie_types: tuple[MovieType, ...],
+        downsample_ratio: float,
+        downsample_type: str,
+    ) -> cm.movie:
+        """
+        Load and downsample the movies for `movie_types`, side by side.
+
+        Frames go along time and the types along width, so a two-type grid is
+        one movie with the panels next to each other.
+        """
+
+        movie_chains = []
+
+        raw_paths: list[Path] = []
+        test_paths: list[Path] = []
+
+        # Raises if the test files are missing, before anything is loaded
+        if MovieType.TEST in movie_types:
+            raw_paths, test_paths = self._latest_test_movies()
+
+        for movie_type in movie_types:
+            # Get the movie_paths
+            if movie_type == MovieType.TEST:
+                movie_paths = test_paths
+
+            elif MovieType.TEST in movie_types:
+                # It must be raw in this case
+                movie_paths = raw_paths
+
+            # If there is no test always include all files
+            elif movie_type == MovieType.RAW:
+                movie_paths = [
+                    self.db.main_folder / path
+                    for path in self.acquisitions["raw_path"]
+                ]
+
+            elif movie_type == MovieType.MCOR:
+                movie_paths = [
+                    self.db.main_folder / path
+                    for path in self.mcor_files["mcor_path"]
+                ]
+
+            # There must be at least one movie
+            # TODO: Gather movie_paths for every type first, so it fails
+            #       before having spent time loading anything.
+            assert movie_paths, f"Didn't find any {movie_type.value} files."
+
+            logger.info(
+                f"Adding {len(movie_paths)} {movie_type.value} files to the movie."
+            )
+
+            # "skip" reads only the frames it keeps, rather than reading a whole
+            # movie to average it away. Same number of frames out either way.
+            movie_chain = None
+            for path in tqdm(movie_paths, desc=f"Loading {movie_type.value} movies"):
+                if downsample_type == "skip":
+                    movie = cm.load(
+                        path, subindices=_frames_to_keep(path, downsample_ratio)
+                    )
+
+                    # Reading a single frame drops the time axis, and the movies
+                    # are stacked along it. Happens whenever the ratio is small
+                    # enough to keep one frame per file.
+                    if movie.ndim == 2:
+                        movie = movie[np.newaxis]
+
+                else:
+                    movie = cm.load(path).resize(1, 1, downsample_ratio)
+
+                movie_chain = (
+                    movie
+                    if movie_chain is None
+                    else cm.concatenate([movie_chain, movie], axis=0)
+                )
+
+                logger.info(f"  {path}")
+
+            movie_chains.append(movie_chain)
+
+        movie_chain = cm.concatenate(movie_chains, axis=2)
+
+        return movie_chain
+
     @memorize_params
     @record_call
     def run_motion_correction(
@@ -2237,6 +2420,51 @@ def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:
     return np.linspace(0, frames - 1, keep).round().astype(int)
 
 
+def _write_preview_movie(
+    path: Path,
+    movie: np.ndarray,
+    *,
+    fr: float,
+    q_min: float = 0.0,
+    q_max: float = 99.5,
+    codec: str = "MJPG",
+) -> None:
+    """
+    Write a grayscale preview of `movie` (time, height, width).
+
+    Black and white are put at the `q_min` and `q_max` percentiles of the whole
+    movie rather than at its extremes, so one bright speck cannot flatten
+    everything else. The scale is therefore relative to this movie and says
+    nothing across movies, which is the opposite of the z-score renderer.
+    """
+
+    # Percentiles over every frame, so brightness does not drift as it plays.
+    # On the whole array at once because it is already downsampled and in RAM.
+    low, high = np.percentile(movie, [q_min, q_max])
+    spread = max(float(high - low), 1e-9)
+
+    frames, height, width = movie.shape
+
+    writer = cv2.VideoWriter(
+        str(path), cv2.VideoWriter_fourcc(*codec), fr, (width, height), isColor=False
+    )
+
+    if not writer.isOpened():
+        raise RuntimeError(f"OpenCV could not write '{path}' with codec {codec!r}.")
+
+    try:
+        for frame in tqdm(range(frames), desc="Writing movie"):
+            # uint8 before anything is drawn on it:
+            # OpenCV 5 refuses to draw on float images,
+            #   (caiman does this backwards and, thus, it crashes)
+            picture = np.clip((movie[frame] - low) * (255 / spread), 0, 255)
+
+            writer.write(picture.astype(np.uint8))
+
+    finally:
+        writer.release()
+
+
 def _worker_count() -> int:
     """
     How many processes to hand caiman, which caiman gets wrong on its own.
@@ -2314,77 +2542,9 @@ class LazyMovie:
 
         logger.info("Updating movie...")
 
-        movie_chains = []
-
-        raw_paths: list[Path] = []
-        test_paths: list[Path] = []
-
-        # Raises if the test files are missing, before anything is loaded
-        if MovieType.TEST in self.types:
-            raw_paths, test_paths = self.owner._latest_test_movies()
-
-        for movie_type in self.types:
-            # Get the movie_paths
-            if movie_type == MovieType.TEST:
-                movie_paths = test_paths
-
-            elif MovieType.TEST in self.types:
-                # It must be raw in this case
-                movie_paths = raw_paths
-
-            # If there is no test always include all files
-            elif movie_type == MovieType.RAW:
-                movie_paths = [
-                    self.owner.db.main_folder / path
-                    for path in self.owner.acquisitions["raw_path"]
-                ]
-
-            elif movie_type == MovieType.MCOR:
-                movie_paths = [
-                    self.owner.db.main_folder / path
-                    for path in self.owner.mcor_files["mcor_path"]
-                ]
-
-            # There must be at least one movie
-            # TODO: Gather movie_paths for every type first, so it fails
-            #       before having spent time loading anything.
-            assert movie_paths, f"Didn't find any {movie_type.value} files."
-
-            logger.info(
-                f"Adding {len(movie_paths)} {movie_type.value} files to the movie."
-            )
-
-            # "skip" reads only the frames it keeps, rather than reading a whole
-            # movie to average it away. Same number of frames out either way.
-            movie_chain = None
-            for path in tqdm(movie_paths, desc=f"Loading {movie_type.value} movies"):
-                if downsample_type == "skip":
-                    movie = cm.load(
-                        path, subindices=_frames_to_keep(path, downsample_ratio)
-                    )
-
-                    # Reading a single frame drops the time axis, and the movies
-                    # are stacked along it. Happens whenever the ratio is small
-                    # enough to keep one frame per file.
-                    if movie.ndim == 2:
-                        movie = movie[np.newaxis]
-
-                else:
-                    movie = cm.load(path).resize(1, 1, downsample_ratio)
-
-                movie_chain = (
-                    movie
-                    if movie_chain is None
-                    else cm.concatenate([movie_chain, movie], axis=0)
-                )
-
-                logger.info(f"  {path}")
-
-            movie_chains.append(movie_chain)
-
-        movie_chain = cm.concatenate(movie_chains, axis=2)
-
-        self.movie = movie_chain
+        self.movie = self.owner._load_preview_movie(
+            self.types, downsample_ratio, downsample_type
+        )
 
         return self.movie
 
