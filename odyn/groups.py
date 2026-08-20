@@ -1303,19 +1303,27 @@ class Group(CallRecorder):
         group.save_preview_movie(grid=["raw", "mcor"])
         ```
         """
-        assert len(grid) == 1 or (
-            len(grid) == 2
-            and MovieType.RAW.value in grid
-            and (MovieType.MCOR.value in grid or MovieType.TEST.value in grid)
-        ), """The parameter 'grid' must be one of the following:
-                ['raw'], ['mcor'], ['test'],
-                ['raw', 'test'], ['raw', 'mcor'],
-                ['test', 'raw'], ['mcor', 'raw']"""
+        # Two panels are for comparing a correction against the raw movie, so
+        # one of them has to be the raw one.
+        if not (
+            len(grid) == 1
+            or (
+                len(grid) == 2
+                and MovieType.RAW.value in grid
+                and (MovieType.MCOR.value in grid or MovieType.TEST.value in grid)
+            )
+        ):
+            raise ValueError(
+                "'grid' must be one of ['raw'], ['mcor'], ['test'], "
+                "['raw', 'test'], ['raw', 'mcor'], ['test', 'raw'], "
+                f"['mcor', 'raw'], but instead got {grid!r}."
+            )
 
-        assert downsample_type in ("average", "skip"), (
-            "The parameter 'downsample_type' must be 'average' or 'skip', "
-            f"but instead got {downsample_type!r}."
-        )
+        if downsample_type not in ("average", "skip"):
+            raise ValueError(
+                "'downsample_type' must be 'average' or 'skip', "
+                f"but instead got {downsample_type!r}."
+            )
 
         movie_types = tuple(MovieType(name) for name in grid)
 
@@ -1333,9 +1341,7 @@ class Group(CallRecorder):
 
         logger.info(f"Saving movie to {path}")
 
-        movie = self._load_preview_movie(
-            movie_types, downsample_ratio, downsample_type
-        )
+        movie = self._load_preview_movie(movie_types, downsample_ratio, downsample_type)
 
         _write_preview_movie(path, movie, fr=fr, q_min=q_min, q_max=q_max, codec=codec)
 
@@ -1348,6 +1354,60 @@ class Group(CallRecorder):
         logger.info(f"{CHECK} Wrote {len(movie)} frames.")
 
         return path
+
+    def _movie_paths(
+        self, movie_types: tuple[MovieType, ...]
+    ) -> dict[MovieType, list[Path]]:
+        """
+        Every file each panel needs, checked before anything is loaded.
+
+        Loading a whole group takes long enough over the network that finding
+        out halfway through is worse than one pass of stats up front, which
+        costs milliseconds next to the gigabytes that follow.
+        """
+        raw_paths: list[Path] = []
+        test_paths: list[Path] = []
+
+        # Raises if the test files are missing
+        if MovieType.TEST in movie_types:
+            raw_paths, test_paths = self._latest_test_movies()
+
+        paths_by_type: dict[MovieType, list[Path]] = {}
+
+        for movie_type in movie_types:
+            if movie_type == MovieType.TEST:
+                paths = test_paths
+
+            # A test uses a slice of the raw files, so only pick those
+            elif MovieType.TEST in movie_types:
+                paths = raw_paths
+
+            elif movie_type == MovieType.RAW:
+                paths = [
+                    self.db.main_folder / path for path in self.acquisitions["raw_path"]
+                ]
+
+            else:
+                paths = [
+                    self.db.main_folder / path for path in self.mcor_files["mcor_path"]
+                ]
+
+            if not paths:
+                raise RuntimeError(
+                    f"{self!r} has no {movie_type.value} files to put in a movie."
+                )
+
+            missing = [path for path in paths if not path.is_file()]
+
+            if missing:
+                raise FileNotFoundError(
+                    f"{len(missing)} of {len(paths)} {movie_type.value} files are "
+                    f"not where the database says, starting with '{missing[0]}'."
+                )
+
+            paths_by_type[movie_type] = paths
+
+        return paths_by_type
 
     def _load_preview_movie(
         self,
@@ -1363,40 +1423,10 @@ class Group(CallRecorder):
         """
 
         movie_chains = []
-
-        raw_paths: list[Path] = []
-        test_paths: list[Path] = []
-
-        # Raises if the test files are missing, before anything is loaded
-        if MovieType.TEST in movie_types:
-            raw_paths, test_paths = self._latest_test_movies()
+        paths_by_type = self._movie_paths(movie_types)
 
         for movie_type in movie_types:
-            # Get the movie_paths
-            if movie_type == MovieType.TEST:
-                movie_paths = test_paths
-
-            elif MovieType.TEST in movie_types:
-                # It must be raw in this case
-                movie_paths = raw_paths
-
-            # If there is no test always include all files
-            elif movie_type == MovieType.RAW:
-                movie_paths = [
-                    self.db.main_folder / path
-                    for path in self.acquisitions["raw_path"]
-                ]
-
-            elif movie_type == MovieType.MCOR:
-                movie_paths = [
-                    self.db.main_folder / path
-                    for path in self.mcor_files["mcor_path"]
-                ]
-
-            # There must be at least one movie
-            # TODO: Gather movie_paths for every type first, so it fails
-            #       before having spent time loading anything.
-            assert movie_paths, f"Didn't find any {movie_type.value} files."
+            movie_paths = paths_by_type[movie_type]
 
             logger.info(
                 f"Adding {len(movie_paths)} {movie_type.value} files to the movie."
