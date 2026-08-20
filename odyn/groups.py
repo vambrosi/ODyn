@@ -407,11 +407,11 @@ class Group(CallRecorder):
     # Private Methods
     # ----------------------------------------------------------------------- #
 
-    def _latest_test_movies(self) -> tuple[list[Path], list[Path]]:
+    def _latest_test_movies(self) -> tuple[list[int], list[Path], list[Path]]:
         """
         Raw files and their .mmap files, from the last test motion correction.
 
-        Returns `(raw_paths, mmap_paths)`, matched by file name and in
+        Returns `(acq_ids, raw_paths, mmap_paths)`, matched by file name and in
         acquisition order. Read from `call_output` using `get_tempdir()`.
 
         This function allows `play_movie` to be called on test runs even
@@ -434,13 +434,17 @@ class Group(CallRecorder):
         mmap_paths = [temp_folder / name for name in tests.iloc[0]["mmap_names"]]
 
         # Pair .mmap with the raw file it came from by name
+        acq_ids: list[int] = []
         raw_paths: list[Path] = []
         matched: list[Path] = []
 
-        for raw_path in map(Path, self.acquisitions["raw_path"]):
+        for acq_id, raw_name in self.acquisitions["raw_path"].items():
+            raw_path = Path(cast(str, raw_name))
+
             # Pick the first with the right name
             for path in mmap_paths:
                 if path.name.startswith(f"{raw_path.stem}_") and path.is_file():
+                    acq_ids.append(int(cast(int, acq_id)))
                     raw_paths.append(self.db.main_folder / raw_path)
                     matched.append(path)
                     break
@@ -454,7 +458,7 @@ class Group(CallRecorder):
                 "Rerun 'run_motion_correction(is_test=True)'."
             )
 
-        return raw_paths, matched
+        return acq_ids, raw_paths, matched
 
     def _reset_caches(self) -> None:
         self._acquisitions = None
@@ -1341,17 +1345,41 @@ class Group(CallRecorder):
 
         logger.info(f"Saving movie to {path}")
 
-        movie = self._load_preview_movie(movie_types, downsample_ratio, downsample_type)
+        movie, acq_per_frame = self._load_preview_movie(
+            movie_types, downsample_ratio, downsample_type
+        )
 
-        _write_preview_movie(path, movie, fr=fr, q_min=q_min, q_max=q_max, codec=codec)
+        # How much faster than the experiment the result plays. Says more than
+        # downsample_ratio does: the frame rates here span 7 to 193 Hz, so the
+        # same ratio is a 5x movie on one group and a 130x movie on another.
+        # unique: acq_per_frame repeats an acq_id once per frame, and each
+        # acquisition should count its frames once
+        acq_ids = np.unique(acq_per_frame)
+        experiments = self.experiments.loc[self.acquisitions.loc[acq_ids, "exp_id"]]
+        frames_in = int(experiments["frame_count"].sum())
+        speed = fr * frames_in / (experiments["frame_rate"].mean() * len(movie))
+
+        _write_preview_movie(
+            path,
+            movie,
+            fr=fr,
+            panels=[movie_type.value for movie_type in movie_types],
+            acq_per_frame=acq_per_frame,
+            speed=speed,
+            q_min=q_min,
+            q_max=q_max,
+            codec=codec,
+        )
 
         # outputs stores paths relative to main_folder, so a save_folder
         # somewhere else cannot be recorded.
         if path.is_relative_to(self.db.main_folder):
             self.add_output_file(path)
 
-        self.set_output({"grid": list(grid), "file": path.name})
-        logger.info(f"{CHECK} Wrote {len(movie)} frames.")
+        self.set_output(
+            {"grid": list(grid), "file": path.name, "speed": round(speed, 1)}
+        )
+        logger.info(f"{CHECK} Wrote {len(movie)} frames at {speed:.0f}x real time.")
 
         return path
 
@@ -1365,47 +1393,49 @@ class Group(CallRecorder):
         out halfway through is worse than one pass of stats up front, which
         costs milliseconds next to the gigabytes that follow.
         """
+        test_acq_ids: list[int] = []
         raw_paths: list[Path] = []
         test_paths: list[Path] = []
 
         # Raises if the test files are missing
         if MovieType.TEST in movie_types:
-            raw_paths, test_paths = self._latest_test_movies()
+            test_acq_ids, raw_paths, test_paths = self._latest_test_movies()
 
-        paths_by_type: dict[MovieType, list[Path]] = {}
+        paths_by_type: dict[MovieType, list[tuple[int, Path]]] = {}
 
         for movie_type in movie_types:
             if movie_type == MovieType.TEST:
-                paths = test_paths
+                pairs = list(zip(test_acq_ids, test_paths))
 
             # A test uses a slice of the raw files, so only pick those
             elif MovieType.TEST in movie_types:
-                paths = raw_paths
-
-            elif movie_type == MovieType.RAW:
-                paths = [
-                    self.db.main_folder / path for path in self.acquisitions["raw_path"]
-                ]
+                pairs = list(zip(test_acq_ids, raw_paths))
 
             else:
-                paths = [
-                    self.db.main_folder / path for path in self.mcor_files["mcor_path"]
+                stored = (
+                    self.acquisitions["raw_path"]
+                    if movie_type == MovieType.RAW
+                    else self.mcor_files["mcor_path"]
+                )
+                pairs = [
+                    (int(cast(int, acq_id)), self.db.main_folder / cast(str, path))
+                    for acq_id, path in stored.items()
                 ]
 
-            if not paths:
+            if not pairs:
                 raise RuntimeError(
                     f"{self!r} has no {movie_type.value} files to put in a movie."
                 )
 
-            missing = [path for path in paths if not path.is_file()]
+            missing = [path for _, path in pairs if not path.is_file()]
 
             if missing:
                 raise FileNotFoundError(
-                    f"{len(missing)} of {len(paths)} {movie_type.value} files are "
+                    f"{len(missing)} of {len(pairs)} {movie_type.value} files are "
                     f"not where the database says, starting with '{missing[0]}'."
                 )
 
-            paths_by_type[movie_type] = paths
+            paths_by_type[movie_type] = pairs
 
         return paths_by_type
 
@@ -1414,15 +1444,22 @@ class Group(CallRecorder):
         movie_types: tuple[MovieType, ...],
         downsample_ratio: float,
         downsample_type: str,
-    ) -> cm.movie:
+    ) -> tuple[cm.movie, list[np.ndarray]]:
         """
         Load and downsample the movies for `movie_types`, side by side.
 
         Frames go along time and the types along width, so a two-type grid is
         one movie with the panels next to each other.
+
+        Returns `(movie, acq_per_frame)`, saying which acquisition each frame
+        came from. Panels share the time axis, so one array covers them all;
+        that they agree is checked below rather than assumed. How many frames
+        a file contributes is only known once it is loaded (both downsampling
+        modes truncate), so it is collected here rather than worked out after.
         """
 
         movie_chains = []
+        labels: list[np.ndarray] = []
         paths_by_type = self._movie_paths(movie_types)
 
         for movie_type in movie_types:
@@ -1435,7 +1472,11 @@ class Group(CallRecorder):
             # "skip" reads only the frames it keeps, rather than reading a whole
             # movie to average it away. Same number of frames out either way.
             movie_chain = None
-            for path in tqdm(movie_paths, desc=f"Loading {movie_type.value} movies"):
+            acq_per_frame = []
+
+            for acq_id, path in tqdm(
+                movie_paths, desc=f"Loading {movie_type.value} movies"
+            ):
                 if downsample_type == "skip":
                     movie = cm.load(
                         path, subindices=_frames_to_keep(path, downsample_ratio)
@@ -1450,6 +1491,8 @@ class Group(CallRecorder):
                 else:
                     movie = cm.load(path).resize(1, 1, downsample_ratio)
 
+                acq_per_frame.append(np.full(len(movie), acq_id))
+
                 movie_chain = (
                     movie
                     if movie_chain is None
@@ -1459,10 +1502,23 @@ class Group(CallRecorder):
                 logger.info(f"  {path}")
 
             movie_chains.append(movie_chain)
+            labels.append(np.concatenate(acq_per_frame))
+
+        # Panels are put side by side, so frame f is the same instant in each
+        # of them. If they cover different acquisitions, one frame would show
+        # two of them at once. Checked here because the alternatives are worse:
+        # different totals raise a numpy shape error about "dimension 0", and
+        # equal totals with different file boundaries raise nothing at all.
+        if any(not np.array_equal(labels[0], other) for other in labels[1:]):
+            raise RuntimeError(
+                f"The {' and '.join(t.value for t in movie_types)} files cover "
+                "different acquisitions, so they cannot be shown side by side. "
+                "Every acquisition in the group needs a file of each type."
+            )
 
         movie_chain = cm.concatenate(movie_chains, axis=2)
 
-        return movie_chain
+        return movie_chain, labels[0]
 
     @memorize_params
     @record_call
@@ -2450,11 +2506,52 @@ def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:
     return np.linspace(0, frames - 1, keep).round().astype(int)
 
 
+def _draw_label(
+    picture: np.ndarray,
+    text: str,
+    origin: tuple[int, int],
+    scale: float,
+    overlay_alpha: float = 0.55,
+) -> None:
+    """
+    White text over a darkened bar, so it reads over noise.
+    """
+    thickness = max(1, round(scale))
+    (text_width, text_height), baseline = cv2.getTextSize(
+        text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
+    )
+
+    height, width = picture.shape[:2]
+    pad = round(4 * scale) + 2
+    x, y = origin
+
+    # Clipped, so a label near an edge darkens less rather than wrapping
+    box = picture[
+        max(0, y - text_height - pad) : min(height, y + baseline + pad),
+        max(0, x - pad) : min(width, x + text_width + pad),
+    ]
+    box[:] = (box * (1 - overlay_alpha)).astype(np.uint8)
+
+    cv2.putText(
+        picture,
+        text,
+        origin,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        255,
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
 def _write_preview_movie(
     path: Path,
     movie: np.ndarray,
     *,
     fr: float,
+    panels: Sequence[str] = (),
+    acq_per_frame: np.ndarray | None = None,
+    speed: float | None = None,
     q_min: float = 0.0,
     q_max: float = 99.5,
     codec: str = "MJPG",
@@ -2466,6 +2563,10 @@ def _write_preview_movie(
     movie rather than at its extremes, so one bright speck cannot flatten
     everything else. The scale is therefore relative to this movie and says
     nothing across movies, which is the opposite of the z-score renderer.
+
+    `panels` names the panels left to right, `acq_per_frame` says which
+    acquisition each frame came from, and `speed` is how many times real time
+    the result plays at.
     """
 
     # Percentiles over every frame, so brightness does not drift as it plays.
@@ -2474,6 +2575,11 @@ def _write_preview_movie(
     spread = max(float(high - low), 1e-9)
 
     frames, height, width = movie.shape
+
+    # Frames run from 512 to 1250 px wide across the data, so tie text to them
+    scale = max(0.4, height / 900)
+    margin = round(8 * scale) + 4
+    panel_width = width // max(len(panels), 1)
 
     writer = cv2.VideoWriter(
         str(path), cv2.VideoWriter_fourcc(*codec), fr, (width, height), isColor=False
@@ -2487,9 +2593,27 @@ def _write_preview_movie(
             # uint8 before anything is drawn on it:
             # OpenCV 5 refuses to draw on float images,
             #   (caiman does this backwards and, thus, it crashes)
-            picture = np.clip((movie[frame] - low) * (255 / spread), 0, 255)
+            # ascontiguousarray also drops the caiman subclass, which cv2 needs
+            picture = np.ascontiguousarray(
+                np.clip((movie[frame] - low) * (255 / spread), 0, 255), dtype=np.uint8
+            )
 
-            writer.write(picture.astype(np.uint8))
+            for index, name in enumerate(panels):
+                _draw_label(
+                    picture,
+                    f"{name}  acq {acq_per_frame[frame]}"
+                    if acq_per_frame is not None
+                    else name,
+                    (index * panel_width + margin, margin + round(20 * scale)),
+                    scale,
+                )
+
+            if speed is not None:
+                _draw_label(
+                    picture, f"{speed:.0f}x real time", (margin, height - margin), scale
+                )
+
+            writer.write(picture)
 
     finally:
         writer.release()
@@ -2572,7 +2696,8 @@ class LazyMovie:
 
         logger.info("Updating movie...")
 
-        self.movie = self.owner._load_preview_movie(
+        # play_movie has no overlays, so the labels are dropped here
+        self.movie, _ = self.owner._load_preview_movie(
             self.types, downsample_ratio, downsample_type
         )
 
