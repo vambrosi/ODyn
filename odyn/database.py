@@ -79,6 +79,7 @@ class ExpFlag(IntFlag):
     METADATA_CHANGED = 1 << 4  # TIFF metadata changed, skipped
     H5_UNMATCHED_ACQ = 1 << 5  # some H5 trials had no matching acquisition
     TRIAL_NO_ACQ = 1 << 6  # some trials matched H5 but had no acquisition
+    NOT_A_GRAB = 1 << 7  # add_grab_folder found a file that was not a grab
 
 
 class TrialPhase(IntEnum):
@@ -202,7 +203,6 @@ class Database(CallRecorder):
 
     def __del__(self):
         self.con.close()
-
 
     # ----------------------------------------------------------------------- #
     # SQLite Tables as DataFrames
@@ -403,57 +403,57 @@ class Database(CallRecorder):
     # ----------------------------------------------------------------------- #
 
     def _check_schema_version(self) -> None:
-            """
-            Throws error if DB schema version is not what the code expects.
-            """
+        """
+        Throws error if DB schema version is not what the code expects.
+        """
 
-            version = self.con.execute("PRAGMA user_version;").fetchone()[0]
-            if version == SCHEMA_VERSION:
-                return
+        version = self.con.execute("PRAGMA user_version;").fetchone()[0]
+        if version == SCHEMA_VERSION:
+            return
 
-            if version < SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"Database schema is v{version} but the code expects "
-                    f"v{SCHEMA_VERSION}. Run the migration:\n"
-                    f"    python -m odyn.migrate '{self.main_folder}'"
-                )
-
+        if version < SCHEMA_VERSION:
             raise RuntimeError(
-                f"Database schema is v{version} but the code expects v{SCHEMA_VERSION}. "
-                "Your code is out of date! Pull the latest version!"
+                f"Database schema is v{version} but the code expects "
+                f"v{SCHEMA_VERSION}. Run the migration:\n"
+                f"    python -m odyn.migrate '{self.main_folder}'"
             )
 
+        raise RuntimeError(
+            f"Database schema is v{version} but the code expects v{SCHEMA_VERSION}. "
+            "Your code is out of date! Pull the latest version!"
+        )
+
     def _copy_for_test(self) -> Path:
-            """
-            Returns path to a fresh snapshot of the database.
-            For tests only, via `Database(main_folder, _is_test=True)`.
+        """
+        Returns path to a fresh snapshot of the database.
+        For tests only, via `Database(main_folder, _is_test=True)`.
 
-            PROTECTS DATABASE, BUT ACCESS REAL DATA.
-            """
-            source = self.main_folder / ODYN_FOLDER / "odyn.db"
+        PROTECTS DATABASE, BUT ACCESS REAL DATA.
+        """
+        source = self.main_folder / ODYN_FOLDER / "odyn.db"
 
-            if not source.exists():
-                raise FileNotFoundError(f"No database at '{source}' to copy.")
+        if not source.exists():
+            raise FileNotFoundError(f"No database at '{source}' to copy.")
 
-            copy = source.parent / "tests" / "odyn.db"
-            copy.parent.mkdir(parents=True, exist_ok=True)
-            copy.unlink(missing_ok=True)
+        copy = source.parent / "tests" / "odyn.db"
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.unlink(missing_ok=True)
 
-            # Use the online backup API rather than a file copy.
-            #   (In case the DB is in use.)
-            origin = sqlite3.connect(source, timeout=DB_TIMEOUT_S)
-            destination = sqlite3.connect(copy)
+        # Use the online backup API rather than a file copy.
+        #   (In case the DB is in use.)
+        origin = sqlite3.connect(source, timeout=DB_TIMEOUT_S)
+        destination = sqlite3.connect(copy)
 
-            try:
-                origin.backup(destination)
-            finally:
-                destination.close()
-                origin.close()
+        try:
+            origin.backup(destination)
+        finally:
+            destination.close()
+            origin.close()
 
-            logger.warning(f"TEST COPY: '{copy.resolve()}'")
-            logger.warning("The shared database will not see anything you do here.")
+        logger.warning(f"TEST COPY: '{copy.resolve()}'")
+        logger.warning("The shared database will not see anything you do here.")
 
-            return copy
+        return copy
 
     def _get_raw_metadata(self, path: Path) -> None | tuple[Object, Object]:
         tif = TiffFile(path)
@@ -708,6 +708,109 @@ class Database(CallRecorder):
     # ----------------------------------------------------------------------- #
     # Updating the Database
     # ----------------------------------------------------------------------- #
+
+    @record_call
+    def add_grab_folder(
+        self,
+        *,
+        rel_path: str,
+        rel_raw_paths: None | list[str] = None,
+    ) -> None:
+        """
+        Add a folder of grabs, each as its own experiment
+
+        **PARAMETERS**
+        - `rel_path` is the experiment folder path relative to the `main_folder`
+        - `rel_raw_paths` is the raw files list (if None it searches the raw folder)
+
+        **EXAMPLE**
+        ```python
+        db.add_grab_folder(rel_path="20260623/m462/e2")
+
+        Files already in the database are skipped, so running this again after
+        adding more grabs to the folder only adds the new ones.
+        ```
+        """
+        logger.info("Adding grabs to database...")
+
+        exp_path = self.main_folder / rel_path
+
+        assert exp_path.is_dir(), f"Folder not found: '{exp_path.resolve()}'"
+
+        raw_paths = (
+            sorted(exp_path.glob("raw/[!.]?*.tif"))
+            if rel_raw_paths is None
+            else [self.main_folder / p for p in rel_raw_paths]
+        )
+
+        assert raw_paths, "Did not find any raw/*.tif files."
+
+        logger.info(f"Processing folder: '{exp_path.resolve()}'")
+
+        added = []
+
+        for raw_path in tqdm(raw_paths, desc="Loading TIFF Metadata"):
+            # Read outside the transaction (to not write lock).
+            raw_metadata = self._get_raw_metadata(raw_path)
+
+            if raw_metadata is None:
+                logger.info(
+                    f"  Skipped file {raw_path} (metadata format not supported)"
+                )
+                self.add_flag(ExpFlag.UNSUPPORTED_METADATA)
+                continue
+
+            experiment, acquisition = raw_metadata
+
+            if experiment["exp_type"] != "grab":
+                logger.warning(f"  Skipped '{raw_path.name}' (not a grab).")
+                self.add_flag(ExpFlag.NOT_A_GRAB)
+                continue
+
+            # We keep the trailing number to differentiate grabs
+            #   (differently from the add_experiment)
+            experiment["exp_name"] = raw_path.stem
+
+            # Type checking because Object is too generic
+            assert isinstance(experiment["exp_start"], datetime)
+            exp_start_str = experiment["exp_start"].strftime(DT_FORMAT)
+
+            # One transaction per grab/experiment as in add_experiment
+            # User can rerun it fails in a couple files (or just skip them)
+            with self.con as con:
+                cur = con.cursor()
+                cur.execute("PRAGMA foreign_keys = ON;")
+
+                cur.execute(
+                    "SELECT EXISTS(SELECT 1 FROM experiments WHERE exp_start = ?);",
+                    [exp_start_str],
+                )
+
+                if cur.fetchone()[0]:
+                    logger.info(f"  '{raw_path.name}' already in DB.")
+                    self.add_flag(ExpFlag.ALREADY_IN_DB)
+                    continue
+
+                exp_id = _db_insert(
+                    cur, "experiments", {**experiment, "exp_start": exp_start_str}
+                )
+
+                cur.execute("INSERT INTO groups DEFAULT VALUES;")
+                group_id = cur.lastrowid
+
+                cur.execute(
+                    "INSERT INTO group_experiments (group_id, exp_id) VALUES (?, ?);",
+                    [group_id, exp_id],
+                )
+
+                _db_insert(cur, "acquisitions", {**acquisition, "exp_id": exp_id})
+
+            added.append(raw_path.stem)
+
+        self.set_output({"added": added})
+        self._reset_caches()
+
+        logger.info(f"Added {len(added)} of {len(raw_paths)} grabs. {CHECK}")
 
     @record_call
     def add_experiment(
