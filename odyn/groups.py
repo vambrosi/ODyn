@@ -1357,6 +1357,11 @@ class Group(CallRecorder):
         acq_ids = np.unique(acq_per_frame)
         experiments = self.experiments.loc[self.acquisitions.loc[acq_ids, "exp_id"]]
         frames_in = int(experiments["frame_count"].sum())
+
+        # Every group in the database has one um/px, so the first row speaks
+        # for all of them. Width, because the scale bar is horizontal.
+        first = self.experiments.iloc[0]
+        um_per_px = float(first["width_um"]) / int(first["width_px"])
         speed = fr * frames_in / (experiments["frame_rate"].mean() * len(movie))
 
         _write_preview_movie(
@@ -1365,6 +1370,7 @@ class Group(CallRecorder):
             fr=fr,
             panels=[movie_type.value for movie_type in movie_types],
             acq_per_frame=acq_per_frame,
+            um_per_px=um_per_px,
             speed=speed,
             q_min=q_min,
             q_max=q_max,
@@ -2544,6 +2550,105 @@ def _draw_label(
     )
 
 
+# ScanImage writes um/px as though every acquisition came from a 20x
+# objective. On 20x that is right; on 10x a real 100 um is written as 45 um.
+# Nothing in the TIFF says which objective was used, so both are drawn and the
+# person watching picks. Measured, not the nominal 2x, so do not "simplify" it.
+TEN_X_CORRECTION = 100 / 45
+
+
+def _nice_length(width_px: int, um_per_px: float) -> int:
+    """
+    A round number of microns near a fifth of `width_px`.
+
+    The field of view runs from about 100 um to 3000 um across the data, so a
+    fixed length would be either invisible or wider than the frame.
+    """
+    ladder = (1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000)
+    target = 0.2 * width_px * um_per_px
+
+    return max([rung for rung in ladder if rung <= target], default=ladder[0])
+
+
+def _draw_scale_bars(
+    picture: np.ndarray,
+    left: int,
+    right: int,
+    um_per_px: float,
+    scale: float,
+    overlay_alpha: float = 0.65,
+) -> None:
+    """
+    One labelled bar per objective, in the bottom right of `left` to `right`.
+
+    Two bars because `um_per_px` as stored is only right for 20x (see
+    TEN_X_CORRECTION), and which objective was used is not in the files.
+
+    `um_per_px` is measured across the width, not the height: a few experiments
+    are anisotropic (one is 0.25 um/px across and 1.0 down), and these bars are
+    horizontal, so only the width applies to them.
+    """
+    thickness = max(1, round(scale))
+    pad = round(4 * scale) + 2
+    margin = round(8 * scale) + 4
+    bar_height = max(2, round(4 * scale))
+
+    rows = []
+
+    for objective, correction in (("20x", 1.0), ("10x", TEN_X_CORRECTION)):
+        true_um_per_px = um_per_px * correction
+        microns = _nice_length(right - left, true_um_per_px)
+
+        # 'um' rather than 'µm': Hershey fonts are ASCII only before OpenCV 5,
+        # and the workstations are on 4.x, where the µ comes out as a '?'.
+        text = f"{microns:g} um ({objective})"
+        (text_width, text_height), _ = cv2.getTextSize(
+            text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
+        )
+        rows.append((text, round(microns / true_um_per_px), text_width, text_height))
+
+    height, width = picture.shape[:2]
+    stack = sum(bar_height + 2 * pad + text_height for _, _, _, text_height in rows)
+    widest = max(max(bar_width, text_width) for _, bar_width, text_width, _ in rows)
+
+    # One box behind both, so they read as a pair rather than two labels
+    box = picture[
+        max(0, height - margin - stack - pad) : height,
+        max(0, right - margin - widest - pad) : min(width, right - margin + pad),
+    ]
+    box[:] = (box * (1 - overlay_alpha)).astype(np.uint8)
+
+    end = right - margin
+    bottom = height - margin
+
+    # Bottom up, so 20x sits at the edge and 10x above it
+    for text, bar_width, text_width, text_height in rows:
+        bar_top = bottom - bar_height
+        text_baseline = bar_top - pad
+
+        # A label is often wider than the bar it belongs to, so centring it on
+        # the bar would push it off the edge of the frame. Both are centred in
+        # a block that ends at the margin instead.
+        block = max(bar_width, text_width)
+        start = end - block
+        bar_start = start + (block - bar_width) // 2
+
+        picture[bar_top : bar_top + bar_height, bar_start : bar_start + bar_width] = 255
+
+        cv2.putText(
+            picture,
+            text,
+            (start + (block - text_width) // 2, text_baseline),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            scale,
+            255,
+            thickness,
+            cv2.LINE_AA,
+        )
+
+        bottom = text_baseline - text_height - pad
+
+
 def _write_preview_movie(
     path: Path,
     movie: np.ndarray,
@@ -2552,6 +2657,7 @@ def _write_preview_movie(
     panels: Sequence[str] = (),
     acq_per_frame: np.ndarray | None = None,
     speed: float | None = None,
+    um_per_px: float | None = None,
     q_min: float = 0.0,
     q_max: float = 99.5,
     codec: str = "MJPG",
@@ -2565,8 +2671,8 @@ def _write_preview_movie(
     nothing across movies, which is the opposite of the z-score renderer.
 
     `panels` names the panels left to right, `acq_per_frame` says which
-    acquisition each frame came from, and `speed` is how many times real time
-    the result plays at.
+    acquisition each frame came from, `speed` is how many times real time the
+    result plays at, and `um_per_px` sizes the scale bar.
     """
 
     # Percentiles over every frame, so brightness does not drift as it plays.
@@ -2606,6 +2712,14 @@ def _write_preview_movie(
                     else name,
                     (index * panel_width + margin, margin + round(20 * scale)),
                     scale,
+                )
+
+            # One of each, on opposite sides of the whole image: the scale bars
+            # at the right edge of the last panel, the speed at the left edge
+            # of the first. Repeating either per panel is just clutter.
+            if um_per_px is not None:
+                _draw_scale_bars(
+                    picture, width - panel_width, width, um_per_px, scale
                 )
 
             if speed is not None:
