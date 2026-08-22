@@ -6,6 +6,7 @@ The risk it guards against is a wrong file being attached to an acquisition,
 which would quietly corrupt every analysis downstream.
 """
 
+import logging
 import sqlite3
 
 import numpy as np
@@ -133,6 +134,56 @@ def test_size_comes_off_the_open_file(tmp_path):
 
     with tifffile.TiffFile(path) as tif:
         assert tif.filehandle.size == path.stat().st_size
+
+
+@pytest.mark.parametrize(
+    "frames, kwargs",
+    [
+        (16, {}),                                    # tags gathered at the end
+        (16, {"rowsperstrip": 1, "bigtiff": True}),  # a strip per row, many tags
+        (200, {"bigtiff": True}),                    # enough pages for tags to add up
+    ],
+)
+def test_frame_count_survives_page_overhead(tmp_path, frames, kwargs):
+    """
+    A page costs more than its frame: its own tags, and for a striped page an
+    offset and a byte count per strip. Over many pages that adds up to more
+    than a whole frame, which made the count come out one too high on a real
+    800x720 file with 200 striped pages.
+    """
+    path = write_mcor(tmp_path, 1, frames=frames, height=64, width=64, **kwargs)
+
+    assert _tiff_shape(path, frames)[1] == frames
+
+
+def test_one_page_is_one_frame(tmp_path):
+    """There is no second page to measure the spacing against."""
+    path = write_mcor(tmp_path, 1, frames=1, height=64, width=64)
+
+    assert _tiff_shape(path, 1)[1] == 1
+
+
+def test_the_pages_are_not_counted_when_the_size_agrees(tmp_path, caplog):
+    """
+    Counting reads one header per frame, which measured 471-5371 ms per file
+    over the network, so the estimate has to be right often enough to keep
+    that rare. Correctness alone would not catch this: counting returns the
+    right answer either way, just slowly.
+
+    NOTE: odyn's logger does not propagate, so caplog has to be attached by
+    hand or it sees nothing and the assertion passes for the wrong reason.
+    """
+    path = write_mcor(tmp_path, 1, frames=60, height=256, width=256)
+    odyn_logger = logging.getLogger("odyn")
+    odyn_logger.addHandler(caplog.handler)
+
+    try:
+        with caplog.at_level(logging.INFO):
+            assert _tiff_shape(path, 60)[1] == 60
+    finally:
+        odyn_logger.removeHandler(caplog.handler)
+
+    assert "Counting pages" not in caplog.text
 
 
 def test_a_missing_file_raises_file_not_found(tmp_path):

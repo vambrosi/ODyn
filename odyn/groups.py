@@ -2765,12 +2765,34 @@ def _tiff_shape(path: Path, expected_frames: int) -> tuple[tuple[int, int], int]
         height = int(page.tags["ImageLength"].value)
         width = int(page.tags["ImageWidth"].value)
 
-        # Pixel data is usually most of the TIFF size, so you can cheaply
-        # get the frame count by using the approximation
-        #       size ~ size of frame * number of frames
-        # The size comes off the open file, so it costs no extra round trip.
+        # Pixel data is most of a TIFF, so the frame count is about the size
+        # over the size of a frame. Where the tags sit decides how to count:
+        # some writers put each page's tags next to its frame, others gather
+        # them all at the end. Reading the second page's header says which,
+        # and costs one seek, where counting pages costs one per frame.
         frame_bytes = height * width * page.dtype.itemsize * page.samplesperpixel
-        frames = tif.filehandle.size // frame_bytes
+        first = page.dataoffsets[0]
+
+        try:
+            stride = tif.pages[1].dataoffsets[0] - first
+
+        except IndexError:
+            stride = 0  # asking for a second page says there is only one
+
+        # The size comes off the open file, so it costs no extra round trip.
+        size = tif.filehandle.size - first
+
+        if stride > frame_bytes:
+            # Tags between the frames, so a page costs more than its frame.
+            # One real file spent 7 KB a page against a 1.1 MB frame: 0.6%
+            # each, but over 200 pages more than a whole frame, which is
+            # enough to count one page too many.
+            frames = round(size / stride)
+
+        else:
+            # Tags gathered at the end, so the frames are back to back and
+            # what is left over is the tag block.
+            frames = size // frame_bytes
 
         # Fallback if the quick test fails. Counting properly walks one
         # directory per frame, which can be slow over the network (patchwarp
