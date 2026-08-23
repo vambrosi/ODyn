@@ -1819,7 +1819,18 @@ class Group(CallRecorder):
     # Data Analysis
     # ----------------------------------------------------------------------- #
 
-    def _z_score_frames(self, photobleach_window_s: float) -> tuple[int, int, float]:
+    def _mcors(self, only_approved: bool) -> pd.DataFrame:
+        """
+        The mcor files to use when making a movie.
+
+        `only_approved=False` is for computing before the motion correction has
+        been looked at, while the files are still in the network cache.
+        """
+        return self.approved_mcor_files if only_approved else self.mcor_files
+
+    def _z_score_frames(
+        self, photobleach_window_s: float, only_approved: bool = True
+    ) -> tuple[int, int, float]:
         """
         Range of frames that can be compared across the group.
 
@@ -1829,18 +1840,29 @@ class Group(CallRecorder):
         - the interval above is the largest such interval;
         - `frame_rate` is the mean frame rate across acquisitions.
 
-        Only uses approved acquisitions. The window is the intersection over
-        all of them, so leaving one out is also how you stop an odd one from
-        narrowing the window for the rest.
+        Only uses acquisitions associated with an odor.
         """
 
-        acquisitions = self.acquisitions.loc[self.approved_mcor_files.index]
+        usable = self.acquisitions.loc[self._mcors(only_approved).index]
+
+        if not len(usable):
+            raise RuntimeError(
+                f"{self!r} has no approved mcor files. Check the previews and "
+                "run 'approve_mcor_files()', or pass only_approved=False."
+                if only_approved
+                else f"{self!r} has no mcor files."
+            )
+
+        # An acquisition might not be associated with an odor (no `odor_start`).
+        # We drop them to avoid NaNs in the np.max and np.min below.
+        acquisitions = usable[usable["odor_start"].notna()]
 
         if not len(acquisitions):
-            raise RuntimeError(
-                f"{self!r} has no approved mcor files, so there is nothing to "
-                "z-score. Check the movies and run 'approve_mcor_files()'."
-            )
+            raise RuntimeError("Found no mcor files with an odor onset.")
+
+        elif len(acquisitions) < len(usable):
+            no_odor = len(usable) - len(acquisitions)
+            logger.warning(f"{no_odor} acquisitions don't have odor onsets!")
 
         experiments = self.experiments.loc[acquisitions["exp_id"]]
 
@@ -1863,7 +1885,11 @@ class Group(CallRecorder):
         return first, last, frame_rate
 
     def z_score_acquisition(
-        self, *, acq_id: int, photobleach_window_s: float = 1.0
+        self,
+        *,
+        acq_id: int,
+        photobleach_window_s: float = 1.0,
+        only_approved: bool = True,
     ) -> np.ndarray:
         """
         Z-score one acquisition against its own pre-odor baseline
@@ -1882,16 +1908,17 @@ class Group(CallRecorder):
         Frames are not smoothed over time, differently from the MATLAB script.
         (Averaging leaves far fewer frames to measure the noise from.)
         """
-        approved = self.approved_mcor_files
+        usable = self._mcors(only_approved)
 
         # Check here because .loc would only say "KeyError: <acq_id>"
-        if acq_id not in approved.index:
-            raise KeyError(
-                f"Acquisition {acq_id} has no approved mcor file in {self!r}."
-            )
+        if acq_id not in usable.index:
+            added = {"approved " if only_approved else ""}
+            raise KeyError(f"Acquisition {acq_id} has no {added}mcor file in {self!r}.")
 
         # Redoes the computation for every acquisition, but that is fast.
-        first, last, frame_rate = self._z_score_frames(photobleach_window_s)
+        first, last, frame_rate = self._z_score_frames(
+            photobleach_window_s, only_approved
+        )
 
         onset_delay = cast(
             datetime, self.acquisitions.loc[acq_id, "odor_start"]
@@ -1899,7 +1926,7 @@ class Group(CallRecorder):
 
         onset_frame = int(round(onset_delay.total_seconds() * frame_rate))
 
-        path = self.db.main_folder / cast(str, approved.loc[acq_id, "mcor_path"])
+        path = self.db.main_folder / cast(str, usable.loc[acq_id, "mcor_path"])
 
         with tifffile.TiffFile(path) as tif:
             movie = tif.asarray(
@@ -1915,7 +1942,7 @@ class Group(CallRecorder):
         return np.nan_to_num(z_score, nan=0.0, posinf=0.0, neginf=0.0)
 
     def z_score_average_movies(
-        self, *, photobleach_window_s: float = 1.0
+        self, *, photobleach_window_s: float = 1.0, only_approved: bool = True
     ) -> dict[tuple[int, int, str], np.ndarray]:
         """
         Normalized average z-scores over the acquisitions of each
@@ -1931,13 +1958,16 @@ class Group(CallRecorder):
         Every acquisition is z-scored against its own baseline, and then we
         compute the normalized average across acquisitions (`average * sqrt(n)`).
         We use this normalization so that conditions with different number of
-        acquisitions have similar noise levels (~1).
+        acquisitions have similar noise levels (~1). Pass `only_approved=False`
+        to include mcor files that have not been approved yet.
 
-        ALERT: results holds one movie per condition, so it is too RAM intensive
-        for large experiments.
+        ALERT: results holds one movie per condition, so it can be too RAM
+        intensive for large experiments.
         """
 
-        trials = self.trials[self.trials["acq_id"].isin(self.approved_mcor_files.index)]
+        trials = self.trials[
+            self.trials["acq_id"].isin(self._mcors(only_approved).index)
+        ]
         conditions: dict[tuple[int, int, str], np.ndarray] = {}
 
         for key, rows in trials.groupby(["program_id", "odor_id", "outcome"]):
@@ -1948,7 +1978,9 @@ class Group(CallRecorder):
 
             for acq_id in tqdm(acq_ids, desc=f"{condition}"):
                 z_score = self.z_score_acquisition(
-                    acq_id=acq_id, photobleach_window_s=photobleach_window_s
+                    acq_id=acq_id,
+                    photobleach_window_s=photobleach_window_s,
+                    only_approved=only_approved,
                 )
                 total = z_score if total is None else total + z_score
 
@@ -1963,6 +1995,7 @@ class Group(CallRecorder):
         *,
         photobleach_window_s: float = 1.0,
         smoothing_s: float = 0.2,
+        only_approved: bool = True,
         save_folder: str = r"./movies",
         display_range: float = 5.0,
         codec: str = "mp4v",
@@ -1980,6 +2013,7 @@ class Group(CallRecorder):
         **PARAMETERS**
         - `photobleach_window_s`: how much to drop from the start of each movie
         - `smoothing_s`: average this many seconds together, `0` for none
+        - `only_approved`: `False` for all mcor files, `True` for approved ones.
         - `save_folder`: `"."` is the main_folder (r is to use \\ in the path)
         - `display_range`: z-scores shown, from `-display_range` to `+display_range`
         - `codec`, `extension`: how to encode (see ALERT below)
@@ -2011,7 +2045,12 @@ class Group(CallRecorder):
         )
         folder.mkdir(parents=True, exist_ok=True)
 
-        first_frame, _, frame_rate = self._z_score_frames(photobleach_window_s)
+        first_frame, _, frame_rate = self._z_score_frames(
+            photobleach_window_s, only_approved
+        )
+
+        # Add a flag for the user that the video was made before approval
+        provisional = "" if only_approved else "_provisional"
         exp_name = self.experiments.iloc[0]["exp_name"]
 
         # Odd sized window, so it has a middle frame and the odor keeps its place
@@ -2033,7 +2072,9 @@ class Group(CallRecorder):
                 "saved but not recorded in the database."
             )
 
-        trials = self.trials[self.trials["acq_id"].isin(self.approved_mcor_files.index)]
+        trials = self.trials[
+            self.trials["acq_id"].isin(self._mcors(only_approved).index)
+        ]
         saved = []
         written: list[Object] = []
 
@@ -2051,7 +2092,9 @@ class Group(CallRecorder):
             total = None
             for acq_id in tqdm(acq_ids, desc=description):
                 z_score = self.z_score_acquisition(
-                    acq_id=acq_id, photobleach_window_s=photobleach_window_s
+                    acq_id=acq_id,
+                    photobleach_window_s=photobleach_window_s,
+                    only_approved=only_approved,
                 )
                 total = z_score if total is None else total + z_score
 
@@ -2069,7 +2112,7 @@ class Group(CallRecorder):
             path = folder / (
                 f"Group_{self.group_id}_{exp_name}_z_score"
                 f"_program_{program_id}_odor_{odor_id}"
-                f"_outcome_{outcome.replace(' ', '_')}.{extension}"
+                f"_outcome_{outcome.replace(' ', '_')}{provisional}.{extension}"
             )
 
             odor_s = (rows["odor_end"] - rows["odor_start"]).dt.total_seconds()
