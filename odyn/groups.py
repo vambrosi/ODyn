@@ -63,6 +63,10 @@ DEFAULT_OVERLAP_UM = [96.0, 96.0]
 DEFAULT_MAX_SHIFT_UM = [128.0, 128.0]
 DEFAULT_MAX_DEVIATION_UM = 12.0
 
+# Preview movie overlay text parameters
+TEXT_CORE_THICKNESS = 1
+TEXT_OUTLINE_OFFSET = 1
+
 # Limit used by tifffile.imwrite to switch to BigTIFF.
 # Classic TIFF 32-bit offsets overflow past this limit.
 BIGTIFF_BYTES = 2**32 - 2**25
@@ -407,11 +411,11 @@ class Group(CallRecorder):
     # Private Methods
     # ----------------------------------------------------------------------- #
 
-    def _latest_test_movies(self) -> tuple[list[Path], list[Path]]:
+    def _latest_test_movies(self) -> tuple[list[int], list[Path], list[Path]]:
         """
         Raw files and their .mmap files, from the last test motion correction.
 
-        Returns `(raw_paths, mmap_paths)`, matched by file name and in
+        Returns `(acq_ids, raw_paths, mmap_paths)`, matched by file name and in
         acquisition order. Read from `call_output` using `get_tempdir()`.
 
         This function allows `play_movie` to be called on test runs even
@@ -434,13 +438,17 @@ class Group(CallRecorder):
         mmap_paths = [temp_folder / name for name in tests.iloc[0]["mmap_names"]]
 
         # Pair .mmap with the raw file it came from by name
+        acq_ids: list[int] = []
         raw_paths: list[Path] = []
         matched: list[Path] = []
 
-        for raw_path in map(Path, self.acquisitions["raw_path"]):
+        for acq_id, raw_name in self.acquisitions["raw_path"].items():
+            raw_path = Path(cast(str, raw_name))
+
             # Pick the first with the right name
             for path in mmap_paths:
                 if path.name.startswith(f"{raw_path.stem}_") and path.is_file():
+                    acq_ids.append(int(cast(int, acq_id)))
                     raw_paths.append(self.db.main_folder / raw_path)
                     matched.append(path)
                     break
@@ -454,7 +462,7 @@ class Group(CallRecorder):
                 "Rerun 'run_motion_correction(is_test=True)'."
             )
 
-        return raw_paths, matched
+        return acq_ids, raw_paths, matched
 
     def _reset_caches(self) -> None:
         self._acquisitions = None
@@ -1250,6 +1258,277 @@ class Group(CallRecorder):
             save_movie=save_movie,
             movie_name=movie_name,
         )
+
+    @record_call
+    def save_preview_movie(
+        self,
+        *,
+        grid: list[str] = ["raw", "mcor"],
+        downsample_ratio: float = 0.03,
+        downsample_type: str = "skip",
+        save_folder: str = r"./movies",
+        frame_rate: float = 30,
+        q_min: float = 0.0,
+        q_max: float = 99.5,
+        codec: str = "MJPG",
+        extension: str = "avi",
+    ) -> Path:
+        """
+        Save a preview video of this group's movies, side by side
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            group.save_preview_movie()
+            group.save_preview_movie(grid=["raw"], downsample_ratio=0.1)
+        ```
+
+        **PARAMETERS**
+        *What goes in the movie*
+        - `grid`: which movies to show, one or two of "raw", "test", "mcor"
+        - `downsample_ratio`: fraction of frames to keep
+        - `downsample_type`: how to drop frames ("average" or "skip")
+
+        **ALERT:** "average" reads every frame and averages them down, which
+        looks less noisy but smooths away residual motion. "skip" (the default)
+        reads only the frames it keeps, which is much faster over the network.
+
+        *How it is saved*
+        - `save_folder`: `"."` is the main_folder (r is to use \\ in the path)
+        - `frame_rate`: how fast to play the video (frames/s)
+        - `q_min`, `q_max`: percentiles shown as black and white
+        - `codec`, `extension`: how to encode
+
+        **EXAMPLES**
+        - Every raw movie of the group, one after the other
+        ```python
+        group.save_preview_movie(grid=["raw"])
+        ```
+
+        - Raw on the left, motion corrected on the right
+        ```python
+        group.save_preview_movie(grid=["raw", "mcor"])
+        ```
+        """
+        # Two panels are for comparing against raw movies
+        # So it must be "raw" and ("mcor" or "test")
+        if not (
+            len(grid) == 1
+            or (
+                len(grid) == 2
+                and MovieType.RAW.value in grid
+                and (MovieType.MCOR.value in grid or MovieType.TEST.value in grid)
+            )
+        ):
+            raise ValueError(
+                "'grid' must be one of ['raw'], ['mcor'], ['test'], "
+                "['raw', 'test'], ['raw', 'mcor'], ['test', 'raw'], "
+                f"['mcor', 'raw'], but instead got {grid!r}."
+            )
+
+        if downsample_type not in ("average", "skip"):
+            raise ValueError(
+                "'downsample_type' must be 'average' or 'skip', "
+                f"but instead got {downsample_type!r}."
+            )
+
+        movie_types = tuple(MovieType(name) for name in grid)
+
+        folder = (
+            (self.db.main_folder / save_folder).resolve()
+            if save_folder[0] == "."
+            else Path(save_folder).resolve()
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+
+        path = folder / (
+            f"Group_{self.group_id}_{self.experiments.iloc[0]['exp_name']}"
+            f"_{'_'.join(t.value for t in movie_types)}.{extension}"
+        )
+
+        logger.info(f"Saving movie to {path}")
+
+        movie, frame_acq = self._load_preview_movie(
+            movie_types, downsample_ratio, downsample_type
+        )
+
+        # Get the total number of frames in consideration
+        # np.unique because frame_acq to not get repeated acq_ids
+        acq_ids = np.unique(frame_acq)
+        experiments = self.experiments.loc[self.acquisitions.loc[acq_ids, "exp_id"]]
+        frames_in = int(experiments["frame_count"].sum())
+
+        # Speed relative to real-time is more informative than downsample_ratio
+        # when viewing the movie. However, the latter is a better control of
+        # how long this function will take to run, so we keep it as an parameter.
+        speed = frame_rate * frames_in / (experiments["frame_rate"].mean() * len(movie))
+
+        # Groups are assumed to have only one um/px, so we use only the first
+        # experiment to compute the ratio. Ratio can be direction-dependent, so
+        # we use width_um / width_px because the scale bar is horizontal.
+        first = self.experiments.iloc[0]
+        um_per_px = float(first["width_um"]) / int(first["width_px"])
+
+        _write_preview_movie(
+            path,
+            movie,
+            frame_rate=frame_rate,
+            panels=[movie_type.value for movie_type in movie_types],
+            frame_acq=frame_acq,
+            um_per_px=um_per_px,
+            speed=speed,
+            q_min=q_min,
+            q_max=q_max,
+            codec=codec,
+        )
+
+        # outputs table stores paths relative to main_folder, so a save_folder
+        # somewhere else cannot be recorded (it would not be useful).
+        if path.is_relative_to(self.db.main_folder):
+            self.add_output_file(path)
+
+        self.set_output(
+            {"grid": list(grid), "file": path.name, "speed": round(speed, 1)}
+        )
+        logger.info(f"{CHECK} Wrote {len(movie)} frames at {speed:.0f}x real time.")
+
+        return path
+
+    def _movie_paths(
+        self, movie_types: tuple[MovieType, ...]
+    ) -> dict[MovieType, list[Path]]:
+        """
+        Every file each panel needs, checked before anything is loaded.
+
+        This is to do checks upfront, since files can be very slow to load.
+        """
+        test_acq_ids: list[int] = []
+        raw_paths: list[Path] = []
+        test_paths: list[Path] = []
+
+        # Raises if the test files are missing
+        if MovieType.TEST in movie_types:
+            test_acq_ids, raw_paths, test_paths = self._latest_test_movies()
+
+        paths_by_type: dict[MovieType, list[tuple[int, Path]]] = {}
+
+        for movie_type in movie_types:
+            if movie_type == MovieType.TEST:
+                pairs = list(zip(test_acq_ids, test_paths))
+
+            # A test uses a slice of the raw files, so only pick those
+            elif MovieType.TEST in movie_types:
+                pairs = list(zip(test_acq_ids, raw_paths))
+
+            else:
+                stored = (
+                    self.acquisitions["raw_path"]
+                    if movie_type == MovieType.RAW
+                    else self.mcor_files["mcor_path"]
+                )
+                pairs = [
+                    (int(cast(int, acq_id)), self.db.main_folder / cast(str, path))
+                    for acq_id, path in stored.items()
+                ]
+
+            if not pairs:
+                raise RuntimeError(
+                    f"{self!r} has no {movie_type.value} files to put in a movie."
+                )
+
+            missing = [path for _, path in pairs if not path.is_file()]
+
+            if missing:
+                raise FileNotFoundError(
+                    f"{len(missing)} of {len(pairs)} {movie_type.value} files are "
+                    f"not where the database says, starting with '{missing[0]}'."
+                )
+
+            paths_by_type[movie_type] = pairs
+
+        return paths_by_type
+
+    def _load_preview_movie(
+        self,
+        movie_types: tuple[MovieType, ...],
+        downsample_ratio: float,
+        downsample_type: str,
+    ) -> tuple[cm.movie, list[np.ndarray]]:
+        """
+        Load and downsample the movies for `movie_types`, side by side.
+
+        Frames go along time and the types along width, so a two-type grid is
+        one movie with the panels next to each other.
+
+        Returns `(movie, frame_acq)`, where `frame_acq` says which acquisition
+        each frame came from. Panels share the time axis, so one array is enough.
+
+        NOTE:
+        - We check that the frame -> acq_id map is the same for all panels.
+        - We don't assume that acquisitions have the same number of frames.
+        - Given the last constraint we must compute `frame_acq` here.
+        """
+
+        movie_chains = []
+        labels: list[np.ndarray] = []
+        paths_by_type = self._movie_paths(movie_types)
+
+        for movie_type in movie_types:
+            movie_paths = paths_by_type[movie_type]
+
+            logger.info(
+                f"Adding {len(movie_paths)} {movie_type.value} files to the movie."
+            )
+
+            # "skip" reads only the frames it keeps, rather than reading a whole
+            # movie to average it away. Same number of frames out either way.
+            movie_chain = None
+            frame_acq = []
+
+            for acq_id, path in tqdm(
+                movie_paths, desc=f"Loading {movie_type.value} movies"
+            ):
+                if downsample_type == "skip":
+                    # This should be equal for all acquisitions in the movie.
+                    # We recompute every time, though, to always match what the
+                    # "else" path would produce.
+                    frames_to_keep = _frames_to_keep(path, downsample_ratio)
+
+                    movie = cm.load(path, subindices=frames_to_keep)
+
+                    # Reading a single frame drops the time axis, and the movies
+                    # are stacked along it. Happens whenever the ratio is small
+                    # enough to keep one frame per file.
+                    if movie.ndim == 2:
+                        movie = movie[np.newaxis]
+
+                else:
+                    movie = cm.load(path).resize(1, 1, downsample_ratio)
+
+                frame_acq.append(np.full(len(movie), acq_id))
+
+                movie_chain = (
+                    movie
+                    if movie_chain is None
+                    else cm.concatenate([movie_chain, movie], axis=0)
+                )
+
+                logger.info(f"  {path}")
+
+            movie_chains.append(movie_chain)
+            labels.append(np.concatenate(frame_acq))
+
+        # frame -> acq_id map represented by frame_acq must be the same
+        # for all panels, or else something upstream failed.
+        if any(not np.array_equal(labels[0], other) for other in labels[1:]):
+            raise RuntimeError(
+                f"Could not match frames from "
+                f"{' and '.join(t.value for t in movie_types)} files."
+            )
+
+        movie_chain = cm.concatenate(movie_chains, axis=2)
+
+        return movie_chain, labels[0]
 
     @memorize_params
     @record_call
@@ -2122,7 +2401,7 @@ class Group(CallRecorder):
                 odor_frames=range(onset, onset + round(odor_s.min() * frame_rate)),
                 display_range=display_range,
                 codec=codec,
-                fr=frame_rate,
+                frame_rate=frame_rate,
             )
 
             saved.append(path)
@@ -2131,8 +2410,7 @@ class Group(CallRecorder):
                 self.add_output_file(path)
 
             # int() because these come from pandas as numpy scalars, which
-            # json.dumps refuses -- and record_call dumps on the way out, so
-            # it would fail after the movies were already written.
+            # json.dumps does not accept (so @record_call would fail).
             written.append(
                 {
                     "program_id": int(program_id),
@@ -2168,7 +2446,7 @@ def _save_movie(
     time_series: np.ndarray,
     *,
     odor_frames: range,
-    fr: float,
+    frame_rate: float,
     display_range: float = 5.0,
     codec: str = "mp4v",
 ) -> None:
@@ -2193,7 +2471,7 @@ def _save_movie(
     radius = max(4, height // 60)
 
     writer = cv2.VideoWriter(
-        str(path), cv2.VideoWriter_fourcc(*codec), fr, (width, height)
+        str(path), cv2.VideoWriter_fourcc(*codec), frame_rate, (width, height)
     )
 
     if not writer.isOpened():
@@ -2237,20 +2515,235 @@ def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:
     return np.linspace(0, frames - 1, keep).round().astype(int)
 
 
+def _draw_label(
+    picture: np.ndarray,
+    text: str,
+    origin: tuple[int, int],
+    scale: float,
+    thickness: int = TEXT_CORE_THICKNESS,
+    offset: int = TEXT_OUTLINE_OFFSET,
+) -> None:
+    """
+    White text with a black outline, so it reads over anything.
+    """
+    x, y = origin
+
+    # The outline is the same text drawn at every offset around the middle,
+    # rather than one thicker pass underneath. This is done, because glyphs
+    # land on different positions depending on the thickness, so two passes
+    # can drift apart significantly.
+
+    # This is surprinsingly faster than drawing a box behind the text.
+
+    for dy in range(-offset, offset + 1):
+        for dx in range(-offset, offset + 1):
+            if dy != 0 or dx != 0:
+                cv2.putText(
+                    picture,
+                    text,
+                    (x + dx, y + dy),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    scale,
+                    0,
+                    thickness,
+                    cv2.LINE_AA,
+                )
+
+    # White part last so it lays on top
+    cv2.putText(
+        picture,
+        text,
+        origin,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        255,
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
+# ScanImage writes um/px as though every acquisition came from a 20x
+# objective. On 10x a real 100 um is written as 45 um (measured).
+# No DB data reflects that, so we plot two scale bars on preview movies.
+TEN_X_CORRECTION = 100 / 45
+
+
+def _nice_length(target_px: int, um_per_px: float, panel_px: int) -> int:
+    """
+    A round number of um near `target_px`, but capped at a share of the panel.
+    """
+    ladder = (1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000)
+    fits = [rung for rung in ladder if rung / um_per_px <= 0.3 * panel_px]
+
+    return min(fits or ladder[:1], key=lambda rung: abs(rung / um_per_px - target_px))
+
+
+def _draw_scale_bars(
+    picture: np.ndarray,
+    left: int,
+    right: int,
+    um_per_px: float,
+    scale: float,
+    thickness: int = TEXT_CORE_THICKNESS,
+    offset: int = TEXT_OUTLINE_OFFSET,
+) -> None:
+    """
+    One labelled bar per objective, in the bottom right of `left` to `right`.
+
+    Two bars because `um_per_px` as stored is only right for 20x (see
+    TEN_X_CORRECTION), and which objective was used is not in the files.
+
+    Some experiments are anisotropic, so we show only the horizontal scale
+    for simplicity. Bars and labels are flush right.
+    """
+    # Arbitrary but reasonable parameters
+    pad = round(4 * scale) + 2
+    margin = round(8 * scale) + 4
+    bar_height = max(2, round(4 * scale))
+
+    rows = []
+
+    for objective, correction in (("20x", 1.0), ("10x", TEN_X_CORRECTION)):
+        true_um_per_px = um_per_px * correction
+
+        # We try to make scale bar width close to text size. Since this is
+        # not know yet, we use a typical text size as an approximation.
+        (target_width, _), _ = cv2.getTextSize(
+            f"100 um ({objective})", cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
+        )
+        microns = _nice_length(target_width, true_um_per_px, right - left)
+
+        # 'um' rather than 'µm': Hershey fonts are ASCII-only before OpenCV 5.
+        text = f"{microns:g} um ({objective})"
+        (text_width, text_height), _ = cv2.getTextSize(
+            text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
+        )
+        rows.append((text, round(microns / true_um_per_px), text_width, text_height))
+
+    end = right - margin
+    bottom = picture.shape[0] - margin
+
+    # Bottom up, so 20x sits at the edge and 10x above it
+    for text, bar_width, text_width, text_height in rows:
+        bar_top = bottom - bar_height
+        text_baseline = bar_top - pad
+
+        # The bar gets the same outline as the text
+        picture[
+            bar_top - offset : bar_top + bar_height + offset,
+            end - bar_width - offset : end + offset,
+        ] = 0
+
+        picture[bar_top : bar_top + bar_height, end - bar_width : end] = 255
+
+        _draw_label(
+            picture, text, (end - text_width, text_baseline), scale, thickness, offset
+        )
+
+        bottom = text_baseline - text_height - pad
+
+
+def _write_preview_movie(
+    path: Path,
+    movie: np.ndarray,
+    *,
+    frame_rate: float,
+    panels: Sequence[str] = (),
+    frame_acq: np.ndarray | None = None,
+    speed: float | None = None,
+    um_per_px: float | None = None,
+    q_min: float = 0.0,
+    q_max: float = 99.5,
+    codec: str = "MJPG",
+) -> None:
+    """
+    Write a grayscale preview of `movie` (time, height, width).
+
+    Black and white are put at the `q_min` and `q_max` percentiles, so you
+    cannot compare movie scales, which is the opposite of the z-score renderer.
+
+    `panels` names the panels left to right, `frame_acq` says which
+    acquisition each frame came from, `speed` is how many times real time the
+    result plays at, and `um_per_px` sizes the scale bar.
+    """
+
+    # Percentiles over every frame, so brightness does not drift as it plays.
+    # On the whole array at once because it is already downsampled and in RAM.
+    low, high = np.percentile(movie, [q_min, q_max])
+    spread = max(float(high - low), 1e-9)
+
+    frames, height, width = movie.shape
+
+    # Frame size vary widely, so tie text size to it. These parameters are
+    # more-or-less arbitrary, but seemed to produce reasonable results in
+    # a sample of movies. Fine-tune if that changes later.
+    scale = max(0.4, height / 900)
+    margin = round(8 * scale) + 4
+    panel_width = width // max(len(panels), 1)
+
+    writer = cv2.VideoWriter(
+        str(path),
+        cv2.VideoWriter_fourcc(*codec),
+        frame_rate,
+        (width, height),
+        isColor=False,
+    )
+
+    if not writer.isOpened():
+        raise RuntimeError(f"OpenCV could not save to '{path}' with codec {codec!r}.")
+
+    try:
+        for frame in tqdm(range(frames), desc="Writing movie"):
+            # Convert to uint8 before anything is drawn on it, because OpenCV 5
+            # refuses to draw on float images. caiman does this backwards and crashes.
+            # ascontiguousarray also drops the caiman subclass, which cv2 needs.
+            picture = np.ascontiguousarray(
+                np.clip((movie[frame] - low) * (255 / spread), 0, 255), dtype=np.uint8
+            )
+
+            for index, name in enumerate(panels):
+                _draw_label(
+                    picture,
+                    (
+                        f"{name}  acq {frame_acq[frame]}"
+                        if frame_acq is not None
+                        else name
+                    ),
+                    (index * panel_width + margin, margin + round(20 * scale)),
+                    scale,
+                )
+
+            # Speed on the bottom left corner (first panel)
+            # Scale bars on the bottom right corner (last panel)
+            if um_per_px is not None:
+                _draw_scale_bars(picture, width - panel_width, width, um_per_px, scale)
+
+            if speed is not None:
+                _draw_label(
+                    picture,
+                    f"{speed:.0f}x real time",
+                    (margin, height - margin),
+                    scale,
+                )
+
+            writer.write(picture)
+
+    finally:
+        writer.release()
+
+
 def _worker_count() -> int:
     """
     How many processes to hand caiman, which caiman gets wrong on its own.
 
-    Caiman default (`n_processes=None`) uses `os.cpu_count()`, which reports
-    the whole machine: a 12-core slurm job on a 28-core node measured 28, so it
-    would start 27 workers on 12 cores and split the job's memory between them.
+    Caiman default (`n_processes=None`) uses `os.cpu_count()`, which assumes
+    the whole CPU can be used (not the case for slurm jobs).
 
-    ASSUMES Linux is the cluster and everything else is someone's own machine.
-    A cluster job owns its cores, so it uses all of them, and only Linux has
-    `sched_getaffinity` to report what the scheduler actually gave. A personal
-    machine keeps one core free for the user.
+    This function assumes that Linux is in a cluster and everything else is
+    someone's computer. It leaves one core free in the latter case.
     """
 
+    # Only Linux has this function
     if hasattr(os, "sched_getaffinity"):
         return len(os.sched_getaffinity(0))
 
@@ -2314,77 +2807,10 @@ class LazyMovie:
 
         logger.info("Updating movie...")
 
-        movie_chains = []
-
-        raw_paths: list[Path] = []
-        test_paths: list[Path] = []
-
-        # Raises if the test files are missing, before anything is loaded
-        if MovieType.TEST in self.types:
-            raw_paths, test_paths = self.owner._latest_test_movies()
-
-        for movie_type in self.types:
-            # Get the movie_paths
-            if movie_type == MovieType.TEST:
-                movie_paths = test_paths
-
-            elif MovieType.TEST in self.types:
-                # It must be raw in this case
-                movie_paths = raw_paths
-
-            # If there is no test always include all files
-            elif movie_type == MovieType.RAW:
-                movie_paths = [
-                    self.owner.db.main_folder / path
-                    for path in self.owner.acquisitions["raw_path"]
-                ]
-
-            elif movie_type == MovieType.MCOR:
-                movie_paths = [
-                    self.owner.db.main_folder / path
-                    for path in self.owner.mcor_files["mcor_path"]
-                ]
-
-            # There must be at least one movie
-            # TODO: Gather movie_paths for every type first, so it fails
-            #       before having spent time loading anything.
-            assert movie_paths, f"Didn't find any {movie_type.value} files."
-
-            logger.info(
-                f"Adding {len(movie_paths)} {movie_type.value} files to the movie."
-            )
-
-            # "skip" reads only the frames it keeps, rather than reading a whole
-            # movie to average it away. Same number of frames out either way.
-            movie_chain = None
-            for path in tqdm(movie_paths, desc=f"Loading {movie_type.value} movies"):
-                if downsample_type == "skip":
-                    movie = cm.load(
-                        path, subindices=_frames_to_keep(path, downsample_ratio)
-                    )
-
-                    # Reading a single frame drops the time axis, and the movies
-                    # are stacked along it. Happens whenever the ratio is small
-                    # enough to keep one frame per file.
-                    if movie.ndim == 2:
-                        movie = movie[np.newaxis]
-
-                else:
-                    movie = cm.load(path).resize(1, 1, downsample_ratio)
-
-                movie_chain = (
-                    movie
-                    if movie_chain is None
-                    else cm.concatenate([movie_chain, movie], axis=0)
-                )
-
-                logger.info(f"  {path}")
-
-            movie_chains.append(movie_chain)
-
-        movie_chain = cm.concatenate(movie_chains, axis=2)
-
-        self.movie = movie_chain
+        # play_movie has no overlays, so the labels are dropped here
+        self.movie, _ = self.owner._load_preview_movie(
+            self.types, downsample_ratio, downsample_type
+        )
 
         return self.movie
 
