@@ -483,6 +483,141 @@ class Group(CallRecorder):
         self.db._programs = None
         self.db._trials = None
 
+    def _preview_image(
+        self, path: Path, step: int, image_type: str = "avg"
+    ) -> np.ndarray:
+        """
+        Summary image of a movie, taking every `step`-th frame.
+
+        `"avg"` averages the frames, `"corr"` correlates each pixel with its
+        neighbours. Image is cached in `.odyn/previews/` for future calls.
+        """
+        cache = (
+            self.db.main_folder
+            / ODYN_FOLDER
+            / "previews"
+            / f"{image_type}_{path.stem}_{step}.npy"
+        )
+
+        if cache.exists():
+            return np.load(cache)
+
+        # subindices reads every Nth page
+        movie = cm.load(str(path), subindices=slice(None, None, step))
+
+        image = (
+            cm.local_correlations(movie, swap_dim=False)
+            if image_type == "corr"
+            else movie.mean(axis=0)
+        )
+        image[np.isnan(image)] = 0
+
+        cache.parent.mkdir(exist_ok=True)
+        np.save(cache, image)
+
+        return image
+
+    # ----------------------------------------------------------------------- #
+    # Regions
+    # ----------------------------------------------------------------------- #
+
+    @record_call
+    def pick_regions(
+        self, *, frame_fraction: float = 0.1, only_approved: bool = True
+    ) -> None:
+        """
+        Draw the regions to include or exclude when masking
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            group.pick_regions()
+        ```
+
+        **PARAMETERS**
+        - `frame_fraction`: percentage of frames (of the first motion-corrected
+        file) to average into the background image.
+        - `only_approved`: use only approved motion corrections.
+
+        **USER INTERFACE**
+        Choose if the current polygon interior should be included (green) or
+        excluded (red), then click once per corner to draw it. Press Finish to
+        close the polygon. Undo and delete remove the last corner or polygon,
+        respectively, and save stores the result in the database.
+
+        You can use `group.region_mask()` to get a boolean mask corresponding
+        to the last set of polygons saved (save again to pick a new set).
+        """
+
+        from .regions import pick_regions
+
+        mcors = self._mcors(only_approved)
+
+        if mcors.empty:
+            raise RuntimeError(
+                f"{self!r} has no approved mcor files. Check the previews and "
+                "run 'approve_mcor_files()', or pass only_approved=False."
+                if only_approved
+                else f"{self!r} has no mcor files."
+            )
+
+        acq_id = int(mcors.index[0])
+        path = self.db.main_folder / mcors["mcor_path"].iloc[0]
+        step = max(1, round(1 / frame_fraction))
+
+        logger.info(f"Averaging every {step} frames of acquisition {acq_id}...")
+        image = self._preview_image(path, step)
+
+        # Function returns before polygons are saved, so we edit the DB entry
+        # using a callback (same as pick_mcor_parameters).
+        call_id = self.current_call_id
+        con = self.db.con
+        shape = [int(n) for n in image.shape]
+
+        def save(polygons):
+            output = json.dumps(
+                {"acq_id": acq_id, "shape": shape, "polygons": polygons}
+            )
+
+            with con:
+                con.execute("""
+                    UPDATE method_calls
+                        SET call_output = ?
+                        WHERE method_call_id = ?;
+                    """,
+                    [output, call_id],
+                )
+
+            logger.info(f"Saved {len(polygons)} polygons (call {call_id}).")
+
+        pick_regions(image, save)
+
+    def region_mask(self, shape: None | tuple[int, int] = None) -> np.ndarray:
+        """
+        Mask given by regions picked for this group
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            mask = group.region_mask()
+
+            pixels_kept = image[mask]               # 1D array of pixels
+            picture = mask_outside(image, mask)     # same shape as image (NaN outside)
+        ```
+
+        Uses the most recent `pick_regions`. `mask_outside` is in `odyn.regions`.
+        """
+        from .regions import region_mask
+
+        regions = self.latest_output("Group.pick_regions")
+
+        if not regions:
+            raise RuntimeError(
+                f"{self!r} has no regions. Run 'pick_regions()'."
+            )
+
+        return region_mask(regions, shape)
+
     # ----------------------------------------------------------------------- #
     # Motion Correction functions
     # ----------------------------------------------------------------------- #
@@ -1068,29 +1203,7 @@ class Group(CallRecorder):
 
             # Load the subsampled movie in a different thread
             def load_background():
-                cache = (
-                    self.db.main_folder
-                    / ODYN_FOLDER
-                    / "previews"
-                    / f"{image_type}_{raw_path.stem}_{step}.npy"
-                )
-
-                if cache.exists():
-                    bg_image = np.load(cache)
-
-                else:
-                    # subindices reads every Nth page
-                    movie = cm.load(str(raw_path), subindices=slice(None, None, step))
-
-                    bg_image = (
-                        cm.local_correlations(movie, swap_dim=False)
-                        if image_type == "corr"
-                        else movie.mean(axis=0)
-                    )
-                    bg_image[np.isnan(bg_image)] = 0
-
-                    cache.parent.mkdir(exist_ok=True)
-                    np.save(cache, bg_image)
+                bg_image = self._preview_image(raw_path, step, image_type)
 
                 lo, hi = float(np.quantile(bg_image, 0.01)), float(
                     np.quantile(bg_image, 0.99)
