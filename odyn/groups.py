@@ -228,7 +228,7 @@ class Group(CallRecorder):
                 WHERE g.group_id = {self.group_id};
         """
 
-        self._events = pd.read_sql_query(query, self.db.con)
+        self._events = pd.read_sql_query(query, self.db.con, parse_dates=["event_time"])
         self._events.set_index("event_id", inplace=True)
 
         return self._events

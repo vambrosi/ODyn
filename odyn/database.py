@@ -263,7 +263,7 @@ class Database(CallRecorder):
 
         query = "SELECT * FROM events;"
 
-        self._events = pd.read_sql_query(query, self.con)
+        self._events = pd.read_sql_query(query, self.con, parse_dates=["event_time"])
         self._events.set_index("event_id", inplace=True)
 
         return self._events
