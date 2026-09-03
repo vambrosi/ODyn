@@ -80,6 +80,8 @@ class ExpFlag(IntFlag):
     H5_UNMATCHED_ACQ = 1 << 5  # some H5 trials had no matching acquisition
     TRIAL_NO_ACQ = 1 << 6  # some trials matched H5 but had no acquisition
     NOT_A_GRAB = 1 << 7  # add_grab_folder found a file that was not a grab
+    NO_H5_TIMING = 1 << 8  # no trial timing from the H5 (no file, or no triggers)
+    NO_EVENT_FILES = 1 << 9  # no olfactometer *Events.csv in the folder
 
 
 class TrialPhase(IntEnum):
@@ -951,12 +953,29 @@ class Database(CallRecorder):
                     assert isinstance(experiment["exp_start"], datetime)
                     h5_data = _get_h5_metadata(h5_paths, experiment["exp_start"])
 
+                    # An experiment with only acquisitions is legitimate, so
+                    # this is not a failure. Flag it so that "which adds came
+                    # out incomplete" is one query on call_flag.
+                    if h5_data is None:
+                        self.add_flag(ExpFlag.NO_H5_TIMING)
+                        logger.warning(
+                            "No trial timing from the H5, so acquisitions"
+                            f" will have no odor window timestamps. {CROSS}"
+                        )
+
                     event_files = sorted(
                         exp_path.rglob("[!.]?*Events.csv"),
                         key=lambda x: x.stat().st_mtime,
                     )
 
                     logger.info(f"Found {len(event_files)} olfactometer event files.")
+
+                    if not event_files:
+                        self.add_flag(ExpFlag.NO_EVENT_FILES)
+                        logger.warning(
+                            "Found no event files, so no programs, trials, or "
+                            f"events were added. {CROSS}"
+                        )
 
                 elif last_exp_data != exp_data:
                     checks_failed += 1
