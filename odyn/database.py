@@ -1328,6 +1328,53 @@ def _db_insert(cur: Cursor, table_name: str, data: Object | list[Object]) -> int
 # --------------------------------------------------------------------------- #
 
 
+def _h5_edges(
+    path: Path,
+) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, bool, bool]:
+    """
+    Find the trial and odor edges in one olfactometer H5, as sample indices.
+
+    Returns the sample rate, the imaging rises, the odor rises, the odor falls,
+    and whether the signal was already high at the first and at the last
+    sample. Those last two say the recording began or ended inside a window,
+    which has to be read off the level: the edge itself is not in the signal,
+    and a recording clipped at both ends loses one rise and one fall together,
+    so the counts still agree.
+    """
+    with h5py.File(path) as f:
+        samplerate = float(f.attrs["samplerate"])
+
+        imaging_TTL = f["ImagingWindow"][:]
+        odor_TTL = f["OdorDelivery"][:]
+
+    # TODO: (Vinicius)
+    #   Maybe change the way we find starts? Because adding the distance argument
+    #   picks the highest and not the first choice (both in MATLAB and Python).
+
+    # NOTE: (Priscilla, from MATLAB code, adapted)
+    #   Added distance to deal with problematic file where
+    #   code found 2 peaks right next to each other
+
+    trial_starts, _ = find_peaks(
+        np.diff(imaging_TTL), height=TTL_HIGH, distance=samplerate / 2
+    )
+    odor_starts, _ = find_peaks(
+        np.diff(odor_TTL), height=TTL_HIGH, distance=samplerate / 10
+    )
+    odor_ends, _ = find_peaks(
+        -np.diff(odor_TTL), height=TTL_HIGH, distance=samplerate / 10
+    )
+
+    return (
+        samplerate,
+        trial_starts,
+        odor_starts,
+        odor_ends,
+        bool(imaging_TTL[0] > TTL_HIGH or odor_TTL[0] > TTL_HIGH),
+        bool(imaging_TTL[-1] > TTL_HIGH or odor_TTL[-1] > TTL_HIGH),
+    )
+
+
 def _get_h5_metadata(paths: list[Path], exp_start: datetime) -> None | H5Timing:
     # There must be at most one path
     if not paths:
@@ -1341,84 +1388,57 @@ def _get_h5_metadata(paths: list[Path], exp_start: datetime) -> None | H5Timing:
     # Parse experiment start time
     exp_start_np = np.datetime64(exp_start)
 
-    with h5py.File(path) as f:
-        samplerate = f.attrs["samplerate"]
+    samplerate, trial_starts, odor_starts, odor_ends, high_at_start, high_at_end = (
+        _h5_edges(path)
+    )
 
-        imaging_TTL = f["ImagingWindow"][:]
-        odor_TTL = f["OdorDelivery"][:]
+    # Returns None if no trials where found
+    if len(trial_starts) == 0:
+        logger.info("No trial triggers found in this H5 file.")
+        return None
 
-        # TODO: (Vinicius)
-        #   Maybe change the way we find starts? Because adding the distance argument
-        #   picks the highest and not the first choice (both in MATLAB and Python).
+    trial_starts, odor_starts, odor_ends, dropped_first, dropped_last = (
+        _align_h5_events(trial_starts, odor_starts, odor_ends)
+    )
 
-        # NOTE: (Priscilla, from MATLAB code, adapted)
-        #   Added distance to deal with problematic file where
-        #   code found 2 peaks right next to each other
-
-        trial_starts, _ = find_peaks(
-            np.diff(imaging_TTL), height=TTL_HIGH, distance=samplerate / 2
-        )
-        odor_starts, _ = find_peaks(
-            np.diff(odor_TTL), height=TTL_HIGH, distance=samplerate / 10
-        )
-        odor_ends, _ = find_peaks(
-            -np.diff(odor_TTL), height=TTL_HIGH, distance=samplerate / 10
+    if dropped_first:
+        logger.warning(
+            f"H5 file recording began mid trial, so we dropped the first trial {CROSS}"
         )
 
-        # Whether the recording began or ended inside a window. Read off the
-        # signal level, not inferred from the counts: clipped at both ends, one
-        # rise and one fall go missing together and the counts still agree.
-        high_at_start = bool(imaging_TTL[0] > TTL_HIGH or odor_TTL[0] > TTL_HIGH)
-        high_at_end = bool(imaging_TTL[-1] > TTL_HIGH or odor_TTL[-1] > TTL_HIGH)
-
-        # Returns None if no trials where found
-        if len(trial_starts) == 0:
-            logger.info("No trial triggers found in this H5 file.")
-            return None
-
-        trial_starts, odor_starts, odor_ends, dropped_first, dropped_last = (
-            _align_h5_events(trial_starts, odor_starts, odor_ends)
+    if dropped_last:
+        logger.warning(
+            "H5 file recording stopped mid trial, so we "
+            f"Dropped the last trial. {CROSS}"
         )
 
-        if dropped_first:
-            logger.warning(
-                "H5 file recording began mid trial, so we "
-                f"dropped the first trial {CROSS}"
-            )
+    _check_h5_alignment(trial_starts, odor_starts, odor_ends, samplerate)
 
-        if dropped_last:
-            logger.warning(
-                "H5 file recording stopped mid trial, so we "
-                f"Dropped the last trial. {CROSS}"
-            )
+    # Shift everything by first trial start, to match FrameTimestamp_sec data
+    # FrameTimestamp_sec always starts at zero, so they almost exactly match
+    shift = trial_starts[0]
 
-        _check_h5_alignment(trial_starts, odor_starts, odor_ends, samplerate)
+    trial_starts = trial_starts - shift
+    odor_starts = odor_starts - shift
+    odor_ends = odor_ends - shift
 
-        # Shift everything by first trial start, to match FrameTimestamp_sec data
-        # FrameTimestamp_sec always starts at zero, so they almost exactly match
-        shift = trial_starts[0]
+    logger.info(f"Found {len(trial_starts)} trial starts in the H5 file.")
 
-        trial_starts = trial_starts - shift
-        odor_starts = odor_starts - shift
-        odor_ends = odor_ends - shift
+    # Convert to timedeltas
+    trial_starts = (trial_starts / samplerate * 1e9).astype("timedelta64[ns]")
+    odor_starts = (odor_starts / samplerate * 1e9).astype("timedelta64[ns]")
+    odor_ends = (odor_ends / samplerate * 1e9).astype("timedelta64[ns]")
 
-        logger.info(f"Found {len(trial_starts)} trial starts in the H5 file.")
-
-        # Convert to timedeltas
-        trial_starts = (trial_starts / samplerate * 1e9).astype("timedelta64[ns]")
-        odor_starts = (odor_starts / samplerate * 1e9).astype("timedelta64[ns]")
-        odor_ends = (odor_ends / samplerate * 1e9).astype("timedelta64[ns]")
-
-        # Return the datetimes to be matched with acquisition frame times
-        return H5Timing(
-            trial_starts=exp_start_np + trial_starts,
-            odor_starts=exp_start_np + odor_starts,
-            odor_ends=exp_start_np + odor_ends,
-            dropped_first=dropped_first,
-            dropped_last=dropped_last,
-            high_at_start=high_at_start,
-            high_at_end=high_at_end,
-        )
+    # Return the datetimes to be matched with acquisition frame times
+    return H5Timing(
+        trial_starts=exp_start_np + trial_starts,
+        odor_starts=exp_start_np + odor_starts,
+        odor_ends=exp_start_np + odor_ends,
+        dropped_first=dropped_first,
+        dropped_last=dropped_last,
+        high_at_start=high_at_start,
+        high_at_end=high_at_end,
+    )
 
 
 def _align_h5_events(
