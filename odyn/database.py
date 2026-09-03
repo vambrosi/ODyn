@@ -32,6 +32,7 @@ import json
 import sqlite3
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import time, datetime, timedelta
 from pathlib import Path
 from scipy.signal import find_peaks
@@ -55,6 +56,10 @@ from .utils import CallFrame, CallRecorder, _method_calls_dataframe
 TIMEDELTA_MS = timedelta(milliseconds=1)
 H5_TOLERANCE = timedelta(milliseconds=100)
 DT_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
+
+# The olfactometer TTLs are clean square waves, so one number serves as both
+# the smallest edge that counts as a rise and the level that counts as high.
+TTL_HIGH: Final = 2.0
 
 # TODO: Make program types part of the database
 PROGRAM_TYPES = [
@@ -82,6 +87,27 @@ class ExpFlag(IntFlag):
     NOT_A_GRAB = 1 << 7  # add_grab_folder found a file that was not a grab
     NO_H5_TIMING = 1 << 8  # no trial timing from the H5 (no file, or no triggers)
     NO_EVENT_FILES = 1 << 9  # no olfactometer *Events.csv in the folder
+    H5_DROPPED_FIRST = 1 << 10  # dropped first H5 trial from consideration
+    H5_DROPPED_LAST = 1 << 11  # dropped last H5 trial from consideration
+
+
+@dataclass
+class H5Timing:
+    """
+    Trial and odor times read from one olfactometer H5.
+
+    `dropped_first` / `dropped_last` say a partial trial was removed;
+    `high_at_start` / `high_at_end` say the recording began or ended inside a
+    window, which is true even when there was nothing left over to drop.
+    """
+
+    trial_starts: np.ndarray
+    odor_starts: np.ndarray
+    odor_ends: np.ndarray
+    dropped_first: bool
+    dropped_last: bool
+    high_at_start: bool
+    high_at_end: bool
 
 
 class TrialPhase(IntEnum):
@@ -893,7 +919,7 @@ class Database(CallRecorder):
 
             experiment: None | Object = None
             acquisitions: list[Object] = []
-            h5_data: None | dict = None
+            h5_data: None | H5Timing = None
             event_files: list[Path] = []
 
             last_exp_data: None | Object = None
@@ -963,6 +989,13 @@ class Database(CallRecorder):
                             f" will have no odor window timestamps. {CROSS}"
                         )
 
+                    else:
+                        if h5_data.dropped_first:
+                            self.add_flag(ExpFlag.H5_DROPPED_FIRST)
+
+                        if h5_data.dropped_last:
+                            self.add_flag(ExpFlag.H5_DROPPED_LAST)
+
                     event_files = sorted(
                         exp_path.rglob("[!.]?*Events.csv"),
                         key=lambda x: x.stat().st_mtime,
@@ -1028,7 +1061,7 @@ class Database(CallRecorder):
             # Result: h5_idx -> (acq_idx, h5_to_acq_ms)
             acq_to_h5: dict[int, tuple[int, float]] = {}
 
-            if h5_data and acquisitions:
+            if h5_data is not None and acquisitions:
                 acq_to_h5 = _match_acq_to_h5(acquisitions, h5_data)
 
             # Pool all event trial starts across programs
@@ -1043,7 +1076,7 @@ class Database(CallRecorder):
             # Result: pool_idx -> (h5_idx, h5_to_trial_ms)
             csv_to_h5: dict[int, tuple[int, float]] = {}
 
-            if h5_data and trials:
+            if h5_data is not None and trials:
                 trial_starts = [x[2] for x in trials]
                 csv_to_h5 = _match_csv_to_h5(trial_starts, h5_data)
 
@@ -1080,7 +1113,7 @@ class Database(CallRecorder):
             h5_to_acq_id: dict[int, int] = {}
             matched_acq_indices: set[int] = set()
 
-            if h5_data:
+            if h5_data is not None:
                 for h5_idx, (acq_idx, delta_ms) in acq_to_h5.items():
                     # Type checking because Object is too generic
                     acq_start = acquisitions[acq_idx]["acq_start"]
@@ -1090,8 +1123,8 @@ class Database(CallRecorder):
                         **acquisitions[acq_idx],
                         "exp_id": exp_id,
                         "acq_start": acq_start.strftime(DT_FORMAT),
-                        "odor_start": _to_datetime_str(h5_data["odor_starts"][h5_idx]),
-                        "odor_end": _to_datetime_str(h5_data["odor_ends"][h5_idx]),
+                        "odor_start": _to_datetime_str(h5_data.odor_starts[h5_idx]),
+                        "odor_end": _to_datetime_str(h5_data.odor_ends[h5_idx]),
                         "h5_to_acq_ms": delta_ms,
                     }
                     h5_to_acq_id[h5_idx] = _db_insert(cur, "acquisitions", acq)
@@ -1153,8 +1186,8 @@ class Database(CallRecorder):
             # Reporting
             # --------------------------------------------------------------- #
 
-            if h5_data:
-                n_h5 = len(h5_data["trial_starts"])
+            if h5_data is not None:
+                n_h5 = len(h5_data.trial_starts)
                 n_matched_acq = len(acq_to_h5)
 
                 if n_matched_acq < n_h5:
@@ -1295,9 +1328,7 @@ def _db_insert(cur: Cursor, table_name: str, data: Object | list[Object]) -> int
 # --------------------------------------------------------------------------- #
 
 
-def _get_h5_metadata(
-    paths: list[Path], exp_start: datetime
-) -> None | dict[str, np.ndarray]:
+def _get_h5_metadata(paths: list[Path], exp_start: datetime) -> None | H5Timing:
     # There must be at most one path
     if not paths:
         return None
@@ -1325,34 +1356,51 @@ def _get_h5_metadata(
         #   code found 2 peaks right next to each other
 
         trial_starts, _ = find_peaks(
-            np.diff(imaging_TTL), height=2.0, distance=samplerate / 2
+            np.diff(imaging_TTL), height=TTL_HIGH, distance=samplerate / 2
         )
         odor_starts, _ = find_peaks(
-            np.diff(odor_TTL), height=2.0, distance=samplerate / 10
+            np.diff(odor_TTL), height=TTL_HIGH, distance=samplerate / 10
         )
         odor_ends, _ = find_peaks(
-            -np.diff(odor_TTL), height=2.0, distance=samplerate / 10
+            -np.diff(odor_TTL), height=TTL_HIGH, distance=samplerate / 10
         )
+
+        # Whether the recording began or ended inside a window. Read off the
+        # signal level, not inferred from the counts: clipped at both ends, one
+        # rise and one fall go missing together and the counts still agree.
+        high_at_start = bool(imaging_TTL[0] > TTL_HIGH or odor_TTL[0] > TTL_HIGH)
+        high_at_end = bool(imaging_TTL[-1] > TTL_HIGH or odor_TTL[-1] > TTL_HIGH)
 
         # Returns None if no trials where found
         if len(trial_starts) == 0:
             logger.info("No trial triggers found in this H5 file.")
             return None
 
+        trial_starts, odor_starts, odor_ends, dropped_first, dropped_last = (
+            _align_h5_events(trial_starts, odor_starts, odor_ends)
+        )
+
+        if dropped_first:
+            logger.warning(
+                "H5 file recording began mid trial, so we "
+                f"dropped the first trial {CROSS}"
+            )
+
+        if dropped_last:
+            logger.warning(
+                "H5 file recording stopped mid trial, so we "
+                f"Dropped the last trial. {CROSS}"
+            )
+
+        _check_h5_alignment(trial_starts, odor_starts, odor_ends, samplerate)
+
         # Shift everything by first trial start, to match FrameTimestamp_sec data
         # FrameTimestamp_sec always starts at zero, so they almost exactly match
         shift = trial_starts[0]
 
-        trial_starts -= shift
-        odor_starts -= shift
-        odor_ends -= shift
-
-        assert len(trial_starts) == len(odor_starts) == len(odor_ends), (
-            f"The following do not match:\n"
-            f"    Number of trials {len(trial_starts)}\n"
-            f"    Odor presentation starts {len(odor_starts)}\n"
-            f"    Odor presentation ends {len(odor_ends)}"
-        )
+        trial_starts = trial_starts - shift
+        odor_starts = odor_starts - shift
+        odor_ends = odor_ends - shift
 
         logger.info(f"Found {len(trial_starts)} trial starts in the H5 file.")
 
@@ -1362,11 +1410,98 @@ def _get_h5_metadata(
         odor_ends = (odor_ends / samplerate * 1e9).astype("timedelta64[ns]")
 
         # Return the datetimes to be matched with acquisition frame times
-        return {
-            "trial_starts": exp_start_np + trial_starts,
-            "odor_starts": exp_start_np + odor_starts,
-            "odor_ends": exp_start_np + odor_ends,
-        }
+        return H5Timing(
+            trial_starts=exp_start_np + trial_starts,
+            odor_starts=exp_start_np + odor_starts,
+            odor_ends=exp_start_np + odor_ends,
+            dropped_first=dropped_first,
+            dropped_last=dropped_last,
+            high_at_start=high_at_start,
+            high_at_end=high_at_end,
+        )
+
+
+def _align_h5_events(
+    trial_starts: np.ndarray,
+    odor_starts: np.ndarray,
+    odor_ends: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool, bool]:
+    """
+    Drop an incomplete trial from either end of the H5 recording.
+
+    Takes the raw sample indices of the imaging rises and the odor pulse edges,
+    and returns them with any partial trial removed, plus whether one was
+    dropped at the start and at the end.
+
+    A recording that begins inside an imaging window has no rise for it -- the
+    rise is not in the signal, so no peak finder can recover it -- while the
+    odor pulse inside that window often is, orphaned in front of the first
+    trial start. Dropping those leading odor edges is what keeps the rest
+    paired; putting a trial start at sample 0 instead would anchor the whole
+    timeline on a rise that happened at an unknown time before it. A recording
+    that stops mid trial leaves the last trial short of its odor end, or of its
+    odor entirely, so the tail is cut back to the shortest of the three.
+    """
+    first = trial_starts[0]
+
+    kept_starts = odor_starts[odor_starts >= first]
+    kept_ends = odor_ends[odor_ends >= first]
+
+    dropped_first = len(kept_starts) < len(odor_starts) or len(kept_ends) < len(
+        odor_ends
+    )
+
+    lengths = (len(trial_starts), len(kept_starts), len(kept_ends))
+    count = min(lengths)
+
+    return (
+        trial_starts[:count],
+        kept_starts[:count],
+        kept_ends[:count],
+        dropped_first,
+        max(lengths) > count,
+    )
+
+
+def _check_h5_alignment(
+    trial_starts: np.ndarray,
+    odor_starts: np.ndarray,
+    odor_ends: np.ndarray,
+    samplerate: float,
+) -> None:
+    """
+    Raise unless the H5 reads as whole trials, each holding one odor pulse.
+
+    Equal counts alone are not enough: a recording clipped at both ends loses
+    one rise and one fall together, so the counts agree while every trial is
+    paired with the odor of the next one.
+    """
+    if not len(trial_starts) == len(odor_starts) == len(odor_ends):
+        raise RuntimeError(
+            "The following do not match:\n"
+            f"    Number of trials {len(trial_starts)}\n"
+            f"    Odor presentation starts {len(odor_starts)}\n"
+            f"    Odor presentation ends {len(odor_ends)}"
+        )
+
+    def seconds(sample) -> str:
+        return f"{sample / samplerate:.3f} s"
+
+    for index, (start, odor_start, odor_end) in enumerate(
+        zip(trial_starts, odor_starts, odor_ends)
+    ):
+        if not start < odor_start < odor_end:
+            raise RuntimeError(
+                f"H5 trial {index} is out of order: trial start"
+                f" {seconds(start)}, odor {seconds(odor_start)}"
+                f" to {seconds(odor_end)}."
+            )
+
+        if index + 1 < len(trial_starts) and not odor_end < trial_starts[index + 1]:
+            raise RuntimeError(
+                f"H5 trial {index} odor ends at {seconds(odor_end)}, after the"
+                f" next trial starts at {seconds(trial_starts[index + 1])}."
+            )
 
 
 def _load_event_data(
@@ -1533,7 +1668,7 @@ def _load_event_data(
 
 def _match_acq_to_h5(
     acquisitions: list[Object],
-    h5_data: dict[str, np.ndarray],
+    h5_data: H5Timing,
 ) -> dict[int, tuple[int, float]]:
     """
     Match acquisitions to H5 trials by nearest timestamp.
@@ -1542,7 +1677,7 @@ def _match_acq_to_h5(
 
     Returns dict: h5_idx -> (acq_idx, h5_to_acq_ms)
     """
-    h5_dts = [_to_datetime(t) for t in h5_data["trial_starts"]]
+    h5_dts = [_to_datetime(t) for t in h5_data.trial_starts]
     matches: dict[int, tuple[int, float]] = {}
     h5_ptr = 0
 
@@ -1566,7 +1701,7 @@ def _match_acq_to_h5(
 
 def _match_csv_to_h5(
     csv_starts: list[datetime],
-    h5_data: dict[str, np.ndarray],
+    h5_data: H5Timing,
 ) -> dict[int, tuple[int, float]]:
     """
     Find the best alignment of CSV trial starts with H5 trial starts.
@@ -1579,7 +1714,7 @@ def _match_csv_to_h5(
 
     Returns dict: pool_idx -> (h5_idx, h5_to_trial_ms)
     """
-    h5_starts = [_to_datetime(t) for t in h5_data["trial_starts"]]
+    h5_starts = [_to_datetime(t) for t in h5_data.trial_starts]
     n_h5 = len(h5_starts)
     n_events = len(csv_starts)
 
