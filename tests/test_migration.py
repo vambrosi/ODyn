@@ -71,7 +71,7 @@ def test_migration_matches_fresh_schema(tmp_path):
     old = main_folder / ODYN_FOLDER / "odyn.db"
     build(old, PREVIOUS_SCHEMA, SCHEMA_VERSION - 1)
 
-    migrate(main_folder)
+    migrate(main_folder, diagram=False)
 
     assert get_schema(old) == get_schema(fresh)
     con = sqlite3.connect(old)
@@ -176,7 +176,7 @@ def migrated_db(tmp_path):
     finally:
         con.close()
 
-    migrate(main_folder)
+    migrate(main_folder, diagram=False)
 
     return old
 

@@ -39,8 +39,14 @@ DIAGRAM_SCRIPT = Path(__file__).parent / "diagram.sql"
 SCHEMA_DIAGRAM = Path(__file__).parent / "schema.svg"
 
 
-def migrate(main_folder: str | Path) -> None:
-    """Migrate DB from v(SCHEMA_VERSION-1) up to vSCHEMA_VERSION."""
+def migrate(main_folder: str | Path, *, diagram: bool = True) -> None:
+    """
+    Migrate DB from v(SCHEMA_VERSION-1) up to vSCHEMA_VERSION.
+
+    `diagram` regenerates `schema.svg`. It is a tracked file, so pass `False`
+    from anything that runs repeatedly (the tests), or a stray graphviz version
+    rewrites all of it as a side effect.
+    """
 
     db_path = Path(main_folder) / ODYN_FOLDER / "odyn.db"
     if not db_path.exists():
@@ -113,7 +119,8 @@ def migrate(main_folder: str | Path) -> None:
         con.close()
 
     # Keep the diagram in sync with the schema.
-    generate_diagram()
+    if diagram:
+        generate_diagram()
 
 
 def generate_diagram() -> None:
