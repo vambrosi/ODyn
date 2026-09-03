@@ -5,6 +5,7 @@ Make a small synthetic experiment to test the pipeline.
 USAGE
     python generate_data.py                      # into ../tmp/generated_data
     python generate_data.py --out /some/folder --acquisitions 8 --seed 7
+    python generate_data.py --h5-flat            # a defective add to repair
 
 The result is a `main_folder`, so it can be used directly:
 
@@ -13,8 +14,19 @@ The result is a `main_folder`, so it can be used directly:
 
 OUTPUTS
     - Raw acquisition files that can be read be `tifffile`;
-    - No synthetic H5 or Events.csv yet;
+    - An olfactometer H5 with the imaging and odor TTLs (no Events.csv yet);
     - `ground_truth.json` to compare against function outputs.
+
+BROKEN RECORDINGS
+    The H5 switches make the states `add_experiment` has to survive, so the
+    flags and the repair have something to run against:
+
+    --no-h5             no H5 at all
+    --h5-flat           an H5 whose triggers never rise (a session stopped
+                        immediately); well formed, but all timing is missing
+    --h5-high-start     recording began inside the first imaging window, so
+                        that window's rise is not in the signal
+    --skip-first-tiff   the first acquisition was never saved
 
 WHAT IS MODELLED
     glomeruli       flat-topped discs with soft edges, random size and place
@@ -39,6 +51,7 @@ import struct
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import h5py
 import numpy as np
 import tifffile
 
@@ -81,6 +94,12 @@ ODOR_DURATION_S = 1.0
 RISE_S = 0.25
 DECAY_S = 1.2
 PHOTOBLEACH_FRACTION = 0.12
+
+# Olfactometer H5 parameters
+H5_SAMPLERATE = 1000.0  # Hz
+H5_TTL_HIGH = 5.0  # volts, well over the rise `_get_h5_metadata` looks for
+H5_LEAD_S = 2.0  # recorded before the first imaging window opens
+H5_TAIL_S = 2.0  # recorded after the last one closes
 
 # Motion is split in two to simulate real data:
 #   - There a rigid jitter/drift motion that the whole field shares;
@@ -198,6 +217,74 @@ def _write_tiff(
 
 
 # --------------------------------------------------------------------------- #
+# Olfactometer H5
+# --------------------------------------------------------------------------- #
+
+
+def _write_h5(
+    path: Path,
+    *,
+    acquisitions: int,
+    frames: int,
+    frame_rate: float,
+    flat: bool = False,
+    high_start: bool = False,
+) -> dict:
+    """
+    Write the olfactometer H5 the way `_get_h5_metadata` reads it back.
+
+    Two square TTLs sampled at `H5_SAMPLERATE`: `ImagingWindow` is high for the
+    length of each acquisition and `OdorDelivery` for the odor inside it. Window
+    `i` opens `LOOP_INTERVAL_S` after window `i - 1`, which is the spacing
+    `_match_acq_to_h5` compares against `frameTimestamps_sec`.
+
+    `flat` writes both channels as zeros: a session stopped immediately gives a
+    well formed file in which no trigger ever rises.
+
+    `high_start` cuts the recording short at the front, between the first
+    window's rise and its odor. The rise is then not in the signal at all, so
+    no peak finder can recover it, and the odor pulse it belongs to is left
+    with no trial start in front of it.
+    """
+    window_s = frames / frame_rate
+    span_s = (acquisitions - 1) * LOOP_INTERVAL_S + window_s
+    samples = int((H5_LEAD_S + span_s + H5_TAIL_S) * H5_SAMPLERATE)
+
+    imaging = np.zeros(samples, np.float32)
+    odor = np.zeros(samples, np.float32)
+
+    def high(signal, start_s, duration_s):
+        first = int(start_s * H5_SAMPLERATE)
+        signal[first : first + int(duration_s * H5_SAMPLERATE)] = H5_TTL_HIGH
+
+    if not flat:
+        for index in range(acquisitions):
+            opened = H5_LEAD_S + index * LOOP_INTERVAL_S
+
+            high(imaging, opened, window_s)
+            high(odor, opened + ODOR_START_S, ODOR_DURATION_S)
+
+    cut = int((H5_LEAD_S + ODOR_START_S / 2) * H5_SAMPLERATE) if high_start else 0
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(path, "w") as f:
+        f.attrs["samplerate"] = H5_SAMPLERATE
+        f.create_dataset("ImagingWindow", data=imaging[cut:])
+        f.create_dataset("OdorDelivery", data=odor[cut:])
+
+    return {
+        "path": path.name,
+        "samplerate": H5_SAMPLERATE,
+        "window_s": window_s,
+        "lead_s": H5_LEAD_S - cut / H5_SAMPLERATE,
+        "flat": flat,
+        "high_start": high_start,
+        "trials": 0 if flat else acquisitions - bool(high_start),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # The scene
 # --------------------------------------------------------------------------- #
 
@@ -312,6 +399,10 @@ def generate(
     frame_rate: float = FRAME_RATE,
     motion: float = 1.0,
     seed: int = 0,
+    h5: bool = True,
+    h5_flat: bool = False,
+    h5_high_start: bool = False,
+    skip_first_tiff: bool = False,
 ) -> dict:
     """
     Write the recording and return what went into it.
@@ -321,6 +412,9 @@ def generate(
 
     `motion` scales every displacement. Pass `0` for a still recording, which is
     lets you see the response by itself. (Can be used as mcor comparison.)
+
+    The `h5*` and `skip_first_tiff` arguments make a broken recording instead of
+    a good one; see the module docstring.
     """
     output_folder = Path(output_folder)
     rng = np.random.default_rng(seed)
@@ -341,7 +435,8 @@ def generate(
         )
 
     exp_name = f"{EXP_DATE}_{MOUSE}_{EXP}"
-    raw_folder = output_folder / EXP_DATE / MOUSE / EXP / "raw"
+    exp_folder = output_folder / EXP_DATE / MOUSE / EXP
+    raw_folder = exp_folder / "raw"
 
     cells = _glomeruli(rng, height, width, um_per_px)
     edge_px = EDGE_UM / um_per_px
@@ -376,10 +471,26 @@ def generate(
         "motion": motion,
         "seed": seed,
         "glomeruli": cells,
+        "h5": None,
         "acquisitions": [],
     }
 
+    if h5:
+        truth["h5"] = _write_h5(
+            exp_folder / f"{exp_name}.h5",
+            acquisitions=acquisitions,
+            frames=frames,
+            frame_rate=frame_rate,
+            flat=h5_flat,
+            high_start=h5_high_start,
+        )
+
     for index in range(acquisitions):
+        # An acquisition that was never saved: the loop still counts it, so the
+        # files that follow keep the frame timestamps they already had.
+        if skip_first_tiff and index == 0:
+            continue
+
         offsets = motion * _displacements(rng, vertices, frames, frame_rate, um_per_px)
         stack = np.empty((frames, height, width), np.float32)
 
@@ -443,6 +554,22 @@ def main() -> None:
     parser.add_argument(
         "--motion", default=1.0, type=float, help="scale displacements, 0 for still"
     )
+    parser.add_argument(
+        "--no-h5", dest="h5", action="store_false", help="write no H5 at all"
+    )
+    parser.add_argument(
+        "--h5-flat", action="store_true", help="an H5 whose triggers never rise"
+    )
+    parser.add_argument(
+        "--h5-high-start",
+        action="store_true",
+        help="start recording inside the first imaging window",
+    )
+    parser.add_argument(
+        "--skip-first-tiff",
+        action="store_true",
+        help="the first acquisition was never saved",
+    )
 
     args = parser.parse_args()
     truth = generate(
@@ -453,6 +580,10 @@ def main() -> None:
         width=args.width,
         motion=args.motion,
         seed=args.seed,
+        h5=args.h5,
+        h5_flat=args.h5_flat,
+        h5_high_start=args.h5_high_start,
+        skip_first_tiff=args.skip_first_tiff,
     )
 
     responding = sum(cell["responds"] for cell in truth["glomeruli"])
@@ -463,6 +594,12 @@ def main() -> None:
     print(f"    Frame Count      {args.frames}")
     print(f"    File Size        {size / 1e6:.1f} MB")
     print(f"    Glomeruli Count  {len(truth['glomeruli'])} ({responding} responding)")
+
+    if truth["h5"] is None:
+        print("    Olfactometer H5  none")
+    else:
+        print(f"    Olfactometer H5  {truth['h5']['trials']} trial triggers")
+
     print(f"Ground truth in {Path(args.out) / 'ground_truth.json'}")
 
 
