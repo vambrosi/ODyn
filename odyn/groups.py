@@ -2218,7 +2218,7 @@ class Group(CallRecorder):
         """
         return self.approved_mcor_files if only_approved else self.mcor_files
 
-    def _z_score_frames(
+    def _common_frames(
         self, photobleach_window_s: float, only_approved: bool = True
     ) -> tuple[int, int, float]:
         """
@@ -2306,7 +2306,7 @@ class Group(CallRecorder):
             raise KeyError(f"Acquisition {acq_id} has no {added}mcor file in {self!r}.")
 
         # Redoes the computation for every acquisition, but that is fast.
-        first, last, frame_rate = self._z_score_frames(
+        first, last, frame_rate = self._common_frames(
             photobleach_window_s, only_approved
         )
 
@@ -2435,7 +2435,7 @@ class Group(CallRecorder):
         )
         folder.mkdir(parents=True, exist_ok=True)
 
-        first_frame, _, frame_rate = self._z_score_frames(
+        first_frame, _, frame_rate = self._common_frames(
             photobleach_window_s, only_approved
         )
 
