@@ -47,7 +47,7 @@ from caiman.motion_correction import MotionCorrect
 from caiman.paths import get_tempdir
 
 from .utils import *
-from .utils import _method_calls_dataframe
+from .utils import _acquisition_trials, _method_calls_dataframe
 from .utils import CallFrame, CallRecorder
 
 if TYPE_CHECKING:
@@ -119,6 +119,78 @@ class McorFlag(IntFlag):
     SOME_NOT_APPROVED = 1 << 10  # approval left some acquisitions out
 
 
+@dataclass
+class RoiTraces:
+    """
+    Return type of `Group.roi_traces`.
+
+    - `F`: brightness, with shape acquisition x frame x ROI;
+    - `times`: when each frame happened, in seconds from the odor onset;
+    - `roi_labels`: the ROI numbers, in the order of the last axis;
+    - `acquisitions`: odor, program and outcome of each acquisition, in the
+    order of the first axis.
+
+    **EXAMPLE**
+    ```python
+        z = traces.z_scores()
+        flat_z = z.reshape(-1, len(traces.roi_labels))
+    ```
+
+    Rows of `flat_z` are all frames (from all acquisitions) in the order
+    they were recorded, and columns are ROIs. This is what a PCA over a whole
+    session would need as input.
+    """
+
+    F: np.ndarray
+    times: np.ndarray
+    roi_labels: np.ndarray
+    acquisitions: pd.DataFrame
+    frame_rate: float
+    mask_path: str
+    method_call_id: int
+
+    @property
+    def acq_ids(self) -> np.ndarray:
+        """The acquisition of each row of the first axis."""
+        return self.acquisitions.index.to_numpy()
+
+    def z_scores(self, baseline: None | np.ndarray = None) -> np.ndarray:
+        """
+        `F` in units of how much it usually varies before the odor
+
+        **USAGE**
+        ```python
+            z = traces.z_scores()
+            rows = z.reshape(-1, len(traces.roi_labels))    # for a PCA
+        ```
+
+        **PARAMETERS**
+        - `baseline`: which frames to compare against, as a mask over `times`.
+        Every frame before the odor by default.
+
+        Each acquisition and each ROI is compared to its own baseline, so a
+        value of 2 means twice that ROI's usual wobble in that acquisition,
+        whatever the acquisition's brightness. Same shape as `F`.
+        """
+        if baseline is None:
+            baseline = self.times < 0
+
+        before = self.F[:, baseline, :]
+
+        if before.shape[1] < 2:
+            raise ValueError(
+                f"{before.shape[1]} baseline frames is not enough to measure "
+                "how much a ROI varies. Widen 'baseline'."
+            )
+
+        middle = before.mean(axis=1, keepdims=True)
+        spread = before.std(axis=1, ddof=1, keepdims=True)
+
+        # A ROI that never moves would divide by zero, and it has no wobble to
+        # measure against, so it stays at its own distance from the middle
+        return (self.F - middle) / np.where(spread > 0, spread, 1)
+
+
 # --------------------------------------------------------------------------- #
 # Main Data Processing\Analysis Class
 # --------------------------------------------------------------------------- #
@@ -163,6 +235,7 @@ class Group(CallRecorder):
 
         # Initialize "private" variables
         self._acquisitions: None | pd.DataFrame = None
+        self._acquisition_trials: None | pd.DataFrame = None
         self._events: None | pd.DataFrame = None
         self._experiments: None | pd.DataFrame = None
         self._mcor_files: None | pd.DataFrame = None
@@ -212,6 +285,21 @@ class Group(CallRecorder):
         self._acquisitions.set_index("acq_id", inplace=True)
 
         return self._acquisitions
+
+    @property
+    def acquisition_trials(self) -> pd.DataFrame:
+        """
+        `DataFrame` with each acquisition beside the trial that triggered it.
+        """
+        self.db._refresh_if_stale()
+
+        if self._acquisition_trials is not None:
+            return self._acquisition_trials
+
+        self._acquisition_trials = _acquisition_trials(
+            self.db.con, GROUP_ACQUISITION_TRIALS, [self.group_id]
+        )
+        return self._acquisition_trials
 
     @property
     def events(self) -> pd.DataFrame:
@@ -467,6 +555,7 @@ class Group(CallRecorder):
 
     def _reset_caches(self) -> None:
         self._acquisitions = None
+        self._acquisition_trials = None
         self._events = None
         self._experiments = None
         self._mcor_files = None
@@ -476,6 +565,7 @@ class Group(CallRecorder):
         self._trials = None
 
         self.db._acquisitions = None
+        self.db._acquisition_trials = None
         self.db._events = None
         self.db._experiments = None
         self.db._mcor_files = None
@@ -2465,6 +2555,103 @@ class Group(CallRecorder):
         )
 
         logger.info(f"Saved '{path}'.")
+
+    def roi_traces(self) -> RoiTraces:
+        """
+        Read back the last ROI traces saved for this group
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            traces = group.roi_traces()
+
+            hits = traces.acquisitions["outcome"] == "hit"
+            traces.F[hits]                          # only those acquisitions
+        ```
+
+        `traces.F` has shape acquisition x frame x ROI, `traces.times` says
+        when each frame happened relative to the odor onset, and
+        `traces.acquisitions` says what each acquisition was: its odor,
+        program and outcome, read from the database rather than from the file,
+        so a later correction shows up here.
+
+        **ALERT**: run `save_roi_traces()` first. Acquisitions the database
+        cannot describe are kept, with their odor and outcome left empty.
+        """
+        calls = self.latest_calls("Group.save_roi_traces")
+
+        if calls.empty:
+            raise RuntimeError(
+                f"{self!r} has no ROI traces. Run 'save_roi_traces()' first."
+            )
+
+        files = self.outputs[self.outputs["method_call_id"].isin(calls.index)]
+
+        if files.empty:
+            raise RuntimeError(
+                f"{self!r} recorded a 'save_roi_traces' call but no file. The "
+                "call may have failed; check its 'call_log' and run it again."
+            )
+
+        # latest_calls comes back newest first, so the newest call that still
+        # has a file on record wins
+        newest = files["method_call_id"].max()
+        path = (
+            self.db.main_folder
+            / files.set_index("method_call_id").loc[newest, "file_path"]
+        )
+
+        with h5py.File(path, "r") as handle:
+            traces = np.asarray(handle["F"])
+            times = np.asarray(handle["times"])
+            acq_ids = np.asarray(handle["acq_ids"])
+            roi_labels = np.asarray(handle["roi_labels"])
+            saved_group = int(handle.attrs["group_id"])
+            frame_rate = float(handle.attrs["frame_rate"])
+            mask_path = str(handle.attrs["mask_path"])
+
+        if saved_group != self.group_id:
+            raise ValueError(
+                f"'{path.name}' was saved for group {saved_group}, not "
+                f"{self.group_id}."
+            )
+
+        return RoiTraces(
+            F=traces,
+            times=times,
+            roi_labels=roi_labels,
+            acquisitions=self._describe(acq_ids),
+            frame_rate=frame_rate,
+            mask_path=mask_path,
+            method_call_id=int(newest),
+        )
+
+    def _describe(self, acq_ids: np.ndarray) -> pd.DataFrame:
+        """
+        Odor, program and outcome of each acquisition, in the order given.
+
+        Rows the database cannot describe are kept and left empty, so the
+        frame stays lined up with the first axis of `F`.
+        """
+        removed = [int(a) for a in acq_ids if a not in self.acquisitions.index]
+
+        if removed:
+            raise ValueError(
+                f"Acquisitions {removed} are in the traces file but not "
+                "in the database. They might have been removed after ROI "
+                "traces were saved."
+            )
+
+        described = self.acquisition_trials.reindex(acq_ids)
+        missing = [int(a) for a in acq_ids[described["trial_id"].isna()]]
+
+        if missing:
+            logger.warning(
+                f"Acquisitions {missing} have no trial, so their odor, "
+                "program and outcome are empty."
+            )
+
+        return described
 
     def z_score_average_movies(
         self, *, photobleach_window_s: float = 1.0, only_approved: bool = True

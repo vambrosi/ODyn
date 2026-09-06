@@ -126,6 +126,45 @@ class CallRecorder:
         db._outputs = None
 
 
+# Two ways of accessing the same view, kept together so drifts are visible.
+#
+# ASSUMPTIONS:
+# - Some acquisitions don't have trials (thus, we use LEFT JOIN);
+# - At most one trial per acquisition, so no row-splitting.
+
+ACQUISITION_TRIALS = """
+    SELECT a.*, t.trial_id, t.odor_id, t.outcome, t.program_id, p.program_type
+        FROM acquisitions AS a
+        LEFT JOIN trials   AS t ON t.acq_id = a.acq_id
+        LEFT JOIN programs AS p ON p.program_id = t.program_id;
+"""
+
+GROUP_ACQUISITION_TRIALS = """
+    SELECT a.*, t.trial_id, t.odor_id, t.outcome, t.program_id, p.program_type
+        FROM group_experiments AS g
+        JOIN experiments   AS e ON e.exp_id = g.exp_id
+        JOIN acquisitions  AS a ON a.exp_id = e.exp_id
+        LEFT JOIN trials   AS t ON t.acq_id = a.acq_id
+        LEFT JOIN programs AS p ON p.program_id = t.program_id
+        WHERE g.group_id = ?;
+"""
+
+
+def _acquisition_trials(
+    con: Connection, query: str, params: list = []
+) -> pd.DataFrame:
+    """Shared body of `Database.acquisition_trials` / `Group.acquisition_trials`."""
+    frame = pd.read_sql_query(
+        query,
+        con,
+        params=params,
+        parse_dates=["acq_start", "odor_start", "odor_end"],
+    )
+    frame.set_index("acq_id", inplace=True)
+
+    return frame
+
+
 def _method_calls_dataframe(con: Connection, query: str, params: list) -> pd.DataFrame:
     """
     Run `query` against method_calls and expand its JSON columns into columns.

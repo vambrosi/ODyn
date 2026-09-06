@@ -46,7 +46,8 @@ import pandas as pd
 from .groups import Group
 from .migrate import SCHEMA_VERSION
 from .utils import *
-from .utils import CallFrame, CallRecorder, _method_calls_dataframe
+from .utils import CallFrame, CallRecorder
+from .utils import _acquisition_trials, _method_calls_dataframe
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -184,6 +185,7 @@ class Database(CallRecorder):
         # Initialize "private" variables
         self._call_stack: list[CallFrame] = []
         self._acquisitions: None | pd.DataFrame = None
+        self._acquisition_trials: None | pd.DataFrame = None
         self._events: None | pd.DataFrame = None
         self._experiments: None | pd.DataFrame = None
         self._groups: dict[int, Group] = {}  # Caches groups one-by-one
@@ -273,6 +275,23 @@ class Database(CallRecorder):
         self._acquisitions.set_index("acq_id", inplace=True)
 
         return self._acquisitions
+
+    @property
+    def acquisition_trials(self) -> pd.DataFrame:
+        """
+        `DataFrame` with each acquisition beside the trial it recorded
+
+        Every acquisition holds at most one trial, so this adds the odor, the
+        outcome and the program to each one without ever splitting a row.
+        Acquisitions with no trial are kept, with those columns empty.
+        """
+        self._refresh_if_stale()
+
+        if self._acquisition_trials is not None:
+            return self._acquisition_trials
+
+        self._acquisition_trials = _acquisition_trials(self.con, ACQUISITION_TRIALS)
+        return self._acquisition_trials
 
     @property
     def events(self) -> pd.DataFrame:
@@ -586,6 +605,7 @@ class Database(CallRecorder):
 
     def _reset_caches(self) -> None:
         self._acquisitions = None
+        self._acquisition_trials = None
         self._events = None
         self._experiments = None
         self._group_experiments = None
@@ -598,6 +618,7 @@ class Database(CallRecorder):
         # In case a specific group can still be accessed
         for group in self._groups.values():
             group._acquisitions = None
+            group._acquisition_trials = None
             group._events = None
             group._experiments = None
             group._mcor_files = None
