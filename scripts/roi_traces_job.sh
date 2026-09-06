@@ -26,7 +26,10 @@ set +u
 conda activate caiman
 set -u
 
-cd "$(dirname "$0")"
+# Not `dirname "$0"`: sbatch copies this file into the job's spool folder, so
+# "$0" is that copy and not the script you submitted. SLURM_SUBMIT_DIR is the
+# folder you ran sbatch from, which is where save_roi_traces.py sits.
+cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")}"
 
 echo "STARTING ROI TRACES"
 echo "python   $(which python)"
