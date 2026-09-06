@@ -34,6 +34,7 @@ from typing import cast, Final, TYPE_CHECKING
 from pathlib import Path
 
 import cv2
+import h5py
 import numpy as np
 import pandas as pd
 import tifffile
@@ -482,6 +483,116 @@ class Group(CallRecorder):
         self.db._outputs = None
         self.db._programs = None
         self.db._trials = None
+
+    # ----------------------------------------------------------------------- #
+    # ROI masks
+    # ----------------------------------------------------------------------- #
+
+    @record_call
+    def import_mask(self, *, mask_path: str, dataset: str = "masks/labels") -> None:
+        """
+        Register a segmentation mask with this group
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            group.import_mask(mask_path="projects/project_name/outputs/masks.h5")
+        ```
+
+        **PARAMETERS**
+        - `mask_path`: the mask file, relative to the main folder or absolute
+        - `dataset`: which dataset inside the file holds the labels
+
+        The mask is a "labeled mask": `0` outside every ROI, and the ROI's own
+        number inside it. Functions that need ROIs use the last mask imported.
+
+        **ALERT**: the file has to be somewhere inside the `main_folder`.
+        """
+        path = Path(mask_path)
+
+        if not path.is_absolute():
+            path = self.db.main_folder / path
+
+        path = path.resolve()
+
+        if not path.is_file():
+            raise FileNotFoundError(f"No mask file at '{path}'.")
+
+        if not path.is_relative_to(self.db.main_folder):
+            raise ValueError(
+                f"mask_path needs to be inside the main_folder. But '{path}' "
+                f"is not. Copy the mask to a subfolder of main_folder first."
+            )
+
+        with h5py.File(path, "r") as handle:
+            if dataset not in handle:
+                raise KeyError(
+                    f"'{path.name}' has no '{dataset}' dataset. "
+                    f"It holds {list(handle)}."
+                )
+
+            labels_image = np.asarray(handle[dataset])
+
+        if labels_image.ndim != 2:
+            raise ValueError(
+                f"Expected one picture, but '{dataset}' has {labels_image.ndim} axes."
+            )
+
+        # The likeliest mistake is importing another group's mask, and every
+        # later function would then read the wrong pixels without complaining
+        experiment = self.experiments.iloc[0]
+        shape = (int(experiment["height_px"]), int(experiment["width_px"]))
+
+        if labels_image.shape != shape:
+            raise ValueError(
+                f"Mask is {labels_image.shape} but {self!r} was recorded at "
+                f"{shape}. This mask probably belongs to another group."
+            )
+
+        labels = np.unique(labels_image)
+        labels = labels[labels != 0]
+
+        if not labels.size:
+            raise ValueError(f"'{path.name}' has no ROIs, only zeros.")
+
+        relative = path.relative_to(self.db.main_folder).as_posix()
+
+        self.set_output(
+            {
+                "mask_path": relative,
+                "dataset": dataset,
+                "shape": list(shape),
+                "labels": [int(label) for label in labels],
+            }
+        )
+        self.add_output_file(path)
+
+        logger.info(f"Imported {len(labels)} ROIs from '{relative}'.")
+
+    def mask_labels(self) -> tuple[np.ndarray, Object]:
+        """
+        Labeled picture of the last mask imported, and how it was recorded
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            labels_image, mask = group.mask_labels()
+        ```
+
+        `mask["labels"]` holds the ROI numbers in the order every other
+        function uses them.
+        """
+        mask = self.latest_output("Group.import_mask")
+
+        if not mask:
+            raise RuntimeError(f"{self!r} has no mask. Run 'import_mask()' first.")
+
+        path = self.db.main_folder / cast(str, mask["mask_path"])
+
+        with h5py.File(path, "r") as handle:
+            labels_image = np.asarray(handle[cast(str, mask["dataset"])])
+
+        return labels_image, mask
 
     # ----------------------------------------------------------------------- #
     # Motion Correction functions
