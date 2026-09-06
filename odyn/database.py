@@ -173,7 +173,7 @@ class Database(CallRecorder):
                     f"underscores, but instead got {project!r}."
                 )
 
-            live = odyn_folder / "projects" / f"{project}.db"
+            live = odyn_folder / PROJECTS_FOLDER / f"{project}.db"
 
         self._is_test: Final[bool] = _is_test
         self.path: Final[Path] = self._copy_for_test(live) if _is_test else live
@@ -232,6 +232,27 @@ class Database(CallRecorder):
 
     def __del__(self):
         self.con.close()
+
+    @property
+    def project_folder(self) -> Path:
+        """
+        Folder holding the project files
+
+        **USAGE**
+        ```python
+            db = Database(main_folder, project="project_name")
+            outputs = db.project_folder / "outputs"
+        ```
+
+        All files created by a project (except mcor files) live in this folder.
+        """
+        if self.project is None:
+            raise RuntimeError(
+                "Only a project has a folder of its own. Open the database "
+                "with 'Database(main_folder, project=\"name\")' to use one."
+            )
+
+        return self.main_folder / PROJECTS_FOLDER / self.project
 
     # ----------------------------------------------------------------------- #
     # SQLite Tables as DataFrames

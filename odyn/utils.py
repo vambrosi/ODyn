@@ -31,6 +31,11 @@ CROSS = "\033[1;31m✘\033[0m"
 ODYN_FOLDER = ".odyn"
 INFO_FOLDER = ".odyn/olfactometer/Log/Info"
 
+# Used twice for a project:
+#   - its database lives in '<main_folder>/.odyn/projects/<name>.db';
+#   - its own files (scripts, outputs, movies) in '<main_folder>/projects/<name>'
+PROJECTS_FOLDER = "projects"
+
 # Default wait before "database locked"
 DB_TIMEOUT_S = 30
 
