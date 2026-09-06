@@ -500,6 +500,29 @@ class Group(CallRecorder):
     # Private Methods
     # ----------------------------------------------------------------------- #
 
+    def _output_name(
+        self, description: str, extension: str, call_id: None | int = None
+    ) -> str:
+        """
+        File name for something this group produced.
+
+        **FORMAT**: `Group_<id>_<first_exp_name>_<description>.<extension>`
+
+        **RATIONALE**
+
+        - The group comes first so a folder sorts by group;
+        - Experiment name is included because it is recognizable at a glance;
+        - `call_id` not `None` if older copies are needed for comparison;
+        - `call_id=None` if each rerun should overwrite (most common).
+        """
+        exp_name = self.experiments.iloc[0]["exp_name"]
+        stem = f"Group_{self.group_id}_{exp_name}_{description}"
+
+        if call_id is not None:
+            stem = f"{stem}_{call_id}"
+
+        return f"{stem}.{extension}"
+
     def _latest_test_movies(self) -> tuple[list[int], list[Path], list[Path]]:
         """
         Raw files and their .mmap files, from the last test motion correction.
@@ -579,18 +602,24 @@ class Group(CallRecorder):
     # ----------------------------------------------------------------------- #
 
     @record_call
-    def import_mask(self, *, mask_path: str, dataset: str = "masks/labels") -> None:
+    def import_mask(
+        self,
+        *,
+        mask_path: None | str = None,
+        dataset: str = "masks/labels",
+    ) -> None:
         """
         Register a segmentation mask with this group
 
         **USAGE**
         ```python
             group = db.groups[some_index]
-            group.import_mask(mask_path="projects/project_name/outputs/masks.h5")
+            group.import_mask()
         ```
 
         **PARAMETERS**
-        - `mask_path`: the mask file, relative to the main folder or absolute
+        - `mask_path`: the mask file, relative to the main folder or absolute.
+        By default, it uses `outputs/Group_<group_id>_roi_masks.h5`.
         - `dataset`: which dataset inside the file holds the labels
 
         The mask is a "labeled mask": `0` outside every ROI, and the ROI's own
@@ -598,7 +627,11 @@ class Group(CallRecorder):
 
         **ALERT**: the file has to be somewhere inside the `main_folder`.
         """
-        path = Path(mask_path)
+        if mask_path is None:
+            # Not '_output_name', because the segmentation tool writes this file.
+            path = self.db.outputs_folder / f"Group_{self.group_id}_roi_masks.h5"
+        else:
+            path = Path(mask_path)
 
         if not path.is_absolute():
             path = self.db.main_folder / path
@@ -1426,10 +1459,9 @@ class Group(CallRecorder):
 
         # --- Transform parameters --- #
 
-        # TODO: Change name and default folder
+        # TODO: Change default folder
         movie_type_str = "_".join(t.value for t in movie_types)
-        first_exp_name = self.experiments.iloc[0]["exp_name"]
-        filename = f"Group_{self.group_id}_{first_exp_name}_{movie_type_str}.avi"
+        filename = self._output_name(movie_type_str, "avi")
 
         filepath = (
             (self.db.main_folder / save_folder / filename).resolve()
@@ -1542,9 +1574,8 @@ class Group(CallRecorder):
         )
         folder.mkdir(parents=True, exist_ok=True)
 
-        path = folder / (
-            f"Group_{self.group_id}_{self.experiments.iloc[0]['exp_name']}"
-            f"_{'_'.join(t.value for t in movie_types)}.{extension}"
+        path = folder / self._output_name(
+            "_".join(t.value for t in movie_types), extension
         )
 
         logger.info(f"Saving movie to {path}")
@@ -2478,7 +2509,7 @@ class Group(CallRecorder):
         is the whole session in order, one row per frame and one column per ROI.
         """
 
-        folder = self.db.project_folder / "outputs"
+        folder = self.db.outputs_folder
         folder.mkdir(parents=True, exist_ok=True)
 
         labels_image, mask = self.mask_labels()
@@ -2535,7 +2566,7 @@ class Group(CallRecorder):
 
             del movie
 
-        path = folder / f"group{self.group_id}_roi_traces_{self.current_call_id}.h5"
+        path = folder / self._output_name("roi_traces", "h5")
 
         with h5py.File(path, "w") as handle:
             handle.create_dataset("F", data=traces)
@@ -2763,7 +2794,6 @@ class Group(CallRecorder):
 
         # Add a flag for the user that the video was made before approval
         provisional = "" if only_approved else "_provisional"
-        exp_name = self.experiments.iloc[0]["exp_name"]
 
         # Odd sized window, so it has a middle frame and the odor keeps its place
         window = max(1, round(smoothing_s * frame_rate))
@@ -2821,10 +2851,10 @@ class Group(CallRecorder):
                 # it holds however correlated the frames turn out to be.
                 total /= total[:onset].std()
 
-            path = folder / (
-                f"Group_{self.group_id}_{exp_name}_z_score"
-                f"_program_{program_id}_odor_{odor_id}"
-                f"_outcome_{outcome.replace(' ', '_')}{provisional}.{extension}"
+            path = folder / self._output_name(
+                f"z_score_program_{program_id}_odor_{odor_id}"
+                f"_outcome_{outcome.replace(' ', '_')}{provisional}",
+                extension,
             )
 
             odor_s = (rows["odor_end"] - rows["odor_start"]).dt.total_seconds()

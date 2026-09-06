@@ -36,6 +36,9 @@ INFO_FOLDER = ".odyn/olfactometer/Log/Info"
 #   - its own files (scripts, outputs, movies) in '<main_folder>/projects/<name>'
 PROJECTS_FOLDER = "projects"
 
+# Where saved results go, under the project folder or the main folder
+OUTPUTS_FOLDER = "outputs"
+
 # Default wait before "database locked"
 DB_TIMEOUT_S = 30
 

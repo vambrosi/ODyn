@@ -277,6 +277,18 @@ class Database(CallRecorder):
         return self._acquisitions
 
     @property
+    def outputs_folder(self) -> Path:
+        """
+        Where functions of this database save what they produce
+
+        The project's own `outputs` folder when the database belongs to one,
+        and the main folder's otherwise. It is made when something is saved.
+        """
+        root = self.main_folder if self.project is None else self.project_folder
+
+        return root / OUTPUTS_FOLDER
+
+    @property
     def acquisition_trials(self) -> pd.DataFrame:
         """
         `DataFrame` with each acquisition beside the trial it recorded
