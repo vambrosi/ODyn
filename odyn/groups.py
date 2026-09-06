@@ -2274,6 +2274,43 @@ class Group(CallRecorder):
 
         return first, last, frame_rate
 
+    def _common_movie(
+        self,
+        acq_id: int,
+        photobleach_window_s: float,
+        only_approved: bool = True,
+    ) -> np.ndarray:
+        """
+        Loads only the `_common_frames` of an acquisition.
+
+        Every acquisition comes back with same length and aligned on its own odor
+        onset, so frame `i` is the same moment in all of them.
+        """
+        usable = self._mcors(only_approved)
+
+        # Check here because .loc would only say "KeyError: <acq_id>"
+        if acq_id not in usable.index:
+            added = "approved " if only_approved else ""
+            raise KeyError(f"Acquisition {acq_id} has no {added}mcor file in {self!r}.")
+
+        first, last, frame_rate = self._common_frames(
+            photobleach_window_s, only_approved
+        )
+
+        onset_delay = cast(
+            datetime, self.acquisitions.loc[acq_id, "odor_start"]
+        ) - cast(datetime, self.acquisitions.loc[acq_id, "acq_start"])
+
+        onset_frame = int(round(onset_delay.total_seconds() * frame_rate))
+
+        path = self.db.main_folder / cast(str, usable.loc[acq_id, "mcor_path"])
+
+        # Reading the window directly keeps the rest of the movie out of RAM.
+        with tifffile.TiffFile(path) as tif:
+            return tif.asarray(
+                key=slice(onset_frame + first, onset_frame + last + 1)
+            ).astype(np.float32)
+
     def z_score_acquisition(
         self,
         *,
@@ -2291,37 +2328,20 @@ class Group(CallRecorder):
         ```
 
         Each pixel is compared to how much it varied before the odor
-        presentation and after the photobleaching window. Frames indices are
-        relative to the acquisition odor onset, and the same range is used
-        for every acquisition of the group, so the results can be averaged.
+        presentation and after the photobleaching window.
+
+        **ALERTS**
+
+        Outputs of this function use a common set of frames relative
+        to odor onset, so results can be averaged across the group.
 
         Frames are not smoothed over time, differently from the MATLAB script.
         (Averaging leaves far fewer frames to measure the noise from.)
         """
-        usable = self._mcors(only_approved)
-
-        # Check here because .loc would only say "KeyError: <acq_id>"
-        if acq_id not in usable.index:
-            added = {"approved " if only_approved else ""}
-            raise KeyError(f"Acquisition {acq_id} has no {added}mcor file in {self!r}.")
-
         # Redoes the computation for every acquisition, but that is fast.
-        first, last, frame_rate = self._common_frames(
-            photobleach_window_s, only_approved
-        )
+        first, _, _ = self._common_frames(photobleach_window_s, only_approved)
 
-        onset_delay = cast(
-            datetime, self.acquisitions.loc[acq_id, "odor_start"]
-        ) - cast(datetime, self.acquisitions.loc[acq_id, "acq_start"])
-
-        onset_frame = int(round(onset_delay.total_seconds() * frame_rate))
-
-        path = self.db.main_folder / cast(str, usable.loc[acq_id, "mcor_path"])
-
-        with tifffile.TiffFile(path) as tif:
-            movie = tif.asarray(
-                key=slice(onset_frame + first, onset_frame + last + 1)
-            ).astype(np.float32)
+        movie = self._common_movie(acq_id, photobleach_window_s, only_approved)
 
         # The odor starts at index -first, so everything before it is baseline
         baseline = movie[:-first]
@@ -2330,6 +2350,121 @@ class Group(CallRecorder):
         z_score = (movie - baseline.mean(axis=0)) / np.where(spread > 0, spread, 1)
 
         return np.nan_to_num(z_score, nan=0.0, posinf=0.0, neginf=0.0)
+
+    @record_call
+    def save_roi_traces(
+        self,
+        *,
+        photobleach_window_s: float = 1.0,
+        only_approved: bool = True,
+    ) -> None:
+        """
+        Save the average brightness of every ROI (per acquisition/frame)
+
+        **USAGE**
+        ```python
+            group = db.groups[some_index]
+            group.import_mask(mask_path="projects/PA_K99/outputs/masks.h5")
+            group.save_roi_traces()
+        ```
+
+        **PARAMETERS**
+        - `photobleach_window_s`: seconds dropped from the start
+        - `only_approved`: use only approved motion corrections
+
+        Saves one HDF5 file, in the project's `outputs` folder, with:
+        - the signal `F` with shape acquisition x frame x ROI;
+        - `times` with the frames time in seconds relative to odor onset;
+        - `acq_ids` and `roi_labels`, saying what the other two axes are.
+
+        **TIPS**
+
+        `F[:, times < 0, :]` picks the baseline frames to compare against.
+
+        `acq_ids` is in the order the acquisitions were recorded, so
+        ```
+        F.reshape(-1, len(roi_labels))
+        ```
+        is the whole session in order, one row per frame and one column per ROI.
+        """
+
+        folder = self.db.project_folder / "outputs"
+        folder.mkdir(parents=True, exist_ok=True)
+
+        labels_image, mask = self.mask_labels()
+        labels = np.asarray(mask["labels"], dtype=np.intp)
+
+        # One pass per frame instead of one per ROI, and indexing by label
+        # keeps it right when the mask is not numbered 1..n
+        flat_labels = labels_image.ravel().astype(np.intp)
+        sizes = np.bincount(flat_labels)
+
+        first, last, frame_rate = self._common_frames(
+            photobleach_window_s, only_approved
+        )
+
+        # Sorted so the first axis is the session in the order it was recorded.
+        usable = self.acquisitions.loc[self._mcors(only_approved).index]
+        usable = usable.sort_values("acq_start")
+
+        # We need odor onsets to align frames so we leave out acquisitions
+        # that don't have those (same as '_common_frames').
+        chosen = list(usable[usable["odor_start"].notna()].index)
+        no_starts = list(usable[usable["odor_start"].isna()].index)
+
+        if no_starts:
+            logger.warning(
+                f"Acquisitions {no_starts} have no odor onsets. "
+                f"Leaving them out because they can't be aligned."
+            )
+
+        traces = np.empty((len(chosen), last - first + 1, len(labels)), np.float32)
+
+        logger.info(
+            f"Shape: {len(chosen)} acquisitions "
+            f"x {traces.shape[1]} frames "
+            f"x {len(labels)} ROIs."
+        )
+
+        times = (np.arange(first, last + 1) / frame_rate).astype(float)
+        logger.info(
+            f"Time span (relative to odor onset): "
+            f"{times[0]:.2f} s --> {times[-1]:.2f} s"
+        )
+
+        for index, acq_id in enumerate(tqdm(chosen, desc="Reading acquisitions")):
+            movie = self._common_movie(int(acq_id), photobleach_window_s, only_approved)
+
+            for frame, picture in enumerate(movie):
+                sums = np.bincount(
+                    flat_labels,
+                    weights=picture.ravel(),
+                    minlength=sizes.size,
+                )
+                traces[index, frame, :] = sums[labels] / sizes[labels]
+
+            del movie
+
+        path = folder / f"group{self.group_id}_roi_traces_{self.current_call_id}.h5"
+
+        with h5py.File(path, "w") as handle:
+            handle.create_dataset("F", data=traces)
+            handle.create_dataset("times", data=times)
+            handle.create_dataset("acq_ids", data=np.asarray(chosen, dtype=np.int64))
+            handle.create_dataset("roi_labels", data=labels.astype(np.int64))
+
+            handle.attrs["group_id"] = self.group_id
+            handle.attrs["frame_rate"] = frame_rate
+            handle.attrs["photobleach_s"] = photobleach_window_s
+            handle.attrs["method_call_id"] = self.current_call_id
+            handle.attrs["mask_path"] = mask["mask_path"]
+
+        self.add_output_file(path)
+        self.update_parameters_used(
+            {"frame_rate": frame_rate, "acquisitions": len(chosen)}
+        )
+
+        logger.info(f"Saved '{path}'.")
 
     def z_score_average_movies(
         self, *, photobleach_window_s: float = 1.0, only_approved: bool = True
