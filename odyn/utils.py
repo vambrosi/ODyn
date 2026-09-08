@@ -135,9 +135,9 @@ class CallRecorder:
 # - Some acquisitions don't have trials (thus, we use LEFT JOIN);
 # - At most one trial per acquisition, so no row-splitting.
 #
-# 'a.*' rather than a column list, so a new column of 'acquisitions' shows up
-# here on its own. The trial columns are named, both to leave out the two that
-# would collide ('acq_id', 'exp_id') and to rename the odor window.
+# NOTES:
+# - 'a.*' rather than a column list, to allow for new columns;
+# - trial columns are named to leave out some and rename other collisions.
 
 ACQUISITION_TRIALS = """
     SELECT a.*
@@ -181,10 +181,10 @@ def _acquisition_trials(
     """
     Shared body of `Database.acquisition_trials` / `Group.acquisition_trials`.
 
-    Both tables time the odor: the acquisition from the H5 and the trial from
-    the olfactometer, a few milliseconds apart. They are named apart so that
-    picking one is a decision rather than an accident, and so that a difference
-    is always measured against a time from the same clock.
+    When used with the queries above, it returns a left join between the
+    acquisitions and trials tables. Both have odor window timings, which come
+    from the H5 + TIFF metadata and the olfactometer events, respectively.
+    Those can disagree significantly, so they are all kept in the join.
     """
     frame = pd.read_sql_query(
         query,
