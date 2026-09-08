@@ -134,16 +134,38 @@ class CallRecorder:
 # ASSUMPTIONS:
 # - Some acquisitions don't have trials (thus, we use LEFT JOIN);
 # - At most one trial per acquisition, so no row-splitting.
+#
+# 'a.*' rather than a column list, so a new column of 'acquisitions' shows up
+# here on its own. The trial columns are named, both to leave out the two that
+# would collide ('acq_id', 'exp_id') and to rename the odor window.
 
 ACQUISITION_TRIALS = """
-    SELECT a.*, t.trial_id, t.odor_id, t.outcome, t.program_id, p.program_type
+    SELECT a.*
+         , t.trial_id
+         , t.trial_start
+         , t.odor_start AS trial_odor_start
+         , t.odor_end   AS trial_odor_end
+         , t.odor_id
+         , t.outcome
+         , t.h5_to_trial_ms
+         , t.program_id
+         , p.program_type
         FROM acquisitions AS a
         LEFT JOIN trials   AS t ON t.acq_id = a.acq_id
         LEFT JOIN programs AS p ON p.program_id = t.program_id;
 """
 
 GROUP_ACQUISITION_TRIALS = """
-    SELECT a.*, t.trial_id, t.odor_id, t.outcome, t.program_id, p.program_type
+    SELECT a.*
+         , t.trial_id
+         , t.trial_start
+         , t.odor_start AS trial_odor_start
+         , t.odor_end   AS trial_odor_end
+         , t.odor_id
+         , t.outcome
+         , t.h5_to_trial_ms
+         , t.program_id
+         , p.program_type
         FROM group_experiments AS g
         JOIN experiments   AS e ON e.exp_id = g.exp_id
         JOIN acquisitions  AS a ON a.exp_id = e.exp_id
@@ -156,12 +178,31 @@ GROUP_ACQUISITION_TRIALS = """
 def _acquisition_trials(
     con: Connection, query: str, params: list = []
 ) -> pd.DataFrame:
-    """Shared body of `Database.acquisition_trials` / `Group.acquisition_trials`."""
+    """
+    Shared body of `Database.acquisition_trials` / `Group.acquisition_trials`.
+
+    Both tables time the odor: the acquisition from the H5 and the trial from
+    the olfactometer, a few milliseconds apart. They are named apart so that
+    picking one is a decision rather than an accident, and so that a difference
+    is always measured against a time from the same clock.
+    """
     frame = pd.read_sql_query(
         query,
         con,
         params=params,
-        parse_dates=["acq_start", "odor_start", "odor_end"],
+        # Names as the query returns them, before the rename below
+        parse_dates=[
+            "acq_start",
+            "odor_start",
+            "odor_end",
+            "trial_start",
+            "trial_odor_start",
+            "trial_odor_end",
+        ],
+    )
+
+    frame = frame.rename(
+        columns={"odor_start": "acq_odor_start", "odor_end": "acq_odor_end"}
     )
     frame.set_index("acq_id", inplace=True)
 

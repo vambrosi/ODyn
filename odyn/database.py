@@ -296,6 +296,12 @@ class Database(CallRecorder):
         Every acquisition holds at most one trial, so this adds the odor, the
         outcome and the program to each one without ever splitting a row.
         Acquisitions with no trial are kept, with those columns empty.
+
+        Both sides time the odor, from different clocks, so they are named
+        apart: `acq_odor_start` and `acq_odor_end` come from the H5, and
+        `trial_odor_start` and `trial_odor_end` from the olfactometer.
+
+        To compute `events` timedeltas use the trial (olfactometer) timings.
         """
         self._refresh_if_stale()
 

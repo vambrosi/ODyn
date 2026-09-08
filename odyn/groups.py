@@ -290,6 +290,12 @@ class Group(CallRecorder):
     def acquisition_trials(self) -> pd.DataFrame:
         """
         `DataFrame` with each acquisition beside the trial that triggered it.
+
+        Both sides time the odor, from different clocks, so they are named
+        apart: `acq_odor_start` and `acq_odor_end` come from the H5, and
+        `trial_odor_start` and `trial_odor_end` from the olfactometer.
+
+        To compute `events` timedeltas use the trial (olfactometer) timings.
         """
         self.db._refresh_if_stale()
 
