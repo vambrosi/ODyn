@@ -48,86 +48,9 @@ type BasicTypes = None | bool | int | float | str | datetime
 type Value = BasicTypes | Object | Sequence[Value]
 type Object = dict[str, Value]
 
-
 # --------------------------------------------------------------------------- #
-# Call Recording
+# Database queries
 # --------------------------------------------------------------------------- #
-
-
-class CallFlag(IntFlag):
-    """
-    Flags set automatically by @record_call.
-
-    Bit 0 is reserved. Per-function enums should start at 1 << 1.
-    """
-
-    SUCCESS = 0
-    RAISED = 1 << 0
-
-
-@dataclass
-class CallFrame:
-    """Per-call scratch state pushed onto self._call_stack by @record_call."""
-
-    call_id: int
-    flag: int = 0
-    output: Object | None = None
-    used: Object = field(default_factory=dict)
-
-
-class CallRecorder:
-    """
-    `@record_call` helpers shared by `Database` and `Group`.
-
-    Subclasses initialize `_call_stack` and `_outputs`.
-    """
-
-    _call_stack: list[CallFrame]
-
-    @property
-    def _recording_db(self) -> Database:
-        """The `Database` that owns the connection (self for `Database`)."""
-        return getattr(self, "db", self)
-
-    @property
-    def current_call_id(self) -> int:
-        assert (
-            self._call_stack
-        ), "'current_call_id' is only available inside a '@record_call'"
-        return self._call_stack[-1].call_id
-
-    def add_flag(self, flag) -> None:
-        """Set bits on the current call's flag (bitwise OR). Use inside `@record_call`."""
-        self._call_stack[-1].flag |= int(flag)
-
-    def set_output(self, output: Object) -> None:
-        """Record this call's output as JSON. Overwrite previous outputs."""
-        self._call_stack[-1].output = output
-
-    def update_parameters_used(self, params: Object) -> None:
-        """Merge values into this call's parameters_used. Use inside `@record_call`."""
-        self._call_stack[-1].used.update(params)
-
-    def fail(self, flag, message: str = "") -> None:
-        """Flag the current call and abort it by raising RuntimeError."""
-        self.add_flag(flag)
-        raise RuntimeError(message)
-
-    def add_output_file(self, path: str | Path) -> None:
-        """Record a file in `outputs` (path relative to main_folder)."""
-        db = self._recording_db
-        rel_path = Path(path).relative_to(db.main_folder).as_posix()
-
-        with db.con as con:
-            con.execute(
-                "INSERT INTO outputs (method_call_id, file_path, removed) VALUES (?, ?, FALSE);",
-                [self.current_call_id, rel_path],
-            )
-
-        # The outputs table is shared, so drop both cached views.
-        self._outputs = None
-        db._outputs = None
-
 
 # Two ways of accessing the same view, kept together so drifts are visible.
 #
@@ -240,6 +163,86 @@ def _method_calls_dataframe(con: Connection, query: str, params: list) -> pd.Dat
         ],
         axis=1,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Call Recording
+# --------------------------------------------------------------------------- #
+
+
+class CallFlag(IntFlag):
+    """
+    Flags set automatically by @record_call.
+
+    Bit 0 is reserved. Per-function enums should start at 1 << 1.
+    """
+
+    SUCCESS = 0
+    RAISED = 1 << 0
+
+
+@dataclass
+class CallFrame:
+    """Per-call scratch state pushed onto self._call_stack by @record_call."""
+
+    call_id: int
+    flag: int = 0
+    output: Object | None = None
+    used: Object = field(default_factory=dict)
+
+
+class CallRecorder:
+    """
+    `@record_call` helpers shared by `Database` and `Group`.
+
+    Subclasses initialize `_call_stack` and `_outputs`.
+    """
+
+    _call_stack: list[CallFrame]
+
+    @property
+    def _recording_db(self) -> Database:
+        """The `Database` that owns the connection (self for `Database`)."""
+        return getattr(self, "db", self)
+
+    @property
+    def current_call_id(self) -> int:
+        assert (
+            self._call_stack
+        ), "'current_call_id' is only available inside a '@record_call'"
+        return self._call_stack[-1].call_id
+
+    def add_flag(self, flag) -> None:
+        """Set bits on the current call's flag (bitwise OR). Use inside `@record_call`."""
+        self._call_stack[-1].flag |= int(flag)
+
+    def set_output(self, output: Object) -> None:
+        """Record this call's output as JSON. Overwrite previous outputs."""
+        self._call_stack[-1].output = output
+
+    def update_parameters_used(self, params: Object) -> None:
+        """Merge values into this call's parameters_used. Use inside `@record_call`."""
+        self._call_stack[-1].used.update(params)
+
+    def fail(self, flag, message: str = "") -> None:
+        """Flag the current call and abort it by raising RuntimeError."""
+        self.add_flag(flag)
+        raise RuntimeError(message)
+
+    def add_output_file(self, path: str | Path) -> None:
+        """Record a file in `outputs` (path relative to main_folder)."""
+        db = self._recording_db
+        rel_path = Path(path).relative_to(db.main_folder).as_posix()
+
+        with db.con as con:
+            con.execute(
+                "INSERT INTO outputs (method_call_id, file_path, removed) VALUES (?, ?, FALSE);",
+                [self.current_call_id, rel_path],
+            )
+
+        # The outputs table is shared, so drop both cached views.
+        self._outputs = None
+        db._outputs = None
 
 
 def record_call(func):
