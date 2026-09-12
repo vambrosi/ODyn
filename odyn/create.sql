@@ -340,7 +340,9 @@ CREATE INDEX IF NOT EXISTS annotations_target
 -- Coupled to the data section by `group_id` alone (see `groups` table).
 --
 -- NOTES:
--- - `group_id` can be NULL, e.g. annotations that are not about groups;
+-- - `group_id` is which object recorded the call, not what the call is about.
+-- Only `Database` and `Group` record calls, and group 0 is the `Database`'s own
+-- row, seeded when the file is created (no third option currently, so NOT NULL).
 -- - `user` = OS user, for now (wrong for always-logged-in computers);
 -- - `module` says which repo code came from (func.__module__);
 -- - `code` holds commit hashes and if there are uncommitted edits for repos.
@@ -352,7 +354,7 @@ CREATE INDEX IF NOT EXISTS annotations_target
 
 CREATE TABLE IF NOT EXISTS method_calls
     ( method_call_id    INTEGER PRIMARY KEY
-    , group_id          INTEGER
+    , group_id          INTEGER NOT NULL
     , user              TEXT NOT NULL
     , called_at         TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     , method_name       TEXT NOT NULL
