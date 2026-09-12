@@ -494,14 +494,21 @@ class Group(CallRecorder):
 
         row = self.db.con.execute(
             """
-            SELECT call_output FROM method_calls
+            SELECT method_call_id, call_output FROM method_calls
                 WHERE group_id = ? AND method_name = ? AND call_output IS NOT NULL
                 ORDER BY method_call_id DESC LIMIT 1
             """,
             [self.group_id, method_name],
         ).fetchone()
 
-        return json.loads(row["call_output"]) if row else None
+        if row is None:
+            return None
+
+        # Link the call that produced this value to the call reading it, so the
+        # tree of what fed what can be walked later.
+        self.note_consumed(row["method_call_id"])
+
+        return json.loads(row["call_output"])
 
     # ----------------------------------------------------------------------- #
     # Private Methods

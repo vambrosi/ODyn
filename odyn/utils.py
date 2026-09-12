@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import functools
+import getpass
+import inspect
 import json
 import logging
+import os
+import platform
 import subprocess
+import sys
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -62,70 +67,86 @@ type Object = dict[str, Value]
 # - 'a.*' rather than a column list, to allow for new columns;
 # - trial columns are named to leave out some and rename other collisions.
 
-ACQUISITION_TRIALS = """
-    SELECT a.*
-         , t.trial_id
-         , t.trial_start
-         , t.odor_start AS trial_odor_start
-         , t.odor_end   AS trial_odor_end
-         , t.odor_id
-         , t.outcome
-         , t.h5_to_trial_ms
-         , t.program_id
-         , p.program_type
-        FROM acquisitions AS a
-        LEFT JOIN trials   AS t ON t.acq_id = a.acq_id
-        LEFT JOIN programs AS p ON p.program_id = t.program_id;
+_SYNC_COLUMNS = """
+           , s.sync_block
+           , s.sync_frame_count
+           , s.sync_odor_on_frame
+           , s.sync_odor_off_frame
+           , s.sync_odor_residual_s
+           , s.sync_odor_start
+           , s.sync_odor_end
+           , s.sync_camera_frames
+           , s.clock_offset_ms
 """
 
-GROUP_ACQUISITION_TRIALS = """
+# Not 's.*': that would bring a second `acq_id` into the frame, and
+# `method_call_id` means the decode's call here, not the acquisition's.
+
+ACQUISITION_TRIALS = f"""
     SELECT a.*
          , t.trial_id
          , t.trial_start
-         , t.odor_start AS trial_odor_start
-         , t.odor_end   AS trial_odor_end
+         , t.trial_odor_start
+         , t.trial_odor_end
          , t.odor_id
          , t.outcome
-         , t.h5_to_trial_ms
+         , t.sync_to_trial_ms
          , t.program_id
          , p.program_type
+         {_SYNC_COLUMNS}
+        FROM acquisitions AS a
+        LEFT JOIN trials            AS t ON t.acq_id = a.acq_id
+        LEFT JOIN programs          AS p ON p.program_id = t.program_id
+        LEFT JOIN acquisition_sync  AS s ON s.acq_id = a.acq_id;
+"""
+
+GROUP_ACQUISITION_TRIALS = f"""
+    SELECT a.*
+         , t.trial_id
+         , t.trial_start
+         , t.trial_odor_start
+         , t.trial_odor_end
+         , t.odor_id
+         , t.outcome
+         , t.sync_to_trial_ms
+         , t.program_id
+         , p.program_type
+         {_SYNC_COLUMNS}
         FROM group_experiments AS g
         JOIN experiments   AS e ON e.exp_id = g.exp_id
         JOIN acquisitions  AS a ON a.exp_id = e.exp_id
-        LEFT JOIN trials   AS t ON t.acq_id = a.acq_id
-        LEFT JOIN programs AS p ON p.program_id = t.program_id
+        LEFT JOIN trials            AS t ON t.acq_id = a.acq_id
+        LEFT JOIN programs          AS p ON p.program_id = t.program_id
+        LEFT JOIN acquisition_sync  AS s ON s.acq_id = a.acq_id
         WHERE g.group_id = ?;
 """
 
 
-def _acquisition_trials(
-    con: Connection, query: str, params: list = []
-) -> pd.DataFrame:
+def _acquisition_trials(con: Connection, query: str, params: list = []) -> pd.DataFrame:
     """
     Shared body of `Database.acquisition_trials` / `Group.acquisition_trials`.
 
-    When used with the queries above, it returns a left join between the
-    acquisitions and trials tables. Both have odor window timings, which come
-    from the H5 + TIFF metadata and the olfactometer events, respectively.
-    Those can disagree significantly, so they are all kept in the join.
+    When used with the queries above, it joins acquisitions to their trial and
+    to the sync file's view of the same acquisition. Two odor windows are kept
+    side by side on purpose: `trial_odor_*` is what the olfactometer program
+    logged, `sync_odor_*` is the valve TTL the DAQ actually saw. They can
+    disagree, and which one is right is the caller's question, not this one's.
+
+    Both LEFT JOINs can miss: an acquisition may have no trial, and it has no
+    sync row until the sync file has been copied over and decoded.
     """
     frame = pd.read_sql_query(
         query,
         con,
         params=params,
-        # Names as the query returns them, before the rename below
         parse_dates=[
             "acq_start",
-            "odor_start",
-            "odor_end",
             "trial_start",
             "trial_odor_start",
             "trial_odor_end",
+            "sync_odor_start",
+            "sync_odor_end",
         ],
-    )
-
-    frame = frame.rename(
-        columns={"odor_start": "acq_odor_start", "odor_end": "acq_odor_end"}
     )
     frame.set_index("acq_id", inplace=True)
 
@@ -189,6 +210,9 @@ class CallFrame:
     flag: int = 0
     output: Object | None = None
     used: Object = field(default_factory=dict)
+    # method_call_ids this call read through `latest_output`. Collected while
+    # the call is live because it cannot be reconstructed afterwards.
+    consumed: list[int] = field(default_factory=list)
 
 
 class CallRecorder:
@@ -228,6 +252,13 @@ class CallRecorder:
         """Flag the current call and abort it by raising RuntimeError."""
         self.add_flag(flag)
         raise RuntimeError(message)
+
+    def note_consumed(self, call_id: int) -> None:
+        """Record that this call read another call's output (message passing)."""
+        # Silent outside a recorded call: `latest_output` is also usable on its
+        # own from a notebook, and that is not a provenance event.
+        if self._call_stack and call_id not in self._call_stack[-1].consumed:
+            self._call_stack[-1].consumed.append(call_id)
 
     def add_output_file(self, path: str | Path) -> None:
         """Record a file in `outputs` (path relative to main_folder)."""
@@ -273,23 +304,33 @@ def record_call(func):
         # methods may change them during the call.
         parameters_used = {**(func.__kwdefaults__ or {}), **kwargs}
 
+        # Who called in, for `get_code`: a script in a project repository is the
+        # case worth catching. See `_caller_file` for why it is not frame 1.
+        caller_file = _caller_file()
+
         with db.con as con:
             cur = con.cursor()
             cur.execute(
                 """
                 INSERT INTO method_calls
                     ( group_id
+                    , user
                     , method_name
+                    , module
+                    , code
+                    , environment
                     , parameter_inputs
-                    , git_commit
                     , parameters_used
-                    ) VALUES (?, ?, ?, ?, ?);
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 [
                     self.group_id,
+                    get_user(),
                     f"{type(self).__name__}.{func.__name__}",
+                    func.__module__,
+                    json.dumps(get_code(func, caller_file)),
+                    json.dumps(get_environment()),
                     json.dumps(kwargs),
-                    get_git_hash(),
                     json.dumps(parameters_used),
                 ],
             )
@@ -326,6 +367,7 @@ def record_call(func):
                           , call_flag = ?
                           , call_output = ?
                           , parameters_used = ?
+                          , consumed_calls = ?
                         WHERE method_call_id = ?
                     """,
                     [
@@ -333,6 +375,7 @@ def record_call(func):
                         int(frame.flag),
                         call_output,
                         json.dumps(frame.used),
+                        json.dumps(frame.consumed) if frame.consumed else None,
                         call_id,
                     ],
                 )
@@ -382,23 +425,127 @@ if not logger.handlers:
     logger.addHandler(_console_handler)
 
 
-# TODO: - Add failsafe in case git is not on the path
-#       - Embed commit hash in pip installation
-def get_git_hash():
-    try:
-        # Get odyn path
-        package_root = Path(__file__).resolve().parent.parent
+# --------------------------------------------------------------------------- #
+# Provenance
+# --------------------------------------------------------------------------- #
+#
+# What `method_calls` stores about *who and what* ran, as opposed to the
+# parameters. Everything below is cached per process.
 
-        # Get commit hash for that directory
+
+ODYN_ROOT = Path(__file__).resolve().parent.parent
+
+# Read for `environment`. Distribution names, not import names, so nothing here
+# gets imported. Several spellings per package because conda and pip disagree.
+# The first one found wins.
+ENVIRONMENT_PACKAGES = {
+    "numpy": ("numpy",),
+    "pandas": ("pandas",),
+    "scipy": ("scipy",),
+    "opencv": ("opencv-python", "opencv-python-headless", "opencv"),
+    "caiman": ("caiman",),
+    "tifffile": ("tifffile",),
+    "h5py": ("h5py",),
+}
+
+
+def get_user() -> str:
+    """User running the function. `ODYN_USER` is used if set."""
+
+    # Multiple users using the same login, set `ODYN_USER` to resolve this
+    # ambiguity. Otherwise, default to the computer user.
+    return os.environ.get("ODYN_USER") or getpass.getuser()
+
+
+@functools.cache
+def _repo_state(folder: str) -> None | tuple[str, Object]:
+    """`(name, {commit, dirty})` of the git work tree holding `folder`."""
+
+    def git(*args: str, cwd: str) -> str:
         return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=package_root,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
+            ["git", *args], cwd=cwd, stderr=subprocess.DEVNULL, text=True
+        )
+
+    try:
+        root = git("rev-parse", "--show-toplevel", cwd=folder).strip()
+        commit = git("rev-parse", "HEAD", cwd=root).strip()
+        changes = git("status", "--porcelain", cwd=root)
 
     except Exception:
-        return "unknown-hash"
+        # No git, not a repository, or an installed copy with no history.
+        return None
+
+    return Path(root).name, {"commit": commit, "dirty": bool(changes.strip())}
+
+
+def _caller_file() -> None | str:
+    """
+    The file that called into odyn, skipping odyn's own decorator frames.
+    """
+    # Wrappers like `@memorize_params` sitting outside of `@record_call`
+    # necessitate the logic below.
+    frame = sys._getframe(1)
+
+    while frame is not None and frame.f_code.co_filename == __file__:
+        frame = frame.f_back
+
+    return frame.f_code.co_filename if frame is not None else None
+
+
+def get_code(func, caller_file: None | str = None) -> Object:
+    """
+    Which code ran, per repository: `{name: {commit, dirty}}`.
+
+    Three places are asked (since call might involve multiple repos): where
+    the method is defined, odyn itself, and whoever called it.
+
+    `dirty` to see if code was ran without being committed.
+    """
+    folders = []
+
+    try:
+        folders.append(Path(inspect.getfile(func)).resolve().parent)
+
+    except TypeError:
+        pass  # Built-in or otherwise has no source file.
+
+    folders.append(ODYN_ROOT)
+
+    # Notebooks and the REPL give '<stdin>'-style names whose 'parent' is the
+    # working directory, which may be an unrelated repository. Skip those.
+    if caller_file and Path(caller_file).is_file():
+        folders.append(Path(caller_file).resolve().parent)
+
+    code: Object = {}
+
+    for folder in folders:
+        state = _repo_state(str(folder))
+
+        if state is not None:
+            name, info = state
+            code.setdefault(name, info)
+
+    return code
+
+
+@functools.cache
+def get_environment() -> Object:
+    """
+    Versions of the packages that have caused trouble before.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    found: Object = {"python": platform.python_version()}
+
+    for name, candidates in ENVIRONMENT_PACKAGES.items():
+        for candidate in candidates:
+            try:
+                found[name] = version(candidate)
+                break
+            except PackageNotFoundError:
+                continue
+
+    return found
 
 
 # --------------------------------------------------------------------------- #
