@@ -29,9 +29,18 @@ from .utils import DB_TIMEOUT_S, ODYN_FOLDER, logger
 # - Overwrite latest.sql with the latest migration;
 # - Overwrite create.sql with compatible DB schema;
 # - Bump the SCHEMA_VERSION to match;
+# - Set MIGRATES_FROM to the version it upgrades;
 # - Run this script and test_migration.py.
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# Which version `latest.sql` upgrades from, or None when a version is a rebuild
+# rather than a migration. For example, v3 is a rebuild (too many changes to
+# make sense migrating, so we started new databases and keep the old ones
+# readable with tagged older code).
+
+MIGRATES_FROM: None | int = None
+
 LATEST_MIGRATION = Path(__file__).parent / "latest.sql"
 
 CREATE_SCRIPT = Path(__file__).parent / "create.sql"
@@ -40,7 +49,7 @@ SCHEMA_DIAGRAM = Path(__file__).parent / "schema.svg"
 
 
 def migrate(main_folder: str | Path) -> None:
-    """Migrate DB from v(SCHEMA_VERSION-1) up to vSCHEMA_VERSION."""
+    """Migrate DB from vMIGRATES_FROM up to vSCHEMA_VERSION."""
 
     db_path = Path(main_folder) / ODYN_FOLDER / "odyn.db"
     if not db_path.exists():
@@ -58,8 +67,14 @@ def migrate(main_folder: str | Path) -> None:
             logger.info(f"Database already at v{SCHEMA_VERSION}.")
             return
 
-        if version != SCHEMA_VERSION - 1:
-            raise RuntimeError(f"Expected v{SCHEMA_VERSION - 1} but got v{version}")
+        if MIGRATES_FROM is None:
+            raise RuntimeError(
+                f"Schema v{SCHEMA_VERSION} is a rebuild, not a migration, so "
+                f"there is no upgrade path from v{version}."
+            )
+
+        if version != MIGRATES_FROM:
+            raise RuntimeError(f"Expected v{MIGRATES_FROM} but got v{version}")
 
         check_integrity(con)
 

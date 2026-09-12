@@ -1,19 +1,23 @@
 -- Valid-chain insertion check (expected to SUCCEED).
 --
--- A consistent experiment -> program / acquisition -> trial -> event chain, all
--- on the same experiment, must insert without error.
+-- A consistent session -> experiment -> program / acquisition -> trial -> event
+-- chain, all on the same experiment, must insert without error.
+--
+-- Literal SQL on purpose: the schema is what this file tests, so it has to be
+-- updated by hand when the schema changes.
 PRAGMA foreign_keys = ON;
 
+INSERT INTO sessions (session_id, mouse_id, session_date, session_path)
+    VALUES (1, 'm1', '2025-02-01', '20250201/m1');
+
 INSERT INTO experiments
-    ( exp_name, exp_type, exp_start
-    , mouse_id, height_px, width_px, height_um, width_um
-    , frame_count, frame_rate, laser_power_920, laser_power_1040
-    , loop_acq_interval_s
+    ( session_id, exp_name, exp_type, exp_start
+    , height_px, width_px, height_um, width_um
+    , frame_count, frame_rate
     ) VALUES
-        ( 'e1', 'loop', '2025-02-01 00:00:00'
-        , 'm1', 100, 200, 300, 400
-        , 30, 60, 0, 8
-        , 2.0
+        ( 1, 'e1', 'loop', '2025-02-01 00:00:00'
+        , 100, 200, 300, 400
+        , 30, 60
         );
 
 INSERT INTO programs (exp_id, program_name, program_type, program_start, program_path)
@@ -24,10 +28,10 @@ INSERT INTO acquisitions (exp_id, acq_start, raw_path)
 
 INSERT INTO trials
     ( trial_start
-    , odor_start
-    , odor_end
+    , trial_odor_start
+    , trial_odor_end
     , odor_id, outcome
-    , acq_id, h5_to_trial_ms
+    , acq_id, sync_to_trial_ms
     , program_id, exp_id
     ) VALUES
         ( '2025-02-01 00:00:00'

@@ -1,6 +1,10 @@
 """
 Guards against create.sql / migration drift: a fresh DB built from create.sql
 must have the same schema as an old DB walked forward by the migration runner.
+
+When a version is a rebuild rather than a migration (`MIGRATES_FROM is None`)
+there is nothing to walk forward, so those tests skip and only the refusal is
+checked.
 """
 
 import re
@@ -10,13 +14,23 @@ from pathlib import Path
 
 import pytest
 
-from odyn.migrate import SCHEMA_VERSION, migrate
+from odyn.migrate import MIGRATES_FROM, SCHEMA_VERSION, migrate
 
 ODYN_FOLDER = ".odyn"
 PACKAGE = Path(__file__).resolve().parents[1] / "odyn"
 
 CREATE_SQL = PACKAGE / "create.sql"
 PREVIOUS_SCHEMA = Path(__file__).parent / "previous_schema.sql"
+
+# Marks the tests that walk an old database forward, which only mean anything
+# when there is something to walk. A rebuild version (MIGRATES_FROM is None)
+# skips them rather than deleting them: the drift check is what catches
+# create.sql and latest.sql disagreeing, and it is wanted again at the next
+# real migration.
+needs_migration = pytest.mark.skipif(
+    MIGRATES_FROM is None,
+    reason=f"schema v{SCHEMA_VERSION} is a rebuild; there is no migration to test",
+)
 
 
 def normalize(sql: str | None) -> str:
@@ -62,6 +76,7 @@ def build(db_path: Path, script: Path, version: int) -> None:
         con.close()
 
 
+@needs_migration
 def test_migration_matches_fresh_schema(tmp_path):
     fresh = tmp_path / "fresh.db"
     build(fresh, CREATE_SQL, SCHEMA_VERSION)
@@ -69,7 +84,7 @@ def test_migration_matches_fresh_schema(tmp_path):
     main_folder = tmp_path / "main"
     (main_folder / ODYN_FOLDER).mkdir(parents=True)
     old = main_folder / ODYN_FOLDER / "odyn.db"
-    build(old, PREVIOUS_SCHEMA, SCHEMA_VERSION - 1)
+    build(old, PREVIOUS_SCHEMA, MIGRATES_FROM)
 
     migrate(main_folder)
 
@@ -166,7 +181,7 @@ def migrated_db(tmp_path):
     (main_folder / ODYN_FOLDER).mkdir(parents=True)
 
     old = main_folder / ODYN_FOLDER / "odyn.db"
-    build(old, PREVIOUS_SCHEMA, SCHEMA_VERSION - 1)
+    build(old, PREVIOUS_SCHEMA, MIGRATES_FROM)
 
     con = sqlite3.connect(old)
 
@@ -181,6 +196,7 @@ def migrated_db(tmp_path):
     return old
 
 
+@needs_migration
 def test_migration_normalizes_stored_paths(tmp_path):
     """
     Paths are stored relative to main_folder so the DB works from any machine,
@@ -202,6 +218,7 @@ def test_migration_normalizes_stored_paths(tmp_path):
     assert stored[0] == "20260317/m317/e1/raw/20260317_m317_e1_00001.tif"
 
 
+@needs_migration
 def test_migration_backfills_mcor_source(tmp_path):
     """Everything already stored was produced by run_motion_correction."""
     con = sqlite3.connect(migrated_db(tmp_path))
@@ -216,6 +233,7 @@ def test_migration_backfills_mcor_source(tmp_path):
     assert row == ("caiman", 0, 1)
 
 
+@needs_migration
 def test_mcor_source_is_required_and_checked(tmp_path):
     """
     No default on purpose: a default would silently mislabel a source the
@@ -239,6 +257,7 @@ def test_mcor_source_is_required_and_checked(tmp_path):
         con.close()
 
 
+@needs_migration
 def test_migration_preserves_unrelated_rows(tmp_path):
     con = sqlite3.connect(migrated_db(tmp_path))
 
@@ -251,3 +270,26 @@ def test_migration_preserves_unrelated_rows(tmp_path):
         con.close()
 
     assert row == ("Group.run_motion_correction", None, "{}")
+
+
+@pytest.mark.skipif(MIGRATES_FROM is not None, reason="this version migrates")
+def test_rebuild_refuses_to_migrate(tmp_path):
+    """
+    A rebuild must refuse loudly and leave `user_version` alone, rather than
+    stamping a database whose tables were never rebuilt.
+    """
+    main_folder = tmp_path / "main"
+    (main_folder / ODYN_FOLDER).mkdir(parents=True)
+
+    old = main_folder / ODYN_FOLDER / "odyn.db"
+    build(old, PREVIOUS_SCHEMA, SCHEMA_VERSION - 1)
+
+    with pytest.raises(RuntimeError, match="rebuild"):
+        migrate(main_folder)
+
+    con = sqlite3.connect(old)
+
+    try:
+        assert con.execute("PRAGMA user_version;").fetchone()[0] == SCHEMA_VERSION - 1
+    finally:
+        con.close()

@@ -15,12 +15,7 @@ import tifffile
 from odyn import Database
 from odyn.groups import MCOR_LAYOUT, McorFlag, McorSource, _tiff_shape
 
-EXP_DIR = "20260101/m001/e1"
-STEM = "20260101_m001_e1"
-
-# Over 4 frames on purpose: tifffile folds a leading axis of 4 or less into a
-# single multi-sample page, which is not what a real recording looks like.
-FRAMES, HEIGHT, WIDTH = 6, 64, 80
+from helpers import EXP_DIR, FRAMES, HEIGHT, STEM, WIDTH, add_group, seed_rows
 
 
 # --------------------------------------------------------------------------- #
@@ -31,38 +26,9 @@ FRAMES, HEIGHT, WIDTH = 6, 64, 80
 def build(tmp_path, acquisitions=3):
     """A database with one experiment, its acquisitions, and a group."""
     db = Database(tmp_path)
+    seeded = seed_rows(db, acquisitions=acquisitions)
 
-    with db.con as con:
-        con.execute(
-            """
-            INSERT INTO experiments
-                ( exp_id, exp_name, exp_type, exp_start, mouse_id
-                , height_px, width_px, height_um, width_um, frame_count, frame_rate
-                , laser_power_920, laser_power_1040, loop_acq_interval_s
-                ) VALUES ( 1, ?, 'loop', '2026-01-01 10:00:00', 'm001'
-                         , ?, ?, ?, ?, ?
-                         , 14.0, 10, 0, 10.0);
-            """,
-            [STEM, HEIGHT, WIDTH, float(HEIGHT), float(WIDTH), FRAMES],
-        )
-
-        for index in range(acquisitions):
-            con.execute(
-                """
-                INSERT INTO acquisitions (acq_id, exp_id, acq_start, raw_path)
-                    VALUES (?, 1, ?, ?);
-                """,
-                [
-                    index + 1,
-                    f"2026-01-01 10:0{index}:00",
-                    f"{EXP_DIR}/raw/{STEM}_{index + 1:05d}.tif",
-                ],
-            )
-
-        con.execute("INSERT INTO groups (group_id) VALUES (1);")
-        con.execute("INSERT INTO group_experiments (group_id, exp_id) VALUES (1, 1);")
-
-    return db, db.groups[1]
+    return db, db.groups[seeded.group_id]
 
 
 def write_mcor(
@@ -363,11 +329,7 @@ def mcor_group(db, acq_id=1):
 
 def share_experiment(db):
     """A second group over the same experiment, as happens in the real data."""
-    with db.con as con:
-        con.execute("INSERT INTO groups (group_id) VALUES (2);")
-        con.execute("INSERT INTO group_experiments (group_id, exp_id) VALUES (2, 1);")
-
-    return db.groups[2]
+    return add_group(db, group_id=2, exp_ids=[1])
 
 
 def test_replacing_files_another_group_also_uses_is_flagged(tmp_path):
