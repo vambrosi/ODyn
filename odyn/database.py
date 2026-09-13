@@ -44,7 +44,7 @@ from .groups import Group
 from .migrate import SCHEMA_VERSION
 from .utils import *
 from .utils import CallFrame, CallRecorder
-from .utils import _acquisition_trials, _method_calls_dataframe
+from .utils import _acquisition_trials, _method_calls_dataframe, _SYNC_COLUMNS
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -244,7 +244,14 @@ class Database(CallRecorder):
             self.update()
 
     def __del__(self):
-        self.con.close()
+        # `__init__` can raise before the connection exists (a bad `project`,
+        # a schema mismatch), and __del__ still runs on the half-built object.
+        # Without this the real error is followed by an AttributeError from
+        # here, which is the one people read first.
+        connection = getattr(self, "con", None)
+
+        if connection is not None:
+            connection.close()
 
     @property
     def project_folder(self) -> Path:
@@ -279,9 +286,18 @@ class Database(CallRecorder):
         if self._acquisitions is not None:
             return self._acquisitions
 
-        query = "SELECT * FROM acquisitions;"
+        # `acquisition_sync` joined back in; see `Group.acquisitions` for why.
+        # LEFT, because those rows are missing until the sync file is decoded.
+        query = f"""
+            SELECT a.*
+                 {_SYNC_COLUMNS}
+                FROM acquisitions AS a
+                LEFT JOIN acquisition_sync AS s ON s.acq_id = a.acq_id;
+        """
         self._acquisitions = pd.read_sql_query(
-            query, self.con, parse_dates=["acq_start"]
+            query,
+            self.con,
+            parse_dates=["acq_start", "sync_odor_start", "sync_odor_end"],
         )
         self._acquisitions.set_index("acq_id", inplace=True)
 
@@ -915,7 +931,18 @@ class Database(CallRecorder):
                     [group_id, exp_id],
                 )
 
-                _db_insert(cur, "acquisitions", {**acquisition, "exp_id": exp_id})
+                acq_start = acquisition["acq_start"]
+                assert isinstance(acq_start, datetime)
+
+                _db_insert(
+                    cur,
+                    "acquisitions",
+                    {
+                        **acquisition,
+                        "exp_id": exp_id,
+                        "acq_start": acq_start.strftime(DT_FORMAT),
+                    },
+                )
 
             added.append(raw_path.stem)
 
@@ -991,7 +1018,17 @@ class Database(CallRecorder):
                 exp_data, acq = raw_metadata
 
                 if last_exp_data is None:
-                    # Don't do anything if experiment is already in the DB
+                    # Don't do anything if experiment is already in the DB.
+                    #
+                    # Formatted rather than passed as a datetime: the column
+                    # holds DT_FORMAT strings, and sqlite3's datetime adapter
+                    # writes isoformat, which drops '.000000' when the epoch
+                    # lands exactly on a second. The two then never compare
+                    # equal, this check says "not present", and the insert
+                    # fails on UNIQUE instead of returning quietly. (That
+                    # adapter is also deprecated since Python 3.12.)
+                    assert isinstance(exp_data["exp_start"], datetime)
+
                     cur.execute(
                         """
                         SELECT EXISTS(
@@ -999,7 +1036,7 @@ class Database(CallRecorder):
                                 WHERE exp_start = ?
                         );
                     """,
-                        [exp_data["exp_start"]],
+                        [exp_data["exp_start"].strftime(DT_FORMAT)],
                     )
 
                     if cur.fetchone()[0]:
@@ -1087,12 +1124,39 @@ class Database(CallRecorder):
             )
 
             for acq in acquisitions:
-                _db_insert(cur, "acquisitions", {**acq, "exp_id": exp_id})
+                # Formatted here for the same reason as `exp_start` above: the
+                # column holds DT_FORMAT strings, and letting sqlite3's
+                # (deprecated) adapter write the datetime drops the microseconds
+                # whenever they are zero.
+                acq_start = acq["acq_start"]
+                assert isinstance(acq_start, datetime)
+
+                _db_insert(
+                    cur,
+                    "acquisitions",
+                    {
+                        **acq,
+                        "exp_id": exp_id,
+                        "acq_start": acq_start.strftime(DT_FORMAT),
+                    },
+                )
 
             # Insert programs, trials, and events
             for program_idx, program_data in enumerate(programs_data):
+                metadata = program_data["metadata"]
+                assert isinstance(metadata["program_start"], datetime)
+
                 program_id = _db_insert(
-                    cur, "programs", {**program_data["metadata"], "exp_id": exp_id}
+                    cur,
+                    "programs",
+                    {
+                        **metadata,
+                        "exp_id": exp_id,
+                        # Formatted, as everywhere else: see `acq_start` above.
+                        "program_start": metadata["program_start"].strftime(
+                            DT_FORMAT
+                        ),
+                    },
                 )
 
                 # Pass 1: insert trials, collect trial_ids by index

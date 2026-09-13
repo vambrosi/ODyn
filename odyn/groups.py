@@ -47,7 +47,7 @@ from caiman.motion_correction import MotionCorrect
 from caiman.paths import get_tempdir
 
 from .utils import *
-from .utils import _acquisition_trials, _method_calls_dataframe
+from .utils import _acquisition_trials, _method_calls_dataframe, _SYNC_COLUMNS
 from .utils import CallFrame, CallRecorder
 
 if TYPE_CHECKING:
@@ -272,15 +272,26 @@ class Group(CallRecorder):
         if self._acquisitions is not None:
             return self._acquisitions
 
+        # `acquisition_sync` is one row per acquisition and was split out for
+        # storage reasons (it arrives later, and a re-decode replaces it whole),
+        # not because it describes something else. So it is joined back here:
+        # the join cannot change the row count or the index, and asking for
+        # acquisitions without their odor frames is almost never what you want.
+        # LEFT, because those rows are missing until the sync file is decoded.
         query = f"""
-            SELECT a.* FROM group_experiments AS g
+            SELECT a.*
+                 {_SYNC_COLUMNS}
+                FROM group_experiments AS g
                 JOIN experiments  AS e ON e.exp_id = g.exp_id
                 JOIN acquisitions AS a ON a.exp_id = e.exp_id
+                LEFT JOIN acquisition_sync AS s ON s.acq_id = a.acq_id
                 WHERE g.group_id = {self.group_id};
         """
 
         self._acquisitions = pd.read_sql_query(
-            query, self.db.con, parse_dates=["acq_start", "odor_start", "odor_end"]
+            query,
+            self.db.con,
+            parse_dates=["acq_start", "sync_odor_start", "sync_odor_end"],
         )
         self._acquisitions.set_index("acq_id", inplace=True)
 
@@ -467,7 +478,9 @@ class Group(CallRecorder):
         """
 
         self._trials = pd.read_sql_query(
-            query, self.db.con, parse_dates=["trial_start", "odor_start", "odor_end"]
+            query,
+            self.db.con,
+            parse_dates=["trial_start", "trial_odor_start", "trial_odor_end"],
         )
         self._trials.set_index("trial_id", inplace=True)
 
@@ -2378,12 +2391,16 @@ class Group(CallRecorder):
                 else f"{self!r} has no mcor files."
             )
 
-        # An acquisition might not be associated with an odor (no `odor_start`).
-        # We drop them to avoid NaNs in the np.max and np.min below.
-        acquisitions = usable[usable["odor_start"].notna()]
+        # An acquisition has no onset until its sync file is decoded. Drop those
+        # to avoid NaNs in the np.max and np.min below.
+        acquisitions = usable[usable["sync_odor_on_frame"].notna()]
 
         if not len(acquisitions):
-            raise RuntimeError("Found no mcor files with an odor onset.")
+            raise RuntimeError(
+                "Found no mcor files with an odor onset. If the experiment was "
+                "added before its sync file was copied to '<experiment>/sync/', "
+                "decode it now and the onsets will fill in."
+            )
 
         elif len(acquisitions) < len(usable):
             no_odor = len(usable) - len(acquisitions)
@@ -2393,13 +2410,7 @@ class Group(CallRecorder):
 
         frame_rates = experiments["frame_rate"].to_numpy()
         frame_counts = experiments["frame_count"].to_numpy()
-
-        onset_frames = np.rint(
-            (acquisitions["odor_start"] - acquisitions["acq_start"])
-            .dt.total_seconds()
-            .to_numpy()
-            * frame_rates
-        )
+        onset_frames = acquisitions["sync_odor_on_frame"].to_numpy(dtype=float)
 
         frame_rate = float(frame_rates.mean())
         photobleach_frame = round(photobleach_window_s * frame_rate)
@@ -2432,11 +2443,15 @@ class Group(CallRecorder):
             photobleach_window_s, only_approved
         )
 
-        onset_delay = cast(
-            datetime, self.acquisitions.loc[acq_id, "odor_start"]
-        ) - cast(datetime, self.acquisitions.loc[acq_id, "acq_start"])
+        onset_frame = self.acquisitions.loc[acq_id, "sync_odor_on_frame"]
 
-        onset_frame = int(round(onset_delay.total_seconds() * frame_rate))
+        if pd.isna(onset_frame):
+            raise KeyError(
+                f"Acquisition {acq_id} has no odor onset, so it cannot be "
+                f"aligned. Decode the sync file in '<experiment>/sync/' first."
+            )
+
+        onset_frame = int(onset_frame)
 
         path = self.db.main_folder / cast(str, usable.loc[acq_id, "mcor_path"])
 
@@ -2544,8 +2559,8 @@ class Group(CallRecorder):
 
         # We need odor onsets to align frames so we leave out acquisitions
         # that don't have those (same as '_common_frames').
-        chosen = list(usable[usable["odor_start"].notna()].index)
-        no_starts = list(usable[usable["odor_start"].isna()].index)
+        chosen = list(usable[usable["sync_odor_on_frame"].notna()].index)
+        no_starts = list(usable[usable["sync_odor_on_frame"].isna()].index)
 
         if no_starts:
             logger.warning(
@@ -2871,7 +2886,11 @@ class Group(CallRecorder):
                 extension,
             )
 
-            odor_s = (rows["odor_end"] - rows["odor_start"]).dt.total_seconds()
+            # `rows` comes from `self.trials`, so this is the olfactometer's own
+            # record of the odor window rather than the valve TTL.
+            odor_s = (
+                rows["trial_odor_end"] - rows["trial_odor_start"]
+            ).dt.total_seconds()
             _save_movie(
                 path,
                 total,

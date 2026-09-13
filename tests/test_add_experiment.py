@@ -8,6 +8,7 @@ a session rather than an experiment, the rig settings became annotations, and
 the sync-derived timing left `acquisitions` entirely.
 """
 
+import json
 import shutil
 import sqlite3
 
@@ -252,8 +253,17 @@ def test_the_call_is_recorded_with_its_code_and_user(db):
     assert row["group_id"] == 0
     assert row["user"]
     assert row["module"] == "odyn.database"
-    assert "odyn" in row["code"]
-    assert "python" in row["environment"]
+
+    # `code` is keyed by repository *directory* name, whatever that is called on
+    # this machine -- so check the shape rather than the name.
+    code = json.loads(row["code"])
+
+    assert code, "no repository was resolved for the call"
+    assert all(
+        {"commit", "dirty"} <= entry.keys() for entry in code.values()
+    ), code
+
+    assert "python" in json.loads(row["environment"])
 
 
 def test_nothing_is_inserted_twice(db):
