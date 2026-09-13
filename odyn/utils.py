@@ -363,7 +363,9 @@ def record_call(func):
             self._call_stack.pop()
             logger.removeHandler(handler)
 
-            call_output = json.dumps(jsonable(frame.output)) if frame.output is not None else None
+            call_output = (
+                json.dumps(jsonable(frame.output)) if frame.output is not None else None
+            )
 
             with db.con:
                 db.con.execute(
@@ -381,7 +383,11 @@ def record_call(func):
                         int(frame.flag),
                         call_output,
                         json.dumps(jsonable(frame.used)),
-                        json.dumps(jsonable(frame.consumed)) if frame.consumed else None,
+                        (
+                            json.dumps(jsonable(frame.consumed))
+                            if frame.consumed
+                            else None
+                        ),
                         call_id,
                     ],
                 )
@@ -493,9 +499,20 @@ def jsonable(value):
     if hasattr(value, "tolist"):
         return jsonable(value.tolist())
 
-    # datetime, date, time, pandas Timestamp
+    # datetime, date, time, pandas Timestamp.
+    #
+    # A space instead of 'T' because that is what SQLite's `datetime('now')`
+    # uses. `sep` as a keyword because `date` and `time` do not take one and
+    # raise TypeError, which is what should happen -- but `time.isoformat(" ")`
+    # positionally reads the argument as a *timespec* and raises ValueError
+    # instead, which would be caught somewhere else entirely.
+
     if hasattr(value, "isoformat"):
-        return value.isoformat()
+        try:
+            return value.isoformat(sep=" ")
+
+        except TypeError:
+            return value.isoformat()
 
     if isinstance(value, os.PathLike):
         return os.fspath(value)

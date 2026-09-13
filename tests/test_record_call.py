@@ -11,6 +11,8 @@ import json
 import math
 import sqlite3
 
+from datetime import date, datetime, time
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -81,9 +83,37 @@ def test_anything_unrecognized_becomes_text():
     assert jsonable(object()).startswith("<object object")
 
 
-def test_paths_and_times_are_readable(tmp_path):
+def test_paths_are_readable(tmp_path):
     assert jsonable(tmp_path) == str(tmp_path)
-    assert jsonable(pd.Timestamp("2026-08-11 13:36")) == "2026-08-11T13:36:00"
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (datetime(2026, 8, 11, 13, 36, 0, 482264), "2026-08-11 13:36:00.482264"),
+        (pd.Timestamp("2026-08-11 13:36:00.482264"), "2026-08-11 13:36:00.482264"),
+        (np.datetime64("2026-08-11T13:36:00.482264"), "2026-08-11 13:36:00.482264"),
+        (date(2026, 8, 11), "2026-08-11"),
+        (time(13, 36), "13:36:00"),
+    ],
+)
+def test_times_are_written_the_way_the_columns_are(value, expected):
+    """
+    A space, not the ISO 'T'. SQLite's own `datetime('now')` writes a space, so
+    every datetime column in the database reads that way, and a datetime landing
+    in `parameters_used` should not be the one thing that reads differently.
+    """
+    assert jsonable(value) == expected
+
+
+def test_a_date_or_time_does_not_take_a_separator():
+    """
+    `date` and `time` have no `sep`, so they fall back -- and `time` is the trap:
+    called positionally it reads the argument as a *timespec* and raises
+    ValueError rather than TypeError.
+    """
+    assert jsonable(date(2026, 8, 11)) == "2026-08-11"
+    assert jsonable(time(13, 36)) == "13:36:00"
 
 
 # --------------------------------------------------------------------------- #
