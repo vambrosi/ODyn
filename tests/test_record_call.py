@@ -155,6 +155,37 @@ def test_what_is_stored_is_always_valid_json(db):
         json.loads(row[column])  # raises if the column is not valid JSON
 
 
+def test_what_was_passed_and_what_came_back_stay_apart(db):
+    """
+    `latest_calls` flattens the parameters and the output into one frame, and a
+    method may well use one name for what it was given and what it produced. The
+    prefixes are what keep both readable.
+    """
+    with db.con as con:
+        con.execute(
+            """
+            INSERT INTO method_calls
+                ( group_id, user, method_name, module, code
+                , parameter_inputs, parameters_used, call_output
+                ) VALUES (0, 'someone', 'Database.example', 'odyn.database', '{}'
+                , '{}', '{"source": "caiman", "frames": 6}'
+                , '{"source": "caiman", "added": 3}');
+            """
+        )
+
+    call = db.latest_calls("example")
+    columns = call.columns
+
+    assert not columns.duplicated().any(), sorted(columns[columns.duplicated()])
+
+    row = call.iloc[0]
+
+    assert row["input_source"] == "caiman"
+    assert row["input_frames"] == 6
+    assert row["output_source"] == "caiman"
+    assert row["output_added"] == 3
+
+
 def test_a_bad_argument_does_not_lose_the_call(db):
     """
     A value nothing knows how to serialize is recorded as text rather than

@@ -562,9 +562,12 @@ class Group(CallRecorder):
         """
         calls = self.latest_calls("Group.run_motion_correction")
 
-        # These columns will only appear in future calls, so we guard against it.
-        if {"is_test", "mmap_names"} <= set(calls.columns):
-            tests = calls[calls["is_test"].eq(True) & calls["mmap_names"].notna()]
+        # `latest_calls` only has a column for a parameter or an output some
+        # call actually recorded, so neither is there until one has.
+        if {"input_is_test", "output_mmap_names"} <= set(calls.columns):
+            tests = calls[
+                calls["input_is_test"].eq(True) & calls["output_mmap_names"].notna()
+            ]
 
         # Otherwise, make it empty to fail below.
         else:
@@ -574,7 +577,7 @@ class Group(CallRecorder):
             raise RuntimeError(f"{self!r} has no test motion correction. ")
 
         temp_folder = Path(get_tempdir())
-        mmap_paths = [temp_folder / name for name in tests.iloc[0]["mmap_names"]]
+        mmap_paths = [temp_folder / name for name in tests.iloc[0]["output_mmap_names"]]
 
         # Pair .mmap with the raw file it came from by name
         acq_ids: list[int] = []

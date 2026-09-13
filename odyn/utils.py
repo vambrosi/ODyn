@@ -179,8 +179,14 @@ def _method_calls_dataframe(con: Connection, query: str, params: list) -> pd.Dat
         lambda s: json.loads(s) if isinstance(s, str) else {}
     )
 
+    # Prefixed because the two sides are flattened into one frame and a method
+    # may well use the same name for what it was given and what it produced,
+    # which would otherwise leave two columns of that name and neither readable.
     df_parameters_used = pd.json_normalize(df.parameters_used).set_index(df.index)
+    df_parameters_used = df_parameters_used.add_prefix("input_")
+
     df_output = pd.json_normalize(df.call_output).set_index(df.index)
+    df_output = df_output.add_prefix("output_")
 
     return pd.concat(
         [
