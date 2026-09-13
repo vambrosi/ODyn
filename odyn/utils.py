@@ -41,6 +41,11 @@ INFO_FOLDER = ".odyn/olfactometer/Log/Info"
 #   - its own files (scripts, outputs, movies) in '<main_folder>/projects/<name>'
 PROJECTS_FOLDER = "projects"
 
+# Where work goes when nobody names a project. To avoid interacting with the
+# main shared '.odyn/odyn.db' which will be frozen in v2. It needs to be an
+# underscore because only alphanumerics and underscores are allowed.
+DEFAULT_PROJECT = "main_sync"
+
 # Where saved results go, under the project folder or the main folder
 OUTPUTS_FOLDER = "outputs"
 

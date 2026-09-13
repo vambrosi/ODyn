@@ -34,13 +34,10 @@ import sqlite3
 from collections import defaultdict
 from datetime import time, datetime, timedelta
 from pathlib import Path
-from scipy.signal import find_peaks
 from sqlite3 import Cursor
 from tifffile import TiffFile, TiffPage
 from typing import Final
 
-import h5py
-import numpy as np
 import pandas as pd
 
 from .groups import Group
@@ -54,8 +51,12 @@ from .utils import _acquisition_trials, _method_calls_dataframe
 # --------------------------------------------------------------------------- #
 
 TIMEDELTA_MS = timedelta(milliseconds=1)
-H5_TOLERANCE = timedelta(milliseconds=100)
 DT_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
+
+# TIFF metadata that is tier 3 in `create.sql`: recorded, but read by nothing in
+# odyn, so it is stored as annotations instead of columns. Read out of the same
+# dict as the columns so the across-TIFF consistency check still sees it.
+RIG_ANNOTATIONS = ("laser_power_920", "laser_power_1040", "loop_acq_interval_s")
 
 # TODO: Make program types part of the database
 PROGRAM_TYPES = [
@@ -74,12 +75,11 @@ class ExpFlag(IntFlag):
     call_flag bits for `Database.add_experiment` (bit 0 reserved by `CallFlag.RAISED`).
     """
 
+    # Bits 2, 5 and 6 belonged to the old olfactometer H5 and are left free
+    # rather than reused, so an old log line cannot be misread as a new flag.
     ALREADY_IN_DB = 1 << 1  # experiment already present, nothing inserted
-    MULTIPLE_H5 = 1 << 2  # more than one H5 file in the folder, skipped
     UNSUPPORTED_METADATA = 1 << 3  # TIFF does not have expected metadata format
     METADATA_CHANGED = 1 << 4  # TIFF metadata changed, skipped
-    H5_UNMATCHED_ACQ = 1 << 5  # some H5 trials had no matching acquisition
-    TRIAL_NO_ACQ = 1 << 6  # some trials matched H5 but had no acquisition
     NOT_A_GRAB = 1 << 7  # add_grab_folder found a file that was not a grab
 
 
@@ -132,7 +132,7 @@ class Database(CallRecorder):
         self,
         path: str | Path,
         update=False,
-        project: None | str = None,
+        project: None | str = DEFAULT_PROJECT,
         _is_test=False,
     ):
         """
@@ -140,7 +140,7 @@ class Database(CallRecorder):
         - `path` is the main folder holding the experiment folders
         - `update` searches the main folder for experiments to add
         - `project` is a separate database in the same main folder, at
-        `.odyn/projects/<project>.db`. `None` is the shared one.
+        `.odyn/projects/<project>.db`. Leaving it out uses `main_sync`.
 
         **ALERT**
         Projects do not see each other. Two of them can hold the same
@@ -160,7 +160,18 @@ class Database(CallRecorder):
         odyn_folder = self.main_folder / ODYN_FOLDER
 
         if project is None:
-            live = odyn_folder / "odyn.db"
+            # `project=None` used to mean the shared '.odyn/odyn.db', which is
+            # v2 and stays with the tagged release. Refusing it matters most
+            # when that file does *not* exist yet: the old behavior would have
+            # created one here, where everyone expects the shared database, and
+            # nothing would notice until a workstation on the old release
+            # failed to open it.
+            raise ValueError(
+                f"'project' cannot be None: the shared database is schema v2 "
+                f"and this version writes v3. Leave it out to use "
+                f"'{DEFAULT_PROJECT}', or name one:\n"
+                f"    Database(main_folder, project='name')"
+            )
 
         else:
             # Project name is the db file name so it needs to work everywhere
@@ -270,7 +281,7 @@ class Database(CallRecorder):
 
         query = "SELECT * FROM acquisitions;"
         self._acquisitions = pd.read_sql_query(
-            query, self.con, parse_dates=["acq_start", "odor_start", "odor_end"]
+            query, self.con, parse_dates=["acq_start"]
         )
         self._acquisitions.set_index("acq_id", inplace=True)
 
@@ -476,7 +487,9 @@ class Database(CallRecorder):
         query = "SELECT * FROM trials;"
 
         self._trials = pd.read_sql_query(
-            query, self.con, parse_dates=["trial_start", "odor_start", "odor_end"]
+            query,
+            self.con,
+            parse_dates=["trial_start", "trial_odor_start", "trial_odor_end"],
         )
         self._trials.set_index("trial_id", inplace=True)
 
@@ -509,8 +522,8 @@ class Database(CallRecorder):
 
     def _copy_for_test(self, source: Path) -> Path:
         """
-        Returns path to a fresh snapshot of the database.
-        For tests only, via `Database(main_folder, _is_test=True)`.
+        Returns path to a fresh snapshot of the database. For tests only,
+        via `Database(main_folder, project="name", _is_test=True)`.
 
         PROTECTS DATABASE, BUT ACCESS REAL DATA.
 
@@ -887,8 +900,11 @@ class Database(CallRecorder):
                     self.add_flag(ExpFlag.ALREADY_IN_DB)
                     continue
 
-                exp_id = _db_insert(
-                    cur, "experiments", {**experiment, "exp_start": exp_start_str}
+                exp_id = _insert_experiment(
+                    cur,
+                    experiment,
+                    rel_path=rel_path,
+                    method_call_id=self.current_call_id,
                 )
 
                 cur.execute("INSERT INTO groups DEFAULT VALUES;")
@@ -955,7 +971,6 @@ class Database(CallRecorder):
 
             experiment: None | Object = None
             acquisitions: list[Object] = []
-            h5_data: None | dict = None
             event_files: list[Path] = []
 
             last_exp_data: None | Object = None
@@ -994,27 +1009,8 @@ class Database(CallRecorder):
 
                     experiment = exp_data
 
-                    # Load H5 and event files before metadata checks
+                    # Load event files before metadata checks
                     # (Checks take some time so better to not do them if possible)
-                    h5_paths = list(exp_path.glob("[!.]?*.h5"))
-
-                    if len(h5_paths) > 1:
-                        logger.error(
-                            f"There is more than one H5 file in this experiment folder. {CROSS}"
-                        )
-
-                        for path in h5_paths:
-                            relative_path = path.relative_to(self.main_folder)
-                            logger.warning(f"  {relative_path}")
-
-                        logger.error("Experiment will not be added to the DB.")
-                        self.add_flag(ExpFlag.MULTIPLE_H5)
-                        return
-
-                    # Type checking because Object is too generic
-                    assert isinstance(experiment["exp_start"], datetime)
-                    h5_data = _get_h5_metadata(h5_paths, experiment["exp_start"])
-
                     event_files = sorted(
                         exp_path.rglob("[!.]?*Events.csv"),
                         key=lambda x: x.stat().st_mtime,
@@ -1066,51 +1062,20 @@ class Database(CallRecorder):
                 )
 
             # --------------------------------------------------------------- #
-            # Phase 2: Match
+            # Phase 2: Insert
             # --------------------------------------------------------------- #
+            #
+            # There is no matching phase here any more. Odor timing and the link
+            # from a trial to its acquisition both come from the sync file, and
+            # the decode that reads it is its own recorded call so it can be run
+            # again on its own. Once that call exists this method runs it at the
+            # end, warning and skipping when '<exp>/sync/' holds no H5.
 
-            # Acquisitions <-> H5 trials
-            # Result: h5_idx -> (acq_idx, h5_to_acq_ms)
-            acq_to_h5: dict[int, tuple[int, float]] = {}
-
-            if h5_data and acquisitions:
-                acq_to_h5 = _match_acq_to_h5(acquisitions, h5_data)
-
-            # Pool all event trial starts across programs
-            # event_trial_pool[i] = (program_idx, trial_idx, trial_start)
-            trials: list[tuple[int, int, datetime]] = [
-                (program_idx, trial_idx, trial["trial_start"])
-                for program_idx, program in enumerate(programs_data)
-                for trial_idx, trial in enumerate(program["trials"])
-            ]
-
-            # CSV trials <-> H5 trials
-            # Result: pool_idx -> (h5_idx, h5_to_trial_ms)
-            csv_to_h5: dict[int, tuple[int, float]] = {}
-
-            if h5_data and trials:
-                trial_starts = [x[2] for x in trials]
-                csv_to_h5 = _match_csv_to_h5(trial_starts, h5_data)
-
-            # Build lookup: (program_idx, trial_idx) -> (h5_idx, h5_to_trial_ms)
-            trial_to_h5: dict[tuple[int, int], tuple[int, float]] = {
-                (trials[pool_idx][0], trials[pool_idx][1]): (
-                    h5_idx,
-                    h5_to_trial_ms,
-                )
-                for pool_idx, (h5_idx, h5_to_trial_ms) in csv_to_h5.items()
-            }
-
-            # --------------------------------------------------------------- #
-            # Phase 3: Insert
-            # --------------------------------------------------------------- #
-
-            # Fix datetime format to include microseconds
-            assert isinstance(experiment["exp_start"], datetime)
-            exp_start_str = experiment["exp_start"].strftime(DT_FORMAT)
-
-            exp_id = _db_insert(
-                cur, "experiments", {**experiment, "exp_start": exp_start_str}
+            exp_id = _insert_experiment(
+                cur,
+                experiment,
+                rel_path=rel_path,
+                method_call_id=self.current_call_id,
             )
 
             cur.execute("INSERT INTO groups DEFAULT VALUES;")
@@ -1121,31 +1086,8 @@ class Database(CallRecorder):
                 [group_id, exp_id],
             )
 
-            # Insert acquisitions matched to H5 trials (with odor timing from H5)
-            h5_to_acq_id: dict[int, int] = {}
-            matched_acq_indices: set[int] = set()
-
-            if h5_data:
-                for h5_idx, (acq_idx, delta_ms) in acq_to_h5.items():
-                    # Type checking because Object is too generic
-                    acq_start = acquisitions[acq_idx]["acq_start"]
-                    assert isinstance(acq_start, datetime)
-
-                    acq = {
-                        **acquisitions[acq_idx],
-                        "exp_id": exp_id,
-                        "acq_start": acq_start.strftime(DT_FORMAT),
-                        "odor_start": _to_datetime_str(h5_data["odor_starts"][h5_idx]),
-                        "odor_end": _to_datetime_str(h5_data["odor_ends"][h5_idx]),
-                        "h5_to_acq_ms": delta_ms,
-                    }
-                    h5_to_acq_id[h5_idx] = _db_insert(cur, "acquisitions", acq)
-                    matched_acq_indices.add(acq_idx)
-
-            # Fallback: insert acquisitions with no matching H5 trial
-            for acq_idx, acq in enumerate(acquisitions):
-                if acq_idx not in matched_acq_indices:
-                    _db_insert(cur, "acquisitions", {**acq, "exp_id": exp_id})
+            for acq in acquisitions:
+                _db_insert(cur, "acquisitions", {**acq, "exp_id": exp_id})
 
             # Insert programs, trials, and events
             for program_idx, program_data in enumerate(programs_data):
@@ -1157,26 +1099,18 @@ class Database(CallRecorder):
                 trial_ids: dict[int, int] = {}
 
                 for trial_idx, trial in enumerate(program_data["trials"]):
-                    acq_id = None
-                    h5_to_trial_ms = None
-
-                    if (program_idx, trial_idx) in trial_to_h5:
-                        h5_idx, delta_ms = trial_to_h5[(program_idx, trial_idx)]
-                        acq_id = h5_to_acq_id.get(h5_idx)
-                        if acq_id is not None:
-                            h5_to_trial_ms = delta_ms
-
                     trial_ids[trial_idx] = _db_insert(
                         cur,
                         "trials",
                         {
                             "trial_start": trial["trial_start"].strftime(DT_FORMAT),
-                            "odor_start": trial["odor_start"].strftime(DT_FORMAT),
-                            "odor_end": trial["odor_end"].strftime(DT_FORMAT),
+                            "trial_odor_start": trial["odor_start"].strftime(DT_FORMAT),
+                            "trial_odor_end": trial["odor_end"].strftime(DT_FORMAT),
                             "odor_id": trial["odor_id"],
                             "outcome": trial["outcome"],
-                            "acq_id": acq_id,
-                            "h5_to_trial_ms": h5_to_trial_ms,
+                            # Both come from the sync decode (see Phase 2).
+                            "acq_id": None,
+                            "sync_to_trial_ms": None,
                             "program_id": program_id,
                             "exp_id": exp_id,
                         },
@@ -1198,40 +1132,18 @@ class Database(CallRecorder):
             # Reporting
             # --------------------------------------------------------------- #
 
-            if h5_data:
-                n_h5 = len(h5_data["trial_starts"])
-                n_matched_acq = len(acq_to_h5)
+            n_trials = sum(len(p["trials"]) for p in programs_data)
 
-                if n_matched_acq < n_h5:
-                    self.add_flag(ExpFlag.H5_UNMATCHED_ACQ)
-                    logger.warning(
-                        f"{n_h5 - n_matched_acq} H5 trials without "
-                        f"matching acquisition. {CROSS}"
-                    )
-                else:
-                    logger.info(f"All H5 trials matched to acquisitions. {CHECK}")
-
-            if trials:
-                n_events = len(trials)
-                n_matched = len(csv_to_h5)
-
-                if n_matched < n_events:
-                    logger.info(f"{n_events - n_matched} trials without H5 match.")
-
-                n_with_acq = sum(
-                    1
-                    for (h5_idx, _) in trial_to_h5.values()
-                    if h5_to_acq_id.get(h5_idx) is not None
-                )
-
-                if n_with_acq < n_matched:
-                    self.add_flag(ExpFlag.TRIAL_NO_ACQ)
-                    logger.warning(
-                        f"{n_matched - n_with_acq} trials matched "
-                        f"to H5 but no acquisition. {CROSS}"
-                    )
-                elif event_files:
-                    logger.info(f"All matched trials have acquisitions. {CHECK}")
+            logger.info(
+                f"Added {len(acquisitions)} acquisitions and {n_trials} trials "
+                f"over {len(programs_data)} programs. {CHECK}"
+            )
+            # TODO: run the sync decode here once it exists, warning and
+            #       skipping if '<exp>/sync/' holds no H5.
+            logger.warning(
+                "Odor timing and the trial-to-acquisition link are empty: the "
+                "sync file is not read yet on this branch."
+            )
 
             self._reset_caches()
 
@@ -1309,6 +1221,172 @@ class Database(CallRecorder):
         logger.info("Database updated!")
 
 
+def _insert_experiment(
+    cur: Cursor,
+    experiment: Object,
+    *,
+    rel_path: str,
+    method_call_id: int,
+) -> int:
+    """
+    Store one experiment's TIFF metadata, splitting it as the schema does.
+
+    What `_get_raw_metadata` reads out of a TIFF lands in three places under
+    this schema: the mouse names a **session**, the rig settings are
+    **annotations**, and what is left are the experiment's own **columns**. It
+    is read as one dict so the across-TIFF consistency check in `add_experiment`
+    still compares every field, and split here, on the way in.
+    """
+    experiment = dict(experiment)
+
+    exp_start = experiment["exp_start"]
+    assert isinstance(exp_start, datetime)
+
+    mouse_id = experiment.pop("mouse_id")
+    rig = {key: experiment.pop(key) for key in RIG_ANNOTATIONS}
+
+    session_id = _session_id(
+        cur,
+        mouse_id=str(mouse_id),
+        session_date=exp_start.date().isoformat(),
+        # The session is the folder above the experiment: '20260708/m442'.
+        session_path=Path(rel_path).parent.as_posix(),
+    )
+
+    exp_id = _db_insert(
+        cur,
+        "experiments",
+        {
+            **experiment,
+            "session_id": session_id,
+            "exp_start": exp_start.strftime(DT_FORMAT),
+        },
+    )
+
+    for key, value in rig.items():
+        _db_annotate(
+            cur,
+            target_type="experiment",
+            target_id=exp_id,
+            key=key,
+            value=value,
+            method_call_id=method_call_id,
+        )
+
+    return exp_id
+
+
+def _session_id(
+    cur: Cursor, *, mouse_id: str, session_date: str, session_path: str
+) -> int:
+    """The session for this mouse on this day, creating it if it is new."""
+
+    # A session holds every experiment a mouse did that day, so the second
+    # experiment of a session must find the first one's row rather than make
+    # another. `UNIQUE (mouse_id, session_date)` is what makes that safe.
+    row = cur.execute(
+        "SELECT session_id FROM sessions WHERE mouse_id = ? AND session_date = ?;",
+        [mouse_id, session_date],
+    ).fetchone()
+
+    if row is not None:
+        return row["session_id"]
+
+    return _db_insert(
+        cur,
+        "sessions",
+        {
+            "mouse_id": mouse_id,
+            "session_date": session_date,
+            "session_path": session_path,
+        },
+    )
+
+
+def _db_annotate(
+    cur: Cursor,
+    *,
+    target_type: str,
+    target_id: int,
+    key: str,
+    value: Value,
+    method_call_id: int,
+) -> int:
+    """Write one annotation, checking it against the registry first."""
+
+    # The registry declares a type per key and SQLite cannot enforce it: the
+    # column is ANY, which is what lets a number stay a number. So the check
+    # lives here, on the only path that writes.
+    row = cur.execute(
+        "SELECT value_type, allowed_values "
+        "  FROM annotation_keys "
+        "  WHERE applies_to = ? AND key = ?;",
+        [target_type, key],
+    ).fetchone()
+
+    if row is None:
+        raise ValueError(
+            f"No annotation key '{key}' for a {target_type}. Register it in "
+            f"`annotation_keys` first, or check the spelling."
+        )
+
+    value = _annotation_value(
+        key,
+        value,
+        row["value_type"],
+        row["allowed_values"],
+    )
+
+    return _db_insert(
+        cur,
+        "annotations",
+        {
+            "target_type": target_type,
+            "target_id": target_id,
+            "key": key,
+            "value": value,
+            "method_call_id": method_call_id,
+        },
+    )
+
+
+def _annotation_value(
+    key: str, value: Value, value_type: str, allowed_values: None | str
+) -> Value:
+    """Coerce `value` to what the registry says `key` holds, or explain why not."""
+
+    try:
+        match value_type:
+            case "integer":
+                return int(value)  # type: ignore[arg-type]
+
+            case "real":
+                return float(value)  # type: ignore[arg-type]
+
+            case "boolean":
+                return int(bool(value))
+
+            case "enum":
+                options = json.loads(allowed_values or "[]")
+
+                if value not in options:
+                    raise ValueError(f"expected one of {options}")
+
+                return str(value)
+
+            case _:
+                # 'text' and 'date'. Dates are stored as written: the workbook
+                # holds things like '70 um', and repairing that silently would
+                # lose what was actually recorded.
+                return str(value)
+
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"Annotation '{key}' is declared {value_type} "
+            f"but got {value!r} ({error})."
+        ) from error
+
+
 def _db_insert(cur: Cursor, table_name: str, data: Object | list[Object]) -> int:
     # HACK:
     #   ONLY FOR INTERNAL USE (CAN BE USED FOR SQL INJECTION)
@@ -1338,80 +1416,6 @@ def _db_insert(cur: Cursor, table_name: str, data: Object | list[Object]) -> int
 # --------------------------------------------------------------------------- #
 # Data Parsing and Matching
 # --------------------------------------------------------------------------- #
-
-
-def _get_h5_metadata(
-    paths: list[Path], exp_start: datetime
-) -> None | dict[str, np.ndarray]:
-    # There must be at most one path
-    if not paths:
-        return None
-
-    path = paths[0]
-
-    # Very similar to getScopeH5Timestamps
-    logger.info(f"Getting timing data from: '{path}'")
-
-    # Parse experiment start time
-    exp_start_np = np.datetime64(exp_start)
-
-    with h5py.File(path) as f:
-        samplerate = f.attrs["samplerate"]
-
-        imaging_TTL = f["ImagingWindow"][:]
-        odor_TTL = f["OdorDelivery"][:]
-
-        # TODO: (Vinicius)
-        #   Maybe change the way we find starts? Because adding the distance argument
-        #   picks the highest and not the first choice (both in MATLAB and Python).
-
-        # NOTE: (Priscilla, from MATLAB code, adapted)
-        #   Added distance to deal with problematic file where
-        #   code found 2 peaks right next to each other
-
-        trial_starts, _ = find_peaks(
-            np.diff(imaging_TTL), height=2.0, distance=samplerate / 2
-        )
-        odor_starts, _ = find_peaks(
-            np.diff(odor_TTL), height=2.0, distance=samplerate / 10
-        )
-        odor_ends, _ = find_peaks(
-            -np.diff(odor_TTL), height=2.0, distance=samplerate / 10
-        )
-
-        # Returns None if no trials where found
-        if len(trial_starts) == 0:
-            logger.info("No trial triggers found in this H5 file.")
-            return None
-
-        # Shift everything by first trial start, to match FrameTimestamp_sec data
-        # FrameTimestamp_sec always starts at zero, so they almost exactly match
-        shift = trial_starts[0]
-
-        trial_starts -= shift
-        odor_starts -= shift
-        odor_ends -= shift
-
-        assert len(trial_starts) == len(odor_starts) == len(odor_ends), (
-            f"The following do not match:\n"
-            f"    Number of trials {len(trial_starts)}\n"
-            f"    Odor presentation starts {len(odor_starts)}\n"
-            f"    Odor presentation ends {len(odor_ends)}"
-        )
-
-        logger.info(f"Found {len(trial_starts)} trial starts in the H5 file.")
-
-        # Convert to timedeltas
-        trial_starts = (trial_starts / samplerate * 1e9).astype("timedelta64[ns]")
-        odor_starts = (odor_starts / samplerate * 1e9).astype("timedelta64[ns]")
-        odor_ends = (odor_ends / samplerate * 1e9).astype("timedelta64[ns]")
-
-        # Return the datetimes to be matched with acquisition frame times
-        return {
-            "trial_starts": exp_start_np + trial_starts,
-            "odor_starts": exp_start_np + odor_starts,
-            "odor_ends": exp_start_np + odor_ends,
-        }
 
 
 def _load_event_data(
@@ -1576,92 +1580,6 @@ def _load_event_data(
     return programs
 
 
-def _match_acq_to_h5(
-    acquisitions: list[Object],
-    h5_data: dict[str, np.ndarray],
-) -> dict[int, tuple[int, float]]:
-    """
-    Match acquisitions to H5 trials by nearest timestamp.
-
-    h5_to_acq_ms stores the signed difference (acq_start - h5_trial_start) in ms.
-
-    Returns dict: h5_idx -> (acq_idx, h5_to_acq_ms)
-    """
-    h5_dts = [_to_datetime(t) for t in h5_data["trial_starts"]]
-    matches: dict[int, tuple[int, float]] = {}
-    h5_ptr = 0
-
-    for acq_idx, acq in enumerate(acquisitions):
-        # Type checking because Object is too generic
-        acq_start = acq["acq_start"]
-        assert isinstance(acq_start, datetime)
-
-        # Advance h5 pointer past trials clearly before this acquisition
-        while h5_ptr < len(h5_dts) - 1 and h5_dts[h5_ptr] < acq_start - H5_TOLERANCE:
-            h5_ptr += 1
-
-        if h5_ptr < len(h5_dts):
-            delta = acq_start - h5_dts[h5_ptr]
-            if abs(delta) < H5_TOLERANCE:
-                matches[h5_ptr] = (acq_idx, delta / TIMEDELTA_MS)
-                h5_ptr += 1
-
-    return matches
-
-
-def _match_csv_to_h5(
-    csv_starts: list[datetime],
-    h5_data: dict[str, np.ndarray],
-) -> dict[int, tuple[int, float]]:
-    """
-    Find the best alignment of CSV trial starts with H5 trial starts.
-
-    This function searches for the starting position k in the csv_starts list
-    such that csv_starts[k:k+n_h5] best aligns with h5 trial starts (minimizing
-    std of pairwise differences). Unmatched trials at the boundaries are left out.
-
-    h5_to_trial_ms stores the signed difference (csv_start - h5_start) in ms.
-
-    Returns dict: pool_idx -> (h5_idx, h5_to_trial_ms)
-    """
-    h5_starts = [_to_datetime(t) for t in h5_data["trial_starts"]]
-    n_h5 = len(h5_starts)
-    n_events = len(csv_starts)
-
-    if n_events == 0 or n_h5 == 0:
-        return {}
-
-    if n_events < n_h5:
-        logger.warning(
-            f"Fewer trial starts in the CSV files ({n_events})"
-            f" than in the H5 file ({n_h5}). Matching as many as possible."
-        )
-        n_h5 = n_events
-
-    # Use offsets from the first H5 trial for numerical stability
-    base = h5_starts[0]
-    h5_ms = np.array([(t - base).total_seconds() * 1000 for t in h5_starts[:n_h5]])
-    trial_ms = np.array([(t - base).total_seconds() * 1000 for t in csv_starts])
-
-    best_k = 0
-    best_std = float("inf")
-
-    for k in range(n_events - n_h5 + 1):
-        std = float(np.std(trial_ms[k : k + n_h5] - h5_ms))
-        if std < best_std:
-            best_std = std
-            best_k = k
-
-    diffs = trial_ms[best_k : best_k + n_h5] - h5_ms
-
-    logger.info(
-        f"Average clock offset (event - h5):"
-        f" {float(np.mean(diffs)):.1f} ms, std: {best_std:.1f} ms"
-    )
-
-    return {best_k + j: (j, float(diffs[j])) for j in range(n_h5)}
-
-
 def _parse_event_file(path: Path, program_start: datetime) -> pd.DataFrame:
     """
     Perform simple parsing into a DataFrame to be iterated over.
@@ -1725,12 +1643,3 @@ def _parse_program_starts(db: Database, start: datetime) -> list[tuple[datetime,
                     starts.append((dt, program_name))
 
     return starts
-
-
-def _to_datetime(dt: np.datetime64) -> datetime:
-    dt_str = np.datetime_as_string(dt).item()
-    return datetime.fromisoformat(dt_str)
-
-
-def _to_datetime_str(dt: np.datetime64) -> str:
-    return _to_datetime(dt).strftime(DT_FORMAT)

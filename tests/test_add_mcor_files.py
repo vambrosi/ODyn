@@ -25,7 +25,7 @@ from helpers import EXP_DIR, FRAMES, HEIGHT, STEM, WIDTH, add_group, seed_rows
 
 def build(tmp_path, acquisitions=3):
     """A database with one experiment, its acquisitions, and a group."""
-    db = Database(tmp_path)
+    db = Database(tmp_path, project="test")
     seeded = seed_rows(db, acquisitions=acquisitions)
 
     return db, db.groups[seeded.group_id]
