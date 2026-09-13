@@ -3,6 +3,8 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import math
+import os
 import subprocess
 
 from collections.abc import Sequence
@@ -288,9 +290,9 @@ def record_call(func):
                 [
                     self.group_id,
                     f"{type(self).__name__}.{func.__name__}",
-                    json.dumps(kwargs),
+                    json.dumps(jsonable(kwargs)),
                     get_git_hash(),
-                    json.dumps(parameters_used),
+                    json.dumps(jsonable(parameters_used)),
                 ],
             )
             call_id = cur.lastrowid
@@ -316,7 +318,7 @@ def record_call(func):
             self._call_stack.pop()
             logger.removeHandler(handler)
 
-            call_output = json.dumps(frame.output) if frame.output is not None else None
+            call_output = json.dumps(jsonable(frame.output)) if frame.output is not None else None
 
             with db.con:
                 db.con.execute(
@@ -332,7 +334,7 @@ def record_call(func):
                         buf.getvalue(),
                         int(frame.flag),
                         call_output,
-                        json.dumps(frame.used),
+                        json.dumps(jsonable(frame.used)),
                         call_id,
                     ],
                 )
@@ -380,6 +382,54 @@ if not logger.handlers:
     _console_handler = logging.StreamHandler()
     _console_handler.setFormatter(_ColorFormatter())
     logger.addHandler(_console_handler)
+
+
+def jsonable(value):
+    """
+    Turn `value` into something `json.dumps` writes and SQLite will store.
+
+    Everything recorded about a call goes through here, because what reaches a
+    method is whatever the caller had to hand: an id out of a DataFrame index is
+    a numpy integer, a file argument is a `Path`, a threshold that came from
+    `np.percentile` is a numpy float, and one read out of a table can be NaN.
+    None of those are JSON, and two of them fail in ways that are hard to read:
+
+    - a numpy or `Path` argument raises `TypeError` at the *start* of the call,
+      before the method has done anything, from a line about JSON;
+    - a NaN does not raise at all. `json.dumps` writes a bare `NaN`, which is
+      not valid JSON, so the `json_valid` CHECK rejects it -- and for
+      `parameters_used` that happens in the UPDATE at the *end*, throwing away
+      the work of a call that had otherwise finished.
+
+    Non-finite floats become `None`, which reads back as NaN through pandas.
+    Anything unrecognized becomes its `str`, because losing the exact form of an
+    argument in the log is better than failing a call over it.
+    """
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+
+    if isinstance(value, dict):
+        return {str(key): jsonable(item) for key, item in value.items()}
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [jsonable(item) for item in value]
+
+    # numpy scalars and arrays, pandas Series and Index. `tolist` gives Python
+    # types, and recursing catches any NaN inside.
+    if hasattr(value, "tolist"):
+        return jsonable(value.tolist())
+
+    # datetime, date, time, pandas Timestamp
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
+
+    return str(value)
 
 
 # TODO: - Add failsafe in case git is not on the path
