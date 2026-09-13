@@ -91,6 +91,9 @@ def test_an_id_from_a_dataframe_index_works(db):
     The obvious way to get an id is out of a DataFrame, which hands back a numpy
     integer. That is not an `int` to `isinstance`, and sqlite3 will not adapt
     it, so it has to be coerced rather than refused.
+
+    Getting it as far as the database also needs `record_call` to serialize it;
+    see `test_record_call.py`.
     """
     exp_id = db.experiments.index[0]
 
