@@ -58,6 +58,18 @@ DT_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 # dict as the columns so the across-TIFF consistency check still sees it.
 RIG_ANNOTATIONS = ("laser_power_920", "laser_power_1040", "loop_acq_interval_s")
 
+# What an annotation can be attached to, and where that row lives. The target is
+# polymorphic, so SQLite cannot check `annotations.target_id` with a foreign key
+# and this is what stands in for one. Keep it in step with `applies_to` in
+# `create.sql`.
+ANNOTATION_TARGETS = {
+    "session": ("sessions", "session_id"),
+    "experiment": ("experiments", "exp_id"),
+    "program": ("programs", "program_id"),
+    "acquisition": ("acquisitions", "acq_id"),
+    "group": ("groups", "group_id"),
+}
+
 # TODO: Make program types part of the database
 PROGRAM_TYPES = [
     "fine 1",
@@ -111,6 +123,8 @@ class Database(CallRecorder):
         db.groups             # `List` of `Group`s for processing/analysis
 
         db.acquisitions       # `DataFrame` with acquisition metadata
+        db.annotations        # `DataFrame` with everything people wrote down
+        db.annotation_keys    # `DataFrame` with what may be annotated
         db.events             # `DataFrame` with olfactometer events
         db.experiments        # `DataFrame` with experiment metadata
         db.mcor_files         # `DataFrame` with mcor files metadata
@@ -125,6 +139,12 @@ class Database(CallRecorder):
         db.add_experiment(...)          # Add a new experiment folder
         db.update(...)                  # Find and add all experiment folders
         db.latest_calls(method_name)    # `DataFrame` with `method_name` calls
+
+        db.add_annotation(...)          # Save an annotation in the DB
+        db.annotations_for(target)      # One row per target, one column per key
+        db.missing_annotations()        # What is still to be filled in
+        db.add_annotation_key(...)      # Allow a new kind of annotation
+        db.retire_annotation_key(...)   # Stop offering one, keep its values
     ```
     """
 
@@ -197,6 +217,8 @@ class Database(CallRecorder):
         self._call_stack: list[CallFrame] = []
         self._acquisitions: None | pd.DataFrame = None
         self._acquisition_trials: None | pd.DataFrame = None
+        self._annotation_keys: None | pd.DataFrame = None
+        self._annotations: None | pd.DataFrame = None
         self._events: None | pd.DataFrame = None
         self._experiments: None | pd.DataFrame = None
         self._groups: dict[int, Group] = {}  # Caches groups one-by-one
@@ -461,6 +483,89 @@ class Database(CallRecorder):
         return self._odors
 
     @property
+    def annotation_keys(self) -> pd.DataFrame:
+        """`DataFrame` with every annotation this project can record"""
+        self._refresh_if_stale()
+
+        if self._annotation_keys is not None:
+            return self._annotation_keys
+
+        query = "SELECT * FROM annotation_keys;"
+
+        self._annotation_keys = pd.read_sql_query(query, self.con)
+        self._annotation_keys.set_index(["applies_to", "key"], inplace=True)
+
+        return self._annotation_keys
+
+    @property
+    def annotations(self) -> pd.DataFrame:
+        """
+        `DataFrame` with every annotation ever written, newest last
+
+        Annotations are append-only, so a key that was corrected appears more
+        than once here. Use `annotations_for` to get the current value of each.
+        """
+        self._refresh_if_stale()
+
+        if self._annotations is not None:
+            return self._annotations
+
+        query = "SELECT * FROM annotations;"
+
+        self._annotations = pd.read_sql_query(query, self.con)
+        self._annotations.set_index("annotation_id", inplace=True)
+
+        return self._annotations
+
+    def annotations_for(self, target_type: str) -> pd.DataFrame:
+        """
+        One row per annotated `session`/`experiment`/`program`/... , one column per key.
+
+        **EXAMPLE**
+        ```python
+        deep = db.annotations_for("experiment").query("fov_depth_um > 200")
+        db.experiments.join(deep, how="inner")
+        ```
+
+        Only keys that hold a single value appear, so every column is a plain
+        number or string and the table behaves like any other. Keys that hold a
+        list (notes, flags) are in `db.annotations` instead.
+        """
+        keys = self.annotation_keys
+
+        if target_type not in keys.index.get_level_values("applies_to"):
+            raise ValueError(
+                f"Nothing can be annotated on a {target_type!r}. Use one of: "
+                f"{sorted(set(keys.index.get_level_values('applies_to')))}."
+            )
+
+        scalar = keys.xs(target_type, level="applies_to")
+        scalar = scalar[~scalar["multi_valued"].astype(bool)]
+
+        rows = self.annotations
+        rows = rows[
+            (rows["target_type"] == target_type) & rows["key"].isin(scalar.index)
+        ]
+
+        # Append-only, so the last row written for a key is its current value.
+        # `annotation_id` rises with time and is the index, hence sorting on it.
+        current = rows.sort_index().drop_duplicates(
+            subset=["target_id", "key"], keep="last"
+        )
+
+        frame = current.pivot(index="target_id", columns="key", values="value")
+        frame.columns.name = None
+        frame.index.name = f"{target_type}_id"
+
+        # `value` is an ANY column, so a column arrives as object dtype even when
+        # every entry in it is a number. The registry says which is which.
+        for key, declared in scalar["value_type"].items():
+            if key in frame.columns and declared in ("integer", "real", "boolean"):
+                frame[key] = pd.to_numeric(frame[key], errors="coerce")
+
+        return frame
+
+    @property
     def outputs(self) -> pd.DataFrame:
         """`DataFrame` with output files of functions"""
         self._refresh_if_stale()
@@ -650,6 +755,8 @@ class Database(CallRecorder):
     def _reset_caches(self) -> None:
         self._acquisitions = None
         self._acquisition_trials = None
+        self._annotation_keys = None
+        self._annotations = None
         self._events = None
         self._experiments = None
         self._group_experiments = None
@@ -1153,9 +1260,7 @@ class Database(CallRecorder):
                         **metadata,
                         "exp_id": exp_id,
                         # Formatted, as everywhere else: see `acq_start` above.
-                        "program_start": metadata["program_start"].strftime(
-                            DT_FORMAT
-                        ),
+                        "program_start": metadata["program_start"].strftime(DT_FORMAT),
                     },
                 )
 
@@ -1210,6 +1315,212 @@ class Database(CallRecorder):
             )
 
             self._reset_caches()
+
+    @record_call
+    def add_annotation(
+        self,
+        *,
+        target_type: str,
+        target_id: int,
+        key: str,
+        value: Value,
+    ) -> None:
+        """
+        Record something about an experiment, session, group, etc.
+
+        **PARAMETERS**
+        - `target_type` is what this annotation is about. Options are
+        `'session'`, `'experiment'`, `'program'`, `'acquisition'` or `'group'`.
+        - `target_id` is that row's id (on the target_type table)
+        - `key` must already be in `db.annotation_keys`
+        - `value` has to match the type the key was registered with
+
+        **EXAMPLE**
+        ```python
+        db.add_annotation(
+            target_type="experiment",
+            target_id=12,
+            key="fov_depth_um",
+            value=70,
+        )
+        ```
+
+        **ALERT**
+        odyn's processing does not uses annotations. Those are for analysis
+        only. Anything the pipeline has to use must be a column instead.
+
+        Annotations are never overwritten. Writing a key twice keeps both, and
+        the later one is used (so the whole history stays visible).
+        """
+
+        with self.con as con:
+            cur = con.cursor()
+            cur.execute("PRAGMA foreign_keys = ON;")
+
+            _db_annotate(
+                cur,
+                target_type=target_type,
+                target_id=target_id,
+                key=key,
+                value=value,
+                method_call_id=self.current_call_id,
+            )
+
+        logger.info(f"Annotated {target_type} {target_id}: {key} = {value!r}. {CHECK}")
+
+        self._reset_caches()
+
+    @record_call
+    def add_annotation_key(
+        self,
+        *,
+        applies_to: str,
+        key: str,
+        label: str,
+        value_type: str,
+        description: str,
+        unit: None | str = None,
+        allowed_values: None | list = None,
+        required: bool = False,
+        multi_valued: bool = False,
+    ) -> None:
+        """
+        Register something new that can be annotated in this project.
+
+        **PARAMETERS**
+        - `applies_to` is `'session'`, `'experiment'`, `'program'`,
+        `'acquisition'` or `'group'`
+        - `key` is what `add_annotation` will be called with
+        - `value_type` is `'text'`, `'integer'`, `'real'`, `'boolean'`,
+        `'date'`, or `'enum'`; an `'enum'` needs `allowed_values`
+        - `required` means the data is not finished until this is filled in
+        - `multi_valued` keeps every value written instead of only the latest,
+        which is what notes and flags want
+
+        **EXAMPLE**
+        ```python
+        db.add_annotation_key(
+            applies_to="experiment",
+            key="uses_odor_batch",
+            label="Odor batch used",
+            value_type="text",
+            description="Which batch of odor was used.",
+        )
+        ```
+
+        Keys are never deleted, because old values would stop making sense. If
+        you want to stop using a particular key, use `retire_annotation_key`.
+        """
+        with self.con as con:
+            cur = con.cursor()
+
+            _db_insert(
+                cur,
+                "annotation_keys",
+                {
+                    "applies_to": applies_to,
+                    "key": key,
+                    "label": label,
+                    "value_type": value_type,
+                    "allowed_values": (
+                        None if allowed_values is None else json.dumps(allowed_values)
+                    ),
+                    "unit": unit,
+                    "description": description,
+                    "required": bool(required),
+                    "multi_valued": bool(multi_valued),
+                    "retired": False,
+                },
+            )
+
+        logger.info(f"Registered annotation '{key}' for a {applies_to}. {CHECK}")
+
+        self._reset_caches()
+
+    @record_call
+    def retire_annotation_key(
+        self, *, applies_to: str, key: str, retired: bool = True
+    ) -> None:
+        """
+        Stop offering an annotation, without losing what was already written.
+
+        **USAGE**
+        ```python
+        db.retire_annotation_key(applies_to="experiment", key="cohort")
+        db.retire_annotation_key(
+            applies_to="experiment",
+            key="cohort",
+            retired=False,
+        )
+        ```
+
+        **PARAMETERS**
+        - `applies_to` and `key` name the annotation, as in `db.annotation_keys`
+        - `retired=False` brings it back, for when one is retired by mistake
+
+        A retired key is refused by `add_annotation` and dropped from
+        `db.missing_annotations()`, but everything written under it stays in
+        `db.annotations` and keeps showing up in `db.annotations_for(...)`.
+        """
+        with self.con as con:
+            changed = con.execute(
+                """
+                UPDATE annotation_keys
+                    SET retired = ?
+                    WHERE applies_to = ? AND key = ?;
+                """,
+                [bool(retired), applies_to, key],
+            ).rowcount
+
+        if not changed:
+            raise ValueError(
+                f"No annotation key '{key}' for a {applies_to}. Check "
+                f"'db.annotation_keys' for the ones this project has."
+            )
+
+        was = "Retired" if retired else "Brought back"
+        logger.info(f"{was} annotation '{key}' for a {applies_to}. {CHECK}")
+
+        self._reset_caches()
+
+    def missing_annotations(self) -> pd.DataFrame:
+        """
+        Everything still to be filled in before this project's data is finished.
+
+        One row per `(target_type, target_id, key)` that is marked `required` in
+        `db.annotation_keys` and has nothing written for it yet.
+        """
+        keys = self.annotation_keys
+        required = keys[keys["required"].astype(bool) & ~keys["retired"].astype(bool)]
+
+        rows = []
+
+        for (applies_to, key), entry in required.iterrows():
+            table, id_column = ANNOTATION_TARGETS[applies_to]
+
+            found = self.con.execute(
+                f"""
+                SELECT t.{id_column} FROM {table} AS t
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM annotations AS a
+                            WHERE a.target_type = ? AND a.key = ?
+                              AND a.target_id = t.{id_column}
+                    );
+                """,
+                [applies_to, key],
+            ).fetchall()
+
+            rows.extend(
+                {
+                    "target_type": applies_to,
+                    "target_id": row[id_column],
+                    "key": key,
+                    "label": entry["label"],
+                }
+                for row in found
+            )
+
+        return pd.DataFrame(rows, columns=["target_type", "target_id", "key", "label"])
 
     @record_call
     def update(self) -> None:
@@ -1376,13 +1687,37 @@ def _db_annotate(
     value: Value,
     method_call_id: int,
 ) -> int:
-    """Write one annotation, checking it against the registry first."""
+    """Write one annotation, checking the target and the registry first."""
+
+    # `target_id` usually arrives as a numpy integer, because the obvious way to
+    # get one is out of a DataFrame index. That is not an `int` to `isinstance`
+    # and sqlite3 will not adapt it, so coerce rather than refuse.
+    target_id = int(target_id)
+
+    # No foreign key can cover a polymorphic target, so this stands in for one:
+    # without it an annotation can name a row that does not exist, and nothing
+    # would ever say so.
+    if target_type not in ANNOTATION_TARGETS:
+        raise ValueError(
+            f"Cannot annotate a {target_type!r}. Use one of: "
+            f"{sorted(ANNOTATION_TARGETS)}."
+        )
+
+    table, id_column = ANNOTATION_TARGETS[target_type]
+
+    exists = cur.execute(
+        f"SELECT EXISTS(SELECT 1 FROM {table} WHERE {id_column} = ?);",
+        [target_id],
+    ).fetchone()[0]
+
+    if not exists:
+        raise ValueError(f"There is no {target_type} {target_id} to annotate.")
 
     # The registry declares a type per key and SQLite cannot enforce it: the
     # column is ANY, which is what lets a number stay a number. So the check
     # lives here, on the only path that writes.
     row = cur.execute(
-        "SELECT value_type, allowed_values "
+        "SELECT value_type, allowed_values, retired "
         "  FROM annotation_keys "
         "  WHERE applies_to = ? AND key = ?;",
         [target_type, key],
@@ -1392,6 +1727,15 @@ def _db_annotate(
         raise ValueError(
             f"No annotation key '{key}' for a {target_type}. Register it in "
             f"`annotation_keys` first, or check the spelling."
+        )
+
+    # Retiring is what a project has instead of deleting a key: old values stay
+    # readable, new ones are not taken.
+    if row["retired"]:
+        raise ValueError(
+            f"Annotation '{key}' is retired for a {target_type}, so it does not "
+            f"take new values. What was written under it is still readable. Use "
+            f"`retire_annotation_key(..., retired=False)` to bring it back."
         )
 
     value = _annotation_value(
