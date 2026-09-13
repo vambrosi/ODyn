@@ -892,7 +892,19 @@ class Database(CallRecorder):
                     [group_id, exp_id],
                 )
 
-                _db_insert(cur, "acquisitions", {**acquisition, "exp_id": exp_id})
+                # Type checking because Object is too generic
+                acq_start = acquisition["acq_start"]
+                assert isinstance(acq_start, datetime)
+
+                _db_insert(
+                    cur,
+                    "acquisitions",
+                    {
+                        **acquisition,
+                        "exp_id": exp_id,
+                        "acq_start": acq_start.strftime(DT_FORMAT),
+                    },
+                )
 
             added.append(raw_path.stem)
 
@@ -969,7 +981,16 @@ class Database(CallRecorder):
                 exp_data, acq = raw_metadata
 
                 if last_exp_data is None:
-                    # Don't do anything if experiment is already in the DB
+                    # Don't do anything if experiment is already in the DB.
+                    #
+                    # Formatted rather than passed as a datetime: the column
+                    # holds DT_FORMAT strings, and sqlite3's adapter writes
+                    # isoformat, which drops '.000000' when the epoch lands
+                    # exactly on a second. The two then never compare equal, so
+                    # this says "not present" and the insert below fails on
+                    # UNIQUE instead of returning quietly.
+                    assert isinstance(exp_data["exp_start"], datetime)
+
                     cur.execute(
                         """
                         SELECT EXISTS(
@@ -977,7 +998,7 @@ class Database(CallRecorder):
                                 WHERE exp_start = ?
                         );
                     """,
-                        [exp_data["exp_start"]],
+                        [exp_data["exp_start"].strftime(DT_FORMAT)],
                     )
 
                     if cur.fetchone()[0]:
@@ -1136,14 +1157,41 @@ class Database(CallRecorder):
                     matched_acq_indices.add(acq_idx)
 
             # Fallback: insert acquisitions with no matching H5 trial
+            #
+            # Formatted like the matched ones above, not left to sqlite3's
+            # adapter. The adapter writes isoformat, which drops '.000000' when
+            # the microseconds are zero, so the two loops would put two formats
+            # in one column -- and `read_sql_query` infers the format from the
+            # first row and silently returns NaT for every row unlike it.
             for acq_idx, acq in enumerate(acquisitions):
                 if acq_idx not in matched_acq_indices:
-                    _db_insert(cur, "acquisitions", {**acq, "exp_id": exp_id})
+                    # Type checking because Object is too generic
+                    acq_start = acq["acq_start"]
+                    assert isinstance(acq_start, datetime)
+
+                    _db_insert(
+                        cur,
+                        "acquisitions",
+                        {
+                            **acq,
+                            "exp_id": exp_id,
+                            "acq_start": acq_start.strftime(DT_FORMAT),
+                        },
+                    )
 
             # Insert programs, trials, and events
             for program_idx, program_data in enumerate(programs_data):
+                metadata = program_data["metadata"]
+                assert isinstance(metadata["program_start"], datetime)
+
                 program_id = _db_insert(
-                    cur, "programs", {**program_data["metadata"], "exp_id": exp_id}
+                    cur,
+                    "programs",
+                    {
+                        **metadata,
+                        "exp_id": exp_id,
+                        "program_start": metadata["program_start"].strftime(DT_FORMAT),
+                    },
                 )
 
                 # Pass 1: insert trials, collect trial_ids by index
