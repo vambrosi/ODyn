@@ -130,6 +130,7 @@ class Database(CallRecorder):
         db.mcor_files         # `DataFrame` with mcor files metadata
         db.method_calls       # `DataFrame` with `@record_call` functions
         db.odors              # `DataFrame` with current list of odors
+        db.session_odors      # `DataFrame` with each session's vials/dilutions
         db.programs           # `DataFrame` with one entry per _Event.csv_ file
         db.trials             # `DataFrame` with all olfactometer trials
     ```
@@ -219,6 +220,7 @@ class Database(CallRecorder):
         self._acquisition_trials: None | pd.DataFrame = None
         self._annotation_keys: None | pd.DataFrame = None
         self._annotations: None | pd.DataFrame = None
+        self._session_odors: None | pd.DataFrame = None
         self._events: None | pd.DataFrame = None
         self._experiments: None | pd.DataFrame = None
         self._groups: dict[int, Group] = {}  # Caches groups one-by-one
@@ -481,6 +483,25 @@ class Database(CallRecorder):
         self._odors.set_index("odor_id", inplace=True)
 
         return self._odors
+
+    @property
+    def session_odors(self) -> pd.DataFrame:
+        """
+        `DataFrame` with what was in each vial, for each session
+        """
+        self._refresh_if_stale()
+
+        if self._session_odors is not None:
+            return self._session_odors
+
+        query = "SELECT * FROM session_odors;"
+
+        self._session_odors = pd.read_sql_query(
+            query, self.con, parse_dates=["made_on"]
+        )
+        self._session_odors.set_index(["session_id", "odor_id"], inplace=True)
+
+        return self._session_odors
 
     @property
     def annotation_keys(self) -> pd.DataFrame:
@@ -757,6 +778,7 @@ class Database(CallRecorder):
         self._acquisition_trials = None
         self._annotation_keys = None
         self._annotations = None
+        self._session_odors = None
         self._events = None
         self._experiments = None
         self._group_experiments = None
@@ -1434,6 +1456,118 @@ class Database(CallRecorder):
             )
 
         logger.info(f"Registered annotation '{key}' for a {applies_to}. {CHECK}")
+
+        self._reset_caches()
+
+    @record_call
+    def set_session_odors(self, *, session_id: int, odors: list[Object]) -> None:
+        """
+        Record which odor was in which vial for a session, and how it was made.
+
+        **USAGE**
+        ```python
+        db.set_session_odors(
+            session_id=3,
+            odors=[
+                {"odor_id": 1, "vial": 1, "goal_ppm": "0.3", "sccm": 200,
+                 "made_on": "2026-07-06"},
+                {"odor_id": 17, "vial": 4, "goal_ppm": "44.2", "sccm": 200},
+            ],
+        )
+        ```
+
+        **PARAMETERS**
+        - `session_id` is the session this panel was used in
+        - `odors` is one entry per vial. `odor_id` is required; `vial`,
+        `goal_ppm`, `percent_vv`, `sccm` and `made_on` are optional.
+
+        **IMPORTANT**
+        This replaces the session's whole panel rather than adding to it. A
+        panel is written down as one table and is only meaningful as a whole:
+        adding row by row would leave a half-updated panel looking complete.
+
+        `goal_ppm` is text because the log holds ranges and words as well as
+        numbers ('1 to 24', 'na'), and rewriting those as numbers would be
+        inventing a precision nobody recorded.
+        """
+        allowed = {"odor_id", "vial", "goal_ppm", "percent_vv", "sccm", "made_on"}
+
+        rows = []
+
+        for entry in odors:
+            unknown = set(entry) - allowed
+            if unknown:
+                raise ValueError(
+                    f"{sorted(unknown)} are not things recorded about a vial. "
+                    f"Use any of: {sorted(allowed)}."
+                )
+
+            if "odor_id" not in entry:
+                raise ValueError(f"Every entry needs an 'odor_id', but got {entry}.")
+
+            made_on = entry.get("made_on")
+
+            rows.append(
+                {
+                    "session_id": int(session_id),
+                    "odor_id": int(entry["odor_id"]),  # type: ignore[arg-type]
+                    "vial": entry.get("vial"),
+                    "goal_ppm": (
+                        None
+                        if entry.get("goal_ppm") is None
+                        else str(entry["goal_ppm"])
+                    ),
+                    "percent_vv": entry.get("percent_vv"),
+                    "sccm": entry.get("sccm"),
+                    # Dates are written as dates not datetimes (to not imply precision).
+                    "made_on": (
+                        None
+                        if made_on is None
+                        else (
+                            made_on.date().isoformat()
+                            if isinstance(made_on, datetime)
+                            else str(made_on)
+                        )
+                    ),
+                }
+            )
+
+        seen = [row["odor_id"] for row in rows]
+        repeated = sorted({o for o in seen if seen.count(o) > 1})
+
+        if repeated:
+            raise ValueError(
+                f"Odors {repeated} appear more than once. One entry per odor: "
+                f"a panel cannot have the same odor in two vials."
+            )
+
+        with self.con as con:
+            cur = con.cursor()
+            cur.execute("PRAGMA foreign_keys = ON;")
+
+            exists = cur.execute(
+                """
+                SELECT EXISTS(
+                    SELECT 1
+                        FROM sessions
+                        WHERE session_id = ?
+                    );
+                """,
+                [int(session_id)],
+            ).fetchone()[0]
+
+            if not exists:
+                raise ValueError(f"There is no session {session_id}.")
+
+            cur.execute(
+                "DELETE FROM session_odors WHERE session_id = ?;",
+                [int(session_id)],
+            )
+
+            if rows:
+                _db_insert(cur, "session_odors", rows)
+
+        logger.info(f"Recorded {len(rows)} odors for session {session_id}. {CHECK}")
 
         self._reset_caches()
 
