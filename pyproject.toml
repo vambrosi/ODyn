@@ -9,8 +9,13 @@ version = "0.0.1"
 
 dependencies = ["tomlkit"]
 
+# The entry app needs Qt; the cluster and the processing workstations do not,
+# so it is not a dependency of `odyn` itself. Install with `pip install -e .[gui]`.
+[project.optional-dependencies]
+gui = ["PySide6"]
+
 [tool.setuptools]
-packages = ["odyn"]
+packages = ["odyn", "odyn.app"]
 
 [tool.setuptools.package-data]
 odyn = ["*.sql"]
