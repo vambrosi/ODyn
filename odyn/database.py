@@ -1711,6 +1711,44 @@ class Database(CallRecorder):
         return number
 
     @record_call
+    def set_objective(self, *, exp_id: int, objective: int) -> None:
+        """
+        Record which objective an experiment was imaged through.
+
+        **USAGE**
+        ```python
+        db.set_objective(exp_id=12, objective=10)
+        ```
+
+        **PARAMETERS**
+        - `exp_id` is the experiment
+        - `objective` is the magnification, as a number: `10` or `20`
+
+        A column rather than an annotation because the micron-per-pixel scale
+        depends on it, and the TIFFs do not record it -- only the logs do.
+        Calling this again corrects it.
+        """
+        magnification = int(objective)
+
+        if magnification <= 0:
+            raise ValueError(f"An objective is a magnification, not {objective!r}.")
+
+        with self.con as con:
+            cur = con.cursor()
+
+            changed = cur.execute(
+                "UPDATE experiments SET objective = ? WHERE exp_id = ?;",
+                [magnification, int(exp_id)],
+            ).rowcount
+
+            if not changed:
+                raise ValueError(f"There is no experiment {exp_id}.")
+
+        logger.info(f"Experiment {exp_id} used a {magnification}x. {CHECK}")
+
+        self._reset_caches()
+
+    @record_call
     def add_panel(
         self,
         *,
