@@ -23,7 +23,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, QSize, Qt
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -45,6 +46,7 @@ from PySide6.QtWidgets import (
 
 from .draft import Draft, drafts_folder
 from .fields import BOOLEAN, ENUM, LONG_TEXT, Field, form_fields, missing_required
+from .icons import icon, label_icon
 from .submit import check_all, session_folders, submit_all
 
 # A blank dropdown entry, so "not recorded" stays different from a real answer.
@@ -54,8 +56,26 @@ UNSET = "—"
 # is being filled in.
 NOTE = "note"
 
-# Wide enough that a goal or a drug name is readable without resizing.
+# A line of text much wider than this is tiring to read: the eye loses the
+# start of the next line. The form sits in a column of this width, centred,
+# rather than stretching with the window.
+COLUMN_WIDTH = 620
 FIELD_WIDTH = 260
+
+# Flat, rounded, padded. Qt's native entry is a sunken bevel, which reads as a
+# hole in the page next to the rest of this.
+STYLE = """
+QLineEdit, QPlainTextEdit, QComboBox {
+    border: 1px solid palette(mid);
+    border-radius: 6px;
+    padding: 5px 8px;
+    background: palette(base);
+}
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus {
+    border: 1px solid palette(highlight);
+}
+QComboBox::drop-down { border: none; width: 18px; }
+"""
 
 
 class FieldRow(QWidget):
@@ -145,8 +165,19 @@ class FormPane(QScrollArea):
 
             form.addRow(field.prompt, FieldRow(field, values.get(field.key), on_change))
 
+        column = QWidget()
+        column.setLayout(form)
+        column.setMaximumWidth(COLUMN_WIDTH)
+
+        # Centred, so the form keeps its width as the window grows and the
+        # space goes to the margins instead of to the lines.
+        centred = QHBoxLayout()
+        centred.addStretch()
+        centred.addWidget(column)
+        centred.addStretch()
+
         holder = QWidget()
-        holder.setLayout(form)
+        holder.setLayout(centred)
 
         self.setWidget(holder)
         self.setWidgetResizable(True)
@@ -230,18 +261,27 @@ class NotesDock(QDockWidget):
         self.setWidget(self.editor)
 
     def show_note(self, draft: None | Draft, experiment: None | str = None) -> None:
-        """Point the dock at a session's note, or at one experiment's."""
+        """
+        Point the dock at a session's note, or at one experiment's.
+
+        The banner says which, because the box itself changing content is easy
+        to miss when several sessions are open.
+        """
         self.target = None if draft is None else (draft, experiment)
 
         held = ""
 
-        if draft is not None:
+        if draft is None:
+            self.setWindowTitle("Notes")
+        else:
             where = (
                 draft.session
                 if experiment is None
                 else (draft.experiment(experiment) or {})
             )
             held = where.get(NOTE) or ""
+
+            self.retitle()
 
         # Setting the text fires `textChanged`, which would write the note we
         # just loaded back onto whatever is now selected.
@@ -250,6 +290,22 @@ class NotesDock(QDockWidget):
         self.loading = False
 
         self.editor.setEnabled(draft is not None)
+
+    def retitle(self) -> None:
+        """
+        Say again what the note is about, without reloading it.
+
+        Renaming a session changes the banner while someone may be part way
+        through typing into the box, so the text is left exactly as it is.
+        """
+        if self.target is None:
+            self.setWindowTitle("Notes")
+            return
+
+        draft, experiment = self.target
+        about = "Session" if experiment is None else experiment.upper()
+
+        self.setWindowTitle(f"{about} notes — {draft.label}")
 
     def _changed(self) -> None:
         if self.loading or self.target is None:
@@ -273,26 +329,44 @@ class EntryWindow(QMainWindow):
         self.db = db
         self.drafts = list(drafts)
         self.showing = "session"
+        self.selected = 0
 
         self.setWindowTitle("ODyn — session entry")
         self.resize(1000, 700)
+        self.setStyleSheet(STYLE)
 
         self.bar = QToolBar("Sections")
         self.bar.setObjectName("sections")
         self.bar.setMovable(False)
+        self.bar.setIconSize(QSize(26, 26))
         self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, self.bar)
 
         self.notes = NotesDock()
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.notes)
 
+        # Its own bar on the other edge, so a closed dock can be brought back.
+        # Without it, closing the notes would hide them for good.
+        self.panels = QToolBar("Panels")
+        self.panels.setObjectName("panels")
+        self.panels.setMovable(False)
+        self.panels.setIconSize(QSize(26, 26))
+        self.addToolBar(Qt.ToolBarArea.RightToolBarArea, self.panels)
+
+        self.notes_button = self.panels.addAction(icon("notes"), "Notes")
+        self.notes_button.setToolTip("Notes")
+        self.notes_button.setCheckable(True)
+        self.notes_button.setChecked(True)
+        # Read from the action rather than taking the signal's argument:
+        # `triggered` carries the checked state only sometimes, and a bare
+        # `setVisible` would then be called with nothing.
+        self.notes_button.triggered.connect(
+            lambda: self.notes.setVisible(self.notes_button.isChecked())
+        )
+
+        # So closing the dock by its own X un-checks the button that reopens it.
+        self.notes.visibilityChanged.connect(self.notes_button.setChecked)
+
         self.stack = QStackedWidget()
-
-        # Which session, until the mouse icons replace it.
-        self.picker = QComboBox()
-        self.picker.currentIndexChanged.connect(lambda _: self._show())
-
-        new_session = QPushButton("Add session")
-        new_session.clicked.connect(self._add_session)
 
         self.status = QLabel()
         self.status.setWordWrap(True)
@@ -300,17 +374,11 @@ class EntryWindow(QMainWindow):
         submit = QPushButton("Check and submit the day")
         submit.clicked.connect(self._submit_day)
 
-        top = QHBoxLayout()
-        top.addWidget(QLabel("Session"))
-        top.addWidget(self.picker, stretch=1)
-        top.addWidget(new_session)
-
         bottom = QHBoxLayout()
         bottom.addWidget(self.status, stretch=1)
         bottom.addWidget(submit)
 
         layout = QVBoxLayout()
-        layout.addLayout(top)
         layout.addWidget(self.stack, stretch=1)
         layout.addLayout(bottom)
 
@@ -319,7 +387,6 @@ class EntryWindow(QMainWindow):
         self.setCentralWidget(holder)
 
         self._build_bar()
-        self._refresh_picker()
         self._restore_layout()
 
     # ------------------------------------------------------------------ #
@@ -327,23 +394,85 @@ class EntryWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _build_bar(self) -> None:
-        """Sections of the bar, separated the way a toolbar separates them."""
-        for name, label in (("session", "Session"), ("panel", "Odors")):
-            action = self.bar.addAction(label)
+        """
+        The parts of the bar that never change: what to edit, and the `+`.
+
+        Session icons are inserted between them as sessions are added, rather
+        than by rebuilding: clearing a toolbar destroys its actions, and this
+        runs from an action's own `triggered`.
+        """
+        self.section_actions = {}
+        self.session_actions = []
+
+        for name, label, picture in (
+            ("session", "Session", "session"),
+            ("panel", "Odors", "odors"),
+        ):
+            action = self.bar.addAction(icon(picture), label)
+            action.setToolTip(label)
             action.setCheckable(True)
             action.setChecked(name == self.showing)
             action.triggered.connect(lambda _, which=name: self._select(which))
+            self.section_actions[name] = action
 
         self.bar.addSeparator()
 
-    def _select(self, which: str) -> None:
-        self.showing = which
+        self.add_action = self.bar.addAction(icon("add"), "Add session")
+        self.add_action.setToolTip("Add session")
+        self.add_action.triggered.connect(self._add_session)
 
-        for action in self.bar.actions():
-            if action.text():
-                action.setChecked(action.text().lower().startswith(which[:4]))
+        for draft in self.drafts:
+            self._add_session_action(draft)
 
         self._show()
+
+    def _add_session_action(self, draft: Draft) -> None:
+        """One session icon, inserted just before the `+` that adds them."""
+        action = QAction(label_icon("?"), draft.label, self)
+        action.setCheckable(True)
+        action.triggered.connect(lambda _, which=draft: self._choose(which))
+
+        self.bar.insertAction(self.add_action, action)
+        self.session_actions.append(action)
+
+        self._update_badges()
+
+    def _select(self, which: str) -> None:
+        """Choose what is being edited for the current session."""
+        self.showing = which
+
+        for name, action in self.section_actions.items():
+            action.setChecked(name == which)
+
+        self._show()
+
+    def _choose(self, which: int | Draft) -> None:
+        """Choose which session the forms and the note are about."""
+        self.selected = which if isinstance(which, int) else self.drafts.index(which)
+
+        self._update_badges()
+        self._show()
+
+    def _update_badges(self) -> None:
+        """
+        Redraw what each session icon says and which is checked.
+
+        In place, never by rebuilding: this runs from a field's
+        `editingFinished`, which Qt emits *during* a focus change, so
+        destroying widgets here takes the box that emitted it and the box about
+        to receive focus with it.
+        """
+        for index, (draft, action) in enumerate(zip(self.drafts, self.session_actions)):
+            # The position until someone types a number, so the icons can be
+            # told apart from the moment they appear. Drawn as the icon itself
+            # rather than as a badge over one: a number squeezed under a
+            # picture is unreadable at the size a toolbar gives it.
+            badge = draft.mouse_id if draft.mouse_id is not None else index + 1
+
+            action.setIcon(label_icon(str(badge)))
+            action.setToolTip(draft.label)
+            action.setText(draft.label)
+            action.setChecked(index == self.selected)
 
     # ------------------------------------------------------------------ #
     # Sessions
@@ -352,30 +481,53 @@ class EntryWindow(QMainWindow):
     @property
     def draft(self) -> None | Draft:
         """The session being edited, or `None` before any has been added."""
-        index = self.picker.currentIndex()
+        at = self.selected
 
-        return self.drafts[index] if 0 <= index < len(self.drafts) else None
-
-    def _refresh_picker(self) -> None:
-        chosen = self.picker.currentIndex()
-
-        self.picker.blockSignals(True)
-        self.picker.clear()
-        self.picker.addItems([draft.label for draft in self.drafts])
-        self.picker.setCurrentIndex(max(0, min(chosen, len(self.drafts) - 1)))
-        self.picker.blockSignals(False)
-
-        self._show()
+        return self.drafts[at] if 0 <= at < len(self.drafts) else None
 
     def _add_session(self) -> None:
-        self.drafts.append(Draft.start(drafts_folder()))
-        self._refresh_picker()
-        self.picker.setCurrentIndex(len(self.drafts) - 1)
+        draft = Draft.start(drafts_folder())
+
+        self.drafts.append(draft)
+        self.selected = len(self.drafts) - 1
+        self._add_session_action(draft)
+        self._show()
+
+    def _drop_sessions(self, gone: set) -> None:
+        """Take submitted sessions out of the bar, keeping the rest in place."""
+        for draft, action in list(zip(self.drafts, self.session_actions)):
+            if draft.path in gone:
+                self.bar.removeAction(action)
+                self.session_actions.remove(action)
+                action.deleteLater()
+
+        self.drafts = [draft for draft in self.drafts if draft.path not in gone]
+        self.selected = min(self.selected, max(0, len(self.drafts) - 1))
+
+        self._update_badges()
+        self._show()
+
+    def _identify(self, **named) -> None:
+        """Set the animal or the day, and redraw the badge that shows it."""
+        draft = self.draft
+
+        if draft is None:
+            return
+
+        draft.identify(**named)
+        self._update_badges()
+        self.notes.retitle()
+        self._refresh_status()
 
     def _show(self) -> None:
         """Put the selected session's chosen form in the stack."""
         while self.stack.count():
-            self.stack.removeWidget(self.stack.widget(0))
+            old = self.stack.widget(0)
+            self.stack.removeWidget(old)
+
+            # Not dropped on the floor: Qt may still be delivering an event to
+            # something inside it, and `deleteLater` waits for that to finish.
+            old.deleteLater()
 
         draft = self.draft
 
@@ -387,11 +539,42 @@ class EntryWindow(QMainWindow):
                     form_fields(self.db, "session"),
                     draft.session,
                     lambda field, value: draft.update_session(**{field.key: value}),
+                    extra=self._identity_rows(draft),
                 )
             )
 
         self.notes.show_note(draft)
         self._refresh_status()
+
+    def _identity_rows(self, draft: Draft) -> list[tuple[str, QWidget]]:
+        """
+        Which animal and which day, above the rest of the session form.
+
+        Not annotations: they say which session this is, and the mouse is what
+        the left bar puts on the badge.
+        """
+        mouse = QLineEdit("" if draft.mouse_id is None else str(draft.mouse_id))
+        mouse.setPlaceholderText("the number, as in 442")
+        mouse.setMinimumWidth(FIELD_WIDTH)
+        mouse.editingFinished.connect(lambda: self._set_mouse(mouse))
+
+        day = QLineEdit(draft.date)
+        day.setMinimumWidth(FIELD_WIDTH)
+        day.editingFinished.connect(lambda: self._set_date(day))
+
+        return [("Mouse ID", mouse), ("Date", day)]
+
+    def _set_mouse(self, box: QLineEdit) -> None:
+        text = box.text().strip().lstrip("mM")
+
+        if text.isdigit() and int(text) > 0:
+            self._identify(mouse_id=int(text))
+
+    def _set_date(self, box: QLineEdit) -> None:
+        try:
+            self._identify(date=box.text())
+        except ValueError:
+            box.setText("" if self.draft is None else self.draft.date)
 
     def _refresh_status(self) -> None:
         draft = self.draft
@@ -441,11 +624,10 @@ class EntryWindow(QMainWindow):
             return
 
         results = submit_all([result.draft for result in ready], self.db)
-        done = {r.draft.path for r in results if r.submitted}
-        self.drafts = [draft for draft in self.drafts if draft.path not in done]
+
+        self._drop_sessions({r.draft.path for r in results if r.submitted})
 
         QMessageBox.information(self, "Submitted", _report(results))
-        self._refresh_picker()
 
     # ------------------------------------------------------------------ #
     # Between runs

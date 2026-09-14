@@ -23,3 +23,7 @@ packages = ["odyn", "odyn.app"]
 
 [tool.setuptools.package-data]
 odyn = ["*.sql"]
+
+# Without this the icons are missing from an installed copy, and the app runs
+# with blank buttons.
+"odyn.app" = ["icons/*.svg"]
