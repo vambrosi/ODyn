@@ -109,6 +109,7 @@ class Draft:
             "date": session_date,
             "started_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
             "saved_at": None,
+            "mouse": {},
             "session": {},
             "experiments": [],
             "panel": {},
@@ -188,6 +189,16 @@ class Draft:
         return self.data.get("saved_at")
 
     @property
+    def mouse(self) -> dict[str, Any]:
+        """
+        Lasting facts about the animal: sex, date of birth, line, sensor.
+
+        Here rather than in `session` because they are true of the mouse, not
+        of the day. Usually filled in once, the first time it is used.
+        """
+        return self.data.setdefault("mouse", {})
+
+    @property
     def session(self) -> dict[str, Any]:
         """The fields that describe the day: goal, weight, headplate, notes."""
         return self.data.setdefault("session", {})
@@ -205,7 +216,7 @@ class Draft:
     @property
     def is_empty(self) -> bool:
         """Whether anything has been filled in, so an untouched draft can go."""
-        return not (self.session or self.experiments or self.panel)
+        return not (self.mouse or self.session or self.experiments or self.panel)
 
     def experiment(self, name: str) -> None | dict[str, Any]:
         """One experiment's entry, or `None` if it has not been started."""
@@ -218,6 +229,12 @@ class Draft:
     # ----------------------------------------------------------------- #
     # Changing it
     # ----------------------------------------------------------------- #
+
+    def update_mouse(self, **fields: Any) -> Draft:
+        """Set what is known about the animal. `None` clears a field."""
+        _merge(self.mouse, fields)
+
+        return self.save()
 
     def update_session(self, **fields: Any) -> Draft:
         """

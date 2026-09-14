@@ -41,16 +41,17 @@ import tifffile
 
 from matplotlib import colormaps
 
-import caiman as cm
-from caiman.base.movies import get_file_size
-from caiman.motion_correction import MotionCorrect
-from caiman.paths import get_tempdir
-
+# caiman is imported inside the functions that use it, not here. It is by far
+# the slowest import in the package, and only motion correction and the movie
+# loaders need it -- so importing `odyn` to read or annotate the database, or
+# to run the entry app, does not pay for it.
 from .utils import *
 from .utils import _acquisition_trials, _method_calls_dataframe, _SYNC_COLUMNS
 from .utils import CallFrame, CallRecorder
 
 if TYPE_CHECKING:
+    import caiman as cm
+
     from .database import Database
 
 # --------------------------------------------------------------------------- #
@@ -576,6 +577,8 @@ class Group(CallRecorder):
         if tests.empty:
             raise RuntimeError(f"{self!r} has no test motion correction. ")
 
+        from caiman.paths import get_tempdir
+
         temp_folder = Path(get_tempdir())
         mmap_paths = [temp_folder / name for name in tests.iloc[0]["output_mmap_names"]]
 
@@ -763,6 +766,8 @@ class Group(CallRecorder):
         **EXAMPLES*
             group.delete_temp_files()
         """
+
+        from caiman.paths import get_tempdir
 
         # Get file paths for mmaps in the temp folder
         path = Path(get_tempdir())
@@ -1332,6 +1337,8 @@ class Group(CallRecorder):
 
             # Load the subsampled movie in a different thread
             def load_background():
+                import caiman as cm
+
                 cache = (
                     self.db.main_folder
                     / ODYN_FOLDER
@@ -1731,6 +1738,8 @@ class Group(CallRecorder):
         - Given the last constraint we must compute `frame_acq` here.
         """
 
+        import caiman as cm
+
         movie_chains = []
         labels: list[np.ndarray] = []
         paths_by_type = self._movie_paths(movie_types)
@@ -1916,6 +1925,9 @@ class Group(CallRecorder):
                     self.movies[movie_types].mark_as_outdated()
 
         # --- Get settings for CaImAn MotionCorrection class --- #
+
+        import caiman as cm
+        from caiman.motion_correction import MotionCorrect
 
         # Get raw paths
         acquisitions_slice = self.acquisitions.iloc[first_acq : last_acq + 1 : step_acq]
@@ -3006,6 +3018,8 @@ def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:
     NOTE: this must be an array. `caiman.load` reads a *list* of subindices as
     one index per dimension, so a list would be taken as [time, y, x].
     """
+    from caiman.base.movies import get_file_size
+
     _, frames = get_file_size(path)
     frames = cast(int, frames)
 
