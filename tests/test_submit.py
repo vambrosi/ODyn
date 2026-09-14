@@ -258,7 +258,7 @@ def test_submit_ingests_and_annotates_together(db, filled):
 
 
 def test_the_typed_fields_arrive_as_annotations(db, filled):
-    written = submit(filled, db)
+    submit(filled, db)
 
     stored = {
         row["key"]: row["value"]

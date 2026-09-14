@@ -1,28 +1,33 @@
 """
-The entry window: one session being filled in, saved as it is typed.
+The entry window.
 
-Needs Qt, which is an optional dependency -- `pip install -e .[gui]`. Launch it
-with `python -m odyn.app MAIN_FOLDER`.
+Needs Qt, an optional dependency -- `pip install -e .[gui]`. Launch it with
+`python -m odyn.app MAIN_FOLDER`.
 
 The window holds no state of its own. Every edit goes straight into the `Draft`
-and therefore straight to disk, so closing the app mid-session loses nothing
-and the next launch offers the day back. What goes on the form comes from
-`fields.py`, which builds it from the annotation registry.
+and therefore straight to disk, so closing the app mid-session loses nothing.
+What each form asks for comes from `fields.py`, which builds it from the
+annotation registry.
 
-Submitting is `submit.submit`: it reports what is wrong before writing, and
-writes nothing until there is nothing blocking.
+**LAYOUT**
+Three of Qt's own `QMainWindow` parts, rather than nested layouts: a toolbar
+down the left edge to choose what is being edited, a dock on the right for the
+note, and a stack in the middle holding the forms. Qt then handles collapsing,
+resizing and remembering the arrangement between runs.
+
+The note is not on any form. It belongs to whatever the left bar has selected,
+and lives in the dock so it stays readable while the rest is filled in.
 """
 
 from __future__ import annotations
 
-from datetime import date as Date
 from pathlib import Path
 
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QDialog,
-    QDialogButtonBox,
+    QDockWidget,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -32,42 +37,37 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
-    QSpinBox,
-    QTabWidget,
+    QStackedWidget,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
 from .draft import Draft, drafts_folder
-from .fields import (
-    BOOLEAN,
-    ENUM,
-    LONG_TEXT,
-    Field,
-    form_fields,
-    missing_required,
-)
+from .fields import BOOLEAN, ENUM, LONG_TEXT, Field, form_fields, missing_required
 from .submit import check_all, session_folders, submit_all
 
 # A blank dropdown entry, so "not recorded" stays different from a real answer.
 UNSET = "—"
 
+# Held in the dock rather than on a form, so it is visible while anything else
+# is being filled in.
+NOTE = "note"
+
+# Wide enough that a goal or a drug name is readable without resizing.
+FIELD_WIDTH = 260
+
 
 class FieldRow(QWidget):
-    """
-    One registry field on the form, drawn to suit its type.
-
-    Emits nothing: it calls `on_change` with the parsed value whenever the box
-    is done being edited, and shows the parse error in place when there is one.
-    """
+    """One registry field, drawn to suit its type, saving as it is edited."""
 
     def __init__(self, field: Field, value, on_change):
         super().__init__()
 
         self.field = field
         self.on_change = on_change
-
         self.editor = self._editor(value)
+
         self.error = QLabel()
         self.error.setStyleSheet("color: palette(link-visited);")
         self.error.hide()
@@ -81,10 +81,7 @@ class FieldRow(QWidget):
             self.editor.setToolTip(field.description)
 
     def _editor(self, value) -> QWidget:
-        """
-        A dropdown for a closed set of answers, a box for a block of prose,
-        a line for everything else.
-        """
+        """A dropdown for a closed answer, a box for prose, a line otherwise."""
         if self.field.value_type in (BOOLEAN, ENUM):
             box = QComboBox()
             box.addItem(UNSET)
@@ -95,24 +92,21 @@ class FieldRow(QWidget):
             )
             box.setCurrentText(_as_text(value) or UNSET)
             box.currentTextChanged.connect(self._changed)
-
-            return box
-
-        if self.field.value_type == LONG_TEXT:
+        elif self.field.value_type == LONG_TEXT:
             box = QPlainTextEdit(_as_text(value))
-            box.setMinimumHeight(120)
+            box.setMinimumHeight(90)
 
-            # No `editingFinished` on a text area, and a note is typed over the
-            # whole session, so it is saved as it is written.
+            # A text area has no `editingFinished`, and prose is typed over a
+            # whole session, so it saves as it is written.
             box.textChanged.connect(lambda: self._changed(box.toPlainText()))
+        else:
+            box = QLineEdit(_as_text(value))
 
-            return box
+            # On finishing rather than per keystroke: a half-typed number is
+            # not a parse error worth showing anyone.
+            box.editingFinished.connect(lambda: self._changed(box.text()))
 
-        box = QLineEdit(_as_text(value))
-
-        # On finishing rather than on every keystroke: a half-typed number is
-        # not a parse error worth showing anyone.
-        box.editingFinished.connect(lambda: self._changed(box.text()))
+        box.setMinimumWidth(FIELD_WIDTH)
 
         return box
 
@@ -128,94 +122,55 @@ class FieldRow(QWidget):
             self.error.show()
 
 
-class SessionTab(QWidget):
-    """The day: goal, weight, headplate, the note, whether it is flagged."""
+class FormPane(QScrollArea):
+    """
+    A scrolling form built from registry fields.
 
-    def __init__(self, draft: Draft, fields: list[Field]):
+    `values` is what to show, `on_change(field, value)` is called as each is
+    edited. The note is left out: the dock owns it.
+    """
+
+    def __init__(self, fields: list[Field], values: dict, on_change, extra=()):
         super().__init__()
 
-        self.draft = draft
-        self.fields = fields
-
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        for label, widget in extra:
+            form.addRow(label, widget)
 
         for field in fields:
-            form.addRow(
-                field.prompt, FieldRow(field, draft.session.get(field.key), self._set)
-            )
+            if field.key == NOTE:
+                continue
+
+            form.addRow(field.prompt, FieldRow(field, values.get(field.key), on_change))
 
         holder = QWidget()
         holder.setLayout(form)
 
-        scroll = QScrollArea()
-        scroll.setWidget(holder)
-        scroll.setWidgetResizable(True)
+        self.setWidget(holder)
+        self.setWidgetResizable(True)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(scroll)
-
-    def _set(self, field: Field, value) -> None:
-        self.draft.update_session(**{field.key: value})
+        # Otherwise the scroll area draws a border and the form inside draws
+        # another, which reads as a box inside a box.
+        self.setFrameShape(QScrollArea.Shape.NoFrame)
 
 
-class ExperimentTab(QWidget):
-    """One experiment: which objective, how deep, where, what for."""
-
-    def __init__(self, draft: Draft, name: str, fields: list[Field]):
-        super().__init__()
-
-        self.draft = draft
-        self.name = name
-
-        entry = draft.experiment(name) or {}
-        form = QFormLayout()
-
-        objective = QComboBox()
-        objective.addItems([UNSET, "10", "20"])
-        objective.setCurrentText(_as_text(entry.get("objective")) or UNSET)
-        objective.currentTextChanged.connect(self._set_objective)
-
-        # A column rather than an annotation: the micron-per-pixel scale
-        # depends on it, and the TIFFs do not record it.
-        form.addRow("Objective", objective)
-
-        for field in fields:
-            form.addRow(field.prompt, FieldRow(field, entry.get(field.key), self._set))
-
-        holder = QWidget()
-        holder.setLayout(form)
-
-        scroll = QScrollArea()
-        scroll.setWidget(holder)
-        scroll.setWidgetResizable(True)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(scroll)
-
-    def _set(self, field: Field, value) -> None:
-        self.draft.set_experiment(self.name, **{field.key: value})
-
-    def _set_objective(self, text: str) -> None:
-        self.draft.set_experiment(
-            self.name, objective=None if text == UNSET else int(text)
-        )
-
-
-class PanelTab(QWidget):
+class PanelPane(QWidget):
     """Which rack of vials, and when each was mixed."""
 
     def __init__(self, draft: Draft, db):
         super().__init__()
 
         self.draft = draft
-        self.db = db
-
         names = sorted(db.panels["panel_name"]) if len(db.panels) else []
 
         self.panel = QComboBox()
         self.panel.addItems([UNSET] + names)
         self.panel.setCurrentText(draft.panel.get("panel_name") or UNSET)
-        self.panel.currentTextChanged.connect(self._set_panel)
+        self.panel.currentTextChanged.connect(
+            lambda text: draft.set_panel(panel_name=None if text == UNSET else text)
+        )
 
         self.made_on = QLineEdit(draft.panel.get("made_on") or "")
         self.made_on.setPlaceholderText("YYYY-MM-DD, the day the rack was mixed")
@@ -227,13 +182,14 @@ class PanelTab(QWidget):
         )
         self.vials.textChanged.connect(self._set_vials)
 
+        for box in (self.panel, self.made_on):
+            box.setMinimumWidth(FIELD_WIDTH)
+
         form = QFormLayout(self)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.addRow("Panel", self.panel)
         form.addRow("Mixed on", self.made_on)
         form.addRow("Vials mixed separately", self.vials)
-
-    def _set_panel(self, text: str) -> None:
-        self.draft.set_panel(panel_name=None if text == UNSET else text)
 
     def _set_made_on(self) -> None:
         self.draft.set_panel(made_on=self.made_on.text().strip() or None)
@@ -242,9 +198,6 @@ class PanelTab(QWidget):
         dates = {}
 
         for line in self.vials.toPlainText().splitlines():
-            if ":" not in line:
-                continue
-
             position, _, date = line.partition(":")
 
             if position.strip().isdigit() and date.strip():
@@ -253,96 +206,157 @@ class PanelTab(QWidget):
         self.draft.set_panel(vial_dates=dates)
 
 
-class NewSessionDialog(QDialog):
-    """Which animal, which day. Everything else follows from those two."""
+class NotesDock(QDockWidget):
+    """
+    The note for whatever the left bar has selected.
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    One dock reused as the selection moves, rather than a note box on every
+    form: it is the field people write in all day, so it stays open.
+    """
 
-        self.setWindowTitle("New session")
+    def __init__(self):
+        super().__init__("Notes")
+        self.setObjectName("notes")  # so saveState can remember it
 
-        self.mouse = QSpinBox()
-        self.mouse.setRange(1, 999_999)
-        self.mouse.setPrefix("m")
+        self.target: None | tuple[Draft, None | str] = None
+        self.loading = False
 
-        self.date = QLineEdit(Date.today().isoformat())
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        self.editor = QPlainTextEdit()
+        self.editor.setPlaceholderText(
+            "Anything worth knowing, including what went wrong."
         )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self.editor.textChanged.connect(self._changed)
 
-        form = QFormLayout(self)
-        form.addRow("Mouse", self.mouse)
-        form.addRow("Date", self.date)
-        form.addRow(buttons)
+        self.setWidget(self.editor)
+
+    def show_note(self, draft: None | Draft, experiment: None | str = None) -> None:
+        """Point the dock at a session's note, or at one experiment's."""
+        self.target = None if draft is None else (draft, experiment)
+
+        held = ""
+
+        if draft is not None:
+            where = (
+                draft.session
+                if experiment is None
+                else (draft.experiment(experiment) or {})
+            )
+            held = where.get(NOTE) or ""
+
+        # Setting the text fires `textChanged`, which would write the note we
+        # just loaded back onto whatever is now selected.
+        self.loading = True
+        self.editor.setPlainText(held)
+        self.loading = False
+
+        self.editor.setEnabled(draft is not None)
+
+    def _changed(self) -> None:
+        if self.loading or self.target is None:
+            return
+
+        draft, experiment = self.target
+        text = self.editor.toPlainText() or None
+
+        if experiment is None:
+            draft.update_session(**{NOTE: text})
+        else:
+            draft.set_experiment(experiment, **{NOTE: text})
 
 
 class EntryWindow(QMainWindow):
-    """
-    A day's sessions, open for as long as the day lasts.
-
-    Several mice are run in sequence and their recordings are all copied off at
-    the end, so the window holds every draft of the day and a picker chooses
-    which one the tabs are showing.
-    """
+    """A day's sessions: what is being edited is chosen from the left bar."""
 
     def __init__(self, db, drafts: list[Draft]):
         super().__init__()
 
         self.db = db
         self.drafts = list(drafts)
+        self.showing = "session"
 
         self.setWindowTitle("ODyn — session entry")
-        self.resize(760, 680)
+        self.resize(1000, 700)
 
+        self.bar = QToolBar("Sections")
+        self.bar.setObjectName("sections")
+        self.bar.setMovable(False)
+        self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, self.bar)
+
+        self.notes = NotesDock()
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.notes)
+
+        self.stack = QStackedWidget()
+
+        # Which session, until the mouse icons replace it.
         self.picker = QComboBox()
-        self.picker.currentIndexChanged.connect(self._switch_session)
+        self.picker.currentIndexChanged.connect(lambda _: self._show())
 
         new_session = QPushButton("Add session")
         new_session.clicked.connect(self._add_session)
+
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+
+        submit = QPushButton("Check and submit the day")
+        submit.clicked.connect(self._submit_day)
 
         top = QHBoxLayout()
         top.addWidget(QLabel("Session"))
         top.addWidget(self.picker, stretch=1)
         top.addWidget(new_session)
 
-        self.tabs = QTabWidget()
-
-        add = QPushButton("Add experiment")
-        add.clicked.connect(self._add_experiment)
-
-        self.submit_button = QPushButton("Check and submit the day")
-        self.submit_button.clicked.connect(self._submit_day)
-
-        self.status = QLabel()
-        self.status.setWordWrap(True)
-
-        buttons = QHBoxLayout()
-        buttons.addWidget(add)
-        buttons.addStretch()
-        buttons.addWidget(self.submit_button)
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.status, stretch=1)
+        bottom.addWidget(submit)
 
         layout = QVBoxLayout()
         layout.addLayout(top)
-        layout.addWidget(self.tabs)
-        layout.addWidget(self.status)
-        layout.addLayout(buttons)
+        layout.addWidget(self.stack, stretch=1)
+        layout.addLayout(bottom)
 
         holder = QWidget()
         holder.setLayout(layout)
-
         self.setCentralWidget(holder)
+
+        self._build_bar()
         self._refresh_picker()
+        self._restore_layout()
+
+    # ------------------------------------------------------------------ #
+    # The left bar
+    # ------------------------------------------------------------------ #
+
+    def _build_bar(self) -> None:
+        """Sections of the bar, separated the way a toolbar separates them."""
+        for name, label in (("session", "Session"), ("panel", "Odors")):
+            action = self.bar.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(name == self.showing)
+            action.triggered.connect(lambda _, which=name: self._select(which))
+
+        self.bar.addSeparator()
+
+    def _select(self, which: str) -> None:
+        self.showing = which
+
+        for action in self.bar.actions():
+            if action.text():
+                action.setChecked(action.text().lower().startswith(which[:4]))
+
+        self._show()
+
+    # ------------------------------------------------------------------ #
+    # Sessions
+    # ------------------------------------------------------------------ #
 
     @property
-    def draft(self) -> Draft:
-        """The session the tabs are showing."""
-        return self.drafts[max(0, self.picker.currentIndex())]
+    def draft(self) -> None | Draft:
+        """The session being edited, or `None` before any has been added."""
+        index = self.picker.currentIndex()
+
+        return self.drafts[index] if 0 <= index < len(self.drafts) else None
 
     def _refresh_picker(self) -> None:
-        """Rebuild the session list, keeping whichever one was selected."""
         chosen = self.picker.currentIndex()
 
         self.picker.blockSignals(True)
@@ -351,90 +365,62 @@ class EntryWindow(QMainWindow):
         self.picker.setCurrentIndex(max(0, min(chosen, len(self.drafts) - 1)))
         self.picker.blockSignals(False)
 
-        self._switch_session()
-
-    def _switch_session(self) -> None:
-        self._build_tabs()
-        self._refresh_status()
+        self._show()
 
     def _add_session(self) -> None:
-        dialog = NewSessionDialog(self)
+        self.drafts.append(Draft.start(drafts_folder()))
+        self._refresh_picker()
+        self.picker.setCurrentIndex(len(self.drafts) - 1)
 
-        while dialog.exec() == QDialog.DialogCode.Accepted:
-            try:
-                draft = Draft.start(
-                    self.draft.path.parent,
-                    mouse_id=dialog.mouse.value(),
-                    date=dialog.date.text(),
+    def _show(self) -> None:
+        """Put the selected session's chosen form in the stack."""
+        while self.stack.count():
+            self.stack.removeWidget(self.stack.widget(0))
+
+        draft = self.draft
+
+        if draft is not None:
+            self.stack.addWidget(
+                PanelPane(draft, self.db)
+                if self.showing == "panel"
+                else FormPane(
+                    form_fields(self.db, "session"),
+                    draft.session,
+                    lambda field, value: draft.update_session(**{field.key: value}),
                 )
-            except ValueError as wrong:
-                QMessageBox.warning(dialog, "Try again", str(wrong))
-                continue
+            )
 
-            if any(other.path == draft.path for other in self.drafts):
-                QMessageBox.information(
-                    self, "Already open", "That session is already in the list."
-                )
-                return
-
-            # Saved immediately so it survives a crash before anything is typed.
-            self.drafts.append(draft.save())
-            self._refresh_picker()
-            self.picker.setCurrentIndex(len(self.drafts) - 1)
-
-            return
-
-    def _build_tabs(self) -> None:
-        self.tabs.clear()
-        self.tabs.addTab(
-            SessionTab(self.draft, form_fields(self.db, "session")), "Session"
-        )
-
-        experiment_fields = form_fields(self.db, "experiment")
-
-        for entry in self.draft.experiments:
-            name = entry["name"]
-            self.tabs.addTab(ExperimentTab(self.draft, name, experiment_fields), name)
-
-        self.tabs.addTab(PanelTab(self.draft, self.db), "Odors")
-
-    def _add_experiment(self) -> None:
-        """Named by position: the folders are `e1`, `e2` and so on."""
-        taken = {entry["name"] for entry in self.draft.experiments}
-        number = 1
-
-        while f"e{number}" in taken:
-            number += 1
-
-        self.draft.set_experiment(f"e{number}")
-        self._build_tabs()
-        self.tabs.setCurrentIndex(self.tabs.count() - 2)
+        self.notes.show_note(draft)
         self._refresh_status()
 
     def _refresh_status(self) -> None:
-        """What is still missing, shown before anyone presses submit."""
-        lines = []
+        draft = self.draft
 
-        wanted = missing_required(form_fields(self.db, "session"), self.draft.session)
+        if draft is None:
+            self.status.setText("No sessions yet — add one to start.")
+            return
+
+        lines = []
+        wanted = missing_required(form_fields(self.db, "session"), draft.session)
 
         if wanted:
             lines.append("Still to fill in: " + ", ".join(f.label for f in wanted))
 
-        if not session_folders(self.db.main_folder, self.draft):
+        if draft.mouse_id is None:
+            lines.append("No mouse number yet.")
+        elif not session_folders(self.db.main_folder, draft):
             lines.append(
-                "No recordings found for this session yet — they are usually "
-                "copied over at the end of the day."
+                "No recordings found yet — they are usually copied over at the "
+                "end of the day."
             )
 
         self.status.setText("\n".join(lines))
 
-    def _submit_day(self) -> None:
-        """
-        Check every session, show what is wrong, then submit what is ready.
+    # ------------------------------------------------------------------ #
+    # Submitting
+    # ------------------------------------------------------------------ #
 
-        Reading the TIFF metadata of a day's recordings takes a while, so the
-        check is shown and confirmed first rather than run into.
-        """
+    def _submit_day(self) -> None:
         checked = check_all(self.drafts, self.db)
         ready = [result for result in checked if not result.blocked]
 
@@ -455,24 +441,26 @@ class EntryWindow(QMainWindow):
             return
 
         results = submit_all([result.draft for result in ready], self.db)
-
-        # Submitted drafts were archived, so only the rest stay in the window.
-        self.drafts = [
-            draft
-            for draft in self.drafts
-            if not any(r.draft.path == draft.path and r.submitted for r in results)
-        ]
+        done = {r.draft.path for r in results if r.submitted}
+        self.drafts = [draft for draft in self.drafts if draft.path not in done]
 
         QMessageBox.information(self, "Submitted", _report(results))
-
-        if not self.drafts:
-            self.close()
-            return
-
         self._refresh_picker()
 
+    # ------------------------------------------------------------------ #
+    # Between runs
+    # ------------------------------------------------------------------ #
+
+    def _restore_layout(self) -> None:
+        """Panel sizes and dock positions, as they were left."""
+        saved = QSettings("ODyn", "entry").value("layout")
+
+        if saved is not None:
+            self.restoreState(saved)
+
     def closeEvent(self, event) -> None:
-        """Nothing to save on the way out: every edit was saved as it happened."""
+        QSettings("ODyn", "entry").setValue("layout", self.saveState())
+
         for draft in self.drafts:
             if draft.is_empty:
                 draft.discard()
@@ -485,23 +473,21 @@ def _report(results) -> str:
     lines = []
 
     for result in results:
-        who = result.draft.label
-
         if result.error:
-            lines.append(f"✗ {who}: {result.error}")
+            lines.append(f"✗ {result.draft.label}: {result.error}")
         elif result.submitted:
             written = result.written
             lines.append(
-                f"✔ {who}: {len(written.experiments)} experiments, "
+                f"✔ {result.draft.label}: {len(written.experiments)} experiments, "
                 f"{written.annotations} annotations"
             )
         elif result.blocked:
             reasons = "; ".join(
                 problem.what for problem in result.problems if problem.blocking
             )
-            lines.append(f"✗ {who}: {reasons}")
+            lines.append(f"✗ {result.draft.label}: {reasons}")
         else:
-            lines.append(f"• {who}: ready")
+            lines.append(f"• {result.draft.label}: ready")
 
     return "\n".join(lines)
 
@@ -523,19 +509,13 @@ def _vial_text(dates: dict) -> str:
 
 
 def run(main_folder: Path | str, *, project: None | str = None) -> int:
-    """
-    Open the app on a main folder, offering any unfinished draft first.
-
-    Returns Qt's exit code.
-    """
+    """Open the app on a main folder, with any unfinished sessions restored."""
     from ..database import Database
 
     application = QApplication.instance() or QApplication([])
-
     db = Database(main_folder, project=project) if project else Database(main_folder)
 
     folder = drafts_folder()
-    unfinished = Draft.pending(folder)
     broken = Draft.unreadable(folder)
 
     if broken:
@@ -546,30 +526,7 @@ def run(main_folder: Path | str, *, project: None | str = None) -> int:
             + "\n".join(f"• {path.name}: {why}" for path, why in broken),
         )
 
-    if not unfinished:
-        first = _ask_for_session(folder)
-
-        if first is None:
-            return 0
-
-        unfinished = [first.save()]
-
-    window = EntryWindow(db, unfinished)
+    window = EntryWindow(db, Draft.pending(folder))
     window.show()
 
     return application.exec()
-
-
-def _ask_for_session(folder: Path) -> None | Draft:
-    """Ask which animal and day, and open that draft."""
-    dialog = NewSessionDialog()
-
-    while dialog.exec() == QDialog.DialogCode.Accepted:
-        try:
-            return Draft.start(
-                folder, mouse_id=dialog.mouse.value(), date=dialog.date.text()
-            )
-        except ValueError as wrong:
-            QMessageBox.warning(dialog, "Try again", str(wrong))
-
-    return None
