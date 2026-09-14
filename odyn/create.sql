@@ -573,7 +573,7 @@ INSERT OR IGNORE INTO annotation_keys
     -- measured.
     ( 'session'
     , 'left_right_correction', 'Left-right correction'
-    , 'text', NULL, NULL
+    , 'long_text', NULL, NULL
     , 'What was done to correct the head left-right tilt, if anything.'
     , FALSE
     ),
