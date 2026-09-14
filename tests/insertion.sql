@@ -8,7 +8,7 @@
 PRAGMA foreign_keys = ON;
 
 INSERT INTO sessions (session_id, mouse_id, session_date, session_path)
-    VALUES (1, 'm1', '2025-02-01', '20250201/m1');
+    VALUES (1, 1, '2025-02-01', '20250201/m1');
 
 INSERT INTO experiments
     ( session_id, exp_name, exp_type, exp_start

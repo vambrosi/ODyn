@@ -22,13 +22,23 @@
 -------------------------------------------------------------------------------
 
 -- Unchanging data about the mice
+-- `mouse_id` is the number after `m` or `sid` in the folders.
 CREATE TABLE IF NOT EXISTS mice
-    ( mouse_id          TEXT PRIMARY KEY
-    , mouse_sex         TEXT NOT NULL CHECK(mouse_sex IN ('M', 'F'))
-    , mouse_dob         TEXT NOT NULL CHECK(date(mouse_dob) IS NOT NULL)
-    , mouse_line        TEXT NOT NULL
-    , mouse_genotype    TEXT NOT NULL
-    , stax_injection    TEXT NOT NULL
+    ( mouse_id          INTEGER PRIMARY KEY
+    , mouse_sex         TEXT CHECK(mouse_sex IS NULL OR mouse_sex IN ('M', 'F'))
+    , mouse_dob         TEXT CHECK(mouse_dob IS NULL OR date(mouse_dob) IS NOT NULL)
+    , stax_injection    TEXT
+    , sensor            TEXT
+    ) STRICT;
+
+-- One entry for each line/genotype of a mouse
+CREATE TABLE IF NOT EXISTS mouse_lines
+    ( mouse_id      INTEGER NOT NULL
+    , line          TEXT NOT NULL
+    , genotype      TEXT CHECK(genotype IS NULL OR genotype IN ('wt', 'het', 'hom'))
+
+    , PRIMARY KEY (mouse_id, line)
+    , FOREIGN KEY (mouse_id) REFERENCES mice(mouse_id) ON DELETE CASCADE
     ) STRICT;
 
 -- The mouse/day level of hierarchy, e.g. `20260708/m442`. Annotations pointing
@@ -37,7 +47,7 @@ CREATE TABLE IF NOT EXISTS mice
 
 CREATE TABLE IF NOT EXISTS sessions
     ( session_id        INTEGER PRIMARY KEY
-    , mouse_id          TEXT NOT NULL
+    , mouse_id          INTEGER NOT NULL
     , session_date      TEXT NOT NULL CHECK(date(session_date) IS NOT NULL)
     , session_path      TEXT NOT NULL
     , added_to_db_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
@@ -240,21 +250,94 @@ CREATE TABLE IF NOT EXISTS odors
     , odor_name TEXT NOT NULL
     ) STRICT;
 
--- Odor details for a particular session. Not project-specific so uses columns.
--- NOTE: `goal_ppm` is a text because it might hold ranges (1 - 24).
-CREATE TABLE IF NOT EXISTS session_odors
-    ( session_id    INTEGER NOT NULL
-    , odor_id       INTEGER NOT NULL
-    , vial          INTEGER
-    , goal_ppm      TEXT
-    , percent_vv    REAL
-    , sccm          REAL
-    , made_on       TEXT CHECK(made_on IS NULL OR date(made_on) IS NOT NULL)
+-- Panels of odors to be used in a session
+CREATE TABLE IF NOT EXISTS panels
+    ( panel_id          INTEGER PRIMARY KEY
+    , panel_name        TEXT NOT NULL UNIQUE
+    , description       TEXT
+    , added_to_db_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    ) STRICT;
 
-    , PRIMARY KEY (session_id, odor_id)
+-- One row per vial position in a panel: what the olfactometer delivers when it
+-- opens that vial, and how the liquid in it was made up.
+--
+-- `odor_id` is the odor as delivered, so a two-component mix points at the
+-- mix's own row in `odors` ('alpha', 'lambda') rather than at either component.
+-- What went into the vial is in `vial_components`; a pure odor has one
+-- component row, mineral oil has none.
+--
+-- NOTES:
+-- - `odor_sccm` is the flow drawn through the vial, `total_sccm` the flow
+-- reaching the animal, so the dilution at the nose is their ratio.
+-- - `solvent_volume_ml` is the mineral oil the odorant was dissolved in, and
+-- `total_volume_ml` what the vial holds once it is.
+CREATE TABLE IF NOT EXISTS panel_vials
+    ( panel_id          INTEGER NOT NULL
+    , vial_position     INTEGER NOT NULL CHECK(vial_position > 0)
+    , odor_id           INTEGER NOT NULL
+    , odor_sccm         REAL
+    , total_sccm        REAL
+    , total_volume_ml   REAL
+    , solvent_volume_ml REAL
+
+    , PRIMARY KEY (panel_id, vial_position)
+    , FOREIGN KEY (panel_id) REFERENCES panels(panel_id) ON DELETE CASCADE
+    , FOREIGN KEY (odor_id)  REFERENCES odors(odor_id)
+    ) STRICT;
+
+-- What was pipetted into a vial. Separate from `panel_vials` so a mix is not
+-- capped at the two components the current panels happen to use.
+--
+-- `target_ppm` is the headspace concentration the recipe was solved for and
+-- `liquid_ul` the volume that produced it, so the pair records both what was
+-- wanted and what was actually measured out.
+CREATE TABLE IF NOT EXISTS vial_components
+    ( panel_id          INTEGER NOT NULL
+    , vial_position     INTEGER NOT NULL
+    , odor_id           INTEGER NOT NULL
+    , target_ppm        REAL
+    , liquid_ul         REAL
+    , percent_vv        REAL
+
+    , PRIMARY KEY (panel_id, vial_position, odor_id)
+    , FOREIGN KEY (panel_id, vial_position)
+        REFERENCES panel_vials(panel_id, vial_position) ON DELETE CASCADE
+    , FOREIGN KEY (odor_id) REFERENCES odors(odor_id)
+    ) STRICT;
+
+-- Which panel a session ran. The recipe is in `panels` because many sessions
+-- share it; what varies per session is the mixing, in `session_vials`.
+CREATE TABLE IF NOT EXISTS session_panels
+    ( session_id    INTEGER PRIMARY KEY
+    , panel_id      INTEGER NOT NULL
+
+    -- So `session_vials` can key on the pair and inherit the panel.
+    , UNIQUE (session_id, panel_id)
 
     , FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
-    , FOREIGN KEY (odor_id)    REFERENCES odors(odor_id)
+    , FOREIGN KEY (panel_id)   REFERENCES panels(panel_id)
+    ) STRICT;
+
+-- When each vial a session ran was last mixed. Usually a whole rack is remade
+-- at once and every vial carries the same date, but they have also been refilled
+-- one at a time, so the date belongs to the vial rather than to the session.
+--
+-- A vial with no row was not recorded; a row with a NULL `made_on` was recorded
+-- as unknown.
+CREATE TABLE IF NOT EXISTS session_vials
+    ( session_id    INTEGER NOT NULL
+    , panel_id      INTEGER NOT NULL
+    , vial_position INTEGER NOT NULL
+    , made_on       TEXT CHECK(made_on IS NULL OR date(made_on) IS NOT NULL)
+
+    , PRIMARY KEY (session_id, vial_position)
+
+    , FOREIGN KEY (session_id, panel_id)
+        REFERENCES session_panels(session_id, panel_id) ON DELETE CASCADE
+
+    -- A session can only date a vial its own panel defines.
+    , FOREIGN KEY (panel_id, vial_position)
+        REFERENCES panel_vials(panel_id, vial_position)
     ) STRICT;
 
 -------------------------------------------------------------------------------
@@ -277,7 +360,8 @@ CREATE TABLE IF NOT EXISTS session_odors
 
 CREATE TABLE IF NOT EXISTS annotation_keys
     ( applies_to        TEXT NOT NULL CHECK(applies_to IN
-                            ( 'session'
+                            ( 'mouse'
+                            , 'session'
                             , 'experiment'
                             , 'program'
                             , 'acquisition'
@@ -448,9 +532,23 @@ INSERT OR IGNORE INTO annotation_keys
     ),
 
     ( 'session'
-    , 'injection_volume_ml', 'S.q. injection volume'
+    , 'injection_volume', 'S.q. injection volume'
     , 'real', NULL, 'ml'
     , 'Subcutaneous injection volume given during the session.'
+    , FALSE, FALSE
+    ),
+
+    ( 'session'
+    , 'injection_drug', 'S.q. injection drug'
+    , 'text', NULL, NULL
+    , 'What was injected, as written down.'
+    , FALSE, FALSE
+    ),
+
+    ( 'session'
+    , 'injection_time', 'S.q. injection time'
+    , 'text', NULL, NULL
+    , 'When the injection was given, as written down.'
     , FALSE, FALSE
     ),
 

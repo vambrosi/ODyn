@@ -82,8 +82,11 @@ def test_a_target_that_does_not_exist_is_refused(db):
     with pytest.raises(ValueError, match="no experiment 9999"):
         annotate(db, "fov_depth_um", 70.0, target_id=9999)
 
+
+def test_a_target_type_that_cannot_be_annotated_is_refused(db):
+    """Only the rows listed as targets have somewhere for the check to look."""
     with pytest.raises(ValueError, match="Cannot annotate"):
-        annotate(db, "fov_depth_um", 70.0, target_type="mouse", target_id=1)
+        annotate(db, "fov_depth_um", 70.0, target_type="trial", target_id=1)
 
 
 def test_an_id_from_a_dataframe_index_works(db):

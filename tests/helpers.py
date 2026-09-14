@@ -41,7 +41,7 @@ def seed_rows(
     db,
     *,
     acquisitions: int = 3,
-    mouse_id: str = "m001",
+    mouse_id: int = 1,
     session_date: str = "2026-01-01",
     session_path: str = "20260101/m001",
     exp_name: str = STEM,

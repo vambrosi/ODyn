@@ -101,7 +101,7 @@ def test_the_mouse_names_a_session_not_an_experiment(db):
     """`experiments.mouse_id` is gone: a mouse has sessions, sessions have experiments."""
     row = db.con.execute("SELECT * FROM sessions;").fetchone()
 
-    assert row["mouse_id"] == MOUSE
+    assert row["mouse_id"] == int(MOUSE.lstrip("m"))
     assert row["session_date"] == EXP_START.date().isoformat()
     # The session folder is the experiment's parent, not the experiment.
     assert row["session_path"] == f"{EXP_DATE}/{MOUSE}"
@@ -138,7 +138,7 @@ def _session_id_of(cur, *, session_path):
 
     return _session_id(
         cur,
-        mouse_id=MOUSE,
+        mouse_id=int(MOUSE.lstrip("m")),
         session_date=EXP_START.date().isoformat(),
         session_path=session_path,
     )

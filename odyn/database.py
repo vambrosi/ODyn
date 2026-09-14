@@ -29,6 +29,7 @@
 # --------------------------------------------------------------------------- #
 
 import json
+import re
 import sqlite3
 
 from collections import defaultdict
@@ -63,6 +64,7 @@ RIG_ANNOTATIONS = ("laser_power_920", "laser_power_1040", "loop_acq_interval_s")
 # and this is what stands in for one. Keep it in step with `applies_to` in
 # `create.sql`.
 ANNOTATION_TARGETS = {
+    "mouse": ("mice", "mouse_id"),
     "session": ("sessions", "session_id"),
     "experiment": ("experiments", "exp_id"),
     "program": ("programs", "program_id"),
@@ -129,8 +131,14 @@ class Database(CallRecorder):
         db.experiments        # `DataFrame` with experiment metadata
         db.mcor_files         # `DataFrame` with mcor files metadata
         db.method_calls       # `DataFrame` with `@record_call` functions
+        db.mice               # `DataFrame` with one row per animal
+        db.mouse_lines        # `DataFrame` with the mutations each mouse carries
         db.odors              # `DataFrame` with current list of odors
-        db.session_odors      # `DataFrame` with each session's vials/dilutions
+        db.panels             # `DataFrame` with every known odor panel
+        db.panel_vials        # `DataFrame` with what each vial delivers
+        db.vial_components    # `DataFrame` with what was pipetted into each vial
+        db.session_panels     # `DataFrame` with the panel each session ran
+        db.session_vials      # `DataFrame` with each vial's mixing date
         db.programs           # `DataFrame` with one entry per _Event.csv_ file
         db.trials             # `DataFrame` with all olfactometer trials
     ```
@@ -146,6 +154,10 @@ class Database(CallRecorder):
         db.missing_annotations()        # What is still to be filled in
         db.add_annotation_key(...)      # Allow a new kind of annotation
         db.retire_annotation_key(...)   # Stop offering one, keep its values
+
+        db.set_mouse(...)               # Record an animal's sex, DOB and line
+        db.add_panel(...)               # Register a rack of vials as a recipe
+        db.set_session_panel(...)       # Say which panel a session ran
     ```
     """
 
@@ -220,14 +232,20 @@ class Database(CallRecorder):
         self._acquisition_trials: None | pd.DataFrame = None
         self._annotation_keys: None | pd.DataFrame = None
         self._annotations: None | pd.DataFrame = None
-        self._session_odors: None | pd.DataFrame = None
+        self._session_panels: None | pd.DataFrame = None
         self._events: None | pd.DataFrame = None
         self._experiments: None | pd.DataFrame = None
         self._groups: dict[int, Group] = {}  # Caches groups one-by-one
         self._group_experiments: None | pd.DataFrame = None
         self._mcor_files: None | pd.DataFrame = None
         self._method_calls: None | pd.DataFrame = None
+        self._mice: None | pd.DataFrame = None
+        self._mouse_lines: None | pd.DataFrame = None
         self._odors: None | pd.DataFrame = None
+        self._panels: None | pd.DataFrame = None
+        self._panel_vials: None | pd.DataFrame = None
+        self._session_vials: None | pd.DataFrame = None
+        self._vial_components: None | pd.DataFrame = None
         self._outputs: None | pd.DataFrame = None
         self._programs: None | pd.DataFrame = None
         self._trials: None | pd.DataFrame = None
@@ -485,23 +503,155 @@ class Database(CallRecorder):
         return self._odors
 
     @property
-    def session_odors(self) -> pd.DataFrame:
+    def mice(self) -> pd.DataFrame:
+        """`DataFrame` with one row per animal. Its line is in `mouse_lines`"""
+        self._refresh_if_stale()
+
+        if self._mice is not None:
+            return self._mice
+
+        query = "SELECT * FROM mice;"
+
+        self._mice = pd.read_sql_query(query, self.con, parse_dates=["mouse_dob"])
+        self._mice.set_index("mouse_id", inplace=True)
+
+        return self._mice
+
+    @property
+    def mouse_lines(self) -> pd.DataFrame:
+        """`DataFrame` with one row per line a mouse carries, and its genotype"""
+        self._refresh_if_stale()
+
+        if self._mouse_lines is not None:
+            return self._mouse_lines
+
+        query = "SELECT * FROM mouse_lines ORDER BY mouse_id, line;"
+
+        self._mouse_lines = pd.read_sql_query(query, self.con)
+        self._mouse_lines.set_index(["mouse_id", "line"], inplace=True)
+
+        return self._mouse_lines
+
+    @property
+    def panels(self) -> pd.DataFrame:
+        """`DataFrame` with every odor panel this project knows"""
+        self._refresh_if_stale()
+
+        if self._panels is not None:
+            return self._panels
+
+        query = "SELECT * FROM panels;"
+
+        self._panels = pd.read_sql_query(
+            query, self.con, parse_dates=["added_to_db_at"]
+        )
+        self._panels.set_index("panel_id", inplace=True)
+
+        return self._panels
+
+    @property
+    def panel_vials(self) -> pd.DataFrame:
         """
-        `DataFrame` with what was in each vial, for each session
+        `DataFrame` with what each vial of each panel delivers
+
+        Indexed by panel *name* rather than id, since that is what a person
+        reading it knows. `odor_name` is joined in for the same reason; the
+        components pipetted into the vial are in `vial_components`.
         """
         self._refresh_if_stale()
 
-        if self._session_odors is not None:
-            return self._session_odors
+        if self._panel_vials is not None:
+            return self._panel_vials
 
-        query = "SELECT * FROM session_odors;"
+        query = """
+            SELECT p.panel_name, v.*, o.odor_name
+                FROM panel_vials AS v
+                JOIN panels AS p ON p.panel_id = v.panel_id
+                JOIN odors  AS o ON o.odor_id  = v.odor_id
+                ORDER BY p.panel_name, v.vial_position;
+            """
 
-        self._session_odors = pd.read_sql_query(
+        self._panel_vials = pd.read_sql_query(query, self.con)
+        self._panel_vials.set_index(["panel_name", "vial_position"], inplace=True)
+
+        return self._panel_vials
+
+    @property
+    def vial_components(self) -> pd.DataFrame:
+        """`DataFrame` with what was pipetted into each vial of each panel"""
+        self._refresh_if_stale()
+
+        if self._vial_components is not None:
+            return self._vial_components
+
+        query = """
+            SELECT p.panel_name, c.*, o.odor_name
+                FROM vial_components AS c
+                JOIN panels AS p ON p.panel_id = c.panel_id
+                JOIN odors  AS o ON o.odor_id  = c.odor_id
+                ORDER BY p.panel_name, c.vial_position, c.odor_id;
+            """
+
+        self._vial_components = pd.read_sql_query(query, self.con)
+        self._vial_components.set_index(
+            ["panel_name", "vial_position", "odor_id"], inplace=True
+        )
+
+        return self._vial_components
+
+    @property
+    def session_vials(self) -> pd.DataFrame:
+        """
+        `DataFrame` with every vial a session ran, and the day it was mixed
+
+        One row per vial. `made_on` is NULL where the mixing was recorded as
+        unknown; a vial the session did not run has no row at all.
+        """
+        self._refresh_if_stale()
+
+        if self._session_vials is not None:
+            return self._session_vials
+
+        query = """
+            SELECT v.*, p.panel_name, pv.odor_id, o.odor_name
+                FROM session_vials AS v
+                JOIN panels AS p ON p.panel_id = v.panel_id
+                JOIN panel_vials AS pv
+                    ON pv.panel_id = v.panel_id
+                   AND pv.vial_position = v.vial_position
+                JOIN odors AS o ON o.odor_id = pv.odor_id
+                ORDER BY v.session_id, v.vial_position;
+            """
+
+        self._session_vials = pd.read_sql_query(
             query, self.con, parse_dates=["made_on"]
         )
-        self._session_odors.set_index(["session_id", "odor_id"], inplace=True)
+        self._session_vials.set_index(["session_id", "vial_position"], inplace=True)
 
-        return self._session_odors
+        return self._session_vials
+
+    @property
+    def session_panels(self) -> pd.DataFrame:
+        """
+        `DataFrame` with which panel each session ran
+
+        When each of its vials was mixed is in `session_vials`.
+        """
+        self._refresh_if_stale()
+
+        if self._session_panels is not None:
+            return self._session_panels
+
+        query = """
+            SELECT s.*, p.panel_name
+                FROM session_panels AS s
+                JOIN panels AS p ON p.panel_id = s.panel_id;
+            """
+
+        self._session_panels = pd.read_sql_query(query, self.con)
+        self._session_panels.set_index("session_id", inplace=True)
+
+        return self._session_panels
 
     @property
     def annotation_keys(self) -> pd.DataFrame:
@@ -778,15 +928,22 @@ class Database(CallRecorder):
         self._acquisition_trials = None
         self._annotation_keys = None
         self._annotations = None
-        self._session_odors = None
+        self._session_panels = None
         self._events = None
         self._experiments = None
         self._group_experiments = None
         self._mcor_files = None
         self._method_calls = None
+        self._mice = None
+        self._mouse_lines = None
+        self._odors = None
         self._outputs = None
+        self._panels = None
+        self._panel_vials = None
+        self._session_vials = None
         self._programs = None
         self._trials = None
+        self._vial_components = None
 
         # In case a specific group can still be accessed
         for group in self._groups.values():
@@ -1460,114 +1617,323 @@ class Database(CallRecorder):
         self._reset_caches()
 
     @record_call
-    def set_session_odors(self, *, session_id: int, odors: list[Object]) -> None:
+    def set_mouse(
+        self,
+        *,
+        mouse_id: int | str,
+        sex: None | str = None,
+        dob: None | str = None,
+        lines: None | dict[str, None | str] = None,
+        stax_injection: None | str = None,
+        sensor: None | str = None,
+    ) -> int:
         """
-        Record which odor was in which vial for a session, and how it was made.
+        Record what is known about an animal, creating its row if it is new.
 
         **USAGE**
         ```python
-        db.set_session_odors(
-            session_id=3,
-            odors=[
-                {"odor_id": 1, "vial": 1, "goal_ppm": "0.3", "sccm": 200,
-                 "made_on": "2026-07-06"},
-                {"odor_id": 17, "vial": 4, "goal_ppm": "44.2", "sccm": 200},
+        db.set_mouse(
+            mouse_id="m442",
+            sex="F",
+            dob="2026-01-22",
+            lines={"DAT-Cre": "het", "TIGRE": "het"},
+            sensor="GCaMP8s",
+        )
+        ```
+
+        **PARAMETERS**
+        - `mouse_id` is the number, or a name like `'m442'` to take it from
+        - `sex` is `'M'` or `'F'`, in either case
+        - `dob` is the date of birth, `YYYY-MM-DD`
+        - `lines` maps each mutation the animal carries to `'wt'`, `'het'`,
+        `'hom'`, or `None` when the line is known but the genotyping is not
+        - `stax_injection` and `sensor` are what was injected and what it expresses
+
+        Returns the `mouse_id`. Anything left out keeps the value already
+        stored, so this can be called repeatedly as details arrive. Passing
+        `lines={}` clears the line; `lines=None` leaves it alone.
+        """
+        number = _mouse_number(str(mouse_id))
+        stored_sex = None if sex is None else str(sex).strip().upper()
+
+        if stored_sex not in (None, "M", "F"):
+            raise ValueError(f"Sex must be 'M' or 'F', not {sex!r}.")
+
+        born = dob.date().isoformat() if isinstance(dob, datetime) else dob
+        carried = None if lines is None else _mouse_lines(lines)
+
+        with self.con as con:
+            cur = con.cursor()
+            cur.execute("PRAGMA foreign_keys = ON;")
+
+            # COALESCE so that a field left out of this call does not erase what
+            # an earlier one wrote: the details arrive from different people.
+            cur.execute(
+                """
+                INSERT INTO mice
+                    (mouse_id, mouse_sex, mouse_dob, stax_injection, sensor)
+                    VALUES (:mouse_id, :sex, :dob, :stax, :sensor)
+                ON CONFLICT(mouse_id) DO UPDATE SET
+                      mouse_sex      = COALESCE(:sex, mouse_sex)
+                    , mouse_dob      = COALESCE(:dob, mouse_dob)
+                    , stax_injection = COALESCE(:stax, stax_injection)
+                    , sensor         = COALESCE(:sensor, sensor);
+                """,
+                {
+                    "mouse_id": number,
+                    "sex": stored_sex,
+                    "dob": None if born is None else str(born),
+                    "stax": stax_injection,
+                    "sensor": sensor,
+                },
+            )
+
+            if carried is not None:
+                # Replaced as a whole: a mouse carries one set of mutations, and
+                # a correction usually rewrites more than one of them.
+                cur.execute(
+                    "DELETE FROM mouse_lines WHERE mouse_id = ?;", [number]
+                )
+
+                for line, genotype in carried.items():
+                    _db_insert(
+                        cur,
+                        "mouse_lines",
+                        {"mouse_id": number, "line": line, "genotype": genotype},
+                    )
+
+        cross = "unknown line" if not carried else " x ".join(carried)
+
+        logger.info(f"Mouse {number} recorded ({cross}). {CHECK}")
+
+        self._reset_caches()
+
+        return number
+
+    @record_call
+    def add_panel(
+        self,
+        *,
+        panel_name: str,
+        vials: list[Object],
+        description: None | str = None,
+    ) -> int:
+        """
+        Register an odor panel: what sits in each vial, and how it was made up.
+
+        **USAGE**
+        ```python
+        db.add_panel(
+            panel_name="print_v3",
+            vials=[
+                {"vial_position": 1, "odor_id": 1, "odor_sccm": 200,
+                 "components": [{"odor_id": 1, "target_ppm": 0.3}]},
+                {"vial_position": 3, "odor_id": 0},
             ],
         )
         ```
 
         **PARAMETERS**
-        - `session_id` is the session this panel was used in
-        - `odors` is one entry per vial. `odor_id` is required; `vial`,
-        `goal_ppm`, `percent_vv`, `sccm` and `made_on` are optional.
+        - `panel_name` names the recipe, and is what `set_session_panel` refers to
+        - `vials` is one dict per vial. `vial_position` and `odor_id` are
+        required; `odor_sccm`, `total_sccm`, `total_volume_ml` and
+        `solvent_volume_ml` are optional, as is `components`
+        - each entry of `components` needs an `odor_id` and may carry
+        `target_ppm`, `liquid_ul` and `percent_vv`
+        - `description` is a free-text note about the panel
 
-        **IMPORTANT**
-        This replaces the session's whole panel rather than adding to it. A
-        panel is written down as one table and is only meaningful as a whole:
-        adding row by row would leave a half-updated panel looking complete.
-
-        `goal_ppm` is text because the log holds ranges and words as well as
-        numbers ('1 to 24', 'na'), and rewriting those as numbers would be
-        inventing a precision nobody recorded.
+        Returns the `panel_id`. Every `odor_id` must already be in `odors`.
+        Calling this again for the same name replaces that panel's vials, so a
+        corrected recipe is one call -- until a session has run it, after which
+        the recipe is what that session's trials mean and cannot be rewritten.
+        Re-registering an unchanged panel is a no-op either way, so an importer
+        can be run again safely. Raises `ValueError` on a changed recipe that a
+        session already used; register it under a new name instead.
         """
-        allowed = {"odor_id", "vial", "goal_ppm", "percent_vv", "sccm", "made_on"}
+        wanted = _panel_rows(vials)
 
-        rows = []
+        with self.con as con:
+            cur = con.cursor()
+            cur.execute("PRAGMA foreign_keys = ON;")
 
-        for entry in odors:
-            unknown = set(entry) - allowed
-            if unknown:
+            # RETURNING rather than lastrowid: on the update branch no row is
+            # inserted, and the existing id is the one the vials must carry.
+            panel_id = cur.execute(
+                """
+                INSERT INTO panels (panel_name, description)
+                    VALUES (:name, :description)
+                ON CONFLICT(panel_name) DO UPDATE SET
+                    description = COALESCE(:description, description)
+                RETURNING panel_id;
+                """,
+                {"name": str(panel_name), "description": description},
+            ).fetchone()[0]
+
+            if _stored_panel(cur, panel_id) == wanted:
+                logger.info(f"Panel {panel_name} is already as given. {CHECK}")
+
+                return panel_id
+
+            sessions = [
+                row[0]
+                for row in cur.execute(
+                    "SELECT DISTINCT session_id FROM session_vials"
+                    " WHERE panel_id = ? ORDER BY session_id;",
+                    [panel_id],
+                )
+            ]
+
+            # A session's trials mean whatever was in its vials at the time, so
+            # a used recipe is history. The foreign key from `session_vials`
+            # would refuse the rewrite anyway; this says why.
+            if sessions:
                 raise ValueError(
-                    f"{sorted(unknown)} are not things recorded about a vial. "
-                    f"Use any of: {sorted(allowed)}."
+                    f"Panel {panel_name!r} was already run by sessions "
+                    f"{sessions}, so its recipe cannot be changed. Register the "
+                    f"new one under a different name."
                 )
 
-            if "odor_id" not in entry:
-                raise ValueError(f"Every entry needs an 'odor_id', but got {entry}.")
+            # Replaced rather than merged, so a recipe cannot end up half old
+            # and half new. `vial_components` cascades from the vials.
+            cur.execute("DELETE FROM panel_vials WHERE panel_id = ?;", [panel_id])
 
-            made_on = entry.get("made_on")
+            for position, odor_id, scalars, components in wanted:
+                _db_insert(cur, "panel_vials", {
+                    "panel_id": panel_id,
+                    "vial_position": position,
+                    "odor_id": odor_id,
+                    **dict(zip(VIAL_COLUMNS, scalars)),
+                })
 
-            rows.append(
-                {
-                    "session_id": int(session_id),
-                    "odor_id": int(entry["odor_id"]),  # type: ignore[arg-type]
-                    "vial": entry.get("vial"),
-                    "goal_ppm": (
-                        None
-                        if entry.get("goal_ppm") is None
-                        else str(entry["goal_ppm"])
-                    ),
-                    "percent_vv": entry.get("percent_vv"),
-                    "sccm": entry.get("sccm"),
-                    # Dates are written as dates not datetimes (to not imply precision).
-                    "made_on": (
-                        None
-                        if made_on is None
-                        else (
-                            made_on.date().isoformat()
-                            if isinstance(made_on, datetime)
-                            else str(made_on)
-                        )
-                    ),
-                }
-            )
+                for component_odor, values in components:
+                    _db_insert(cur, "vial_components", {
+                        "panel_id": panel_id,
+                        "vial_position": position,
+                        "odor_id": component_odor,
+                        **dict(zip(COMPONENT_COLUMNS, values)),
+                    })
 
-        seen = [row["odor_id"] for row in rows]
-        repeated = sorted({o for o in seen if seen.count(o) > 1})
+        logger.info(f"Panel {panel_name} has {len(vials)} vials. {CHECK}")
 
-        if repeated:
-            raise ValueError(
-                f"Odors {repeated} appear more than once. One entry per odor: "
-                f"a panel cannot have the same odor in two vials."
-            )
+        self._reset_caches()
+
+        return panel_id
+
+    @record_call
+    def set_session_panel(
+        self,
+        *,
+        session_id: int,
+        panel_name: str,
+        made_on: None | str = None,
+        vial_dates: None | dict[int, None | str] = None,
+    ) -> None:
+        """
+        Record which set of vials a session ran, and when each was mixed.
+
+        **USAGE**
+        ```python
+        # A whole rack remade at once, which is the usual case.
+        db.set_session_panel(
+            session_id=3, panel_name="print_v3", made_on="2026-07-06"
+        )
+
+        # One vial refilled later than the rest.
+        db.set_session_panel(
+            session_id=3,
+            panel_name="print_v3",
+            made_on="2026-07-06",
+            vial_dates={4: "2026-07-21"},
+        )
+        ```
+
+        **PARAMETERS**
+        - `session_id` is the session that ran this panel
+        - `panel_name` names a panel registered with `add_panel`
+        - `made_on` is the day the vials were mixed, applied to every vial the
+        panel defines
+        - `vial_dates` maps a vial position to its own date, for the vials that
+        were not mixed with the rest. It overrides `made_on` for those
+        positions, and may be given without it
+
+        A session runs one panel, so calling this again replaces what it had,
+        dates included. Positions in `vial_dates` must exist in the panel.
+        """
+        common = _optional_date(made_on)
+        per_vial = {
+            int(position): _optional_date(date)
+            for position, date in (vial_dates or {}).items()
+        }
 
         with self.con as con:
             cur = con.cursor()
             cur.execute("PRAGMA foreign_keys = ON;")
 
             exists = cur.execute(
-                """
-                SELECT EXISTS(
-                    SELECT 1
-                        FROM sessions
-                        WHERE session_id = ?
-                    );
-                """,
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?);",
                 [int(session_id)],
             ).fetchone()[0]
 
             if not exists:
                 raise ValueError(f"There is no session {session_id}.")
 
+            panel = cur.execute(
+                "SELECT panel_id FROM panels WHERE panel_name = ?;",
+                [str(panel_name)],
+            ).fetchone()
+
+            if panel is None:
+                raise ValueError(
+                    f"There is no panel {panel_name!r}. Register it with "
+                    f"`add_panel` before a session can name it."
+                )
+
+            panel_id = panel[0]
+            positions = [
+                row[0]
+                for row in cur.execute(
+                    "SELECT vial_position FROM panel_vials WHERE panel_id = ?"
+                    " ORDER BY vial_position;",
+                    [panel_id],
+                )
+            ]
+
+            unknown = sorted(set(per_vial) - set(positions))
+
+            if unknown:
+                raise ValueError(
+                    f"Panel {panel_name!r} has no vial {unknown}. It runs "
+                    f"positions {positions[0]}-{positions[-1]}."
+                )
+
+            # Replaced whole, so a re-entered panel cannot keep a date from the
+            # one it replaced. `session_vials` cascades from this row.
             cur.execute(
-                "DELETE FROM session_odors WHERE session_id = ?;",
-                [int(session_id)],
+                "DELETE FROM session_panels WHERE session_id = ?;", [int(session_id)]
             )
 
-            if rows:
-                _db_insert(cur, "session_odors", rows)
+            _db_insert(cur, "session_panels", {
+                "session_id": int(session_id),
+                "panel_id": panel_id,
+            })
 
-        logger.info(f"Recorded {len(rows)} odors for session {session_id}. {CHECK}")
+            # Every vial of the panel gets a row, so that "not recorded" (no
+            # row) stays distinguishable from "recorded as unknown" (NULL).
+            for position in positions:
+                _db_insert(cur, "session_vials", {
+                    "session_id": int(session_id),
+                    "panel_id": panel_id,
+                    "vial_position": position,
+                    "made_on": per_vial.get(position, common),
+                })
+
+        dates = {per_vial.get(position, common) for position in positions}
+        mixed = dates.pop() if len(dates) == 1 else f"{len(dates)} dates"
+
+        logger.info(
+            f"Session {session_id} ran {panel_name}, mixed {mixed or 'unknown'}."
+            f" {CHECK}"
+        )
 
         self._reset_caches()
 
@@ -1756,7 +2122,7 @@ def _insert_experiment(
 
     session_id = _session_id(
         cur,
-        mouse_id=str(mouse_id),
+        mouse_id=_mouse_number(str(mouse_id)),
         session_date=exp_start.date().isoformat(),
         # The session is the folder above the experiment: '20260708/m442'.
         session_path=Path(rel_path).parent.as_posix(),
@@ -1785,8 +2151,166 @@ def _insert_experiment(
     return exp_id
 
 
+def _mouse_number(name: str) -> int:
+    """
+    The number a mouse is known by, from the name its folders and files use.
+
+    Raises `ValueError` for a name that is not a number with an optional letter
+    prefix, since guessing which animal was meant would attach a recording to
+    the wrong one.
+
+    **EXAMPLE**
+    ```python
+    _mouse_number("m442")   # 442
+    ```
+    """
+    match = re.fullmatch(r"[A-Za-z]*0*(\d+)", str(name).strip())
+
+    # Zero is the placeholder people write when a recording is not about a
+    # particular animal, so it names no mouse either.
+    if match is None or int(match.group(1)) == 0:
+        raise ValueError(
+            f"Cannot tell which mouse {name!r} is. A name is an optional prefix "
+            f"and a number above zero, as in 'm442'."
+        )
+
+    return int(match.group(1))
+
+
+GENOTYPES = {
+    "wt": "wt", "wildtype": "wt", "wild type": "wt", "+/+": "wt",
+    "het": "het", "heterozygous": "het", "+/-": "het",
+    "hom": "hom", "homozygous": "hom", "-/-": "hom",
+}
+
+
+def _mouse_lines(lines: dict[str, None | str]) -> dict[str, None | str]:
+    """
+    Clean a line-to-genotype mapping for storage.
+
+    Line names keep the spelling they were given, minus surrounding spaces.
+    The genotype is matched case-insensitively against the spellings people
+    write and stored as `'wt'`, `'het'` or `'hom'`; `None` stays `None`, meaning
+    the mouse carries the mutation but was not genotyped for it.
+
+    **EXAMPLE**
+    ```python
+    _mouse_lines({"TH-Cre ": "Het", "TIGRE": None})
+    # {"TH-Cre": "het", "TIGRE": None}
+    ```
+    """
+    cleaned: dict[str, None | str] = {}
+
+    for line, genotype in lines.items():
+        name = str(line).strip()
+
+        if not name:
+            raise ValueError("A line needs a name.")
+
+        if genotype is None:
+            cleaned[name] = None
+            continue
+
+        known = GENOTYPES.get(str(genotype).strip().lower())
+
+        if known is None:
+            raise ValueError(
+                f"Cannot tell what {genotype!r} means for {name}. Use one of: "
+                f"{sorted(set(GENOTYPES.values()))}."
+            )
+
+        cleaned[name] = known
+
+    return cleaned
+
+
+VIAL_COLUMNS = ("odor_sccm", "total_sccm", "total_volume_ml", "solvent_volume_ml")
+COMPONENT_COLUMNS = ("target_ppm", "liquid_ul", "percent_vv")
+
+
+def _panel_rows(vials: list[Object]) -> list[tuple]:
+    """
+    A panel's vials as sorted, comparable tuples.
+
+    The shape is `(position, odor_id, scalars, components)` with `components`
+    sorted by odor. Two panels compare equal exactly when they would store the
+    same rows, which is what lets an unchanged re-registration do nothing.
+    """
+    rows = []
+
+    for vial in vials:
+        components = sorted(
+            (
+                int(component["odor_id"]),
+                tuple(
+                    _optional_real(component.get(name))
+                    for name in COMPONENT_COLUMNS
+                ),
+            )
+            for component in vial.get("components") or []
+        )
+
+        rows.append((
+            int(vial["vial_position"]),
+            int(vial["odor_id"]),
+            tuple(_optional_real(vial.get(name)) for name in VIAL_COLUMNS),
+            components,
+        ))
+
+    return sorted(rows)
+
+
+def _stored_panel(cur: Cursor, panel_id: int) -> list[tuple]:
+    """The panel as it currently sits in the database, shaped like `_panel_rows`."""
+
+    components: dict[int, list] = defaultdict(list)
+
+    for row in cur.execute(
+        f"SELECT vial_position, odor_id, {', '.join(COMPONENT_COLUMNS)}"
+        f" FROM vial_components WHERE panel_id = ?;",
+        [panel_id],
+    ):
+        components[row[0]].append((row[1], tuple(row)[2:]))
+
+    return sorted(
+        (row[0], row[1], tuple(row)[2:], sorted(components[row[0]]))
+        for row in cur.execute(
+            f"SELECT vial_position, odor_id, {', '.join(VIAL_COLUMNS)}"
+            f" FROM panel_vials WHERE panel_id = ?;",
+            [panel_id],
+        )
+    )
+
+
+def _optional_date(value: Value) -> None | str:
+    """A `YYYY-MM-DD` string for the database, or `None` for a missing entry."""
+
+    if value is None:
+        return None
+
+    # Spreadsheets give a date as a datetime at midnight, and that time is not
+    # real, so it is dropped rather than stored as zeros.
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+
+    return str(value).strip() or None
+
+
+def _optional_real(value: Value) -> None | float:
+    """A float for the database, or `None` for a missing or blank entry."""
+
+    # Spreadsheets give an empty cell as None or as an empty string, and pandas
+    # turns it into NaN, which STRICT stores happily and every later sum ruins.
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+
+    number = float(value)
+
+    return None if number != number else number
+
+
 def _session_id(
-    cur: Cursor, *, mouse_id: str, session_date: str, session_path: str
+    cur: Cursor, *, mouse_id: int, session_date: str, session_path: str
 ) -> int:
     """The session for this mouse on this day, creating it if it is new."""
 
