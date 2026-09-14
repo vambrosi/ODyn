@@ -28,7 +28,7 @@ import os
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from enum import Enum, IntFlag
 from typing import cast, Final, TYPE_CHECKING
 
 from pathlib import Path
@@ -40,14 +40,27 @@ import pandas as pd
 import tifffile
 
 from matplotlib import colormaps
+from tqdm.auto import tqdm
 
 # caiman is imported inside the functions that use it, not here. It is by far
 # the slowest import in the package, and only motion correction and the movie
 # loaders need it -- so importing `odyn` to read or annotate the database, or
 # to run the entry app, does not pay for it.
-from .utils import *
+from .utils import (
+    CHECK,
+    CROSS,
+    GROUP_ACQUISITION_TRIALS,
+    ODYN_FOLDER,
+    CallFrame,
+    CallRecorder,
+    Object,
+    clamp,
+    logger,
+    memorize_params,
+    record_call,
+    um_to_pixels,
+)
 from .utils import _acquisition_trials, _method_calls_dataframe, _SYNC_COLUMNS
-from .utils import CallFrame, CallRecorder
 
 if TYPE_CHECKING:
     import caiman as cm
@@ -253,7 +266,7 @@ class Group(CallRecorder):
 
         # Show the experiment name if there is only one
         if len(self.experiments) == 1:
-            msg += f" (exp_name = {self.experiments["exp_name"].iloc[0]})"
+            msg += f" (exp_name = {self.experiments['exp_name'].iloc[0]})"
 
         return msg
 

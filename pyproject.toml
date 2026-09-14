@@ -7,6 +7,10 @@ name = "odyn"
 readme = "README.md"
 version = "0.0.1"
 
+# Also what tools target. Without it Black infers the version from the syntax
+# it finds, and may rewrite f-string quotes into a form only 3.12 can parse.
+requires-python = ">=3.10"
+
 dependencies = ["tomlkit"]
 
 # The entry app needs Qt; the cluster and the processing workstations do not,

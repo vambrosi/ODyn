@@ -13,15 +13,13 @@ import sys
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from enum import Enum, IntEnum, IntFlag
+from enum import IntFlag
 from io import StringIO
 from pathlib import Path
-from tqdm.auto import tqdm
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias, Union
 
 if TYPE_CHECKING:
     from .database import Database
-    from .groups import Group
     from datetime import datetime
     from sqlite3 import Connection
 
@@ -55,9 +53,13 @@ DB_TIMEOUT_S = 30
 
 # List is invariant     => list[float] is not a list[Value]
 # Sequence is covariant => list[float] is a list[Value]
-type BasicTypes = None | bool | int | float | str | datetime
-type Value = BasicTypes | Object | Sequence[Value]
-type Object = dict[str, Value]
+#
+# `TypeAlias` rather than a PEP 695 `type` statement, which needs 3.12. These
+# are mutually recursive, and a `TypeAlias` is evaluated where it is written
+# rather than lazily, so the names not yet defined are quoted.
+BasicTypes: TypeAlias = Union[None, bool, int, float, str, "datetime"]
+Value: TypeAlias = Union[BasicTypes, "Object", Sequence["Value"]]
+Object: TypeAlias = dict[str, "Value"]
 
 # --------------------------------------------------------------------------- #
 # Database queries
