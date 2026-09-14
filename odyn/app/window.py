@@ -347,9 +347,7 @@ class EntryWindow(QMainWindow):
 
         self.picker.blockSignals(True)
         self.picker.clear()
-        self.picker.addItems(
-            [f"m{draft.mouse_id} on {draft.date}" for draft in self.drafts]
-        )
+        self.picker.addItems([draft.label for draft in self.drafts])
         self.picker.setCurrentIndex(max(0, min(chosen, len(self.drafts) - 1)))
         self.picker.blockSignals(False)
 
@@ -364,7 +362,7 @@ class EntryWindow(QMainWindow):
 
         while dialog.exec() == QDialog.DialogCode.Accepted:
             try:
-                draft = Draft.open(
+                draft = Draft.start(
                     self.draft.path.parent,
                     mouse_id=dialog.mouse.value(),
                     date=dialog.date.text(),
@@ -487,7 +485,7 @@ def _report(results) -> str:
     lines = []
 
     for result in results:
-        who = f"m{result.draft.mouse_id} on {result.draft.date}"
+        who = result.draft.label
 
         if result.error:
             lines.append(f"✗ {who}: {result.error}")
@@ -568,7 +566,7 @@ def _ask_for_session(folder: Path) -> None | Draft:
 
     while dialog.exec() == QDialog.DialogCode.Accepted:
         try:
-            return Draft.open(
+            return Draft.start(
                 folder, mouse_id=dialog.mouse.value(), date=dialog.date.text()
             )
         except ValueError as wrong:

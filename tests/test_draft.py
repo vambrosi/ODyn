@@ -8,6 +8,9 @@ file cannot hide the good ones.
 """
 
 import json
+import re
+
+from datetime import date
 
 import pytest
 
@@ -21,7 +24,7 @@ def folder(tmp_path):
 
 @pytest.fixture
 def draft(folder):
-    return Draft.open(folder, mouse_id=442, date="2026-07-08")
+    return Draft.start(folder, mouse_id=442, date="2026-07-08")
 
 
 # --------------------------------------------------------------------------- #
@@ -29,24 +32,65 @@ def draft(folder):
 # --------------------------------------------------------------------------- #
 
 
-def test_a_draft_is_named_for_the_animal_and_the_day(draft):
-    assert draft.path.name == "20260708_m442.json"
+def test_a_draft_is_named_for_when_it_was_started(draft):
+    """
+    Not for the animal: a session is usually opened before anyone types the
+    number, and the number can be corrected afterwards.
+    """
+    assert re.fullmatch(r"\d{8}-\d{6}\.json", draft.path.name)
 
 
-def test_the_same_animal_and_day_is_one_draft(folder, draft):
-    """Two people opening the same session must not get two days of notes."""
-    draft.update_session(goal="10x pre/post ket/xyl")
+def test_a_session_can_be_started_with_no_mouse(folder):
+    started = Draft.start(folder)
 
-    again = Draft.open(folder, mouse_id=442, date="2026-07-08")
+    assert started.mouse_id is None
+    assert started.date == date.today().isoformat()
+    assert started.label.startswith("no mouse yet")
 
-    assert again.path == draft.path
-    assert again.session["goal"] == "10x pre/post ket/xyl"
+
+def test_the_mouse_can_be_named_afterwards(folder):
+    started = Draft.start(folder)
+    started.identify(mouse_id=442)
+
+    assert Draft.load(started.path).mouse_id == 442
+
+
+def test_naming_the_mouse_does_not_move_the_draft(folder):
+    """The file keeps its name, so nothing it is open in has to follow it."""
+    started = Draft.start(folder)
+    started.update_session(goal="a real day of work")
+
+    before = started.path
+    started.identify(mouse_id=442)
+
+    assert started.path == before
+    assert Draft.load(before).session["goal"] == "a real day of work"
+
+
+def test_two_unidentified_sessions_do_not_collide(folder):
+    """Both are 'no mouse yet', so a name built from the animal would clash."""
+    first, second = Draft.start(folder), Draft.start(folder)
+
+    assert first.path != second.path
+    assert len(Draft.pending(folder)) == 2
+
+
+def test_correcting_the_mouse_cannot_overwrite_another_session(folder):
+    """Two sessions of the same animal stay two drafts."""
+    first = Draft.start(folder, mouse_id=442)
+    second = Draft.start(folder, mouse_id=357)
+
+    second.identify(mouse_id=442)
+
+    assert first.path != second.path
+    assert {d.mouse_id for d in Draft.pending(folder)} == {442}
+    assert len(Draft.pending(folder)) == 2
 
 
 def test_a_date_that_is_not_one_is_refused(folder):
     """A mistyped date would file the day under the wrong name silently."""
     with pytest.raises(ValueError, match="YYYY-MM-DD"):
-        Draft.open(folder, mouse_id=442, date="08/07/2026")
+        Draft.start(folder, date="08/07/2026")
 
 
 def test_a_new_draft_is_empty(draft):
@@ -74,7 +118,7 @@ def test_an_interrupted_draft_comes_back(folder, draft):
     draft.set_experiment("e1", fov_depth_um=-55)
 
     # The app died here.
-    reopened = Draft.open(folder, mouse_id=442, date="2026-07-08")
+    reopened = Draft.load(draft.path)
 
     assert reopened.session["headplate"] == "A"
     assert reopened.session["note"] == "genteal drops before starting"
@@ -174,8 +218,8 @@ def test_the_panel_keeps_per_vial_dates(draft):
 
 
 def test_pending_lists_unfinished_drafts(folder):
-    Draft.open(folder, mouse_id=442, date="2026-07-08").update_session(goal="one")
-    Draft.open(folder, mouse_id=357, date="2026-07-09").update_session(goal="two")
+    Draft.start(folder, mouse_id=442).update_session(goal="one")
+    Draft.start(folder, mouse_id=357).update_session(goal="two")
 
     assert {entry.mouse_id for entry in Draft.pending(folder)} == {442, 357}
 
@@ -198,21 +242,21 @@ def test_one_bad_file_does_not_hide_the_good_ones(folder, draft):
     """
     draft.update_session(goal="a real day of work")
 
-    (folder / "20260101_m999.json").write_text(
+    (folder / "20260101-090000.json").write_text(
         json.dumps({"version": DRAFT_VERSION + 1, "mouse_id": 999})
     )
-    (folder / "20260102_m998.json").write_text("{ not json at all")
+    (folder / "20260102-090000.json").write_text("{ not json at all")
 
     assert [entry.mouse_id for entry in Draft.pending(folder)] == [442]
 
     broken = {path.name for path, _ in Draft.unreadable(folder)}
 
-    assert broken == {"20260101_m999.json", "20260102_m998.json"}
+    assert broken == {"20260101-090000.json", "20260102-090000.json"}
 
 
 def test_a_draft_from_a_newer_app_is_refused(folder):
     """Reading the parts we recognize would quietly drop the rest."""
-    path = folder / "20260101_m999.json"
+    path = folder / "20260101-090000.json"
     folder.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"version": DRAFT_VERSION + 1, "mouse_id": 999}))
 
@@ -223,7 +267,7 @@ def test_a_draft_from_a_newer_app_is_refused(folder):
 def test_unrelated_files_are_ignored(folder, draft):
     draft.save()
     (folder / "notes.txt").write_text("not a draft")
-    (folder / "20260103_m997.json.writing").write_text("{ half written")
+    (folder / "20260103-090000.json.writing").write_text("{ half written")
 
     assert len(Draft.pending(folder)) == 1
     assert Draft.unreadable(folder) == []

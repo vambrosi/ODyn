@@ -8,13 +8,15 @@ are append-only and would fill up with half-typed values, and a day's entry is
 only meaningful once it is finished. So the database keeps committed facts and
 this keeps everything before that.
 
-One JSON file per animal per day, named `20260708_m442.json`. Saving is atomic,
-so a crash costs at most the last edit rather than the whole day, and an
-unfinished draft is simply still there the next time the app opens.
+One JSON file per session, named for the moment it was started
+(`20260914-113042.json`). Saving is atomic, so a crash costs at most the last
+edit rather than the whole day, and an unfinished draft is simply still there
+the next time the app opens.
 
 **USAGE**
 ```python
-draft = Draft.open(drafts_folder(), mouse_id=442, date="2026-07-08")
+draft = Draft.start(drafts_folder())        # today, animal not yet known
+draft.identify(mouse_id=442)                # once someone types it
 
 draft.update_session(goal="10x pre/post ket/xyl", mouse_weight_g=25.1)
 draft.set_experiment("e1", fov_depth_um=-55, objective=20)
@@ -44,7 +46,10 @@ FOLDER_NAME = ".odyn"
 DRAFTS = "drafts"
 SUBMITTED = "drafts/submitted"
 
-NAME_PATTERN = re.compile(r"(\d{8})_m(\d+)\.json$")
+# A draft is named for when it was started, not for what it is about: the mouse
+# is typed in later and can be corrected, and two sessions can be open before
+# either has been identified.
+NAME_PATTERN = re.compile(r"\d{8}-\d{6}(-\d+)?\.json")
 
 
 def drafts_folder() -> Path:
@@ -87,28 +92,30 @@ class Draft:
     # ----------------------------------------------------------------- #
 
     @classmethod
-    def open(cls, folder: Path | str, *, mouse_id: int, date: str) -> Draft:
+    def start(
+        cls,
+        folder: Path | str,
+        *,
+        mouse_id: None | int = None,
+        date: None | str = None,
+    ) -> Draft:
         """
-        The draft for this animal on this day, loaded if it exists, else new.
+        Begin a session, named for the moment it was started.
 
-        `mouse_id` is the number, so that a session typed as `m442` one day and
-        `442` the next is one draft. Normalizing the name is the caller's job.
+        `mouse_id` is optional because a session is usually opened before anyone
+        types the animal's number, and `date` defaults to today. Both can be set
+        afterwards with `identify`.
         """
         folder = Path(folder)
-        session_date = _check_date(date)
-        name = f"{session_date.replace('-', '')}_m{int(mouse_id)}.json"
-        path = folder / name
+        started = datetime.now()
 
-        if path.exists():
-            return cls.load(path)
-
-        return cls(
-            path,
+        draft = cls(
+            folder / f"{started:%Y%m%d-%H%M%S}.json",
             {
                 "version": DRAFT_VERSION,
-                "mouse_id": int(mouse_id),
-                "date": session_date,
-                "started_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
+                "mouse_id": None if mouse_id is None else int(mouse_id),
+                "date": _check_date(date or started.date()),
+                "started_at": started.isoformat(sep=" ", timespec="seconds"),
                 "saved_at": None,
                 "mouse": {},
                 "session": {},
@@ -116,6 +123,35 @@ class Draft:
                 "panel": {},
             },
         )
+
+        # Two sessions started in the same second would otherwise share a name.
+        stem = draft.path.stem
+        attempt = 0
+
+        while draft.path.exists():
+            attempt += 1
+            draft.path = draft.path.with_name(f"{stem}-{attempt}.json")
+
+        # Saved straight away, so a crash before the first keystroke still
+        # leaves the session there to come back to.
+        return draft.save()
+
+    def identify(
+        self, *, mouse_id: None | int = None, date: None | str = None
+    ) -> Draft:
+        """
+        Say which animal and which day this session is.
+
+        Both are ordinary fields, so either can be corrected later without the
+        draft changing its name or colliding with another.
+        """
+        if mouse_id is not None:
+            self.data["mouse_id"] = int(mouse_id)
+
+        if date is not None:
+            self.data["date"] = _check_date(date)
+
+        return self.save()
 
     @classmethod
     def load(cls, path: Path | str) -> Draft:
@@ -179,8 +215,11 @@ class Draft:
     # ----------------------------------------------------------------- #
 
     @property
-    def mouse_id(self) -> int:
-        return int(self.data["mouse_id"])
+    def mouse_id(self) -> None | int:
+        """The animal, or `None` while the session is still unidentified."""
+        stored = self.data.get("mouse_id")
+
+        return None if stored is None else int(stored)
 
     @property
     def date(self) -> str:
@@ -214,6 +253,13 @@ class Draft:
     def panel(self) -> dict[str, Any]:
         """The panel run, and when its vials were mixed."""
         return self.data.setdefault("panel", {})
+
+    @property
+    def label(self) -> str:
+        """How the session reads on screen, before and after it is identified."""
+        who = "no mouse yet" if self.mouse_id is None else f"m{self.mouse_id}"
+
+        return f"{who} on {self.date}"
 
     @property
     def is_empty(self) -> bool:
@@ -332,7 +378,7 @@ class Draft:
         self.path.unlink(missing_ok=True)
 
     def __repr__(self) -> str:
-        return f"<Draft m{self.mouse_id} {self.date} ({len(self.experiments)} exp)>"
+        return f"<Draft {self.label} ({len(self.experiments)} exp)>"
 
 
 def _draft_files(folder: Path | str) -> list[Path]:

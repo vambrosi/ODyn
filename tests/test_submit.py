@@ -85,7 +85,7 @@ def db(recording, tmp_path):
 @pytest.fixture
 def draft(tmp_path):
     """A draft for the session the recording belongs to."""
-    return Draft.open(
+    return Draft.start(
         tmp_path / "drafts",
         mouse_id=int(MOUSE.lstrip("m")),
         date=EXP_START.date().isoformat(),
@@ -123,7 +123,7 @@ def test_a_folder_named_any_other_way_is_still_found(db, tmp_path):
     """The same animal, filed under a differently padded name."""
     (db.main_folder / "20260202" / "M0001" / "e1" / "raw").mkdir(parents=True)
 
-    other = Draft.open(tmp_path / "drafts", mouse_id=1, date="2026-02-02")
+    other = Draft.start(tmp_path / "drafts", mouse_id=1, date="2026-02-02")
 
     assert session_path(db.main_folder, other) == "20260202/M0001"
 
@@ -162,7 +162,7 @@ def test_recordings_that_were_never_copied_are_reported(db, tmp_path, filled):
     The common case: someone fills the app in during a session and submits
     before moving the files off the rig.
     """
-    other = Draft.open(
+    other = Draft.start(
         tmp_path / "drafts", mouse_id=999, date=EXP_START.date().isoformat()
     )
     other.update_session(goal="never copied")
@@ -369,7 +369,7 @@ def test_a_day_is_checked_before_any_of_it_is_written(db, filled, tmp_path):
     the end, so every session is unsubmittable until then and reviewing them
     one at a time is four rounds of the same answer.
     """
-    second = Draft.open(tmp_path / "drafts", mouse_id=999, date="2026-03-03")
+    second = Draft.start(tmp_path / "drafts", mouse_id=999, date="2026-03-03")
     second.update_session(goal="recordings not copied yet")
 
     checked = check_all([filled, second], db)
@@ -379,7 +379,7 @@ def test_a_day_is_checked_before_any_of_it_is_written(db, filled, tmp_path):
 
 
 def test_a_blocked_session_does_not_stop_the_others(db, filled, tmp_path):
-    second = Draft.open(tmp_path / "drafts", mouse_id=999, date="2026-03-03")
+    second = Draft.start(tmp_path / "drafts", mouse_id=999, date="2026-03-03")
     second.update_session(goal="recordings not copied yet")
 
     results = submit_all([filled, second], db)
@@ -404,7 +404,7 @@ def test_each_session_of_a_day_lands_separately(db, filled, tmp_path, second_mou
     """
     shutil.copytree(second_mouse, db.main_folder, dirs_exist_ok=True)
 
-    second = Draft.open(
+    second = Draft.start(
         tmp_path / "drafts", mouse_id=2, date=EXP_START.date().isoformat()
     )
     second.update_session(goal="second mouse of the day")
@@ -425,7 +425,7 @@ def test_recordings_named_for_another_mouse_are_refused(db, filled, tmp_path):
     disagree the recordings land under one mouse and the annotations look for
     another, so nothing would connect and nothing would say so.
     """
-    second = Draft.open(
+    second = Draft.start(
         tmp_path / "drafts", mouse_id=2, date=EXP_START.date().isoformat()
     )
     second.update_session(goal="folder says m002, files say m001")

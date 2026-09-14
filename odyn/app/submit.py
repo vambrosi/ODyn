@@ -196,10 +196,15 @@ def check(draft: Draft, db) -> list[Problem]:
     Non-blocking ones are worth showing but do not stop a submit.
     """
     problems: list[Problem] = []
-    where = f"m{draft.mouse_id} {draft.date}"
+    where = draft.label
 
     if draft.is_empty:
         return [Problem(where, "nothing has been filled in")]
+
+    # Everything below looks the session up by its animal, so without one there
+    # is nothing to look up and no point reporting the consequences.
+    if draft.mouse_id is None:
+        return [Problem(where, "no mouse number has been entered")]
 
     sessions = session_folders(db.main_folder, draft)
     folders: list[str] = []
@@ -525,7 +530,7 @@ def _session_of(db, draft: Draft) -> None | int:
     """The session ingestion created for this draft, if it created one."""
     row = db.con.execute(
         "SELECT session_id FROM sessions WHERE mouse_id = ? AND session_date = ?;",
-        [_mouse_number(str(draft.mouse_id)), draft.date],
+        [draft.mouse_id, draft.date],
     ).fetchone()
 
     return None if row is None else row[0]
