@@ -8,11 +8,20 @@ Most of what is checked here is therefore what `check` refuses to submit.
 
 import shutil
 
+from datetime import timedelta
+
 import pytest
 
 from odyn import Database
 from odyn.app.draft import Draft
-from odyn.app.submit import SubmitRefused, check, session_path, submit
+from odyn.app.submit import (
+    SubmitRefused,
+    check,
+    check_all,
+    session_path,
+    submit,
+    submit_all,
+)
 
 from generate_data import EXP, EXP_DATE, EXP_START, MOUSE, generate
 
@@ -33,6 +42,20 @@ def recording(tmp_path_factory):
     generate(
         folder, acquisitions=ACQUISITIONS, frames=FRAMES,
         height=32, width=32, motion=0.0,
+    )
+
+    return folder
+
+
+@pytest.fixture(scope="module")
+def second_mouse(tmp_path_factory):
+    """A second animal the same day, an hour later, in its own main folder."""
+    folder = tmp_path_factory.mktemp("second")
+
+    generate(
+        folder, acquisitions=ACQUISITIONS, frames=FRAMES,
+        height=32, width=32, motion=0.0,
+        mouse="m002", start=EXP_START + timedelta(hours=1),
     )
 
     return folder
@@ -314,3 +337,90 @@ def test_force_writes_what_it_can(db, filled):
     assert written.session_id is not None
     assert "e99" not in written.experiments
     assert EXP in written.experiments
+
+
+# --------------------------------------------------------------------------- #
+# A whole day at once
+# --------------------------------------------------------------------------- #
+
+
+def test_a_day_is_checked_before_any_of_it_is_written(db, filled, tmp_path):
+    """
+    Several mice run in sequence, and their recordings are copied off once at
+    the end, so every session is unsubmittable until then and reviewing them
+    one at a time is four rounds of the same answer.
+    """
+    second = Draft.open(tmp_path / "drafts", mouse_id=999, date="2026-03-03")
+    second.update_session(goal="recordings not copied yet")
+
+    checked = check_all([filled, second], db)
+
+    assert [result.blocked for result in checked] == [False, True]
+    assert db.con.execute("SELECT count(*) FROM sessions;").fetchone()[0] == 0
+
+
+def test_a_blocked_session_does_not_stop_the_others(db, filled, tmp_path):
+    second = Draft.open(tmp_path / "drafts", mouse_id=999, date="2026-03-03")
+    second.update_session(goal="recordings not copied yet")
+
+    results = submit_all([filled, second], db)
+
+    assert results[0].submitted
+    assert not results[1].submitted
+    assert results[1].blocked
+
+    # The one that could not go is still on disk to be fixed and sent again.
+    assert second.path.exists()
+    assert not filled.path.exists()
+
+
+def test_each_session_of_a_day_lands_separately(db, filled, tmp_path, second_mouse):
+    """
+    A second mouse on the same day is its own session row.
+
+    Its recording needs a start time of its own: `experiments.exp_start` is
+    UNIQUE, so two recordings made at the same instant read as one experiment
+    and the second is skipped as already ingested. Two mice cannot share a
+    scope at the same second anyway.
+    """
+    shutil.copytree(second_mouse, db.main_folder, dirs_exist_ok=True)
+
+    second = Draft.open(
+        tmp_path / "drafts", mouse_id=2, date=EXP_START.date().isoformat()
+    )
+    second.update_session(goal="second mouse of the day")
+    second.set_experiment(EXP, fov_depth_um=-70.0)
+
+    results = submit_all([filled, second], db)
+
+    assert all(result.submitted for result in results), [r.problems for r in results]
+    assert {
+        row[0] for row in db.con.execute("SELECT mouse_id FROM sessions;")
+    } == {1, 2}
+
+
+def test_recordings_named_for_another_mouse_are_refused(db, filled, tmp_path):
+    """
+    Ingestion takes the animal from the file name, not the folder. If they
+    disagree the recordings land under one mouse and the annotations look for
+    another, so nothing would connect and nothing would say so.
+    """
+    second = Draft.open(
+        tmp_path / "drafts", mouse_id=2, date=EXP_START.date().isoformat()
+    )
+    second.update_session(goal="folder says m002, files say m001")
+
+    # Folder renamed, file names left alone -- which is what happens when a
+    # recording is started before the mouse on the rig is changed over.
+    (db.main_folder / EXP_DATE / MOUSE).rename(db.main_folder / EXP_DATE / "m002")
+
+    problems = [problem for problem in check(second, db) if problem.blocking]
+
+    assert any("named for m1" in problem.what for problem in problems)
+
+
+
+
+def test_an_empty_day_reports_rather_than_raises(db):
+    assert submit_all([], db) == []
+    assert check_all([], db) == []

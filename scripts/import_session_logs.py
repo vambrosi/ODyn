@@ -218,24 +218,6 @@ def drug_and_time(written: str) -> tuple[None | str, None | str]:
     return rest[: found.start()].strip() or None, found.group(1).strip()
 
 
-def yes_no(written: str) -> None | bool:
-    """
-    `True`, `False`, or `None` for a cell that answers something else.
-
-    The column is a yes/no question but people also describe what they did, and
-    a description is not an answer to it.
-    """
-    said = str(written).strip().lower()
-
-    if said in ("y", "yes", "true", "1"):
-        return True
-
-    if said in ("n", "no", "false", "0"):
-        return False
-
-    return None
-
-
 def entries(written: str) -> list[str]:
     """One note or flag per entry, as the survey joined them."""
     return [part.strip() for part in str(written).split(SEPARATOR) if part.strip()]
@@ -307,23 +289,9 @@ def import_session(db, report, row, session_id, dry_run):
         else:
             write("pitch_angle", degrees)
 
-    correction = filled(row, "left-right-correction")
-
-    if correction:
-        answer = yes_no(correction)
-
-        if answer is None:
-            # The registry types this as a boolean, and these cells describe
-            # what was done instead of answering. Recorded as a note so the
-            # observation is not lost, and reported so the mismatch is visible.
-            report.problem(
-                where,
-                f"left-right-correction {correction!r} is not yes or no;"
-                f" kept as a note",
-            )
-            write("note", f"left-right correction: {correction}")
-        else:
-            write("left_right_correction", answer)
+    # Kept as written. People answer this with what they did to level the head
+    # ('right side down slightly') as often as with 'no', and both are answers.
+    write("left_right_correction", filled(row, "left-right-correction"))
 
     injection = filled(row, "s.q. injection vol (ml)")
 

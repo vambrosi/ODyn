@@ -50,11 +50,12 @@ from skimage.transform import PiecewiseAffineTransform, warp
 
 OUTPUT_FOLDER = Path(__file__).resolve().parents[1] / "tmp" / "generated_data"
 
-# Experiment metadata
-EXP_DATE = "20260101"
+# Experiment metadata. The folder date is derived so that passing `generate` a
+# different `start` cannot leave the two disagreeing.
 MOUSE = "m001"
 EXP = "e1"
 EXP_START = datetime(2026, 1, 1, 10, 0, 0)
+EXP_DATE = EXP_START.strftime("%Y%m%d")
 
 # Acquisition parameters
 ACQUISITIONS = 4
@@ -312,15 +313,21 @@ def generate(
     frame_rate: float = FRAME_RATE,
     motion: float = 1.0,
     seed: int = 0,
+    mouse: str = MOUSE,
+    start: datetime = EXP_START,
 ) -> dict:
     """
     Write the recording and return what went into it.
 
     `out` becomes a `main_folder`, holding one experiment at
-    `<date>/<mouse>/<exp>/raw/`.
+    `<date>/<mouse>/<exp>/raw/`, where the date comes from `start`.
 
     `motion` scales every displacement. Pass `0` for a still recording, which is
     lets you see the response by itself. (Can be used as mcor comparison.)
+
+    `mouse` and `start` are for tests that need more than one recording in a
+    main folder. `experiments.exp_start` is UNIQUE, so a second recording needs
+    a `start` of its own or it reads as the first one all over again.
     """
     output_folder = Path(output_folder)
     rng = np.random.default_rng(seed)
@@ -340,8 +347,9 @@ def generate(
             f"  {DECAY_S} s = {DECAY_S * frame_rate:.2f} frames"
         )
 
-    exp_name = f"{EXP_DATE}_{MOUSE}_{EXP}"
-    raw_folder = output_folder / EXP_DATE / MOUSE / EXP / "raw"
+    exp_date = start.strftime("%Y%m%d")
+    exp_name = f"{exp_date}_{mouse}_{EXP}"
+    raw_folder = output_folder / exp_date / mouse / EXP / "raw"
 
     cells = _glomeruli(rng, height, width, um_per_px)
     edge_px = EDGE_UM / um_per_px
@@ -412,7 +420,7 @@ def generate(
                 [
                     "frameNumbers = 1",
                     f"frameTimestamps_sec = {started:.6f}",
-                    f"epoch = [{EXP_START:%Y %m %d %H %M} {EXP_START.second:.3f}]",
+                    f"epoch = [{start:%Y %m %d %H %M} {start.second:.3f}]",
                 ]
             ),
             um_per_px=um_per_px,
@@ -420,8 +428,8 @@ def generate(
 
         truth["acquisitions"].append(
             {
-                "raw_path": f"{EXP_DATE}/{MOUSE}/{EXP}/raw/{name}",
-                "acq_start": (EXP_START + timedelta(seconds=started)).isoformat(),
+                "raw_path": f"{exp_date}/{mouse}/{EXP}/raw/{name}",
+                "acq_start": (start + timedelta(seconds=started)).isoformat(),
                 "mean_shift_px": np.abs(offsets).mean(axis=(1, 2)).round(3).tolist(),
             }
         )

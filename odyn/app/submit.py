@@ -158,6 +158,32 @@ def _experiment_name(rel_path: str) -> str:
     return rel_path.rsplit("/", 1)[-1]
 
 
+def recorded_mice(main_folder: Path | str, rel_path: str) -> set[int]:
+    """
+    The mice the raw file *names* say an experiment is of.
+
+    Ingestion takes the animal from the file name rather than the folder, so
+    the two can disagree -- a folder renamed after the fact, or a recording
+    started under the previous mouse. Read from the names alone, so this costs
+    a directory listing and no file opens.
+    """
+    folder = Path(main_folder) / rel_path / "raw"
+
+    if not folder.is_dir():
+        return set()
+
+    found = set()
+
+    for tiff in folder.glob("[!.]?*.tif"):
+        parts = tiff.stem.split("_")
+        number = _mouse_number_of(parts[1]) if len(parts) > 1 else None
+
+        if number is not None:
+            found.add(number)
+
+    return found
+
+
 # --------------------------------------------------------------------------- #
 # Checking
 # --------------------------------------------------------------------------- #
@@ -201,6 +227,20 @@ def check(draft: Draft, db) -> list[Problem]:
                 where,
                 f"'{sessions[0]}' holds no experiment with a 'raw/' folder of"
                 f" TIFFs. Copy the recordings over, then submit again",
+            ))
+
+    for rel_path in folders:
+        mice = recorded_mice(db.main_folder, rel_path)
+
+        # Ingestion would file these under the mouse the file names give, and
+        # the annotations are looked up under the drafted one, so they would
+        # land on different sessions -- or on none at all.
+        if mice and mice != {draft.mouse_id}:
+            problems.append(Problem(
+                f"{where} {_experiment_name(rel_path)}",
+                f"the recordings are named for "
+                f"{', '.join(f'm{number}' for number in sorted(mice))}, not "
+                f"m{draft.mouse_id}",
             ))
 
     recorded = {_experiment_name(path) for path in folders}
@@ -380,6 +420,75 @@ def submit(draft: Draft, db, *, force: bool = False, archive: bool = True) -> Wr
         draft.archive()
 
     return written
+
+
+# --------------------------------------------------------------------------- #
+# A whole day at once
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class SessionResult:
+    """What became of one session in a day-long submit."""
+
+    draft: Draft
+    written: None | Written = None
+    problems: list[Problem] = field(default_factory=list)
+    error: None | str = None
+
+    @property
+    def submitted(self) -> bool:
+        return self.written is not None
+
+    @property
+    def blocked(self) -> bool:
+        return any(problem.blocking for problem in self.problems)
+
+
+def check_all(drafts: list[Draft], db) -> list[SessionResult]:
+    """
+    Check every session of a day, writing nothing.
+
+    Recordings are usually copied off the rig only once, at the end of the day,
+    so until then every session reports missing recordings. Checking them
+    together is what makes that one review rather than four.
+    """
+    return [SessionResult(draft, problems=check(draft, db)) for draft in drafts]
+
+
+def submit_all(
+    drafts: list[Draft], db, *, force: bool = False, archive: bool = True
+) -> list[SessionResult]:
+    """
+    Submit a day's sessions, one after another.
+
+    Each is independent: one that is blocked, or that fails partway, does not
+    stop the others, and stays on disk to be fixed and submitted again. The
+    results say which is which -- `submitted`, `blocked`, or carrying an
+    `error`.
+
+    Check the whole day first (`check_all`) and show it, so that a run of
+    ingestion is not started on sessions that were never going to be written.
+    """
+    results = []
+
+    for draft in drafts:
+        result = SessionResult(draft, problems=check(draft, db))
+
+        if result.blocked and not force:
+            results.append(result)
+            continue
+
+        try:
+            result.written = submit(draft, db, force=True, archive=archive)
+        except Exception as failure:
+            # One session's bad TIFF must not cost the other three, so this is
+            # recorded against the session rather than raised.
+            result.error = f"{type(failure).__name__}: {failure}"
+
+        results.append(result)
+
+    return results
 
 
 def _write_annotations(db, target_type: str, target_id: int, fields: dict) -> int:
