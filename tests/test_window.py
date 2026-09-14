@@ -17,7 +17,7 @@ pytest.importorskip("PySide6")
 # screen. `setdefault`, so it can still be watched with QT_QPA_PLATFORM=cocoa.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtCore import QSize, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QScrollArea  # noqa: E402
 
 from odyn.app.icons import icon, label_icon  # noqa: E402
@@ -376,18 +376,42 @@ def test_the_right_bar_reopens_a_closed_notes_dock(window):
 # --------------------------------------------------------------------------- #
 
 
-def test_the_form_sits_in_a_column_of_its_own_width(window):
+@pytest.mark.parametrize("section", ["session", "panel"])
+def test_every_pane_sits_in_a_column_of_the_same_width(qt, window, section):
     """
-    A line the width of the window is tiring to read, so the form keeps its
+    A line the width of the window is tiring to read, so each pane keeps its
     width and the space goes to the margins.
+
+    Width, not just the cap: a maximum on its own leaves the column at the
+    width its contents ask for, which is far narrower than this.
     """
     window._add_session()
+    window._select(section)
+    window.show()
 
     centred = window.stack.widget(0).widget().layout()
     column = centred.itemAt(1).widget()
 
     assert column.maximumWidth() == W.COLUMN_WIDTH
     assert centred.count() == 3  # stretch, column, stretch
+    assert window.stack.widget(0).frameShape() == QScrollArea.Shape.NoFrame
+
+    window.resize(1900, 900)
+    qt.processEvents()
+
+    assert column.width() == W.COLUMN_WIDTH
+
+
+def test_the_column_gives_way_on_a_narrow_window(qt, window):
+    """It is a cap, not a demand: a small window is not made to scroll."""
+    window._add_session()
+    window.show()
+    window.resize(700, 900)
+    qt.processEvents()
+
+    column = window.stack.widget(0).widget().layout().itemAt(1).widget()
+
+    assert column.width() < W.COLUMN_WIDTH
 
 
 def test_entries_are_flat_and_rounded(window):
@@ -452,3 +476,183 @@ def test_the_banner_follows_the_selection(window):
 
     window._choose(0)
     assert "m442" in window.notes.windowTitle()
+
+
+def test_the_window_is_called_odyn(window):
+    assert window.windowTitle() == "ODyn"
+
+
+def test_the_bars_are_flat(window):
+    """The native style paints a gradient; this sits with the rest instead."""
+    assert "QToolBar {" in window.styleSheet()
+    assert "background: palette(window)" in window.styleSheet()
+
+
+def test_hover_and_chosen_look_the_same(window):
+    """Both mean "this one"; a separate hover appearance is only noise."""
+    style = window.styleSheet()
+
+    assert "QToolBar QToolButton:hover," in style
+    assert "QToolBar QToolButton:checked," in style
+
+
+@pytest.mark.parametrize(
+    "named", ["session", "odors", "notes", "experiment", "add", None]
+)
+def test_every_icon_is_quiet_at_rest_and_bright_when_chosen(qt, named):
+    """
+    Two shades in one icon, which Qt picks between by state. A stylesheet
+    cannot recolour a drawing, so the drawing carries both -- and an icon
+    loaded from a file gets the same treatment as a drawn one, or the sections
+    would stay dim while the sessions lit up.
+    """
+    from PySide6.QtGui import QIcon
+
+    made = icon(named) if named else label_icon("4")
+
+    rest = made.pixmap(QSize(64, 64), QIcon.Mode.Normal, QIcon.State.Off).toImage()
+    lit = made.pixmap(QSize(64, 64), QIcon.Mode.Normal, QIcon.State.On).toImage()
+    hovered = made.pixmap(QSize(64, 64), QIcon.Mode.Active, QIcon.State.Off).toImage()
+
+    assert rest != lit
+    assert hovered == lit
+
+
+def test_icon_shades_follow_the_theme(qt):
+    """
+    Taken from the palette at both ends, so the bright shade is white on a dark
+    theme and black on a light one.
+    """
+    from PySide6.QtGui import QColor, QIcon, QPalette
+
+    def brightest(palette):
+        qt.setPalette(palette)
+        image = (
+            label_icon("4")
+            .pixmap(QSize(64, 64), QIcon.Mode.Normal, QIcon.State.On)
+            .toImage()
+        )
+
+        return max(
+            QColor(image.pixel(x, y)).lightness()
+            for x in range(64)
+            for y in range(64)
+            if QColor.fromRgba(image.pixel(x, y)).alpha() > 200
+        )
+
+    was = qt.palette()
+
+    dark = QPalette()
+    dark.setColor(QPalette.ColorRole.WindowText, QColor("white"))
+    dark.setColor(QPalette.ColorRole.Window, QColor("#1e1e1e"))
+
+    light = QPalette()
+    light.setColor(QPalette.ColorRole.WindowText, QColor("black"))
+    light.setColor(QPalette.ColorRole.Window, QColor("white"))
+
+    try:
+        assert brightest(dark) > 200
+        assert brightest(light) < 60
+    finally:
+        qt.setPalette(was)
+
+
+def test_a_number_is_drawn_the_same_size_as_a_picture(qt):
+    """
+    Everything in the bar comes from one drawing path, so a session's number
+    and a section's glyph are the same height. They were not while some came
+    from files and some were drawn, and the bar read as two sizes.
+    """
+    from PySide6.QtGui import QColor, QIcon
+
+    def height(made):
+        image = made.pixmap(
+            QSize(W.icons.WIDTH, W.icons.HEIGHT), QIcon.Mode.Normal, QIcon.State.Off
+        ).toImage()
+        rows = [
+            y
+            for x in range(image.width())
+            for y in range(image.height())
+            if QColor.fromRgba(image.pixel(x, y)).alpha() > 60
+        ]
+
+        return max(rows) - min(rows) + 1
+
+    glyphs = [height(icon(n)) for n in ("session", "odors", "experiment", "add")]
+
+    # Within a quarter of each other: a glyph is drawn to its own em box, so
+    # they are close rather than identical.
+    assert max(glyphs) - min(glyphs) <= 0.25 * max(glyphs)
+    assert abs(height(label_icon("1")) - max(glyphs)) <= 0.25 * max(glyphs)
+
+
+def test_a_long_number_still_fits_inside_the_icon(qt):
+    """A three-digit mouse is the usual case, so it must not run off the edge."""
+    from PySide6.QtGui import QColor, QIcon
+
+    for text in ("1", "442", "1234"):
+        image = (
+            label_icon(text)
+            .pixmap(
+                QSize(W.icons.WIDTH, W.icons.HEIGHT), QIcon.Mode.Normal, QIcon.State.Off
+            )
+            .toImage()
+        )
+        columns = [
+            x
+            for x in range(image.width())
+            for y in range(image.height())
+            if QColor.fromRgba(image.pixel(x, y)).alpha() > 60
+        ]
+
+        assert min(columns) > 0, f"{text} touches the left edge"
+        assert max(columns) < image.width() - 1, f"{text} touches the right edge"
+
+
+def test_the_bar_slots_keep_the_drawing_proportions(window):
+    """Or the glyphs would be squashed to fit a square slot."""
+    slot = window.bar.iconSize()
+
+    assert slot.height() == W.ICON_HEIGHT
+    assert abs(slot.width() / slot.height() - W.icons.WIDTH / W.icons.HEIGHT) < 0.05
+
+
+# --------------------------------------------------------------------------- #
+# Closing and coming back
+# --------------------------------------------------------------------------- #
+
+
+def test_a_started_session_is_still_there_after_closing(window, drafts):
+    """
+    What makes the app safe to quit. A session is usually left with only the
+    animal's number on it for a while, and that must survive the day ending.
+    """
+    window._add_session()
+    window._identify(mouse_id=442)
+    path = window.draft.path
+
+    window.close()
+
+    assert path.exists()
+    assert [draft.mouse_id for draft in Draft.pending(drafts)] == [442]
+
+
+def test_a_session_nobody_typed_into_is_thrown_away(window, drafts):
+    """The other half: a stray click must not leave a session to sort out."""
+    window._add_session()
+
+    window.close()
+
+    assert Draft.pending(drafts) == []
+
+
+def test_closing_keeps_the_sessions_that_were_typed_into(window, drafts):
+    """Only the untouched ones go, whatever order they were started in."""
+    window._add_session()
+    window._add_session()
+    window._identify(mouse_id=357)
+    window._add_session()
+
+    window.close()
+
+    assert [draft.mouse_id for draft in Draft.pending(drafts)] == [357]

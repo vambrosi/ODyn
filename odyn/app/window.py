@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QStackedWidget,
     QToolBar,
     QVBoxLayout,
@@ -46,6 +47,7 @@ from PySide6.QtWidgets import (
 
 from .draft import Draft, drafts_folder
 from .fields import BOOLEAN, ENUM, LONG_TEXT, Field, form_fields, missing_required
+from . import icons
 from .icons import icon, label_icon
 from .submit import check_all, session_folders, submit_all
 
@@ -56,10 +58,15 @@ UNSET = "—"
 # is being filled in.
 NOTE = "note"
 
+# How large the bar icons are drawn on screen, in the same proportion they are
+# drawn in, so nothing is scaled unevenly.
+ICON_HEIGHT = 39
+ICON_WIDTH = round(ICON_HEIGHT * icons.WIDTH / icons.HEIGHT)
+
 # A line of text much wider than this is tiring to read: the eye loses the
 # start of the next line. The form sits in a column of this width, centred,
 # rather than stretching with the window.
-COLUMN_WIDTH = 620
+COLUMN_WIDTH = 800
 FIELD_WIDTH = 260
 
 # Flat, rounded, padded. Qt's native entry is a sunken bevel, which reads as a
@@ -75,6 +82,30 @@ QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus {
     border: 1px solid palette(highlight);
 }
 QComboBox::drop-down { border: none; width: 18px; }
+
+/* The bars are painted with a gradient by the native style. Flat, so they sit
+   with the rest of the window rather than standing off it. */
+QToolBar {
+    background: palette(window);
+    border: none;
+    spacing: 2px;
+    padding: 4px;
+}
+
+/* Hover and chosen look the same on purpose: both mean "this one", and a
+   second appearance for hovering only adds noise. The fill sits inside the
+   drawn square; the square and its label brighten with it, which the icon
+   does for itself. */
+QToolBar QToolButton {
+    border: none;
+    border-radius: 8px;
+    padding: 3px;
+}
+QToolBar QToolButton:hover,
+QToolBar QToolButton:checked,
+QToolBar QToolButton:pressed {
+    background: palette(midlight);
+}
 """
 
 
@@ -142,19 +173,57 @@ class FieldRow(QWidget):
             self.error.show()
 
 
-class FormPane(QScrollArea):
+class Pane(QScrollArea):
     """
-    A scrolling form built from registry fields.
+    A scrolling column of fields, the same width whatever is in it.
+
+    Centred rather than stretched: a line as wide as the window is tiring to
+    read, so the form keeps its width and the space goes to the margins.
+    """
+
+    def __init__(self, form: QFormLayout):
+        super().__init__()
+
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        column = QWidget()
+        column.setLayout(form)
+        column.setMaximumWidth(COLUMN_WIDTH)
+
+        # A maximum is only a cap: left to itself the column would sit at the
+        # width its contents ask for, which is far narrower. Expanding makes it
+        # grow into the cap and stop there.
+        column.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        # The column takes what it can and the margins share the rest, so it
+        # reaches its cap on a wide window instead of stopping at the width its
+        # contents happen to ask for.
+        centred = QHBoxLayout()
+        centred.addStretch(1)
+        centred.addWidget(column, 100)
+        centred.addStretch(1)
+
+        holder = QWidget()
+        holder.setLayout(centred)
+
+        self.setWidget(holder)
+        self.setWidgetResizable(True)
+
+        # Otherwise the scroll area draws a border and the column inside draws
+        # another, which reads as a box inside a box.
+        self.setFrameShape(QScrollArea.Shape.NoFrame)
+
+
+class FormPane(Pane):
+    """
+    A form built from registry fields.
 
     `values` is what to show, `on_change(field, value)` is called as each is
     edited. The note is left out: the dock owns it.
     """
 
     def __init__(self, fields: list[Field], values: dict, on_change, extra=()):
-        super().__init__()
-
         form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
         for label, widget in extra:
             form.addRow(label, widget)
@@ -165,34 +234,13 @@ class FormPane(QScrollArea):
 
             form.addRow(field.prompt, FieldRow(field, values.get(field.key), on_change))
 
-        column = QWidget()
-        column.setLayout(form)
-        column.setMaximumWidth(COLUMN_WIDTH)
-
-        # Centred, so the form keeps its width as the window grows and the
-        # space goes to the margins instead of to the lines.
-        centred = QHBoxLayout()
-        centred.addStretch()
-        centred.addWidget(column)
-        centred.addStretch()
-
-        holder = QWidget()
-        holder.setLayout(centred)
-
-        self.setWidget(holder)
-        self.setWidgetResizable(True)
-
-        # Otherwise the scroll area draws a border and the form inside draws
-        # another, which reads as a box inside a box.
-        self.setFrameShape(QScrollArea.Shape.NoFrame)
+        super().__init__(form)
 
 
-class PanelPane(QWidget):
+class PanelPane(Pane):
     """Which rack of vials, and when each was mixed."""
 
     def __init__(self, draft: Draft, db):
-        super().__init__()
-
         self.draft = draft
         names = sorted(db.panels["panel_name"]) if len(db.panels) else []
 
@@ -216,11 +264,12 @@ class PanelPane(QWidget):
         for box in (self.panel, self.made_on):
             box.setMinimumWidth(FIELD_WIDTH)
 
-        form = QFormLayout(self)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form = QFormLayout()
         form.addRow("Panel", self.panel)
         form.addRow("Mixed on", self.made_on)
         form.addRow("Vials mixed separately", self.vials)
+
+        super().__init__(form)
 
     def _set_made_on(self) -> None:
         self.draft.set_panel(made_on=self.made_on.text().strip() or None)
@@ -331,14 +380,14 @@ class EntryWindow(QMainWindow):
         self.showing = "session"
         self.selected = 0
 
-        self.setWindowTitle("ODyn — session entry")
+        self.setWindowTitle("ODyn")
         self.resize(1000, 700)
         self.setStyleSheet(STYLE)
 
         self.bar = QToolBar("Sections")
         self.bar.setObjectName("sections")
         self.bar.setMovable(False)
-        self.bar.setIconSize(QSize(26, 26))
+        self.bar.setIconSize(QSize(ICON_WIDTH, ICON_HEIGHT))
         self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, self.bar)
 
         self.notes = NotesDock()
@@ -349,7 +398,7 @@ class EntryWindow(QMainWindow):
         self.panels = QToolBar("Panels")
         self.panels.setObjectName("panels")
         self.panels.setMovable(False)
-        self.panels.setIconSize(QSize(26, 26))
+        self.panels.setIconSize(QSize(ICON_WIDTH, ICON_HEIGHT))
         self.addToolBar(Qt.ToolBarArea.RightToolBarArea, self.panels)
 
         self.notes_button = self.panels.addAction(icon("notes"), "Notes")
@@ -644,7 +693,7 @@ class EntryWindow(QMainWindow):
         QSettings("ODyn", "entry").setValue("layout", self.saveState())
 
         for draft in self.drafts:
-            if draft.is_empty:
+            if draft.is_untouched:
                 draft.discard()
 
         event.accept()

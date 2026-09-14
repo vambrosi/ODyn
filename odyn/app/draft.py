@@ -263,8 +263,27 @@ class Draft:
 
     @property
     def is_empty(self) -> bool:
-        """Whether anything has been filled in, so an untouched draft can go."""
+        """Whether any of the session's fields hold a value: is there anything
+        here to submit?"""
         return not (self.mouse or self.session or self.experiments or self.panel)
+
+    @property
+    def is_untouched(self) -> bool:
+        """
+        Whether the draft is still exactly as it was started: did anyone type
+        into it at all?
+
+        Weaker than `is_empty`, and the one to ask before throwing a draft
+        away. The animal's number and the date are set through `identify`
+        rather than into a section, and the number is usually the first thing
+        typed, so a draft holding one has nothing to submit yet but is a
+        session someone began rather than one opened by accident.
+        """
+        # `started_at` is `'2026-09-14 11:30:42'`, so its day is the first ten
+        # characters -- what `date` holds unless someone changed it.
+        started = str(self.data.get("started_at", ""))[:10]
+
+        return self.is_empty and self.mouse_id is None and self.date == started
 
     def experiment(self, name: str) -> None | dict[str, Any]:
         """One experiment's entry, or `None` if it has not been started."""

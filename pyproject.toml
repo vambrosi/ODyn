@@ -16,14 +16,10 @@ dependencies = ["tomlkit"]
 # The entry app needs Qt; the cluster and the processing workstations do not,
 # so it is not a dependency of `odyn` itself. Install with `pip install -e .[gui]`.
 [project.optional-dependencies]
-gui = ["PySide6"]
+gui = ["PySide6", "qtawesome"]
 
 [tool.setuptools]
 packages = ["odyn", "odyn.app"]
 
 [tool.setuptools.package-data]
 odyn = ["*.sql"]
-
-# Without this the icons are missing from an installed copy, and the app runs
-# with blank buttons.
-"odyn.app" = ["icons/*.svg"]

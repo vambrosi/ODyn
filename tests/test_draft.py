@@ -98,6 +98,31 @@ def test_a_new_draft_is_empty(draft):
     assert draft.experiments == []
 
 
+def test_a_draft_opened_and_left_alone_is_untouched(folder):
+    """Nothing says who or when it is about, so there is nothing to keep."""
+    assert Draft.start(folder).is_untouched
+
+
+def test_a_draft_with_only_a_mouse_number_has_been_touched(folder):
+    """
+    It is the first thing typed, and the window throws untouched drafts away
+    when it closes. Counting one as untouched loses the session it belongs to.
+    """
+    started = Draft.start(folder)
+    started.identify(mouse_id=442)
+
+    assert started.is_untouched is False
+    assert started.is_empty, "there is still nothing in it to submit"
+
+
+def test_a_draft_dated_by_hand_has_been_touched(folder):
+    """Entering yesterday's session is a choice someone made, not an accident."""
+    started = Draft.start(folder)
+    started.identify(date="2020-01-02")
+
+    assert not started.is_untouched
+
+
 # --------------------------------------------------------------------------- #
 # Surviving the day
 # --------------------------------------------------------------------------- #
