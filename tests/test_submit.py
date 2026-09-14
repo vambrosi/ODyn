@@ -40,8 +40,12 @@ def recording(tmp_path_factory):
     folder = tmp_path_factory.mktemp("recording")
 
     generate(
-        folder, acquisitions=ACQUISITIONS, frames=FRAMES,
-        height=32, width=32, motion=0.0,
+        folder,
+        acquisitions=ACQUISITIONS,
+        frames=FRAMES,
+        height=32,
+        width=32,
+        motion=0.0,
     )
 
     return folder
@@ -53,9 +57,14 @@ def second_mouse(tmp_path_factory):
     folder = tmp_path_factory.mktemp("second")
 
     generate(
-        folder, acquisitions=ACQUISITIONS, frames=FRAMES,
-        height=32, width=32, motion=0.0,
-        mouse="m002", start=EXP_START + timedelta(hours=1),
+        folder,
+        acquisitions=ACQUISITIONS,
+        frames=FRAMES,
+        height=32,
+        width=32,
+        motion=0.0,
+        mouse="m002",
+        start=EXP_START + timedelta(hours=1),
     )
 
     return folder
@@ -87,8 +96,10 @@ def draft(tmp_path):
 def filled(draft):
     """A draft with the kind of thing someone types during a session."""
     draft.update_session(goal="10x pre/post ket/xyl", mouse_weight_g=25.1)
-    draft.add_note("genteal drops before starting")
-    draft.add_flag("pmt off for first 2 acquisitions")
+    draft.update_session(
+        note="genteal drops before starting\npmt off for first 2 acquisitions",
+        flag=True,
+    )
     draft.set_experiment(EXP, fov_depth_um=-55.0, objective=10, goal="baseline")
     draft.set_panel(panel_name="print_v3", made_on="2026-07-06")
 
@@ -151,7 +162,9 @@ def test_recordings_that_were_never_copied_are_reported(db, tmp_path, filled):
     The common case: someone fills the app in during a session and submits
     before moving the files off the rig.
     """
-    other = Draft.open(tmp_path / "drafts", mouse_id=999, date=EXP_START.date().isoformat())
+    other = Draft.open(
+        tmp_path / "drafts", mouse_id=999, date=EXP_START.date().isoformat()
+    )
     other.update_session(goal="never copied")
 
     problems = [problem for problem in check(other, db) if problem.blocking]
@@ -186,8 +199,9 @@ def test_an_unregistered_key_blocks(db, filled):
     """A field the registry does not hold would be refused at write time."""
     filled.update_session(mouse_wieght_g=25.1)
 
-    assert any("not a session annotation" in problem.what
-               for problem in check(filled, db))
+    assert any(
+        "not a session annotation" in problem.what for problem in check(filled, db)
+    )
 
 
 def test_an_unregistered_panel_blocks(db, filled):
@@ -208,9 +222,7 @@ def test_no_panel_is_only_a_warning(db, draft):
     problems = check(draft, db)
 
     assert any("no odor panel" in problem.what for problem in problems)
-    assert not any(
-        problem.blocking and "panel" in problem.what for problem in problems
-    )
+    assert not any(problem.blocking and "panel" in problem.what for problem in problems)
 
 
 # --------------------------------------------------------------------------- #
@@ -258,32 +270,39 @@ def test_the_typed_fields_arrive_as_annotations(db, filled):
     assert stored["goal"] == "10x pre/post ket/xyl"
     assert stored["mouse_weight_g"] == 25.1
 
-    depth = db.con.execute(
-        """
+    depth = db.con.execute("""
         SELECT value FROM annotations
             WHERE target_type = 'experiment' AND key = 'fov_depth_um';
-        """
-    ).fetchone()
+        """).fetchone()
 
     assert depth["value"] == -55.0
 
 
-def test_notes_become_one_annotation_each(db, filled):
-    """A multi-valued key holds separate observations, not one list."""
-    filled.add_note("adjusted thermal probe")
-
+def test_the_note_arrives_as_one_annotation(db, filled):
+    """One field, one row -- however many lines someone typed into it."""
     submit(filled, db)
 
-    notes = db.con.execute(
-        """
+    notes = db.con.execute("""
         SELECT value FROM annotations
-            WHERE target_type = 'session' AND key = 'note' ORDER BY annotation_id;
-        """
-    ).fetchall()
+            WHERE target_type = 'session' AND key = 'note';
+        """).fetchall()
 
-    assert [row["value"] for row in notes] == [
-        "genteal drops before starting", "adjusted thermal probe"
+    assert len(notes) == 1
+    assert notes[0]["value"].splitlines() == [
+        "genteal drops before starting",
+        "pmt off for first 2 acquisitions",
     ]
+
+
+def test_the_flag_is_a_checkbox(db, filled):
+    """A pointer to the note, not a second place to describe the problem."""
+    submit(filled, db)
+
+    flag = db.con.execute(
+        "SELECT value FROM annotations WHERE key = 'flag';"
+    ).fetchone()
+
+    assert flag["value"] == 1
 
 
 def test_the_objective_becomes_a_column(db, filled):
@@ -394,9 +413,10 @@ def test_each_session_of_a_day_lands_separately(db, filled, tmp_path, second_mou
     results = submit_all([filled, second], db)
 
     assert all(result.submitted for result in results), [r.problems for r in results]
-    assert {
-        row[0] for row in db.con.execute("SELECT mouse_id FROM sessions;")
-    } == {1, 2}
+    assert {row[0] for row in db.con.execute("SELECT mouse_id FROM sessions;")} == {
+        1,
+        2,
+    }
 
 
 def test_recordings_named_for_another_mouse_are_refused(db, filled, tmp_path):
@@ -417,8 +437,6 @@ def test_recordings_named_for_another_mouse_are_refused(db, filled, tmp_path):
     problems = [problem for problem in check(second, db) if problem.blocking]
 
     assert any("named for m1" in problem.what for problem in problems)
-
-
 
 
 def test_an_empty_day_reports_rather_than_raises(db):

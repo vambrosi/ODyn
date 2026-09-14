@@ -698,9 +698,10 @@ class Database(CallRecorder):
         db.experiments.join(deep, how="inner")
         ```
 
-        Only keys that hold a single value appear, so every column is a plain
-        number or string and the table behaves like any other. Keys that hold a
-        list (notes, flags) are in `db.annotations` instead.
+        Every key holds one value, so each column is a plain number or string
+        and the table behaves like any other. Annotations are append-only, so
+        what appears here is the latest value written for each key; the earlier
+        ones are in `db.annotations`.
         """
         keys = self.annotation_keys
 
@@ -710,12 +711,11 @@ class Database(CallRecorder):
                 f"{sorted(set(keys.index.get_level_values('applies_to')))}."
             )
 
-        scalar = keys.xs(target_type, level="applies_to")
-        scalar = scalar[~scalar["multi_valued"].astype(bool)]
+        wanted = keys.xs(target_type, level="applies_to")
 
         rows = self.annotations
         rows = rows[
-            (rows["target_type"] == target_type) & rows["key"].isin(scalar.index)
+            (rows["target_type"] == target_type) & rows["key"].isin(wanted.index)
         ]
 
         # Append-only, so the last row written for a key is its current value.
@@ -730,7 +730,7 @@ class Database(CallRecorder):
 
         # `value` is an ANY column, so a column arrives as object dtype even when
         # every entry in it is a number. The registry says which is which.
-        for key, declared in scalar["value_type"].items():
+        for key, declared in wanted["value_type"].items():
             if key in frame.columns and declared in ("integer", "real", "boolean"):
                 frame[key] = pd.to_numeric(frame[key], errors="coerce")
 
@@ -1561,7 +1561,6 @@ class Database(CallRecorder):
         unit: None | str = None,
         allowed_values: None | list = None,
         required: bool = False,
-        multi_valued: bool = False,
     ) -> None:
         """
         Register something new that can be annotated in this project.
@@ -1570,11 +1569,11 @@ class Database(CallRecorder):
         - `applies_to` is `'session'`, `'experiment'`, `'program'`,
         `'acquisition'` or `'group'`
         - `key` is what `add_annotation` will be called with
-        - `value_type` is `'text'`, `'integer'`, `'real'`, `'boolean'`,
-        `'date'`, or `'enum'`; an `'enum'` needs `allowed_values`
+        - `value_type` is `'text'`, `'long_text'`, `'integer'`, `'real'`,
+        `'boolean'`, `'date'`, or `'enum'`; an `'enum'` needs `allowed_values`.
+        `'long_text'` is stored like `'text'` and says a form should give it a
+        box rather than a line
         - `required` means the data is not finished until this is filled in
-        - `multi_valued` keeps every value written instead of only the latest,
-        which is what notes and flags want
 
         **EXAMPLE**
         ```python
@@ -1607,7 +1606,6 @@ class Database(CallRecorder):
                     "unit": unit,
                     "description": description,
                     "required": bool(required),
-                    "multi_valued": bool(multi_valued),
                     "retired": False,
                 },
             )
@@ -1691,9 +1689,7 @@ class Database(CallRecorder):
             if carried is not None:
                 # Replaced as a whole: a mouse carries one set of mutations, and
                 # a correction usually rewrites more than one of them.
-                cur.execute(
-                    "DELETE FROM mouse_lines WHERE mouse_id = ?;", [number]
-                )
+                cur.execute("DELETE FROM mouse_lines WHERE mouse_id = ?;", [number])
 
                 for line, genotype in carried.items():
                     _db_insert(
@@ -1836,20 +1832,28 @@ class Database(CallRecorder):
             cur.execute("DELETE FROM panel_vials WHERE panel_id = ?;", [panel_id])
 
             for position, odor_id, scalars, components in wanted:
-                _db_insert(cur, "panel_vials", {
-                    "panel_id": panel_id,
-                    "vial_position": position,
-                    "odor_id": odor_id,
-                    **dict(zip(VIAL_COLUMNS, scalars)),
-                })
-
-                for component_odor, values in components:
-                    _db_insert(cur, "vial_components", {
+                _db_insert(
+                    cur,
+                    "panel_vials",
+                    {
                         "panel_id": panel_id,
                         "vial_position": position,
-                        "odor_id": component_odor,
-                        **dict(zip(COMPONENT_COLUMNS, values)),
-                    })
+                        "odor_id": odor_id,
+                        **dict(zip(VIAL_COLUMNS, scalars)),
+                    },
+                )
+
+                for component_odor, values in components:
+                    _db_insert(
+                        cur,
+                        "vial_components",
+                        {
+                            "panel_id": panel_id,
+                            "vial_position": position,
+                            "odor_id": component_odor,
+                            **dict(zip(COMPONENT_COLUMNS, values)),
+                        },
+                    )
 
         logger.info(f"Panel {panel_name} has {len(vials)} vials. {CHECK}")
 
@@ -1950,20 +1954,28 @@ class Database(CallRecorder):
                 "DELETE FROM session_panels WHERE session_id = ?;", [int(session_id)]
             )
 
-            _db_insert(cur, "session_panels", {
-                "session_id": int(session_id),
-                "panel_id": panel_id,
-            })
+            _db_insert(
+                cur,
+                "session_panels",
+                {
+                    "session_id": int(session_id),
+                    "panel_id": panel_id,
+                },
+            )
 
             # Every vial of the panel gets a row, so that "not recorded" (no
             # row) stays distinguishable from "recorded as unknown" (NULL).
             for position in positions:
-                _db_insert(cur, "session_vials", {
-                    "session_id": int(session_id),
-                    "panel_id": panel_id,
-                    "vial_position": position,
-                    "made_on": per_vial.get(position, common),
-                })
+                _db_insert(
+                    cur,
+                    "session_vials",
+                    {
+                        "session_id": int(session_id),
+                        "panel_id": panel_id,
+                        "vial_position": position,
+                        "made_on": per_vial.get(position, common),
+                    },
+                )
 
         dates = {per_vial.get(position, common) for position in positions}
         mixed = dates.pop() if len(dates) == 1 else f"{len(dates)} dates"
@@ -2216,9 +2228,16 @@ def _mouse_number(name: str) -> int:
 
 
 GENOTYPES = {
-    "wt": "wt", "wildtype": "wt", "wild type": "wt", "+/+": "wt",
-    "het": "het", "heterozygous": "het", "+/-": "het",
-    "hom": "hom", "homozygous": "hom", "-/-": "hom",
+    "wt": "wt",
+    "wildtype": "wt",
+    "wild type": "wt",
+    "+/+": "wt",
+    "het": "het",
+    "heterozygous": "het",
+    "+/-": "het",
+    "hom": "hom",
+    "homozygous": "hom",
+    "-/-": "hom",
 }
 
 
@@ -2281,19 +2300,20 @@ def _panel_rows(vials: list[Object]) -> list[tuple]:
             (
                 int(component["odor_id"]),
                 tuple(
-                    _optional_real(component.get(name))
-                    for name in COMPONENT_COLUMNS
+                    _optional_real(component.get(name)) for name in COMPONENT_COLUMNS
                 ),
             )
             for component in vial.get("components") or []
         )
 
-        rows.append((
-            int(vial["vial_position"]),
-            int(vial["odor_id"]),
-            tuple(_optional_real(vial.get(name)) for name in VIAL_COLUMNS),
-            components,
-        ))
+        rows.append(
+            (
+                int(vial["vial_position"]),
+                int(vial["odor_id"]),
+                tuple(_optional_real(vial.get(name)) for name in VIAL_COLUMNS),
+                components,
+            )
+        )
 
     return sorted(rows)
 

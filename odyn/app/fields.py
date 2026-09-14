@@ -31,8 +31,15 @@ from dataclasses import dataclass
 from datetime import datetime
 
 # Types the registry can declare, and how each reads a typed-in string.
-TEXT, INTEGER, REAL, BOOLEAN, DATE, ENUM = (
-    "text", "integer", "real", "boolean", "date", "enum"
+# `long_text` is stored like `text`; it asks for a box rather than a line.
+TEXT, LONG_TEXT, INTEGER, REAL, BOOLEAN, DATE, ENUM = (
+    "text",
+    "long_text",
+    "integer",
+    "real",
+    "boolean",
+    "date",
+    "enum",
 )
 
 TRUE_WORDS = ("y", "yes", "true", "1")
@@ -49,7 +56,6 @@ class Field:
     description: str
     unit: None | str = None
     required: bool = False
-    multi_valued: bool = False
     options: tuple[str, ...] = ()
 
     @property
@@ -70,7 +76,7 @@ class Field:
         if not text:
             return None
 
-        if self.value_type == TEXT:
+        if self.value_type in (TEXT, LONG_TEXT):
             return text
 
         if self.value_type == INTEGER:
@@ -112,16 +118,17 @@ def form_fields(db, applies_to: str) -> list[Field]:
         if bool(row["retired"]):
             continue
 
-        fields.append(Field(
-            key=str(key),
-            label=str(row["label"]),
-            value_type=str(row["value_type"]),
-            description=str(row["description"]),
-            unit=None if row["unit"] is None else str(row["unit"]),
-            required=bool(row["required"]),
-            multi_valued=bool(row["multi_valued"]),
-            options=_options(row["allowed_values"]),
-        ))
+        fields.append(
+            Field(
+                key=str(key),
+                label=str(row["label"]),
+                value_type=str(row["value_type"]),
+                description=str(row["description"]),
+                unit=None if row["unit"] is None else str(row["unit"]),
+                required=bool(row["required"]),
+                options=_options(row["allowed_values"]),
+            )
+        )
 
     return fields
 
@@ -192,6 +199,4 @@ def _one_of(text: str, field: Field) -> str:
         if option.lower() == text.lower():
             return option
 
-    raise ValueError(
-        f"{field.label} is one of {list(field.options)}, not {text!r}."
-    )
+    raise ValueError(f"{field.label} is one of {list(field.options)}, not {text!r}.")

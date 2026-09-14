@@ -18,7 +18,6 @@ draft = Draft.open(drafts_folder(), mouse_id=442, date="2026-07-08")
 
 draft.update_session(goal="10x pre/post ket/xyl", mouse_weight_g=25.1)
 draft.set_experiment("e1", fov_depth_um=-55, objective=20)
-draft.add_note("genteal drops before starting")
 
 Draft.pending(drafts_folder())   # everything not yet submitted
 ```
@@ -103,17 +102,20 @@ class Draft:
         if path.exists():
             return cls.load(path)
 
-        return cls(path, {
-            "version": DRAFT_VERSION,
-            "mouse_id": int(mouse_id),
-            "date": session_date,
-            "started_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
-            "saved_at": None,
-            "mouse": {},
-            "session": {},
-            "experiments": [],
-            "panel": {},
-        })
+        return cls(
+            path,
+            {
+                "version": DRAFT_VERSION,
+                "mouse_id": int(mouse_id),
+                "date": session_date,
+                "started_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
+                "saved_at": None,
+                "mouse": {},
+                "session": {},
+                "experiments": [],
+                "panel": {},
+            },
+        )
 
     @classmethod
     def load(cls, path: Path | str) -> Draft:
@@ -292,24 +294,6 @@ class Draft:
 
         return self.save()
 
-    def add_note(self, note: str) -> Draft:
-        """Append a note. They accumulate rather than replacing each other."""
-        return self._append("note", note)
-
-    def add_flag(self, flag: str) -> Draft:
-        """Append something that went wrong."""
-        return self._append("flag", flag)
-
-    def _append(self, key: str, text: str) -> Draft:
-        text = str(text).strip()
-
-        if not text:
-            return self
-
-        self.session.setdefault(key, []).append(text)
-
-        return self.save()
-
     # ----------------------------------------------------------------- #
     # Writing it out
     # ----------------------------------------------------------------- #
@@ -364,9 +348,7 @@ def _draft_files(folder: Path | str) -> list[Path]:
     if not folder.is_dir():
         return []
 
-    return [
-        path for path in folder.glob("*.json") if NAME_PATTERN.fullmatch(path.name)
-    ]
+    return [path for path in folder.glob("*.json") if NAME_PATTERN.fullmatch(path.name)]
 
 
 def _merge(into: dict[str, Any], fields: dict[str, Any]) -> None:

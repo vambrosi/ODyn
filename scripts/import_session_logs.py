@@ -45,7 +45,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from odyn import Database  # noqa: E402
 from odyn.utils import DEFAULT_PROJECT  # noqa: E402
 
-# Notes and flags arrive already joined by the survey, one entry per note.
+# The survey joins a sheet's several note cells with this. They are one block
+# of text now, so the separator becomes a line break.
 SEPARATOR = " | "
 
 # Column in the survey CSV -> annotation key. Everything here is a plain value
@@ -55,18 +56,9 @@ SESSION_TEXT = {
     "headplate": "headplate",
 }
 
-SESSION_LIST = {
-    "notes": "note",
-    "flag": "flag",
-}
-
 EXPERIMENT_TEXT = {
     "roiDescription": "fov_description",
     "goal": "goal",
-}
-
-EXPERIMENT_LIST = {
-    "flag": "flag",
 }
 
 # Columns deliberately not imported, and why. Reported so that the reason is
@@ -188,7 +180,7 @@ def volume_ml(written: str) -> None | float:
     if amount is None:
         return None
 
-    unit = str(written)[len(re.match(r"\s*[-+]?[\d.]*", str(written)).group(0)):]
+    unit = str(written)[len(re.match(r"\s*[-+]?[\d.]*", str(written)).group(0)) :]
 
     return amount / 1000 if unit.strip().lower().startswith(("ul", "µl")) else amount
 
@@ -218,9 +210,25 @@ def drug_and_time(written: str) -> tuple[None | str, None | str]:
     return rest[: found.start()].strip() or None, found.group(1).strip()
 
 
-def entries(written: str) -> list[str]:
-    """One note or flag per entry, as the survey joined them."""
-    return [part.strip() for part in str(written).split(SEPARATOR) if part.strip()]
+def note_block(*cells: str) -> str:
+    """
+    The note as one block of text, from however many cells it was spread over.
+
+    The spreadsheet's several note columns were a spreadsheet convenience, not
+    a design, so they are joined into the single field people asked for. A
+    flag's text goes in here too, marked so it still reads as a problem.
+    """
+    lines = []
+
+    for cell in cells:
+        lines += [part.strip() for part in str(cell).split(SEPARATOR) if part.strip()]
+
+    return "\n".join(lines)
+
+
+def _as_problem(text: str) -> str:
+    """A flag's text, marked so it still reads as a problem inside the note."""
+    return f"PROBLEM: {text}" if text else ""
 
 
 def filled(row: dict, column: str) -> str:
@@ -256,8 +264,16 @@ def import_session(db, report, row, session_id, dry_run):
     where = row["folder"]
 
     def write(key, value):
-        annotate(db, report, where, target_type="session", target_id=session_id,
-                 key=key, value=value, dry_run=dry_run)
+        annotate(
+            db,
+            report,
+            where,
+            target_type="session",
+            target_id=session_id,
+            key=key,
+            value=value,
+            dry_run=dry_run,
+        )
 
     for column, key in SESSION_TEXT.items():
         text = filled(row, column)
@@ -265,9 +281,17 @@ def import_session(db, report, row, session_id, dry_run):
         # One headplate written 'a' and another 'A' is one headplate.
         write(key, text.upper() if key == "headplate" else text)
 
-    for column, key in SESSION_LIST.items():
-        for entry in entries(filled(row, column)):
-            write(key, entry)
+    # The note is one field, so everything that belongs in it is gathered and
+    # written once at the end. Writing it twice would supersede the first.
+    problem = filled(row, "flag")
+
+    # A flag is a checkbox now, and what it said goes into the note: the text
+    # is a real observation ("loop aborted at 158, no space on f drive") and
+    # the checkbox is only a pointer to it.
+    note = [filled(row, "notes"), _as_problem(problem)]
+
+    if problem:
+        write("flag", True)
 
     weight = filled(row, "mouse weight (g)")
 
@@ -301,7 +325,7 @@ def import_session(db, report, row, session_id, dry_run):
 
         if millilitres is None:
             report.problem(where, f"injection {injection!r} has no volume in it")
-            write("note", f"s.q. injection: {injection}")
+            note.append(f"PROBLEM: s.q. injection recorded as {injection!r}")
         elif millilitres >= IMPLAUSIBLE_ML:
             # Recording it would put a dose an order of magnitude too large in
             # a typed field, where it stops looking like a typo.
@@ -310,27 +334,40 @@ def import_session(db, report, row, session_id, dry_run):
                 f"injection {injection!r} reads as {millilitres:g} ml, too much"
                 f" for a mouse; kept as a note",
             )
-            write("note", f"s.q. injection: {injection}")
+            note.append(f"PROBLEM: s.q. injection recorded as {injection!r}")
         else:
             write("injection_volume", millilitres)
 
         write("injection_drug", substance)
         write("injection_time", given_at)
 
+    write("note", note_block(*note))
+
 
 def import_experiment(db, report, row, exp_id, where, dry_run):
     """Everything the `expLog` sheet holds about one experiment."""
 
     def write(key, value):
-        annotate(db, report, where, target_type="experiment", target_id=exp_id,
-                 key=key, value=value, dry_run=dry_run)
+        annotate(
+            db,
+            report,
+            where,
+            target_type="experiment",
+            target_id=exp_id,
+            key=key,
+            value=value,
+            dry_run=dry_run,
+        )
 
     for column, key in EXPERIMENT_TEXT.items():
         write(key, filled(row, column))
 
-    for column, key in EXPERIMENT_LIST.items():
-        for entry in entries(filled(row, column)):
-            write(key, entry)
+    problem = filled(row, "flag")
+
+    write("note", note_block(_as_problem(problem)))
+
+    if problem:
+        write("flag", True)
 
     gain = filled(row, "pmtGain")
 
@@ -508,10 +545,14 @@ def main() -> int:
 
     report = import_all(db, args.survey_folder, sessions, args.dry_run)
 
-    print(f"\n{report.written} annotations {'would be ' if args.dry_run else ''}written")
+    print(
+        f"\n{report.written} annotations {'would be ' if args.dry_run else ''}written"
+    )
 
     if report.zstacks:
-        print(f"\n{len(report.zstacks)} z-stack rows, not imported (no experiment yet):")
+        print(
+            f"\n{len(report.zstacks)} z-stack rows, not imported (no experiment yet):"
+        )
 
         for entry in report.zstacks:
             print(f"  - {entry}")

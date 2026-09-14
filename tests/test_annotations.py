@@ -47,13 +47,11 @@ def annotate(db, key, value, *, target_type="experiment", target_id=None):
 def test_an_annotation_is_attributed_to_its_call(db):
     annotate(db, "fov_depth_um", 70.0)
 
-    row = db.con.execute(
-        """
+    row = db.con.execute("""
         SELECT a.value, m.method_name, m.user
             FROM annotations AS a
             JOIN method_calls AS m ON m.method_call_id = a.method_call_id;
-        """
-    ).fetchone()
+        """).fetchone()
 
     assert row["value"] == 70.0
     assert row["method_name"] == "Database.add_annotation"
@@ -69,8 +67,9 @@ def test_an_unregistered_key_is_refused(db):
 def test_a_key_for_another_target_is_refused(db):
     """`fov_depth_um` describes an experiment; a session has no field of view."""
     with pytest.raises(ValueError, match="No annotation key"):
-        annotate(db, "fov_depth_um", 70.0, target_type="session",
-                 target_id=db.session_id)
+        annotate(
+            db, "fov_depth_um", 70.0, target_type="session", target_id=db.session_id
+        )
 
 
 def test_a_target_that_does_not_exist_is_refused(db):
@@ -161,24 +160,25 @@ def test_corrections_keep_their_history_but_the_latest_wins(db):
     assert db.annotations_for("experiment")["fov_depth_um"].iloc[0] == 85.0
 
 
-def test_the_wide_table_leaves_out_multi_valued_keys(db):
+def test_the_wide_table_holds_the_latest_of_every_key(db):
     """
-    Keeping every column scalar is what lets the result behave like a table --
-    sortable, groupable, comparable. Notes and flags live in `db.annotations`.
+    Every key is scalar, which is what lets the result behave like a table --
+    sortable, groupable, comparable. A rewritten note supersedes the one
+    before it, and the earlier one stays in `db.annotations`.
     """
     annotate(db, "fov_depth_um", 70.0)
     annotate(db, "note", "focus drifted after the injection")
-    annotate(db, "note", "second note")
+    annotate(db, "note", "focus drifted after the injection\nrecovered by 3pm")
 
     wide = db.annotations_for("experiment")
 
     assert "fov_depth_um" in wide.columns
-    assert "note" not in wide.columns
+    assert wide["note"].iloc[0].endswith("recovered by 3pm")
 
     notes = db.annotations.query("key == 'note'")
     assert list(notes["value"]) == [
         "focus drifted after the injection",
-        "second note",
+        "focus drifted after the injection\nrecovered by 3pm",
     ]
 
 
@@ -266,8 +266,9 @@ def test_retiring_keeps_what_was_already_written(db):
 
 def test_retiring_a_required_key_stops_the_nagging(db):
     """Otherwise a key nobody may fill in is demanded forever."""
-    wanted = lambda: set(zip(db.missing_annotations()["target_type"],
-                             db.missing_annotations()["key"]))
+    wanted = lambda: set(
+        zip(db.missing_annotations()["target_type"], db.missing_annotations()["key"])
+    )
 
     assert ("experiment", "fov_depth_um") in wanted()
 

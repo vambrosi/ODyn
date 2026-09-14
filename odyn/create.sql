@@ -352,11 +352,10 @@ CREATE TABLE IF NOT EXISTS session_vials
 -- are prompted to fill it regularly. It is project-wide, so it assumes a
 -- consistent use of `Database(project=...)`
 --
--- - `multi_valued` is False if only the latest value should be used, and True
--- if it is to be considered as a list of values. Former case permit later
--- corrections, and the latter allows for list of related notes.
---
 -- - `retired` is True if it shouldn't be used in forms anymore.
+--
+-- Every key holds one value, the latest written. Annotations are append-only,
+-- so correcting one is writing it again and the older rows stay as history.
 
 CREATE TABLE IF NOT EXISTS annotation_keys
     ( applies_to        TEXT NOT NULL CHECK(applies_to IN
@@ -370,8 +369,12 @@ CREATE TABLE IF NOT EXISTS annotation_keys
 
     , key               TEXT NOT NULL
     , label             TEXT NOT NULL
+    -- `long_text` is stored exactly like `text`; it says the value is a block
+    -- worth a box of its own rather than a line, which is what a form needs to
+    -- know to lay it out.
     , value_type        TEXT NOT NULL CHECK(value_type IN
                             ( 'text'
+                            , 'long_text'
                             , 'integer'
                             , 'real'
                             , 'boolean'
@@ -383,7 +386,6 @@ CREATE TABLE IF NOT EXISTS annotation_keys
     , unit              TEXT
     , description       TEXT NOT NULL
     , required          INTEGER NOT NULL DEFAULT FALSE
-    , multi_valued      INTEGER NOT NULL DEFAULT FALSE
     , retired           INTEGER NOT NULL DEFAULT FALSE
 
     -- An enum with no options renders as an empty dropdown, which looks like a
@@ -513,7 +515,7 @@ INSERT OR IGNORE INTO annotation_keys
     , key, label
     , value_type, allowed_values, unit
     , description
-    , required, multi_valued
+    , required
     ) VALUES
 
 -- session
@@ -521,70 +523,73 @@ INSERT OR IGNORE INTO annotation_keys
     , 'goal', 'Goal'
     , 'text', NULL, NULL
     , 'Goal of this whole session.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'session'
     , 'mouse_weight_g', 'Mouse weight'
     , 'real', NULL, 'g'
     , 'Weight on the day of the experiment.'
-    , TRUE, FALSE
+    , TRUE
     ),
 
     ( 'session'
     , 'injection_volume', 'S.q. injection volume'
     , 'real', NULL, 'ml'
     , 'Subcutaneous injection volume given during the session.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'session'
     , 'injection_drug', 'S.q. injection drug'
     , 'text', NULL, NULL
     , 'What was injected, as written down.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'session'
     , 'injection_time', 'S.q. injection time'
     , 'text', NULL, NULL
     , 'When the injection was given, as written down.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'session'
     , 'headplate', 'Headplate'
     , 'text', NULL, NULL
     , 'Which headplate the mouse was mounted on.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'session'
     , 'pitch_angle', 'Pitch angle'
     , 'real', NULL, 'degrees'
     , 'Head pitch relative to horizontal.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
+    -- Text rather than yes/no: the answer is what was done to level the head,
+    -- e.g. 'right side down slightly'. Yes/no loses that, and no number is
+    -- measured.
     ( 'session'
     , 'left_right_correction', 'Left-right correction'
-    , 'boolean', NULL, NULL
-    , 'Whether a left-right tilt correction was applied.'
-    , FALSE, FALSE
+    , 'text', NULL, NULL
+    , 'What was done to correct the head left-right tilt, if anything.'
+    , FALSE
     ),
 
     ( 'session'
     , 'note', 'Note'
-    , 'text', NULL, NULL
-    , 'Comments about this session. One entry per note.'
-    , FALSE, TRUE
+    , 'long_text', NULL, NULL
+    , 'Anything worth knowing about this session, including what went wrong.'
+    , FALSE
     ),
 
     ( 'session'
     , 'flag', 'Flag'
-    , 'text', NULL, NULL
-    , 'Something that went wrong. One entry per problem.'
-    , FALSE, TRUE
+    , 'boolean', NULL, NULL
+    , 'Something went wrong here -- read the note to see what.'
+    , FALSE
     ),
 
 -- experiment
@@ -592,105 +597,105 @@ INSERT OR IGNORE INTO annotation_keys
     , 'goal', 'Goal'
     , 'text', NULL, NULL
     , 'Experiment goal.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'experiment'
     , 'fov_description', 'FOV description'
     , 'text', NULL, NULL
     , 'Where the field of view sits (in words), e.g. "medial-rostral left bulb".'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'experiment'
     , 'fov_depth_um', 'FOV depth'
     , 'real', NULL, 'um'
     , 'Depth below the surface (used for analysis).'
-    , TRUE, FALSE
+    , TRUE
     ),
 
     ( 'experiment'
     , 'fov_depth_raw', 'FOV depth (as written)'
     , 'text', NULL, NULL
     , 'The depth as written down, signs and approximation marks kept. (For records only.)'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'experiment'
     , 'depth_class', 'Depth class'
     , 'enum', '["superficial", "deep"]', NULL
     , 'Experiment depth goal. Not recomputed from fov_depth_um.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'experiment'
     , 'pmt_gain', 'PMT gain'
     , 'real', NULL, NULL
     , 'PMT gain setting.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'experiment'
     , 'laser_power_920', 'Laser power 920 nm'
     , 'integer', NULL, '%'
     , 'Rig setting.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'experiment'
     , 'laser_power_1040', 'Laser power 1040 nm'
     , 'integer', NULL, '%'
     , 'Rig setting.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'experiment'
     , 'loop_acq_interval_s', 'Loop acquisition interval'
     , 'real', NULL, 's'
     , 'Programmed interval between acquisitions in a loop.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'experiment'
     , 'treatment', 'Treatment'
     , 'text', NULL, NULL
     , 'What was administered, if anything.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'experiment'
     , 'reporter', 'Reporter'
     , 'text', NULL, NULL
     , 'Reporter population imaged.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'experiment'
     , 'inclusion_status', 'Inclusion'
     , 'enum', '["included", "excluded", "undecided"]', NULL
     , 'Cohort selection. Left undecided until selection is done.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'experiment'
     , 'exclusion_reason', 'Exclusion reason'
     , 'text', NULL, NULL
     , 'Reason this experiment should be excluded.'
-    , FALSE, FALSE
+    , FALSE
     ),
 
     ( 'experiment'
     , 'note', 'Note'
-    , 'text', NULL, NULL
-    , 'Notes about this experiment. One entry per note.'
-    , FALSE, TRUE
+    , 'long_text', NULL, NULL
+    , 'Anything worth knowing about this experiment, including what went wrong.'
+    , FALSE
     ),
 
     ( 'experiment'
     , 'flag', 'Flag'
-    , 'text', NULL, NULL
-    , 'Something that went wrong. One entry per problem.'
-    , FALSE, TRUE
+    , 'boolean', NULL, NULL
+    , 'Something went wrong here -- read the note to see what.'
+    , FALSE
     ),
 
 -- program
@@ -698,7 +703,7 @@ INSERT OR IGNORE INTO annotation_keys
     , 'description', 'Description'
     , 'text', NULL, NULL
     , 'Block description, e.g. "baseline", "post-ketamine".'
-    , FALSE, FALSE
+    , FALSE
     ),
 
 -- acquisition
@@ -706,13 +711,14 @@ INSERT OR IGNORE INTO annotation_keys
     , 'exclusion_reason', 'Exclusion reason'
     , 'text', NULL, NULL
     , 'Reason why this acquisition should be excluded.'
-    , FALSE, FALSE),
+    , FALSE
+    ),
 
     ( 'acquisition'
     , 'note', 'Note'
-    , 'text', NULL, NULL
-    , 'Notes about this acquisition.'
-    , FALSE, TRUE
+    , 'long_text', NULL, NULL
+    , 'Anything worth knowing about this acquisition.'
+    , FALSE
     ),
 
 -- group
@@ -720,10 +726,12 @@ INSERT OR IGNORE INTO annotation_keys
     , 'name', 'Name'
     , 'text', NULL, NULL
     , 'Display name for this group.'
-    , FALSE, FALSE),
+    , FALSE
+    ),
 
     ( 'group'
     , 'note', 'Note'
-    , 'text', NULL, NULL
-    , 'Notes about this group. One entry per note.'
-    , FALSE, TRUE);
+    , 'long_text', NULL, NULL
+    , 'Anything worth knowing about this group.'
+    , FALSE
+    );

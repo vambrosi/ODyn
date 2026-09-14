@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -40,7 +39,14 @@ from PySide6.QtWidgets import (
 )
 
 from .draft import Draft, drafts_folder
-from .fields import BOOLEAN, ENUM, Field, form_fields, missing_required
+from .fields import (
+    BOOLEAN,
+    ENUM,
+    LONG_TEXT,
+    Field,
+    form_fields,
+    missing_required,
+)
 from .submit import check_all, session_folders, submit_all
 
 # A blank dropdown entry, so "not recorded" stays different from a real answer.
@@ -75,16 +81,30 @@ class FieldRow(QWidget):
             self.editor.setToolTip(field.description)
 
     def _editor(self, value) -> QWidget:
-        """A dropdown for a closed set of answers, a text box otherwise."""
+        """
+        A dropdown for a closed set of answers, a box for a block of prose,
+        a line for everything else.
+        """
         if self.field.value_type in (BOOLEAN, ENUM):
             box = QComboBox()
             box.addItem(UNSET)
             box.addItems(
-                ["yes", "no"] if self.field.value_type == BOOLEAN
+                ["yes", "no"]
+                if self.field.value_type == BOOLEAN
                 else list(self.field.options)
             )
             box.setCurrentText(_as_text(value) or UNSET)
             box.currentTextChanged.connect(self._changed)
+
+            return box
+
+        if self.field.value_type == LONG_TEXT:
+            box = QPlainTextEdit(_as_text(value))
+            box.setMinimumHeight(120)
+
+            # No `editingFinished` on a text area, and a note is typed over the
+            # whole session, so it is saved as it is written.
+            box.textChanged.connect(lambda: self._changed(box.toPlainText()))
 
             return box
 
@@ -108,49 +128,8 @@ class FieldRow(QWidget):
             self.error.show()
 
 
-class EntryList(QWidget):
-    """A multi-valued field: notes and flags accumulate rather than replace."""
-
-    def __init__(self, label: str, entries: list[str], on_add, on_remove):
-        super().__init__()
-
-        self.list = QListWidget()
-        self.list.addItems(entries)
-
-        self.box = QLineEdit()
-        self.box.setPlaceholderText(f"Add a {label.lower()} and press Enter")
-        self.box.returnPressed.connect(self._add)
-
-        remove = QPushButton("Remove selected")
-        remove.clicked.connect(self._remove)
-
-        self.on_add, self.on_remove = on_add, on_remove
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.list)
-        layout.addWidget(self.box)
-        layout.addWidget(remove)
-
-    def _add(self) -> None:
-        text = self.box.text().strip()
-
-        if not text:
-            return
-
-        self.list.addItem(text)
-        self.box.clear()
-        self.on_add(text)
-
-    def _remove(self) -> None:
-        for item in self.list.selectedItems():
-            row = self.list.row(item)
-            self.list.takeItem(row)
-            self.on_remove(row)
-
-
 class SessionTab(QWidget):
-    """The day: goal, weight, headplate, notes, flags."""
+    """The day: goal, weight, headplate, the note, whether it is flagged."""
 
     def __init__(self, draft: Draft, fields: list[Field]):
         super().__init__()
@@ -161,17 +140,9 @@ class SessionTab(QWidget):
         form = QFormLayout()
 
         for field in fields:
-            if field.multi_valued:
-                form.addRow(field.prompt, EntryList(
-                    field.label,
-                    draft.session.get(field.key, []),
-                    lambda text, key=field.key: self._append(key, text),
-                    lambda row, key=field.key: self._drop(key, row),
-                ))
-            else:
-                form.addRow(field.prompt, FieldRow(
-                    field, draft.session.get(field.key), self._set
-                ))
+            form.addRow(
+                field.prompt, FieldRow(field, draft.session.get(field.key), self._set)
+            )
 
         holder = QWidget()
         holder.setLayout(form)
@@ -185,17 +156,6 @@ class SessionTab(QWidget):
 
     def _set(self, field: Field, value) -> None:
         self.draft.update_session(**{field.key: value})
-
-    def _append(self, key: str, text: str) -> None:
-        self.draft.session.setdefault(key, []).append(text)
-        self.draft.save()
-
-    def _drop(self, key: str, row: int) -> None:
-        entries = self.draft.session.get(key, [])
-
-        if 0 <= row < len(entries):
-            entries.pop(row)
-            self.draft.save()
 
 
 class ExperimentTab(QWidget):
@@ -220,15 +180,7 @@ class ExperimentTab(QWidget):
         form.addRow("Objective", objective)
 
         for field in fields:
-            if field.multi_valued:
-                form.addRow(field.prompt, EntryList(
-                    field.label,
-                    entry.get(field.key, []),
-                    lambda text, key=field.key: self._append(key, text),
-                    lambda row, key=field.key: self._drop(key, row),
-                ))
-            else:
-                form.addRow(field.prompt, FieldRow(field, entry.get(field.key), self._set))
+            form.addRow(field.prompt, FieldRow(field, entry.get(field.key), self._set))
 
         holder = QWidget()
         holder.setLayout(form)
@@ -247,19 +199,6 @@ class ExperimentTab(QWidget):
         self.draft.set_experiment(
             self.name, objective=None if text == UNSET else int(text)
         )
-
-    def _append(self, key: str, text: str) -> None:
-        entry = self.draft.experiment(self.name) or {}
-        entry.setdefault(key, []).append(text)
-        self.draft.set_experiment(self.name, **{key: entry[key]})
-
-    def _drop(self, key: str, row: int) -> None:
-        entry = self.draft.experiment(self.name) or {}
-        entries = entry.get(key, [])
-
-        if 0 <= row < len(entries):
-            entries.pop(row)
-            self.draft.set_experiment(self.name, **{key: entries or None})
 
 
 class PanelTab(QWidget):
@@ -449,15 +388,15 @@ class EntryWindow(QMainWindow):
 
     def _build_tabs(self) -> None:
         self.tabs.clear()
-        self.tabs.addTab(SessionTab(self.draft, form_fields(self.db, "session")), "Session")
+        self.tabs.addTab(
+            SessionTab(self.draft, form_fields(self.db, "session")), "Session"
+        )
 
         experiment_fields = form_fields(self.db, "experiment")
 
         for entry in self.draft.experiments:
             name = entry["name"]
-            self.tabs.addTab(
-                ExperimentTab(self.draft, name, experiment_fields), name
-            )
+            self.tabs.addTab(ExperimentTab(self.draft, name, experiment_fields), name)
 
         self.tabs.addTab(PanelTab(self.draft, self.db), "Odors")
 
@@ -478,9 +417,7 @@ class EntryWindow(QMainWindow):
         """What is still missing, shown before anyone presses submit."""
         lines = []
 
-        wanted = missing_required(
-            form_fields(self.db, "session"), self.draft.session
-        )
+        wanted = missing_required(form_fields(self.db, "session"), self.draft.session)
 
         if wanted:
             lines.append("Still to fill in: " + ", ".join(f.label for f in wanted))
@@ -504,9 +441,7 @@ class EntryWindow(QMainWindow):
         ready = [result for result in checked if not result.blocked]
 
         if not ready:
-            QMessageBox.warning(
-                self, "Nothing to submit", _report(checked)
-            )
+            QMessageBox.warning(self, "Nothing to submit", _report(checked))
             return
 
         confirm = QMessageBox.question(
@@ -599,9 +534,7 @@ def run(main_folder: Path | str, *, project: None | str = None) -> int:
 
     application = QApplication.instance() or QApplication([])
 
-    db = (
-        Database(main_folder, project=project) if project else Database(main_folder)
-    )
+    db = Database(main_folder, project=project) if project else Database(main_folder)
 
     folder = drafts_folder()
     unfinished = Draft.pending(folder)

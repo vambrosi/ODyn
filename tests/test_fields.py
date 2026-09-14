@@ -59,12 +59,20 @@ def test_a_retired_key_is_not_offered(db):
     assert _by_key(form_fields(db, "session"), "headplate") is None
 
 
-def test_required_and_multi_valued_carry_through(db):
+def test_required_carries_through(db):
     fields = form_fields(db, "session")
 
     assert _by_key(fields, "mouse_weight_g").required
-    assert _by_key(fields, "note").multi_valued
-    assert not _by_key(fields, "goal").multi_valued
+    assert not _by_key(fields, "goal").required
+
+
+def test_a_note_asks_for_a_box_rather_than_a_line(db):
+    """`long_text` is stored like text; it only says how much room it needs."""
+    fields = form_fields(db, "session")
+
+    assert _by_key(fields, "note").value_type == "long_text"
+    assert _by_key(fields, "goal").value_type == "text"
+    assert _by_key(fields, "flag").value_type == "boolean"
 
 
 def test_enum_options_come_from_the_registry(db):

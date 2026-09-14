@@ -70,14 +70,14 @@ def test_every_change_is_on_disk_immediately(folder, draft):
 
 def test_an_interrupted_draft_comes_back(folder, draft):
     draft.update_session(goal="10x pre/post ket/xyl", headplate="A")
-    draft.add_note("genteal drops before starting")
+    draft.update_session(note="genteal drops before starting")
     draft.set_experiment("e1", fov_depth_um=-55)
 
     # The app died here.
     reopened = Draft.open(folder, mouse_id=442, date="2026-07-08")
 
     assert reopened.session["headplate"] == "A"
-    assert reopened.session["note"] == ["genteal drops before starting"]
+    assert reopened.session["note"] == "genteal drops before starting"
     assert reopened.experiment("e1")["fov_depth_um"] == -55
 
 
@@ -99,21 +99,27 @@ def test_a_half_written_file_does_not_replace_a_good_one(draft):
 # --------------------------------------------------------------------------- #
 
 
-def test_notes_and_flags_accumulate(draft):
-    """They are separate observations, not corrections of each other."""
-    draft.add_note("first day on scope")
-    draft.add_note("adjusted thermal probe")
-    draft.add_flag("pmt off for first 2 acquisitions")
+def test_the_note_is_one_block_of_text(draft):
+    """
+    Written as one field, not several. The separate cells in the spreadsheet
+    were how a spreadsheet looks tidy, not a distinction anyone wanted.
+    """
+    draft.update_session(note="first day on scope\nadjusted thermal probe")
+    draft.update_session(flag=True)
 
-    assert len(draft.session["note"]) == 2
-    assert draft.session["flag"] == ["pmt off for first 2 acquisitions"]
+    assert draft.session["note"].splitlines() == [
+        "first day on scope",
+        "adjusted thermal probe",
+    ]
+    assert draft.session["flag"] is True
 
 
-def test_a_blank_note_is_not_recorded(draft):
-    """An empty box someone tabbed through is not an observation."""
-    draft.add_note("   ")
+def test_a_rewritten_note_replaces_the_one_before(draft):
+    """It is one field, so editing it is editing it."""
+    draft.update_session(note="first day on scope")
+    draft.update_session(note="first day on scope\nand the probe was adjusted")
 
-    assert "note" not in draft.session
+    assert draft.session["note"].endswith("and the probe was adjusted")
 
 
 def test_setting_a_field_to_none_clears_it(draft):
@@ -138,7 +144,9 @@ def test_an_experiment_is_updated_not_duplicated(draft):
 
     assert len(draft.experiments) == 1
     assert draft.experiment("e1") == {
-        "name": "e1", "fov_depth_um": -55, "objective": 20
+        "name": "e1",
+        "fov_depth_um": -55,
+        "objective": 20,
     }
 
 

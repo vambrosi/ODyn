@@ -27,11 +27,8 @@ two exceptions handled here: `objective` is a column on `experiments`, and the
 
 from __future__ import annotations
 
-import re
-
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from ..database import _mouse_number
 from .draft import Draft
@@ -45,8 +42,6 @@ EXPERIMENT_KEYS = ("name",)
 
 # Keys `Database.set_mouse` takes, as the draft's `mouse` block spells them.
 MOUSE_FIELDS = ("sex", "dob", "lines", "stax_injection", "sensor")
-
-EXPERIMENT_NAME = re.compile(r"e\d+")
 
 
 @dataclass(frozen=True)
@@ -147,10 +142,12 @@ def experiment_folders(main_folder: Path, session: str) -> list[str]:
     if not folder.is_dir():
         return []
 
-    return sorted({
-        tiff.parent.parent.relative_to(Path(main_folder)).as_posix()
-        for tiff in folder.rglob("raw/[!.]?*.tif")
-    })
+    return sorted(
+        {
+            tiff.parent.parent.relative_to(Path(main_folder)).as_posix()
+            for tiff in folder.rglob("raw/[!.]?*.tif")
+        }
+    )
 
 
 def _experiment_name(rel_path: str) -> str:
@@ -208,26 +205,32 @@ def check(draft: Draft, db) -> list[Problem]:
     folders: list[str] = []
 
     if not sessions:
-        problems.append(Problem(
-            where,
-            f"no folder for this mouse under '{draft.date.replace('-', '')}'."
-            f" Copy the recordings off the rig, then submit again",
-        ))
+        problems.append(
+            Problem(
+                where,
+                f"no folder for this mouse under '{draft.date.replace('-', '')}'."
+                f" Copy the recordings off the rig, then submit again",
+            )
+        )
     elif len(sessions) > 1:
-        problems.append(Problem(
-            where,
-            f"several folders could be this session ({', '.join(sessions)});"
-            f" say which one in the draft",
-        ))
+        problems.append(
+            Problem(
+                where,
+                f"several folders could be this session ({', '.join(sessions)});"
+                f" say which one in the draft",
+            )
+        )
     else:
         folders = experiment_folders(db.main_folder, sessions[0])
 
         if not folders:
-            problems.append(Problem(
-                where,
-                f"'{sessions[0]}' holds no experiment with a 'raw/' folder of"
-                f" TIFFs. Copy the recordings over, then submit again",
-            ))
+            problems.append(
+                Problem(
+                    where,
+                    f"'{sessions[0]}' holds no experiment with a 'raw/' folder of"
+                    f" TIFFs. Copy the recordings over, then submit again",
+                )
+            )
 
     for rel_path in folders:
         mice = recorded_mice(db.main_folder, rel_path)
@@ -236,28 +239,34 @@ def check(draft: Draft, db) -> list[Problem]:
         # the annotations are looked up under the drafted one, so they would
         # land on different sessions -- or on none at all.
         if mice and mice != {draft.mouse_id}:
-            problems.append(Problem(
-                f"{where} {_experiment_name(rel_path)}",
-                f"the recordings are named for "
-                f"{', '.join(f'm{number}' for number in sorted(mice))}, not "
-                f"m{draft.mouse_id}",
-            ))
+            problems.append(
+                Problem(
+                    f"{where} {_experiment_name(rel_path)}",
+                    f"the recordings are named for "
+                    f"{', '.join(f'm{number}' for number in sorted(mice))}, not "
+                    f"m{draft.mouse_id}",
+                )
+            )
 
     recorded = {_experiment_name(path) for path in folders}
     drafted = {entry.get("name") for entry in draft.experiments}
 
     for name in sorted(drafted - recorded):
-        problems.append(Problem(
-            f"{where} {name}",
-            "was filled in but has no recordings; submitting would lose it",
-        ))
+        problems.append(
+            Problem(
+                f"{where} {name}",
+                "was filled in but has no recordings; submitting would lose it",
+            )
+        )
 
     for name in sorted(recorded - drafted):
-        problems.append(Problem(
-            f"{where} {name}",
-            "was recorded but has nothing filled in",
-            blocking=False,
-        ))
+        problems.append(
+            Problem(
+                f"{where} {name}",
+                "was recorded but has nothing filled in",
+                blocking=False,
+            )
+        )
 
     problems += _check_keys(draft, db, where)
     problems += _check_panel(draft, db, where)
@@ -282,15 +291,17 @@ def _check_keys(draft: Draft, db, where: str) -> list[Problem]:
                 continue
 
             if ("experiment", key) not in registry.index:
-                problems.append(Problem(
-                    f"{where} {name}", f"'{key}' is not an experiment annotation"
-                ))
+                problems.append(
+                    Problem(
+                        f"{where} {name}", f"'{key}' is not an experiment annotation"
+                    )
+                )
 
     for key in sorted(draft.mouse):
         if key not in MOUSE_FIELDS:
-            problems.append(Problem(
-                where, f"'{key}' is not something recorded about a mouse"
-            ))
+            problems.append(
+                Problem(where, f"'{key}' is not something recorded about a mouse")
+            )
 
     return problems
 
@@ -306,10 +317,12 @@ def _check_panel(draft: Draft, db, where: str) -> list[Problem]:
         return [Problem(where, "no odor panel was chosen", blocking=False)]
 
     if name not in set(db.panels["panel_name"]):
-        return [Problem(
-            where,
-            f"panel '{name}' is not registered; add it before submitting",
-        )]
+        return [
+            Problem(
+                where,
+                f"panel '{name}' is not registered; add it before submitting",
+            )
+        ]
 
     vials = db.panel_vials
     known = set(vials.index.get_level_values("panel_name"))
@@ -412,7 +425,8 @@ def submit(draft: Draft, db, *, force: bool = False, archive: bool = True) -> Wr
             vial_dates={
                 int(position): date
                 for position, date in draft.panel.get("vial_dates", {}).items()
-            } or None,
+            }
+            or None,
         )
         written.panel = True
 
@@ -492,20 +506,17 @@ def submit_all(
 
 
 def _write_annotations(db, target_type: str, target_id: int, fields: dict) -> int:
-    """Write one target's fields, spreading a list into one row per entry."""
+    """Write one target's fields, skipping the ones nobody filled in."""
     count = 0
 
     for key, value in fields.items():
-        # A multi-valued key holds a list of separate observations, and each is
-        # its own annotation rather than one annotation holding a list.
-        for one in value if isinstance(value, list) else [value]:
-            if one is None or one == "":
-                continue
+        if value is None or value == "":
+            continue
 
-            db.add_annotation(
-                target_type=target_type, target_id=target_id, key=key, value=one
-            )
-            count += 1
+        db.add_annotation(
+            target_type=target_type, target_id=target_id, key=key, value=value
+        )
+        count += 1
 
     return count
 
