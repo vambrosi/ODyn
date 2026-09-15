@@ -84,42 +84,32 @@ class SubmitRefused(Exception):
 # --------------------------------------------------------------------------- #
 
 
-def session_folders(main_folder: Path | str, draft: Draft) -> list[str]:
+def session_folder(draft: Draft) -> str:
     """
-    Every folder that could hold this draft's recordings.
+    Where this draft's recordings belong, relative to the main folder.
 
-    Found rather than constructed. A mouse id is the number alone, so it cannot
-    say whether the folder was named `m442`, `m0442` or `M442` -- the day's
-    folder is read instead and each child resolved back to a number.
-
-    Normally one folder; none means the recordings are not there yet, and more
-    than one means the day is ambiguous and a person has to say which.
+    `20260914/m442`: the day without its dashes, then the animal. Constructed
+    rather than searched for, because that is how the rig names them, and a
+    session filed anywhere else carries its own `session_path` in the draft.
     """
-    main_folder = Path(main_folder)
     stated = draft.data.get("session_path")
 
     if stated:
-        path = str(stated).strip("/")
+        return str(stated).strip("/")
 
-        return [path] if (main_folder / path).is_dir() else []
-
-    day = main_folder / draft.date.replace("-", "")
-
-    if not day.is_dir():
-        return []
-
-    return sorted(
-        f"{day.name}/{child.name}"
-        for child in day.iterdir()
-        if child.is_dir() and _mouse_number_of(child.name) == draft.mouse_id
-    )
+    return f"{_day(draft)}/m{draft.mouse_id}"
 
 
 def session_path(main_folder: Path | str, draft: Draft) -> None | str:
-    """The one folder holding this draft's recordings, or `None` if unclear."""
-    folders = session_folders(main_folder, draft)
+    """The folder holding this draft's recordings, or `None` if it is not there."""
+    folder = session_folder(draft)
 
-    return folders[0] if len(folders) == 1 else None
+    return folder if (Path(main_folder) / folder).is_dir() else None
+
+
+def _day(draft: Draft) -> str:
+    """The session's date as the folders spell it, e.g. `20260914`."""
+    return draft.date.replace("-", "")
 
 
 def _mouse_number_of(name: str) -> None | int:
@@ -194,6 +184,10 @@ def check(draft: Draft, db) -> list[Problem]:
     someone typed: no recordings to attach to, a drafted experiment that was
     never recorded, an unregistered panel, a key the registry does not hold.
     Non-blocking ones are worth showing but do not stop a submit.
+
+    Each `what` is a phrase that fits one line beside the session it is about,
+    because they are read as a list. What to do about one is not in it: the
+    problem says what is wrong, which is the part a reader cannot work out.
     """
     problems: list[Problem] = []
     where = draft.label
@@ -204,38 +198,18 @@ def check(draft: Draft, db) -> list[Problem]:
     # Everything below looks the session up by its animal, so without one there
     # is nothing to look up and no point reporting the consequences.
     if draft.mouse_id is None:
-        return [Problem(where, "no mouse number has been entered")]
+        return [Problem(where, "no mouse number")]
 
-    sessions = session_folders(db.main_folder, draft)
+    session = session_path(db.main_folder, draft)
     folders: list[str] = []
 
-    if not sessions:
-        problems.append(
-            Problem(
-                where,
-                f"no folder for this mouse under '{draft.date.replace('-', '')}'."
-                f" Copy the recordings off the rig, then submit again",
-            )
-        )
-    elif len(sessions) > 1:
-        problems.append(
-            Problem(
-                where,
-                f"several folders could be this session ({', '.join(sessions)});"
-                f" say which one in the draft",
-            )
-        )
+    if session is None:
+        problems.append(Problem(where, f"no folder '{session_folder(draft)}'"))
     else:
-        folders = experiment_folders(db.main_folder, sessions[0])
+        folders = experiment_folders(db.main_folder, session)
 
         if not folders:
-            problems.append(
-                Problem(
-                    where,
-                    f"'{sessions[0]}' holds no experiment with a 'raw/' folder of"
-                    f" TIFFs. Copy the recordings over, then submit again",
-                )
-            )
+            problems.append(Problem(where, f"no recordings under {session}"))
 
     for rel_path in folders:
         mice = recorded_mice(db.main_folder, rel_path)
@@ -247,9 +221,8 @@ def check(draft: Draft, db) -> list[Problem]:
             problems.append(
                 Problem(
                     f"{where} {_experiment_name(rel_path)}",
-                    f"the recordings are named for "
-                    f"{', '.join(f'm{number}' for number in sorted(mice))}, not "
-                    f"m{draft.mouse_id}",
+                    f"recordings named "
+                    f"{', '.join(f'm{number}' for number in sorted(mice))}",
                 )
             )
 
@@ -260,7 +233,7 @@ def check(draft: Draft, db) -> list[Problem]:
         problems.append(
             Problem(
                 f"{where} {name}",
-                "was filled in but has no recordings; submitting would lose it",
+                "filled in but not recorded",
             )
         )
 
@@ -268,7 +241,7 @@ def check(draft: Draft, db) -> list[Problem]:
         problems.append(
             Problem(
                 f"{where} {name}",
-                "was recorded but has nothing filled in",
+                "recorded but not filled in",
                 blocking=False,
             )
         )
@@ -304,9 +277,7 @@ def _check_keys(draft: Draft, db, where: str) -> list[Problem]:
 
     for key in sorted(draft.mouse):
         if key not in MOUSE_FIELDS:
-            problems.append(
-                Problem(where, f"'{key}' is not something recorded about a mouse")
-            )
+            problems.append(Problem(where, f"'{key}' is not a mouse field"))
 
     return problems
 
@@ -325,7 +296,7 @@ def _check_panel(draft: Draft, db, where: str) -> list[Problem]:
         return [
             Problem(
                 where,
-                f"panel '{name}' is not registered; add it before submitting",
+                f"panel '{name}' is not registered",
             )
         ]
 

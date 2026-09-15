@@ -52,7 +52,7 @@ OUTPUT_FOLDER = Path(__file__).resolve().parents[1] / "tmp" / "generated_data"
 
 # Experiment metadata. The folder date is derived so that passing `generate` a
 # different `start` cannot leave the two disagreeing.
-MOUSE = "m001"
+MOUSE = "m1"
 EXP = "e1"
 EXP_START = datetime(2026, 1, 1, 10, 0, 0)
 EXP_DATE = EXP_START.strftime("%Y%m%d")

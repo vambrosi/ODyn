@@ -18,6 +18,7 @@ from odyn.app.submit import (
     SubmitRefused,
     check,
     check_all,
+    session_folder,
     session_path,
     submit,
     submit_all,
@@ -63,7 +64,7 @@ def second_mouse(tmp_path_factory):
         height=32,
         width=32,
         motion=0.0,
-        mouse="m002",
+        mouse="m2",
         start=EXP_START + timedelta(hours=1),
     )
 
@@ -111,29 +112,18 @@ def filled(draft):
 # --------------------------------------------------------------------------- #
 
 
-def test_the_session_folder_is_found_not_guessed(db, draft):
-    """
-    A mouse id is the number alone, so it cannot say whether the folder was
-    written `m1`, `m001` or `M1`. Reconstructing the name would miss.
-    """
+def test_the_session_folder_is_the_day_and_the_mouse(db, draft):
+    """`20260914/m442`, which is how the rig names them."""
+    assert session_folder(draft) == f"{EXP_DATE}/{MOUSE}"
     assert session_path(db.main_folder, draft) == f"{EXP_DATE}/{MOUSE}"
 
 
-def test_a_folder_named_any_other_way_is_still_found(db, tmp_path):
-    """The same animal, filed under a differently padded name."""
-    (db.main_folder / "20260202" / "M0001" / "e1" / "raw").mkdir(parents=True)
-
+def test_a_folder_that_is_not_there_reads_as_missing(db, tmp_path):
+    """Rather than as some other folder of the same animal."""
     other = Draft.start(tmp_path / "drafts", mouse_id=1, date="2026-02-02")
 
-    assert session_path(db.main_folder, other) == "20260202/M0001"
-
-
-def test_two_folders_for_one_mouse_and_day_are_refused(db, tmp_path, filled):
-    """Ambiguous: a person has to say which, rather than the app picking."""
-    (db.main_folder / EXP_DATE / "m0001").mkdir(parents=True)
-
-    assert session_path(db.main_folder, filled) is None
-    assert any("several folders" in problem.what for problem in check(filled, db))
+    assert session_folder(other) == "20260202/m1"
+    assert session_path(db.main_folder, other) is None
 
 
 def test_an_unusual_folder_can_be_named(db, draft):
@@ -169,7 +159,29 @@ def test_recordings_that_were_never_copied_are_reported(db, tmp_path, filled):
 
     problems = [problem for problem in check(other, db) if problem.blocking]
 
-    assert any("no folder for this mouse" in problem.what for problem in problems)
+    assert any(f"no folder '{EXP_DATE}/m999'" == problem.what for problem in problems)
+
+
+def test_every_problem_fits_on_one_line(db, tmp_path, filled):
+    """
+    They are read as a list beside the session each is about, so a problem that
+    wraps into a paragraph buries the ones after it. What to do about one is
+    deliberately not in the text.
+    """
+    filled.set_experiment("e99", fov_depth_um=-120.0)
+    filled.update_session(mouse_wieght_g=25.1)
+    filled.set_panel(panel_name="not_a_panel")
+
+    stranded = Draft.start(tmp_path / "drafts", mouse_id=999)
+    stranded.update_session(goal="never copied")
+
+    seen = [problem for draft in (filled, stranded) for problem in check(draft, db)]
+
+    assert len(seen) >= 5, "the sample has to reach most of the messages"
+
+    for problem in seen:
+        assert "\n" not in problem.what
+        assert len(f"{problem.where}: {problem.what}") <= 60, problem
 
 
 def test_a_filled_draft_with_recordings_is_accepted(db, filled):
@@ -183,7 +195,7 @@ def test_an_experiment_that_was_never_recorded_blocks(db, filled):
     problems = [problem for problem in check(filled, db) if problem.blocking]
 
     assert any("e99" in problem.where for problem in problems)
-    assert any("would lose it" in problem.what for problem in problems)
+    assert any("not recorded" in problem.what for problem in problems)
 
 
 def test_a_recording_nobody_filled_in_is_only_a_warning(db, draft):
@@ -192,7 +204,7 @@ def test_a_recording_nobody_filled_in_is_only_a_warning(db, draft):
 
     problems = [problem for problem in check(draft, db) if not problem.blocking]
 
-    assert any("nothing filled in" in problem.what for problem in problems)
+    assert any("not filled in" in problem.what for problem in problems)
 
 
 def test_an_unregistered_key_blocks(db, filled):
@@ -428,15 +440,15 @@ def test_recordings_named_for_another_mouse_are_refused(db, filled, tmp_path):
     second = Draft.start(
         tmp_path / "drafts", mouse_id=2, date=EXP_START.date().isoformat()
     )
-    second.update_session(goal="folder says m002, files say m001")
+    second.update_session(goal="folder says m2, files say m1")
 
     # Folder renamed, file names left alone -- which is what happens when a
     # recording is started before the mouse on the rig is changed over.
-    (db.main_folder / EXP_DATE / MOUSE).rename(db.main_folder / EXP_DATE / "m002")
+    (db.main_folder / EXP_DATE / MOUSE).rename(db.main_folder / EXP_DATE / "m2")
 
     problems = [problem for problem in check(second, db) if problem.blocking]
 
-    assert any("named for m1" in problem.what for problem in problems)
+    assert any("named m1" in problem.what for problem in problems)
 
 
 def test_an_empty_day_reports_rather_than_raises(db):
