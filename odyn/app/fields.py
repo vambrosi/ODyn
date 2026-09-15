@@ -45,6 +45,10 @@ TEXT, LONG_TEXT, INTEGER, REAL, BOOLEAN, DATE, ENUM = (
 TRUE_WORDS = ("y", "yes", "true", "1")
 FALSE_WORDS = ("n", "no", "false", "0")
 
+# The magnifications on the rig, offered as a list: the value rescales
+# everything measured in microns, so a mistyped one is worse than a missing one.
+OBJECTIVES = ("10", "20")
+
 
 @dataclass(frozen=True)
 class Field:
@@ -57,6 +61,10 @@ class Field:
     unit: None | str = None
     required: bool = False
     options: tuple[str, ...] = ()
+
+    # A letter written in front of the number, which the lab does for mice:
+    # `m442` and `442` are the same animal, so both are read as one.
+    prefix: str = ""
 
     @property
     def prompt(self) -> str:
@@ -100,13 +108,58 @@ class Field:
         )
 
 
+# Columns of the tables themselves that a person fills in, written as fields so
+# the form does not have to treat them apart from the registry's keys. Every
+# other column is read from the recordings or set by the database, and the ones
+# here are exactly those `submit` knows to write as columns rather than as
+# annotations.
+COLUMN_FIELDS = {
+    "session": (
+        Field(
+            "mouse_id",
+            "Mouse ID",
+            INTEGER,
+            "Which animal, as a number. 'm442' and '442' are the same one.",
+            required=True,
+            prefix="m",
+        ),
+        Field(
+            "session_date",
+            "Date",
+            DATE,
+            "The day the session was run.",
+            required=True,
+        ),
+    ),
+    "experiment": (
+        Field(
+            "objective",
+            "Objective",
+            INTEGER,
+            "Magnification the experiment was imaged through. The "
+            "micron-per-pixel scale depends on it.",
+            required=True,
+            options=OBJECTIVES,
+        ),
+    ),
+}
+
+
 def form_fields(db, applies_to: str) -> list[Field]:
     """
-    Every field the form should show for a session, experiment, program, and so on.
+    Every field the form should show for a session, experiment, and so on.
 
-    Retired keys are left out: they are still readable in the database, but
-    nothing new should be written under them.
+    The table's own columns come first and the registry's keys after, as one
+    list, so a column and an annotation are asked for, drawn and read back the
+    same way -- a yes/no is a yes/no wherever it is stored. Retired keys are
+    left out: they are still readable in the database, but nothing new should
+    be written under them.
     """
+    return list(COLUMN_FIELDS.get(applies_to, ())) + _registry_fields(db, applies_to)
+
+
+def _registry_fields(db, applies_to: str) -> list[Field]:
+    """The annotation keys registered for this kind of thing."""
     registry = db.annotation_keys
 
     if applies_to not in registry.index.get_level_values("applies_to"):
@@ -159,8 +212,13 @@ def _options(allowed) -> tuple[str, ...]:
 
 
 def _whole_number(text: str, field: Field) -> int:
+    written = text
+
+    if field.prefix and written[:1].lower() == field.prefix.lower():
+        written = written[1:]
+
     try:
-        return int(text)
+        return int(written)
     except ValueError:
         raise ValueError(f"{field.label} is a whole number, not {text!r}.") from None
 
