@@ -259,7 +259,7 @@ class Draft:
         """How the session reads on screen, before and after it is identified."""
         who = "no mouse yet" if self.mouse_id is None else f"m{self.mouse_id}"
 
-        return f"{who} on {self.date}"
+        return f"{who}"
 
     @property
     def is_empty(self) -> bool:
