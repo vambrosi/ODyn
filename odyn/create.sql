@@ -508,7 +508,10 @@ INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (32, 'epsilon''');
 INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (39, 'lambda');
 INSERT OR IGNORE INTO odors (odor_id, odor_name) VALUES (40, 'lambda''');
 
--- Annotations taken from log files (but other keys can be added later)
+-- Annotations taken from log files (but other keys can be added later).
+-- Labels follow the session workbooks word for word where the workbooks have a
+-- column for the same thing, so that what is asked for on screen reads as what
+-- people already write down.
 
 INSERT OR IGNORE INTO annotation_keys
     ( applies_to
@@ -534,7 +537,7 @@ INSERT OR IGNORE INTO annotation_keys
     ),
 
     ( 'session'
-    , 'injection_volume', 'S.q. injection volume'
+    , 'injection_volume', 'S.q. injection vol'
     , 'real', NULL, 'ml'
     , 'Subcutaneous injection volume given during the session.'
     , FALSE
@@ -572,7 +575,7 @@ INSERT OR IGNORE INTO annotation_keys
     -- e.g. 'right side down slightly'. Yes/no loses that, and no number is
     -- measured.
     ( 'session'
-    , 'left_right_correction', 'Left-right correction'
+    , 'left_right_correction', 'Left-right-correction'
     , 'long_text', NULL, NULL
     , 'What was done to correct the head left-right tilt, if anything.'
     , FALSE
@@ -650,7 +653,7 @@ INSERT OR IGNORE INTO annotation_keys
     ),
 
     ( 'experiment'
-    , 'loop_acq_interval_s', 'Loop acquisition interval'
+    , 'loop_acq_interval_s', 'Acq interval'
     , 'real', NULL, 's'
     , 'Programmed interval between acquisitions in a loop.'
     , FALSE
@@ -660,27 +663,6 @@ INSERT OR IGNORE INTO annotation_keys
     , 'treatment', 'Treatment'
     , 'text', NULL, NULL
     , 'What was administered, if anything.'
-    , FALSE
-    ),
-
-    ( 'experiment'
-    , 'reporter', 'Reporter'
-    , 'text', NULL, NULL
-    , 'Reporter population imaged.'
-    , FALSE
-    ),
-
-    ( 'experiment'
-    , 'inclusion_status', 'Inclusion'
-    , 'enum', '["included", "excluded", "undecided"]', NULL
-    , 'Cohort selection. Left undecided until selection is done.'
-    , FALSE
-    ),
-
-    ( 'experiment'
-    , 'exclusion_reason', 'Exclusion reason'
-    , 'text', NULL, NULL
-    , 'Reason this experiment should be excluded.'
     , FALSE
     ),
 
