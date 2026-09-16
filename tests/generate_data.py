@@ -9,7 +9,7 @@ USAGE
 The result is a `main_folder`, so it can be used directly:
 
     from odyn import Database
-    db = Database("tmp/generated_data", update=True)
+    db = Database("tmp/generated_data", update=True, can_create=True)
 
 OUTPUTS
     - Raw acquisition files that can be read be `tifffile`;

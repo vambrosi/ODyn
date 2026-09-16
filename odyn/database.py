@@ -32,10 +32,12 @@ import json
 import sqlite3
 
 from collections import defaultdict
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import time, datetime, timedelta
 from pathlib import Path
 from scipy.signal import find_peaks
-from sqlite3 import Cursor
+from sqlite3 import Connection, Cursor
 from tifffile import TiffFile, TiffPage
 from typing import Final
 
@@ -44,6 +46,7 @@ import numpy as np
 import pandas as pd
 
 from .groups import Group
+from .locking import DatabaseLock
 from .migrate import SCHEMA_VERSION
 from .utils import *
 from .utils import CallFrame, CallRecorder
@@ -128,6 +131,7 @@ class Database(CallRecorder):
         db.add_experiment(...)          # Add a new experiment folder
         db.update(...)                  # Find and add all experiment folders
         db.latest_calls(method_name)    # `DataFrame` with `method_name` calls
+        db.from_query(sql)              # `DataFrame` from a SQL `SELECT`
     ```
     """
 
@@ -136,6 +140,7 @@ class Database(CallRecorder):
         path: str | Path,
         update=False,
         project: None | str = None,
+        can_create: bool = False,
         _is_test=False,
     ):
         """
@@ -144,6 +149,9 @@ class Database(CallRecorder):
         - `update` searches the main folder for experiments to add
         - `project` is a separate database in the same main folder, at
         `.odyn/projects/<project>.db`. `None` is the shared one.
+        - `can_create` makes a new, empty database if none is found. Leave it
+        `False` to get an error instead, so a typo in `path` or `project` does
+        not quietly create a database somewhere else.
 
         **ALERT**
         Projects do not see each other. Two of them can hold the same
@@ -200,43 +208,96 @@ class Database(CallRecorder):
         self._programs: None | pd.DataFrame = None
         self._trials: None | pd.DataFrame = None
 
-        # Get connection and create database if needed
-        if not self.path.exists():
-            logger.info("Did not find a database!")
-            logger.info("Creating database...")
+        # Checked before anything to not leave traces due to a typo.
+        if not can_create and not _has_database(self.path):
+            raise FileNotFoundError(
+                f"No database at '{self.path}'. Check the main folder and the "
+                "project name for typos, or use 'can_create=True'."
+            )
 
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.con = sqlite3.connect(self.path, timeout=DB_TIMEOUT_S)
+        # Every use of the connection goes through `_locked()`.
+        # See `locking.py` for more details.
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = DatabaseLock(self.path)
+        self._schema_checked = False
 
-            # Create schema and add default values
-            with self.con as con:
-                with open(Path(__file__).parent / "create.sql") as f:
-                    con.executescript(f.read())
+        with self._lock:
+            # Decided under the lock, so two processes cannot both create it.
+            # Connecting makes an empty file, hence the size check.
+            is_new = not _has_database(self.path)
 
-                # Fresh DB is already at the latest schema
-                con.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            if is_new and not can_create:
+                raise FileNotFoundError(f"The database at '{self.path}' is gone.")
 
-                # Insert default database group
-                query = "INSERT OR IGNORE INTO groups (group_id) VALUES (?);"
-                con.execute(query, [self.group_id])
+            self._con = sqlite3.connect(self.path, timeout=DB_TIMEOUT_S)
+            self._con.row_factory = sqlite3.Row
 
-            logger.info(f"Database created at: '{self.path.resolve()}'")
+            if is_new:
+                logger.info("Did not find a database!")
+                logger.info("Creating database...")
 
-        else:
-            self.con = sqlite3.connect(self.path, timeout=DB_TIMEOUT_S)
-            logger.info(f"Connected to the database at: '{self.path.resolve()}'")
+                # Create schema and add default values
+                with self._con as con:
+                    with open(Path(__file__).parent / "create.sql") as f:
+                        con.executescript(f.read())
+
+                    # Fresh DB is already at the latest schema
+                    con.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+
+                    # Insert default database group
+                    query = "INSERT OR IGNORE INTO groups (group_id) VALUES (?);"
+                    con.execute(query, [self.group_id])
+
+                logger.info(f"Database created at: '{self.path.resolve()}'")
+
+            else:
+                logger.info(f"Connected to the database at: '{self.path.resolve()}'")
+
             self._check_schema_version()
+            self._schema_checked = True
 
-        self.con.execute("PRAGMA foreign_keys = ON;")
-        self.con.row_factory = sqlite3.Row
-
-        self._data_version = self.con.execute("PRAGMA data_version;").fetchone()[0]
+            self._con.execute("PRAGMA foreign_keys = ON;")
+            self._data_version = self._con.execute("PRAGMA data_version;").fetchone()[0]
 
         if update:
             self.update()
 
     def __del__(self):
-        self.con.close()
+        # `__init__` can raise before the connection exists (a bad `project`,
+        # a schema mismatch), and __del__ still runs on the half-built object.
+        connection = getattr(self, "_con", None)
+
+        if connection is not None:
+            connection.close()
+
+    @contextmanager
+    def _locked(self) -> Generator[sqlite3.Connection]:
+        """
+        Hold the database lock and get the connection. Nests freely.
+
+        ```python
+        with self._locked() as con:
+            rows = con.execute("SELECT ...").fetchall()   # read everything here
+
+        with self._locked() as con, con:                  # one transaction
+            con.execute("INSERT ...")
+        ```
+        """
+        with self._lock as outermost:
+            # A process can stay open across a migration (a notebook left
+            # running), and must not keep writing through the old schema.
+            if outermost and self._schema_checked:
+                self._check_schema_version()
+
+            try:
+                yield self._con
+
+            finally:
+                # A write left uncommitted would keep going after the lock is
+                # released, which is exactly what the lock is there to prevent.
+                if outermost and self._con.in_transaction:
+                    self._con.rollback()
+                    logger.error("Rolled back changes that were never committed.")
 
     @property
     def project_folder(self) -> Path:
@@ -273,18 +334,19 @@ class Database(CallRecorder):
     @property
     def acquisitions(self) -> pd.DataFrame:
         """`DataFrame` with acquisition metadata"""
-        self._refresh_if_stale()
+        with self._locked() as con:
+            self._refresh_if_stale()
 
-        if self._acquisitions is not None:
+            if self._acquisitions is not None:
+                return self._acquisitions
+
+            query = "SELECT * FROM acquisitions;"
+            self._acquisitions = pd.read_sql_query(
+                query, con, parse_dates=["acq_start", "odor_start", "odor_end"]
+            )
+            self._acquisitions.set_index("acq_id", inplace=True)
+
             return self._acquisitions
-
-        query = "SELECT * FROM acquisitions;"
-        self._acquisitions = pd.read_sql_query(
-            query, self.con, parse_dates=["acq_start", "odor_start", "odor_end"]
-        )
-        self._acquisitions.set_index("acq_id", inplace=True)
-
-        return self._acquisitions
 
     @property
     def outputs_folder(self) -> Path:
@@ -308,54 +370,58 @@ class Database(CallRecorder):
 
         To compute `events` timedeltas use the trial (olfactometer) timings.
         """
-        self._refresh_if_stale()
+        with self._locked() as con:
+            self._refresh_if_stale()
 
-        if self._acquisition_trials is not None:
+            if self._acquisition_trials is not None:
+                return self._acquisition_trials
+
+            self._acquisition_trials = _acquisition_trials(con, ACQUISITION_TRIALS)
             return self._acquisition_trials
-
-        self._acquisition_trials = _acquisition_trials(self.con, ACQUISITION_TRIALS)
-        return self._acquisition_trials
 
     @property
     def events(self) -> pd.DataFrame:
         """`DataFrame` with olfactometer events"""
-        self._refresh_if_stale()
+        with self._locked() as con:
+            self._refresh_if_stale()
 
-        if self._events is not None:
+            if self._events is not None:
+                return self._events
+
+            query = "SELECT * FROM events;"
+
+            self._events = pd.read_sql_query(query, con, parse_dates=["event_time"])
+            self._events.set_index("event_id", inplace=True)
+
             return self._events
-
-        query = "SELECT * FROM events;"
-
-        self._events = pd.read_sql_query(query, self.con, parse_dates=["event_time"])
-        self._events.set_index("event_id", inplace=True)
-
-        return self._events
 
     @property
     def experiments(self) -> pd.DataFrame:
         """`DataFrame` with experiment metadata"""
-        self._refresh_if_stale()
+        with self._locked() as con:
+            self._refresh_if_stale()
 
-        if self._experiments is not None:
+            if self._experiments is not None:
+                return self._experiments
+
+            query = "SELECT * FROM experiments;"
+            self._experiments = pd.read_sql_query(
+                query, con, parse_dates=["exp_start", "added_to_db_at"]
+            )
+            self._experiments.set_index("exp_id", inplace=True)
+
             return self._experiments
-
-        query = "SELECT * FROM experiments;"
-        self._experiments = pd.read_sql_query(
-            query, self.con, parse_dates=["exp_start", "added_to_db_at"]
-        )
-        self._experiments.set_index("exp_id", inplace=True)
-
-        return self._experiments
 
     @property
     def groups(self) -> dict[int, Group]:
         """`Group`s (indexed by `group_id`) for processing/analysis."""
-        self._refresh_if_stale()
+        with self._locked() as con:
+            self._refresh_if_stale()
 
-        query = "SELECT group_id FROM groups WHERE group_id != ?;"
-        rows = self.con.execute(query, [self.group_id]).fetchall()
+            query = "SELECT group_id FROM groups WHERE group_id != ?;"
+            rows = con.execute(query, [self.group_id]).fetchall()
 
-        return {row["group_id"]: self._group(row["group_id"]) for row in rows}
+            return {row["group_id"]: self._group(row["group_id"]) for row in rows}
 
     def _group(self, group_id: int) -> Group:
         """Return the cached `Group` for `group_id`, creating it if missing."""
@@ -367,128 +433,135 @@ class Database(CallRecorder):
     @property
     def group_experiments(self) -> pd.DataFrame:
         """`DataFrame` with both group and experiment data"""
-        self._refresh_if_stale()
+        with self._locked() as con:
+            self._refresh_if_stale()
 
-        if self._group_experiments is not None:
+            if self._group_experiments is not None:
+                return self._group_experiments
+
+            query = """
+                SELECT group_id, e.* FROM group_experiments AS ge
+                    JOIN experiments AS e ON e.exp_id = ge.exp_id
+                    WHERE group_id != ?;
+            """
+            self._group_experiments = pd.read_sql_query(
+                query, con, params=[self.group_id]
+            )
+            self._group_experiments.set_index("group_id", inplace=True)
+
             return self._group_experiments
-
-        query = """
-            SELECT group_id, e.* FROM group_experiments AS ge
-                JOIN experiments AS e ON e.exp_id = ge.exp_id
-                WHERE group_id != ?;
-        """
-        self._group_experiments = pd.read_sql_query(
-            query, self.con, params=[self.group_id]
-        )
-        self._group_experiments.set_index("group_id", inplace=True)
-
-        return self._group_experiments
 
     @property
     def mcor_files(self) -> pd.DataFrame:
         """`DataFrame` with mcor files metadata"""
-        self._refresh_if_stale()
+        with self._locked() as con:
+            self._refresh_if_stale()
 
-        if self._mcor_files is not None:
+            if self._mcor_files is not None:
+                return self._mcor_files
+
+            query = "SELECT * FROM mcor_files;"
+            self._mcor_files = pd.read_sql_query(query, con)
+            self._mcor_files.set_index("acq_id", inplace=True)
+
             return self._mcor_files
-
-        query = "SELECT * FROM mcor_files;"
-        self._mcor_files = pd.read_sql_query(query, self.con)
-        self._mcor_files.set_index("acq_id", inplace=True)
-
-        return self._mcor_files
 
     @property
     def method_calls(self) -> pd.DataFrame:
         """`DataFrame` with `@record_call` functions"""
-        self._refresh_if_stale()
+        with self._locked() as con:
+            self._refresh_if_stale()
 
-        if self._method_calls is not None:
+            if self._method_calls is not None:
+                return self._method_calls
+
+            query = "SELECT * FROM method_calls;"
+
+            self._method_calls = pd.read_sql_query(
+                query, con, parse_dates=["called_at"]
+            )
+            self._method_calls.set_index("method_call_id", inplace=True)
+
+            self._method_calls["parameter_inputs"] = self._method_calls[
+                "parameter_inputs"
+            ].apply(json.loads)
+            self._method_calls["parameters_used"] = self._method_calls[
+                "parameters_used"
+            ].apply(json.loads)
+
+            self._method_calls["call_output"] = self._method_calls["call_output"].apply(
+                lambda s: json.loads(s) if isinstance(s, str) else None
+            )
+
             return self._method_calls
-
-        query = "SELECT * FROM method_calls;"
-
-        self._method_calls = pd.read_sql_query(
-            query, self.con, parse_dates=["called_at"]
-        )
-        self._method_calls.set_index("method_call_id", inplace=True)
-
-        self._method_calls["parameter_inputs"] = self._method_calls[
-            "parameter_inputs"
-        ].apply(json.loads)
-        self._method_calls["parameters_used"] = self._method_calls[
-            "parameters_used"
-        ].apply(json.loads)
-
-        self._method_calls["call_output"] = self._method_calls["call_output"].apply(
-            lambda s: json.loads(s) if isinstance(s, str) else None
-        )
-
-        return self._method_calls
 
     @property
     def odors(self) -> pd.DataFrame:
         """`DataFrame` with current list of odors"""
-        self._refresh_if_stale()
+        with self._locked() as con:
+            self._refresh_if_stale()
 
-        if self._odors is not None:
+            if self._odors is not None:
+                return self._odors
+
+            query = "SELECT * FROM odors;"
+
+            self._odors = pd.read_sql_query(query, con)
+            self._odors.set_index("odor_id", inplace=True)
+
             return self._odors
-
-        query = "SELECT * FROM odors;"
-
-        self._odors = pd.read_sql_query(query, self.con)
-        self._odors.set_index("odor_id", inplace=True)
-
-        return self._odors
 
     @property
     def outputs(self) -> pd.DataFrame:
         """`DataFrame` with output files of functions"""
-        self._refresh_if_stale()
+        with self._locked() as con:
+            self._refresh_if_stale()
 
-        if self._outputs is not None:
+            if self._outputs is not None:
+                return self._outputs
+
+            query = "SELECT * FROM outputs;"
+
+            self._outputs = pd.read_sql_query(query, con)
+            self._outputs.set_index("output_id", inplace=True)
+
             return self._outputs
-
-        query = "SELECT * FROM outputs;"
-
-        self._outputs = pd.read_sql_query(query, self.con)
-        self._outputs.set_index("output_id", inplace=True)
-
-        return self._outputs
 
     @property
     def programs(self) -> pd.DataFrame:
         """`DataFrame` with one entry per _Event.csv_ file"""
-        self._refresh_if_stale()
+        with self._locked() as con:
+            self._refresh_if_stale()
 
-        if self._programs is not None:
+            if self._programs is not None:
+                return self._programs
+
+            query = "SELECT * FROM programs;"
+
+            self._programs = pd.read_sql_query(
+                query, con, parse_dates=["program_start"]
+            )
+            self._programs.set_index("program_id", inplace=True)
+
             return self._programs
-
-        query = "SELECT * FROM programs;"
-
-        self._programs = pd.read_sql_query(
-            query, self.con, parse_dates=["program_start"]
-        )
-        self._programs.set_index("program_id", inplace=True)
-
-        return self._programs
 
     @property
     def trials(self) -> pd.DataFrame:
         """`DataFrame` with all olfactometer trials"""
-        self._refresh_if_stale()
+        with self._locked() as con:
+            self._refresh_if_stale()
 
-        if self._trials is not None:
+            if self._trials is not None:
+                return self._trials
+
+            query = "SELECT * FROM trials;"
+
+            self._trials = pd.read_sql_query(
+                query, con, parse_dates=["trial_start", "odor_start", "odor_end"]
+            )
+            self._trials.set_index("trial_id", inplace=True)
+
             return self._trials
-
-        query = "SELECT * FROM trials;"
-
-        self._trials = pd.read_sql_query(
-            query, self.con, parse_dates=["trial_start", "odor_start", "odor_end"]
-        )
-        self._trials.set_index("trial_id", inplace=True)
-
-        return self._trials
 
     # ----------------------------------------------------------------------- #
     # Private Methods
@@ -499,7 +572,8 @@ class Database(CallRecorder):
         Throws error if DB schema version is not what the code expects.
         """
 
-        version = self.con.execute("PRAGMA user_version;").fetchone()[0]
+        # Called with the lock held.
+        version = self._con.execute("PRAGMA user_version;").fetchone()[0]
         if version == SCHEMA_VERSION:
             return
 
@@ -512,7 +586,7 @@ class Database(CallRecorder):
 
         raise RuntimeError(
             f"Database schema is v{version} but the code expects v{SCHEMA_VERSION}. "
-            "Your code is out of date! Pull the latest version!"
+            "Your code is out of date! Pull the latest version and restart Python."
         )
 
     def _copy_for_test(self, source: Path) -> Path:
@@ -534,16 +608,17 @@ class Database(CallRecorder):
         copy.parent.mkdir(parents=True, exist_ok=True)
         copy.unlink(missing_ok=True)
 
-        # Use the online backup API rather than a file copy.
-        #   (In case the DB is in use.)
-        origin = sqlite3.connect(source, timeout=DB_TIMEOUT_S)
-        destination = sqlite3.connect(copy)
+        # Use the online backup API rather than a file copy, holding the
+        # source's lock since it is read like any other use of it.
+        with DatabaseLock(source):
+            origin = sqlite3.connect(source, timeout=DB_TIMEOUT_S)
+            destination = sqlite3.connect(copy)
 
-        try:
-            origin.backup(destination)
-        finally:
-            destination.close()
-            origin.close()
+            try:
+                origin.backup(destination)
+            finally:
+                destination.close()
+                origin.close()
 
         logger.warning(f"TEST COPY: '{copy.resolve()}'")
         logger.warning("The shared database will not see anything you do here.")
@@ -632,7 +707,8 @@ class Database(CallRecorder):
 
     def _refresh_if_stale(self) -> None:
         """Reset caches if another connection has committed since the last check."""
-        version = self.con.execute("PRAGMA data_version;").fetchone()[0]
+        with self._locked() as con:
+            version = con.execute("PRAGMA data_version;").fetchone()[0]
 
         if version != self._data_version:
             self._data_version = version
@@ -720,7 +796,7 @@ class Database(CallRecorder):
                 )
                 return self._group(group_id)
 
-        with self.con as con:
+        with self._locked() as con, con:
             cur = con.cursor()
 
             cur.execute("INSERT INTO groups DEFAULT VALUES;")
@@ -738,8 +814,7 @@ class Database(CallRecorder):
 
     def from_query(self, query: str) -> pd.DataFrame:
         """
-        Creates a pandas DataFrame from a SQL query.
-        Use db.run_query() for inserts/updates.
+        Creates a pandas DataFrame from a SQL query (reading only).
 
         **USAGE**
         ```python
@@ -752,7 +827,16 @@ class Database(CallRecorder):
         db.from_query("SELECT exp_id, exp_name FROM experiments;")
         ```
         """
-        return pd.read_sql_query(query, self.con)
+        with self._locked() as con:
+            frame = pd.read_sql_query(query, con)
+
+            if con.in_transaction:
+                con.rollback()
+                raise ValueError(
+                    "'from_query' only reads, so this change was not saved."
+                )
+
+        return frame
 
     def latest_calls(self, method_name: str) -> pd.DataFrame:
         """Return DataFrame with all calls to 'method_name'."""
@@ -762,57 +846,23 @@ class Database(CallRecorder):
                 WHERE method_name LIKE ?
                 ORDER BY method_call_id DESC
             """
-        return _method_calls_dataframe(self.con, query, [f"%{method_name}"])
+        with self._locked() as con:
+            return _method_calls_dataframe(con, query, [f"%{method_name}"])
 
     def latest_output(self, method_name: str) -> None | Object:
         """Return output of the most recent call to 'method_name'."""
 
-        row = self.con.execute(
-            """
-            SELECT call_output FROM method_calls
-                WHERE group_id = ? AND method_name = ? AND call_output IS NOT NULL
-                ORDER BY method_call_id DESC LIMIT 1
-            """,
-            [self.group_id, method_name],
-        ).fetchone()
+        with self._locked() as con:
+            row = con.execute(
+                """
+                SELECT call_output FROM method_calls
+                    WHERE group_id = ? AND method_name = ? AND call_output IS NOT NULL
+                    ORDER BY method_call_id DESC LIMIT 1
+                """,
+                [self.group_id, method_name],
+            ).fetchone()
 
         return json.loads(row["call_output"]) if row else None
-
-    # ----------------------------------------------------------------------- #
-    # Custom SQL INSERT/UPDATE
-    # ----------------------------------------------------------------------- #
-
-    def commit_changes(self):
-        self.con.commit()
-
-    def rollback_changes(self):
-        self._reset_caches()
-        self.con.rollback()
-
-    def run_query(self, query: str) -> Cursor:
-        """
-        Run SQL query (be careful!).
-
-        **USAGE**
-        ```python
-        db = Database(main_folder)
-        db.run_query(query_as_a_string)
-        ```
-
-        **EXAMPLE**
-        ```python
-        db.run_query(\"\"\"
-            UPDATE experiments
-                SET exp_name = "test"
-                WHERE exp_id = 10;
-        \"\"\")
-        ````
-        """
-
-        cur = self.con.execute(query)
-        self._reset_caches()
-
-        return cur
 
     # ----------------------------------------------------------------------- #
     # Updating the Database
@@ -886,7 +936,7 @@ class Database(CallRecorder):
 
             # One transaction per grab/experiment as in add_experiment
             # User can rerun it fails in a couple files (or just skip them)
-            with self.con as con:
+            with self._locked() as con, con:
                 cur = con.cursor()
                 cur.execute("PRAGMA foreign_keys = ON;")
 
@@ -970,178 +1020,181 @@ class Database(CallRecorder):
 
         logger.info(f"Processing folder: '{exp_path.resolve()}'")
 
-        with self.con as con:
+        # Files are read without holding the database lock, which is only taken
+        # for the short lookups below and once for all the inserts at the end.
+        # So a failure anywhere still leaves nothing behind.
+
+        # --------------------------------------------------------------- #
+        # Phase 1: Load
+        # --------------------------------------------------------------- #
+
+        experiment: None | Object = None
+        acquisitions: list[Object] = []
+        h5_data: None | dict = None
+        event_files: list[Path] = []
+
+        last_exp_data: None | Object = None
+        checks_failed = 0
+
+        assert raw_paths, "Did not find any raw/*.tif files."
+
+        for raw_path in tqdm(raw_paths, desc="Loading TIFF Metadata"):
+            raw_metadata = self._get_raw_metadata(raw_path)
+
+            if raw_metadata is None:
+                logger.info(
+                    f"  Skipped file {raw_path} (metadata format not supported)"
+                )
+                self.add_flag(ExpFlag.UNSUPPORTED_METADATA)
+                continue
+
+            exp_data, acq = raw_metadata
+
+            if last_exp_data is None:
+                # Don't do anything if experiment is already in the DB.
+                #
+                # Formatted rather than passed as a datetime: the column
+                # holds DT_FORMAT strings, and sqlite3's adapter writes
+                # isoformat, which drops '.000000' when the epoch lands
+                # exactly on a second. The two then never compare equal, so
+                # this says "not present" and the insert below fails on
+                # UNIQUE instead of returning quietly.
+                assert isinstance(exp_data["exp_start"], datetime)
+                exp_start_str = exp_data["exp_start"].strftime(DT_FORMAT)
+
+                with self._locked() as con:
+                    already_added = _experiment_exists(con, exp_start_str)
+
+                if already_added:
+                    logger.info("Experiment already in DB.")
+                    self.add_flag(ExpFlag.ALREADY_IN_DB)
+                    return
+
+                experiment = exp_data
+
+                # Load H5 and event files before metadata checks
+                # (Checks take some time so better to not do them if possible)
+                h5_paths = list(exp_path.glob("[!.]?*.h5"))
+
+                if len(h5_paths) > 1:
+                    logger.error(
+                        f"There is more than one H5 file in this experiment folder. {CROSS}"
+                    )
+
+                    for path in h5_paths:
+                        relative_path = path.relative_to(self.main_folder)
+                        logger.warning(f"  {relative_path}")
+
+                    logger.error("Experiment will not be added to the DB.")
+                    self.add_flag(ExpFlag.MULTIPLE_H5)
+                    return
+
+                # Type checking because Object is too generic
+                assert isinstance(experiment["exp_start"], datetime)
+                h5_data = _get_h5_metadata(h5_paths, experiment["exp_start"])
+
+                event_files = sorted(
+                    exp_path.rglob("[!.]?*Events.csv"),
+                    key=lambda x: x.stat().st_mtime,
+                )
+
+                logger.info(f"Found {len(event_files)} olfactometer event files.")
+
+            elif last_exp_data != exp_data:
+                checks_failed += 1
+
+                logger.warning(
+                    f"'{raw_path.relative_to(self.main_folder)}' metadata"
+                    " is inconsistent with the previous acquisition."
+                )
+
+            last_exp_data = exp_data
+            acquisitions.append(acq)
+
+        if checks_failed > 0:
+            logger.error(
+                f"TIFF metadata changed {checks_failed} or more times in the raw folder. {CROSS}"
+            )
+            logger.info("Are there multiple loops or grabs in the same folder?")
+            logger.error("Experiment will not be added to the DB.")
+            self.add_flag(ExpFlag.METADATA_CHANGED)
+            return
+
+        logger.info(f"Passed all TIFF metadata checks! {CHECK}")
+
+        assert (
+            experiment is not None
+        ), "Could not find any TIFF file with the expected metadata format."
+
+        # Parse all event files into structured program/trial dicts
+        programs_data: list[dict] = []
+
+        if event_files:
+            with self._locked() as con:
+                rows = con.execute("SELECT odor_name, odor_id FROM odors;").fetchall()
+
+            odors: dict[str, int] = {name: id for name, id in rows}
+
+            stem_split = event_files[0].stem.split("-")
+            events_start = datetime.strptime(
+                " ".join(stem_split[-3:-1]), "%Y_%m_%d %H_%M_%S"
+            )
+            program_starts = _parse_program_starts(self, events_start)
+
+            programs_data = _load_event_data(
+                event_files, program_starts, odors, self.main_folder
+            )
+
+        # --------------------------------------------------------------- #
+        # Phase 2: Match
+        # --------------------------------------------------------------- #
+
+        # Acquisitions <-> H5 trials
+        # Result: h5_idx -> (acq_idx, h5_to_acq_ms)
+        acq_to_h5: dict[int, tuple[int, float]] = {}
+
+        if h5_data and acquisitions:
+            acq_to_h5 = _match_acq_to_h5(acquisitions, h5_data)
+
+        # Pool all event trial starts across programs
+        # event_trial_pool[i] = (program_idx, trial_idx, trial_start)
+        trials: list[tuple[int, int, datetime]] = [
+            (program_idx, trial_idx, trial["trial_start"])
+            for program_idx, program in enumerate(programs_data)
+            for trial_idx, trial in enumerate(program["trials"])
+        ]
+
+        # CSV trials <-> H5 trials
+        # Result: pool_idx -> (h5_idx, h5_to_trial_ms)
+        csv_to_h5: dict[int, tuple[int, float]] = {}
+
+        if h5_data and trials:
+            trial_starts = [x[2] for x in trials]
+            csv_to_h5 = _match_csv_to_h5(trial_starts, h5_data)
+
+        # Build lookup: (program_idx, trial_idx) -> (h5_idx, h5_to_trial_ms)
+        trial_to_h5: dict[tuple[int, int], tuple[int, float]] = {
+            (trials[pool_idx][0], trials[pool_idx][1]): (
+                h5_idx,
+                h5_to_trial_ms,
+            )
+            for pool_idx, (h5_idx, h5_to_trial_ms) in csv_to_h5.items()
+        }
+
+        with self._locked() as con, con:
             cur = con.cursor()
             cur.execute("PRAGMA foreign_keys = ON;")
 
-            # --------------------------------------------------------------- #
-            # Phase 1: Load
-            # --------------------------------------------------------------- #
-
-            experiment: None | Object = None
-            acquisitions: list[Object] = []
-            h5_data: None | dict = None
-            event_files: list[Path] = []
-
-            last_exp_data: None | Object = None
-            checks_failed = 0
-
-            assert raw_paths, "Did not find any raw/*.tif files."
-
-            for raw_path in tqdm(raw_paths, desc="Loading TIFF Metadata"):
-                raw_metadata = self._get_raw_metadata(raw_path)
-
-                if raw_metadata is None:
-                    logger.info(
-                        f"  Skipped file {raw_path} (metadata format not supported)"
-                    )
-                    self.add_flag(ExpFlag.UNSUPPORTED_METADATA)
-                    continue
-
-                exp_data, acq = raw_metadata
-
-                if last_exp_data is None:
-                    # Don't do anything if experiment is already in the DB.
-                    #
-                    # Formatted rather than passed as a datetime: the column
-                    # holds DT_FORMAT strings, and sqlite3's adapter writes
-                    # isoformat, which drops '.000000' when the epoch lands
-                    # exactly on a second. The two then never compare equal, so
-                    # this says "not present" and the insert below fails on
-                    # UNIQUE instead of returning quietly.
-                    assert isinstance(exp_data["exp_start"], datetime)
-
-                    cur.execute(
-                        """
-                        SELECT EXISTS(
-                            SELECT 1 FROM experiments
-                                WHERE exp_start = ?
-                        );
-                    """,
-                        [exp_data["exp_start"].strftime(DT_FORMAT)],
-                    )
-
-                    if cur.fetchone()[0]:
-                        logger.info("Experiment already in DB.")
-                        self.add_flag(ExpFlag.ALREADY_IN_DB)
-                        return
-
-                    experiment = exp_data
-
-                    # Load H5 and event files before metadata checks
-                    # (Checks take some time so better to not do them if possible)
-                    h5_paths = list(exp_path.glob("[!.]?*.h5"))
-
-                    if len(h5_paths) > 1:
-                        logger.error(
-                            f"There is more than one H5 file in this experiment folder. {CROSS}"
-                        )
-
-                        for path in h5_paths:
-                            relative_path = path.relative_to(self.main_folder)
-                            logger.warning(f"  {relative_path}")
-
-                        logger.error("Experiment will not be added to the DB.")
-                        self.add_flag(ExpFlag.MULTIPLE_H5)
-                        return
-
-                    # Type checking because Object is too generic
-                    assert isinstance(experiment["exp_start"], datetime)
-                    h5_data = _get_h5_metadata(h5_paths, experiment["exp_start"])
-
-                    event_files = sorted(
-                        exp_path.rglob("[!.]?*Events.csv"),
-                        key=lambda x: x.stat().st_mtime,
-                    )
-
-                    logger.info(f"Found {len(event_files)} olfactometer event files.")
-
-                elif last_exp_data != exp_data:
-                    checks_failed += 1
-
-                    logger.warning(
-                        f"'{raw_path.relative_to(self.main_folder)}' metadata"
-                        " is inconsistent with the previous acquisition."
-                    )
-
-                last_exp_data = exp_data
-                acquisitions.append(acq)
-
-            if checks_failed > 0:
-                logger.error(
-                    f"TIFF metadata changed {checks_failed} or more times in the raw folder. {CROSS}"
-                )
-                logger.info("Are there multiple loops or grabs in the same folder?")
-                logger.error("Experiment will not be added to the DB.")
-                self.add_flag(ExpFlag.METADATA_CHANGED)
+            # Checked again now that the lock is held. Someone may have added
+            # the same experiment while the files were being read.
+            if _experiment_exists(cur, exp_start_str):
+                logger.info("Experiment already in DB.")
+                self.add_flag(ExpFlag.ALREADY_IN_DB)
                 return
-
-            logger.info(f"Passed all TIFF metadata checks! {CHECK}")
-
-            assert (
-                experiment is not None
-            ), "Could not find any TIFF file with the expected metadata format."
-
-            # Parse all event files into structured program/trial dicts
-            programs_data: list[dict] = []
-
-            if event_files:
-                res = cur.execute("SELECT odor_name, odor_id FROM odors;")
-                odors: dict[str, int] = {name: id for name, id in res.fetchall()}
-
-                stem_split = event_files[0].stem.split("-")
-                events_start = datetime.strptime(
-                    " ".join(stem_split[-3:-1]), "%Y_%m_%d %H_%M_%S"
-                )
-                program_starts = _parse_program_starts(self, events_start)
-
-                programs_data = _load_event_data(
-                    event_files, program_starts, odors, self.main_folder
-                )
-
-            # --------------------------------------------------------------- #
-            # Phase 2: Match
-            # --------------------------------------------------------------- #
-
-            # Acquisitions <-> H5 trials
-            # Result: h5_idx -> (acq_idx, h5_to_acq_ms)
-            acq_to_h5: dict[int, tuple[int, float]] = {}
-
-            if h5_data and acquisitions:
-                acq_to_h5 = _match_acq_to_h5(acquisitions, h5_data)
-
-            # Pool all event trial starts across programs
-            # event_trial_pool[i] = (program_idx, trial_idx, trial_start)
-            trials: list[tuple[int, int, datetime]] = [
-                (program_idx, trial_idx, trial["trial_start"])
-                for program_idx, program in enumerate(programs_data)
-                for trial_idx, trial in enumerate(program["trials"])
-            ]
-
-            # CSV trials <-> H5 trials
-            # Result: pool_idx -> (h5_idx, h5_to_trial_ms)
-            csv_to_h5: dict[int, tuple[int, float]] = {}
-
-            if h5_data and trials:
-                trial_starts = [x[2] for x in trials]
-                csv_to_h5 = _match_csv_to_h5(trial_starts, h5_data)
-
-            # Build lookup: (program_idx, trial_idx) -> (h5_idx, h5_to_trial_ms)
-            trial_to_h5: dict[tuple[int, int], tuple[int, float]] = {
-                (trials[pool_idx][0], trials[pool_idx][1]): (
-                    h5_idx,
-                    h5_to_trial_ms,
-                )
-                for pool_idx, (h5_idx, h5_to_trial_ms) in csv_to_h5.items()
-            }
 
             # --------------------------------------------------------------- #
             # Phase 3: Insert
             # --------------------------------------------------------------- #
-
-            # Fix datetime format to include microseconds
-            assert isinstance(experiment["exp_start"], datetime)
-            exp_start_str = experiment["exp_start"].strftime(DT_FORMAT)
 
             exp_id = _db_insert(
                 cur, "experiments", {**experiment, "exp_start": exp_start_str}
@@ -1255,46 +1308,46 @@ class Database(CallRecorder):
                         },
                     )
 
-            # --------------------------------------------------------------- #
-            # Reporting
-            # --------------------------------------------------------------- #
+        # --------------------------------------------------------------- #
+        # Reporting
+        # --------------------------------------------------------------- #
 
-            if h5_data:
-                n_h5 = len(h5_data["trial_starts"])
-                n_matched_acq = len(acq_to_h5)
+        if h5_data:
+            n_h5 = len(h5_data["trial_starts"])
+            n_matched_acq = len(acq_to_h5)
 
-                if n_matched_acq < n_h5:
-                    self.add_flag(ExpFlag.H5_UNMATCHED_ACQ)
-                    logger.warning(
-                        f"{n_h5 - n_matched_acq} H5 trials without "
-                        f"matching acquisition. {CROSS}"
-                    )
-                else:
-                    logger.info(f"All H5 trials matched to acquisitions. {CHECK}")
-
-            if trials:
-                n_events = len(trials)
-                n_matched = len(csv_to_h5)
-
-                if n_matched < n_events:
-                    logger.info(f"{n_events - n_matched} trials without H5 match.")
-
-                n_with_acq = sum(
-                    1
-                    for (h5_idx, _) in trial_to_h5.values()
-                    if h5_to_acq_id.get(h5_idx) is not None
+            if n_matched_acq < n_h5:
+                self.add_flag(ExpFlag.H5_UNMATCHED_ACQ)
+                logger.warning(
+                    f"{n_h5 - n_matched_acq} H5 trials without "
+                    f"matching acquisition. {CROSS}"
                 )
+            else:
+                logger.info(f"All H5 trials matched to acquisitions. {CHECK}")
 
-                if n_with_acq < n_matched:
-                    self.add_flag(ExpFlag.TRIAL_NO_ACQ)
-                    logger.warning(
-                        f"{n_matched - n_with_acq} trials matched "
-                        f"to H5 but no acquisition. {CROSS}"
-                    )
-                elif event_files:
-                    logger.info(f"All matched trials have acquisitions. {CHECK}")
+        if trials:
+            n_events = len(trials)
+            n_matched = len(csv_to_h5)
 
-            self._reset_caches()
+            if n_matched < n_events:
+                logger.info(f"{n_events - n_matched} trials without H5 match.")
+
+            n_with_acq = sum(
+                1
+                for (h5_idx, _) in trial_to_h5.values()
+                if h5_to_acq_id.get(h5_idx) is not None
+            )
+
+            if n_with_acq < n_matched:
+                self.add_flag(ExpFlag.TRIAL_NO_ACQ)
+                logger.warning(
+                    f"{n_matched - n_with_acq} trials matched "
+                    f"to H5 but no acquisition. {CROSS}"
+                )
+            elif event_files:
+                logger.info(f"All matched trials have acquisitions. {CHECK}")
+
+        self._reset_caches()
 
     @record_call
     def update(self) -> None:
@@ -1368,6 +1421,22 @@ class Database(CallRecorder):
                 logger.exception("Failed to add experiment")
 
         logger.info("Database updated!")
+
+
+def _has_database(path: Path) -> bool:
+    # Connecting to a missing file creates it empty, so an empty file is what a
+    # failed or interrupted creation leaves behind, not a database.
+    return path.is_file() and path.stat().st_size > 0
+
+
+def _experiment_exists(con: Connection | Cursor, exp_start_str: str) -> bool:
+    """Whether an experiment starting at `exp_start_str` (DT_FORMAT) is in the DB."""
+    row = con.execute(
+        "SELECT EXISTS(SELECT 1 FROM experiments WHERE exp_start = ?);",
+        [exp_start_str],
+    ).fetchone()
+
+    return bool(row[0])
 
 
 def _db_insert(cur: Cursor, table_name: str, data: Object | list[Object]) -> int:

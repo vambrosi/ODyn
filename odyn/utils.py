@@ -236,7 +236,7 @@ class CallRecorder:
         db = self._recording_db
         rel_path = Path(path).relative_to(db.main_folder).as_posix()
 
-        with db.con as con:
+        with db._locked() as con, con:
             con.execute(
                 "INSERT INTO outputs (method_call_id, file_path, removed) VALUES (?, ?, FALSE);",
                 [self.current_call_id, rel_path],
@@ -275,7 +275,7 @@ def record_call(func):
         # methods may change them during the call.
         parameters_used = {**(func.__kwdefaults__ or {}), **kwargs}
 
-        with db.con as con:
+        with db._locked() as con, con:
             cur = con.cursor()
             cur.execute(
                 """
@@ -320,8 +320,8 @@ def record_call(func):
 
             call_output = json.dumps(jsonable(frame.output)) if frame.output is not None else None
 
-            with db.con:
-                db.con.execute(
+            with db._locked() as con, con:
+                con.execute(
                     """
                     UPDATE method_calls
                         SET call_log = ?

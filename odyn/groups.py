@@ -267,24 +267,25 @@ class Group(CallRecorder):
     @property
     def acquisitions(self) -> pd.DataFrame:
         """`DataFrame` with acquisition metadata"""
-        self.db._refresh_if_stale()
+        with self.db._locked() as con:
+            self.db._refresh_if_stale()
 
-        if self._acquisitions is not None:
+            if self._acquisitions is not None:
+                return self._acquisitions
+
+            query = f"""
+                SELECT a.* FROM group_experiments AS g
+                    JOIN experiments  AS e ON e.exp_id = g.exp_id
+                    JOIN acquisitions AS a ON a.exp_id = e.exp_id
+                    WHERE g.group_id = {self.group_id};
+            """
+
+            self._acquisitions = pd.read_sql_query(
+                query, con, parse_dates=["acq_start", "odor_start", "odor_end"]
+            )
+            self._acquisitions.set_index("acq_id", inplace=True)
+
             return self._acquisitions
-
-        query = f"""
-            SELECT a.* FROM group_experiments AS g
-                JOIN experiments  AS e ON e.exp_id = g.exp_id
-                JOIN acquisitions AS a ON a.exp_id = e.exp_id
-                WHERE g.group_id = {self.group_id};
-        """
-
-        self._acquisitions = pd.read_sql_query(
-            query, self.db.con, parse_dates=["acq_start", "odor_start", "odor_end"]
-        )
-        self._acquisitions.set_index("acq_id", inplace=True)
-
-        return self._acquisitions
 
     @property
     def acquisition_trials(self) -> pd.DataFrame:
@@ -298,77 +299,81 @@ class Group(CallRecorder):
 
         To compute `events` timedeltas use the trial (olfactometer) timings.
         """
-        self.db._refresh_if_stale()
+        with self.db._locked() as con:
+            self.db._refresh_if_stale()
 
-        if self._acquisition_trials is not None:
+            if self._acquisition_trials is not None:
+                return self._acquisition_trials
+
+            self._acquisition_trials = _acquisition_trials(
+                con, GROUP_ACQUISITION_TRIALS, [self.group_id]
+            )
             return self._acquisition_trials
-
-        self._acquisition_trials = _acquisition_trials(
-            self.db.con, GROUP_ACQUISITION_TRIALS, [self.group_id]
-        )
-        return self._acquisition_trials
 
     @property
     def events(self) -> pd.DataFrame:
         """`DataFrame` with olfactometer events"""
-        self.db._refresh_if_stale()
+        with self.db._locked() as con:
+            self.db._refresh_if_stale()
 
-        if self._events is not None:
+            if self._events is not None:
+                return self._events
+
+            query = f"""
+                SELECT e.* FROM group_experiments AS g
+                    JOIN experiments AS x ON x.exp_id     = g.exp_id
+                    JOIN programs    AS p ON p.exp_id     = x.exp_id
+                    JOIN events      AS e ON e.program_id = p.program_id
+                    WHERE g.group_id = {self.group_id};
+            """
+
+            self._events = pd.read_sql_query(query, con, parse_dates=["event_time"])
+            self._events.set_index("event_id", inplace=True)
+
             return self._events
-
-        query = f"""
-            SELECT e.* FROM group_experiments AS g
-                JOIN experiments AS x ON x.exp_id     = g.exp_id
-                JOIN programs    AS p ON p.exp_id     = x.exp_id
-                JOIN events      AS e ON e.program_id = p.program_id
-                WHERE g.group_id = {self.group_id};
-        """
-
-        self._events = pd.read_sql_query(query, self.db.con, parse_dates=["event_time"])
-        self._events.set_index("event_id", inplace=True)
-
-        return self._events
 
     @property
     def experiments(self) -> pd.DataFrame:
         """`DataFrame` with experiment metadata"""
-        self.db._refresh_if_stale()
+        with self.db._locked() as con:
+            self.db._refresh_if_stale()
 
-        if self._experiments is not None:
+            if self._experiments is not None:
+                return self._experiments
+
+            query = f"""
+                SELECT e.* FROM group_experiments AS ge
+                    JOIN experiments AS e ON e.exp_id = ge.exp_id
+                    WHERE ge.group_id = {self.group_id};
+            """
+            self._experiments = pd.read_sql_query(
+                query, con, parse_dates=["exp_start", "added_to_db_at"]
+            )
+            self._experiments.set_index("exp_id", inplace=True)
+
             return self._experiments
-
-        query = f"""
-            SELECT e.* FROM group_experiments AS ge
-                JOIN experiments AS e ON e.exp_id = ge.exp_id
-                WHERE ge.group_id = {self.group_id};
-        """
-        self._experiments = pd.read_sql_query(
-            query, self.db.con, parse_dates=["exp_start", "added_to_db_at"]
-        )
-        self._experiments.set_index("exp_id", inplace=True)
-
-        return self._experiments
 
     @property
     def mcor_files(self) -> pd.DataFrame:
         """`DataFrame` with mcor files metadata"""
-        self.db._refresh_if_stale()
+        with self.db._locked() as con:
+            self.db._refresh_if_stale()
 
-        if self._mcor_files is not None:
+            if self._mcor_files is not None:
+                return self._mcor_files
+
+            query = f"""
+                SELECT m.* FROM group_experiments AS g
+                    JOIN experiments  AS e ON e.exp_id = g.exp_id
+                    JOIN acquisitions AS a ON a.exp_id = e.exp_id
+                    JOIN mcor_files   AS m ON m.acq_id = a.acq_id
+                    WHERE g.group_id = {self.group_id};
+            """
+
+            self._mcor_files = pd.read_sql_query(query, con)
+            self._mcor_files.set_index("acq_id", inplace=True)
+
             return self._mcor_files
-
-        query = f"""
-            SELECT m.* FROM group_experiments AS g
-                JOIN experiments  AS e ON e.exp_id = g.exp_id
-                JOIN acquisitions AS a ON a.exp_id = e.exp_id
-                JOIN mcor_files   AS m ON m.acq_id = a.acq_id
-                WHERE g.group_id = {self.group_id};
-        """
-
-        self._mcor_files = pd.read_sql_query(query, self.db.con)
-        self._mcor_files.set_index("acq_id", inplace=True)
-
-        return self._mcor_files
 
     @property
     def approved_mcor_files(self) -> pd.DataFrame:
@@ -383,95 +388,99 @@ class Group(CallRecorder):
     @property
     def method_calls(self) -> pd.DataFrame:
         """`DataFrame` with `@record_call` functions"""
-        self.db._refresh_if_stale()
+        with self.db._locked() as con:
+            self.db._refresh_if_stale()
 
-        if self._method_calls is not None:
+            if self._method_calls is not None:
+                return self._method_calls
+
+            query = f"SELECT * FROM method_calls WHERE group_id = {self.group_id};"
+
+            self._method_calls = pd.read_sql_query(
+                query, con, parse_dates=["called_at"]
+            )
+            self._method_calls.set_index("method_call_id", inplace=True)
+
+            self._method_calls["parameter_inputs"] = self._method_calls[
+                "parameter_inputs"
+            ].apply(json.loads)
+            self._method_calls["parameters_used"] = self._method_calls[
+                "parameters_used"
+            ].apply(json.loads)
+
+            self._method_calls["call_output"] = self._method_calls["call_output"].apply(
+                lambda s: json.loads(s) if isinstance(s, str) else None
+            )
+
             return self._method_calls
-
-        query = f"SELECT * FROM method_calls WHERE group_id = {self.group_id};"
-
-        self._method_calls = pd.read_sql_query(
-            query, self.db.con, parse_dates=["called_at"]
-        )
-        self._method_calls.set_index("method_call_id", inplace=True)
-
-        self._method_calls["parameter_inputs"] = self._method_calls[
-            "parameter_inputs"
-        ].apply(json.loads)
-        self._method_calls["parameters_used"] = self._method_calls[
-            "parameters_used"
-        ].apply(json.loads)
-
-        self._method_calls["call_output"] = self._method_calls["call_output"].apply(
-            lambda s: json.loads(s) if isinstance(s, str) else None
-        )
-
-        return self._method_calls
 
     @property
     def outputs(self) -> pd.DataFrame:
         """`DataFrame` with output files of functions"""
-        self.db._refresh_if_stale()
+        with self.db._locked() as con:
+            self.db._refresh_if_stale()
 
-        if self._outputs is not None:
+            if self._outputs is not None:
+                return self._outputs
+
+            query = f"""
+                SELECT o.* FROM group_experiments AS ge
+                    JOIN method_calls AS mc ON ge.group_id = mc.group_id
+                    JOIN outputs AS o ON mc.method_call_id = o.method_call_id
+                    WHERE ge.group_id = {self.group_id};
+            """
+
+            self._outputs = pd.read_sql_query(query, con)
+            self._outputs.set_index("output_id", inplace=True)
+
             return self._outputs
-
-        query = f"""
-            SELECT o.* FROM group_experiments AS ge
-                JOIN method_calls AS mc ON ge.group_id = mc.group_id
-                JOIN outputs AS o ON mc.method_call_id = o.method_call_id
-                WHERE ge.group_id = {self.group_id};
-        """
-
-        self._outputs = pd.read_sql_query(query, self.db.con)
-        self._outputs.set_index("output_id", inplace=True)
-
-        return self._outputs
 
     @property
     def programs(self) -> pd.DataFrame:
         """`DataFrame` with one entry per _Event.csv_ file"""
-        self.db._refresh_if_stale()
+        with self.db._locked() as con:
+            self.db._refresh_if_stale()
 
-        if self._programs is not None:
+            if self._programs is not None:
+                return self._programs
+
+            query = f"""
+                SELECT p.* FROM group_experiments AS g
+                    JOIN experiments AS e ON e.exp_id = g.exp_id
+                    JOIN programs    AS p ON p.exp_id = e.exp_id
+                    WHERE g.group_id = {self.group_id};
+            """
+
+            self._programs = pd.read_sql_query(
+                query, con, parse_dates=["program_start"]
+            )
+            self._programs.set_index("program_id", inplace=True)
+
             return self._programs
-
-        query = f"""
-            SELECT p.* FROM group_experiments AS g
-                JOIN experiments AS e ON e.exp_id = g.exp_id
-                JOIN programs    AS p ON p.exp_id = e.exp_id
-                WHERE g.group_id = {self.group_id};
-        """
-
-        self._programs = pd.read_sql_query(
-            query, self.db.con, parse_dates=["program_start"]
-        )
-        self._programs.set_index("program_id", inplace=True)
-
-        return self._programs
 
     @property
     def trials(self) -> pd.DataFrame:
         """`DataFrame` with all olfactometer trials"""
-        self.db._refresh_if_stale()
+        with self.db._locked() as con:
+            self.db._refresh_if_stale()
 
-        if self._trials is not None:
+            if self._trials is not None:
+                return self._trials
+
+            query = f"""
+                SELECT t.* FROM group_experiments AS g
+                    JOIN experiments AS x ON x.exp_id     = g.exp_id
+                    JOIN programs    AS p ON p.exp_id     = x.exp_id
+                    JOIN trials      AS t ON t.program_id = p.program_id
+                    WHERE g.group_id = {self.group_id};
+            """
+
+            self._trials = pd.read_sql_query(
+                query, con, parse_dates=["trial_start", "odor_start", "odor_end"]
+            )
+            self._trials.set_index("trial_id", inplace=True)
+
             return self._trials
-
-        query = f"""
-            SELECT t.* FROM group_experiments AS g
-                JOIN experiments AS x ON x.exp_id     = g.exp_id
-                JOIN programs    AS p ON p.exp_id     = x.exp_id
-                JOIN trials      AS t ON t.program_id = p.program_id
-                WHERE g.group_id = {self.group_id};
-        """
-
-        self._trials = pd.read_sql_query(
-            query, self.db.con, parse_dates=["trial_start", "odor_start", "odor_end"]
-        )
-        self._trials.set_index("trial_id", inplace=True)
-
-        return self._trials
 
     # ----------------------------------------------------------------------- #
     # Database Queries
@@ -485,21 +494,23 @@ class Group(CallRecorder):
                 WHERE group_id = ? AND method_name LIKE ?
                 ORDER BY method_call_id DESC
             """
-        return _method_calls_dataframe(
-            self.db.con, query, [self.group_id, f"%{method_name}"]
-        )
+        with self.db._locked() as con:
+            return _method_calls_dataframe(
+                con, query, [self.group_id, f"%{method_name}"]
+            )
 
     def latest_output(self, method_name: str) -> None | Object:
         """Return output of the most recent call to 'method_name'."""
 
-        row = self.db.con.execute(
-            """
-            SELECT call_output FROM method_calls
-                WHERE group_id = ? AND method_name = ? AND call_output IS NOT NULL
-                ORDER BY method_call_id DESC LIMIT 1
-            """,
-            [self.group_id, method_name],
-        ).fetchone()
+        with self.db._locked() as con:
+            row = con.execute(
+                """
+                SELECT call_output FROM method_calls
+                    WHERE group_id = ? AND method_name = ? AND call_output IS NOT NULL
+                    ORDER BY method_call_id DESC LIMIT 1
+                """,
+                [self.group_id, method_name],
+            ).fetchone()
 
         return json.loads(row["call_output"]) if row else None
 
@@ -833,7 +844,7 @@ class Group(CallRecorder):
         # @record_call writes call_output=NULL on return, and Save button
         # updates the records with the chosen parameters.
         call_id = self.current_call_id
-        con = self.db.con
+        db = self.db
 
         # Shift limits are capped at dim/4 (caiman needs 2 * max_shift < dim, and
         # run_motion_correction clamps max_shift to dim/4 anyway).
@@ -1275,7 +1286,7 @@ class Group(CallRecorder):
                     ],
                     "max_deviation_um": float(S["dev"] * min(um_per_px)),
                 }
-                with con:
+                with db._locked() as con, con:
                     con.execute(
                         "UPDATE method_calls SET call_output = ? WHERE method_call_id = ?",
                         [json.dumps(output), call_id],
@@ -1996,9 +2007,9 @@ class Group(CallRecorder):
                     dtype=mc.dtype,
                 )
 
-            # Record each file separately to not lock the DB.
-            with self.db.con:
-                self.db.con.execute(
+            # Record each file separately, so the lock is only held briefly.
+            with self.db._locked() as con, con:
+                con.execute(
                     insertion_query,
                     [
                         acq_id,
@@ -2176,7 +2187,7 @@ class Group(CallRecorder):
             self._check_mcor_group(dropped, _change_mcor_group)
             self.add_flag(McorFlag.REPLACED_EXISTING)
 
-        with self.db.con as con:
+        with self.db._locked() as con, con:
             if dropped:
                 con.execute(
                     f"DELETE FROM mcor_files WHERE acq_id IN "
@@ -2251,7 +2262,7 @@ class Group(CallRecorder):
 
         self._check_mcor_group(acq_ids)
 
-        with self.db.con as con:
+        with self.db._locked() as con, con:
             con.executemany(
                 "UPDATE mcor_files SET approved = ? WHERE acq_id = ?;",
                 [(acq_id not in excluded, acq_id) for acq_id in acq_ids],
@@ -2291,15 +2302,16 @@ class Group(CallRecorder):
 
         marks = ",".join("?" * len(acq_ids))
 
-        owners = self.db.con.execute(
-            f"""
-            SELECT DISTINCT mc.group_id
-                FROM mcor_files   AS m
-                JOIN method_calls AS mc ON mc.method_call_id = m.last_updated_by
-                WHERE m.acq_id    IN ({marks});
-            """,
-            acq_ids,
-        ).fetchall()
+        with self.db._locked() as con:
+            owners = con.execute(
+                f"""
+                SELECT DISTINCT mc.group_id
+                    FROM mcor_files   AS m
+                    JOIN method_calls AS mc ON mc.method_call_id = m.last_updated_by
+                    WHERE m.acq_id    IN ({marks});
+                """,
+                acq_ids,
+            ).fetchall()
 
         would_take_from = [
             row["group_id"] for row in owners if row["group_id"] != self.group_id
@@ -2320,16 +2332,17 @@ class Group(CallRecorder):
                 f"Taking these files over from group(s) {would_take_from}. {CROSS}"
             )
 
-        users = self.db.con.execute(
-            f"""
-            SELECT DISTINCT ge.group_id
-                FROM mcor_files        AS m
-                JOIN acquisitions      AS a  ON a.acq_id = m.acq_id
-                JOIN group_experiments AS ge ON ge.exp_id = a.exp_id
-                WHERE m.acq_id IN ({marks}) AND ge.group_id != ?;
-            """,
-            [*acq_ids, self.group_id],
-        ).fetchall()
+        with self.db._locked() as con:
+            users = con.execute(
+                f"""
+                SELECT DISTINCT ge.group_id
+                    FROM mcor_files        AS m
+                    JOIN acquisitions      AS a  ON a.acq_id = m.acq_id
+                    JOIN group_experiments AS ge ON ge.exp_id = a.exp_id
+                    WHERE m.acq_id IN ({marks}) AND ge.group_id != ?;
+                """,
+                [*acq_ids, self.group_id],
+            ).fetchall()
 
         if users:
             self.add_flag(McorFlag.SHARED_WITH_OTHER_GROUPS)

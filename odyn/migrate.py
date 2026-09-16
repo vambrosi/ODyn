@@ -23,6 +23,7 @@ import sys
 
 from pathlib import Path
 
+from .locking import DatabaseLock
 from .utils import DB_TIMEOUT_S, ODYN_FOLDER, logger
 
 # When adding a new migration you should:
@@ -46,71 +47,74 @@ def migrate(main_folder: str | Path) -> None:
     if not db_path.exists():
         raise FileNotFoundError(f"No database at '{db_path}'.")
 
-    # Can wait longer than usual and manages transactions explicitly
-    con = sqlite3.connect(db_path, timeout=DB_TIMEOUT_S * 4)
-    con.isolation_level = None
+    # Held for the whole migration, including the checks before and after:
+    # everything else that opens the database waits until it is done.
+    with DatabaseLock(db_path):
+        # Can wait longer than usual and manages transactions explicitly
+        con = sqlite3.connect(db_path, timeout=DB_TIMEOUT_S * 4)
+        con.isolation_level = None
 
-    # Connection `con` "context manager"
-    try:
-        version = con.execute("PRAGMA user_version;").fetchone()[0]
-
-        if version == SCHEMA_VERSION:
-            logger.info(f"Database already at v{SCHEMA_VERSION}.")
-            return
-
-        if version != SCHEMA_VERSION - 1:
-            raise RuntimeError(f"Expected v{SCHEMA_VERSION - 1} but got v{version}")
-
-        check_integrity(con)
-
-        # Backs up DB using SQLite online backup API
-        backups = db_path.parent / "backups"
-        backups.mkdir(exist_ok=True)
-
-        backup_path = backups / f"snapshot_v{version}.db"
-        dest = sqlite3.connect(backup_path)
-
+        # Connection `con` "context manager"
         try:
-            con.backup(dest)
-        finally:
-            dest.close()
+            version = con.execute("PRAGMA user_version;").fetchone()[0]
 
-        logger.info(f"Backed up database to '{backup_path}'.")
+            if version == SCHEMA_VERSION:
+                logger.info(f"Database already at v{SCHEMA_VERSION}.")
+                return
 
-        # Dropping tables can violate FOREIGN KEY contraints
-        migration_script = LATEST_MIGRATION.read_text()
-        con.execute("PRAGMA foreign_keys = OFF;")
+            if version != SCHEMA_VERSION - 1:
+                raise RuntimeError(f"Expected v{SCHEMA_VERSION - 1} but got v{version}")
 
-        # Executes migration and version bump as a unit
-        try:
-            con.executescript(f"""
-                BEGIN EXCLUSIVE;
-                {migration_script}
-                PRAGMA user_version = {SCHEMA_VERSION};
-                COMMIT;
-            """)
+            check_integrity(con)
 
-        except Exception:
-            # BEGIN EXCLUSIVE may fail before a transaction exists (e.g. the DB
-            # is locked); don't let a failed ROLLBACK mask the real error.
+            # Backs up DB using SQLite online backup API
+            backups = db_path.parent / "backups"
+            backups.mkdir(exist_ok=True)
+
+            backup_path = backups / f"snapshot_v{version}.db"
+            dest = sqlite3.connect(backup_path)
+
             try:
-                con.execute("ROLLBACK;")
-            except sqlite3.OperationalError:
-                pass
-            raise
+                con.backup(dest)
+            finally:
+                dest.close()
+
+            logger.info(f"Backed up database to '{backup_path}'.")
+
+            # Dropping tables can violate FOREIGN KEY contraints
+            migration_script = LATEST_MIGRATION.read_text()
+            con.execute("PRAGMA foreign_keys = OFF;")
+
+            # Executes migration and version bump as a unit
+            try:
+                con.executescript(f"""
+                    BEGIN EXCLUSIVE;
+                    {migration_script}
+                    PRAGMA user_version = {SCHEMA_VERSION};
+                    COMMIT;
+                """)
+
+            except Exception:
+                # BEGIN EXCLUSIVE may fail before a transaction exists (e.g. the DB
+                # is locked); don't let a failed ROLLBACK mask the real error.
+                try:
+                    con.execute("ROLLBACK;")
+                except sqlite3.OperationalError:
+                    pass
+                raise
+
+            finally:
+                con.execute("PRAGMA foreign_keys = ON;")
+
+            logger.info("Running migration checks...")
+
+            check_integrity(con)
+            check_foreign_keys(con)
+
+            logger.info(f"Migrated database to v{SCHEMA_VERSION}.")
 
         finally:
-            con.execute("PRAGMA foreign_keys = ON;")
-
-        logger.info("Running migration checks...")
-
-        check_integrity(con)
-        check_foreign_keys(con)
-
-        logger.info(f"Migrated database to v{SCHEMA_VERSION}.")
-
-    finally:
-        con.close()
+            con.close()
 
     # Keep the diagram in sync with the schema.
     generate_diagram()

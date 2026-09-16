@@ -30,9 +30,9 @@ FRAMES, HEIGHT, WIDTH = 6, 64, 80
 
 def build(tmp_path, acquisitions=3):
     """A database with one experiment, its acquisitions, and a group."""
-    db = Database(tmp_path)
+    db = Database(tmp_path, can_create=True)
 
-    with db.con as con:
+    with db._locked() as con, con:
         con.execute(
             """
             INSERT INTO experiments
@@ -86,10 +86,16 @@ def write_mcor(
     return path
 
 
+def rows(db, query, params=()):
+    """Every row of a read, taken under the database lock like any other use."""
+    with db._locked() as con:
+        return con.execute(query, params).fetchall()
+
+
 def stored(db):
     return {
         row[0]: (row[1], row[2])
-        for row in db.con.execute("SELECT acq_id, mcor_path, source FROM mcor_files;")
+        for row in rows(db, "SELECT acq_id, mcor_path, source FROM mcor_files;")
     }
 
 
@@ -256,15 +262,13 @@ def test_overwrite_replaces_every_file_in_the_group(tmp_path):
     db, group = build(tmp_path)
     write_mcor(tmp_path, 1)
     group.add_mcor_files()
-    first_call = db.con.execute("SELECT last_updated_by FROM mcor_files;").fetchone()[0]
+    first_call = rows(db, "SELECT last_updated_by FROM mcor_files;")[0][0]
 
     write_mcor(tmp_path, 2)
     write_mcor(tmp_path, 3)
     group.add_mcor_files(overwrite=True)
 
-    owners = {
-        row[0] for row in db.con.execute("SELECT last_updated_by FROM mcor_files;")
-    }
+    owners = {row[0] for row in rows(db, "SELECT last_updated_by FROM mcor_files;")}
 
     assert set(stored(db)) == {1, 2, 3}
     assert owners != {first_call} and len(owners) == 1
@@ -277,12 +281,12 @@ def test_overwrite_clears_approval(tmp_path):
     write_mcor(tmp_path, 1)
     group.add_mcor_files()
 
-    with db.con as con:
+    with db._locked() as con, con:
         con.execute("UPDATE mcor_files SET approved = TRUE;")
 
     group.add_mcor_files(overwrite=True)
 
-    assert db.con.execute("SELECT approved FROM mcor_files;").fetchone()[0] == 0
+    assert rows(db, "SELECT approved FROM mcor_files;")[0][0] == 0
 
 
 def test_overwrite_keeps_what_it_has_if_it_finds_nothing(tmp_path):
@@ -309,10 +313,12 @@ def test_the_call_owns_the_files_it_added(tmp_path):
 
     group.add_mcor_files()
 
-    call_id = db.con.execute("SELECT last_updated_by FROM mcor_files;").fetchone()[0]
-    method = db.con.execute(
-        "SELECT method_name FROM method_calls WHERE method_call_id = ?;", [call_id]
-    ).fetchone()[0]
+    call_id = rows(db, "SELECT last_updated_by FROM mcor_files;")[0][0]
+    method = rows(
+        db,
+        "SELECT method_name FROM method_calls WHERE method_call_id = ?;",
+        [call_id],
+    )[0][0]
 
     assert method == "Group.add_mcor_files"
 
@@ -338,7 +344,7 @@ def test_nothing_to_add_leaves_the_table_empty(tmp_path):
     group.add_mcor_files()
 
     assert stored(db) == {}
-    assert db.con.execute("SELECT count(*) FROM mcor_files;").fetchone()[0] == 0
+    assert rows(db, "SELECT count(*) FROM mcor_files;")[0][0] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -348,7 +354,8 @@ def test_nothing_to_add_leaves_the_table_empty(tmp_path):
 
 def mcor_group(db, acq_id=1):
     """Which group motion corrected this acquisition, the way the code asks."""
-    row = db.con.execute(
+    (row,) = rows(
+        db,
         """
         SELECT mc.group_id
             FROM mcor_files   AS m
@@ -356,14 +363,14 @@ def mcor_group(db, acq_id=1):
             WHERE m.acq_id = ?;
         """,
         [acq_id],
-    ).fetchone()
+    )
 
     return row["group_id"]
 
 
 def share_experiment(db):
     """A second group over the same experiment, as happens in the real data."""
-    with db.con as con:
+    with db._locked() as con, con:
         con.execute("INSERT INTO groups (group_id) VALUES (2);")
         con.execute("INSERT INTO group_experiments (group_id, exp_id) VALUES (2, 1);")
 
