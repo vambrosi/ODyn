@@ -41,16 +41,14 @@ import tifffile
 
 from matplotlib import colormaps
 
-import caiman as cm
-from caiman.base.movies import get_file_size
-from caiman.motion_correction import MotionCorrect
-from caiman.paths import get_tempdir
-
 from .utils import *
 from .utils import _acquisition_trials, _method_calls_dataframe
 from .utils import CallFrame, CallRecorder
 
+# caiman is imported where it is used, since it is slow to import.
 if TYPE_CHECKING:
+    import caiman as cm
+
     from .database import Database
 
 # --------------------------------------------------------------------------- #
@@ -551,6 +549,8 @@ class Group(CallRecorder):
         This function allows `play_movie` to be called on test runs even
         after a kernel crash, as long as all relevant .mmap files are present.
         """
+        from caiman.paths import get_tempdir
+
         calls = self.latest_calls("Group.run_motion_correction")
 
         # These columns will only appear in future calls, so we guard against it.
@@ -751,6 +751,7 @@ class Group(CallRecorder):
         **EXAMPLES*
             group.delete_temp_files()
         """
+        from caiman.paths import get_tempdir
 
         # Get file paths for mmaps in the temp folder
         path = Path(get_tempdir())
@@ -810,6 +811,7 @@ class Group(CallRecorder):
             TapTool,
         )
         from bokeh.palettes import Greys256
+        import caiman as cm
         from caiman.motion_correction import sliding_window_dims
 
         if "ipykernel" in sys.modules and not curstate().notebook:
@@ -1723,6 +1725,7 @@ class Group(CallRecorder):
         - We don't assume that acquisitions have the same number of frames.
         - Given the last constraint we must compute `frame_acq` here.
         """
+        import caiman as cm
 
         movie_chains = []
         labels: list[np.ndarray] = []
@@ -1845,6 +1848,8 @@ class Group(CallRecorder):
         )
         ```
         """
+        import caiman as cm
+        from caiman.motion_correction import MotionCorrect
 
         # --- Optionally override parameters with GUI-picked values --- #
         # These override both the passed arguments and use_last_parameters.
@@ -2998,6 +3003,8 @@ def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:
     NOTE: this must be an array. `caiman.load` reads a *list* of subindices as
     one index per dimension, so a list would be taken as [time, y, x].
     """
+    from caiman.base.movies import get_file_size
+
     _, frames = get_file_size(path)
     frames = cast(int, frames)
 
