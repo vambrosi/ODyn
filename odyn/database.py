@@ -57,6 +57,9 @@ TIMEDELTA_MS = timedelta(milliseconds=1)
 H5_TOLERANCE = timedelta(milliseconds=100)
 DT_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 
+# Tolerance for ScanImage settings silent rounding
+WHOLE_TOLERANCE = 0.01
+
 # TODO: Make program types part of the database
 PROGRAM_TYPES = [
     "fine 1",
@@ -571,10 +574,22 @@ class Database(CallRecorder):
             "mouse_id": file_stem_parts[1],
             "height_px": tif.pages[0].tags["ImageLength"].value,
             "width_px": tif.pages[0].tags["ImageWidth"].value,
-            "frame_count": SI_metadata["SI.hStackManager.framesPerSlice"],
+            "frame_count": _whole_number(
+                SI_metadata["SI.hStackManager.framesPerSlice"],
+                "Frame count",
+                path,
+            ),
             "frame_rate": SI_metadata["SI.hRoiManager.scanFrameRate"],
-            "laser_power_920": laser_powers[0],
-            "laser_power_1040": laser_powers[1],
+            "laser_power_920": _whole_number(
+                laser_powers[0],
+                "Laser power at 920 nm",
+                path,
+            ),
+            "laser_power_1040": _whole_number(
+                laser_powers[1],
+                "Laser power at 1040 nm",
+                path,
+            ),
             "loop_acq_interval_s": SI_metadata["SI.loopAcqInterval"],
         }
 
@@ -1771,6 +1786,24 @@ def _parse_program_starts(db: Database, start: datetime) -> list[tuple[datetime,
                     starts.append((dt, program_name))
 
     return starts
+
+
+def _whole_number(value, field: str, path: Path) -> int:
+    """
+    A ScanImage setting rounded to a whole number.
+
+    Anything more than `WHOLE_TOLERANCE` from a whole number is logged as a warning.
+    """
+    number = float(value)
+    nearest = round(number)
+
+    if abs(number - nearest) > WHOLE_TOLERANCE:
+        logger.warning(
+            f"{field} is {number:g} in '{path.name}', which is not a whole "
+            f"number. Recording it as {nearest}."
+        )
+
+    return nearest
 
 
 def _to_datetime(dt: np.datetime64) -> datetime:
