@@ -256,6 +256,13 @@ class Database(CallRecorder):
 
         return self.main_folder / PROJECTS_FOLDER / self.project
 
+    @property
+    def files_folder(self) -> Path:
+        """
+        "Root" folder for this database's files
+        """
+        return self.main_folder if self.project is None else self.project_folder
+
     # ----------------------------------------------------------------------- #
     # SQLite Tables as DataFrames
     # ----------------------------------------------------------------------- #
@@ -284,9 +291,7 @@ class Database(CallRecorder):
         The project's own `outputs` folder when the database belongs to one,
         and the main folder's otherwise. It is made when something is saved.
         """
-        root = self.main_folder if self.project is None else self.project_folder
-
-        return root / OUTPUTS_FOLDER
+        return self.files_folder / OUTPUTS_FOLDER
 
     @property
     def acquisition_trials(self) -> pd.DataFrame:

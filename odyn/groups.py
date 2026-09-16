@@ -1395,7 +1395,9 @@ class Group(CallRecorder):
         *Video saving*
         - `opencv_codec`: Codec used to encode the saved video
         - `save_movie`: Put `True` if you want to save the preview video to a file
-        - `save_folder`: `"."` is the main_folder (r is to use \\ in the path)
+        - `save_folder`: where to write it. A path starting with `"."` is taken
+          from the project's folder, or from the main folder when the database
+          has no project. Any other path is used as given. (r is to use \\ in the path)
 
         *Video settings*
         - `backend`: "opencv" for popup and "embed_opencv" for inline player
@@ -1471,7 +1473,7 @@ class Group(CallRecorder):
         filename = self._output_name(movie_type_str, "avi")
 
         filepath = (
-            (self.db.main_folder / save_folder / filename).resolve()
+            (self.db.files_folder / save_folder / filename).resolve()
             if save_folder[0] == "."
             else (Path(save_folder) / filename).resolve()
         )
@@ -1534,7 +1536,10 @@ class Group(CallRecorder):
         reads only the frames it keeps, which is much faster over the network.
 
         *How it is saved*
-        - `save_folder`: `"."` is the main_folder (r is to use \\ in the path)
+        - `save_folder`: where to write it. A path starting with `"."` is taken
+          from the project's folder, or from the main folder when the database
+          has no project. Any
+          other path is used as given. (r is to use \\ in the path)
         - `frame_rate`: how fast to play the video (frames/s)
         - `q_min`, `q_max`: percentiles shown as black and white
         - `codec`, `extension`: how to encode
@@ -1575,7 +1580,7 @@ class Group(CallRecorder):
         movie_types = tuple(MovieType(name) for name in grid)
 
         folder = (
-            (self.db.main_folder / save_folder).resolve()
+            (self.db.files_folder / save_folder).resolve()
             if save_folder[0] == "."
             else Path(save_folder).resolve()
         )
@@ -2764,7 +2769,10 @@ class Group(CallRecorder):
         - `photobleach_window_s`: how much to drop from the start of each movie
         - `smoothing_s`: average this many seconds together, `0` for none
         - `only_approved`: `False` for all mcor files, `True` for approved ones.
-        - `save_folder`: `"."` is the main_folder (r is to use \\ in the path)
+        - `save_folder`: where to write it. A path starting with `"."` is taken
+          from the project's folder, or from the main folder when the database
+          has no project, so one project's movies never land in another's. Any
+          other path is used as given. (r is to use \\ in the path)
         - `display_range`: z-scores shown, from `-display_range` to `+display_range`
         - `codec`, `extension`: how to encode (see ALERT below)
 
@@ -2789,7 +2797,7 @@ class Group(CallRecorder):
         `play_movie`. VLC opens either one on any platform.
         """
         folder = (
-            (self.db.main_folder / save_folder).resolve()
+            (self.db.files_folder / save_folder).resolve()
             if save_folder[0] == "."
             else Path(save_folder).resolve()
         )
