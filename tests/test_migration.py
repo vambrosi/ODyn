@@ -30,6 +30,9 @@ def normalize(sql: str | None) -> str:
     sql = re.sub(r"\bIF NOT EXISTS\b", "", sql, flags=re.IGNORECASE)
     sql = sql.replace('"', "")
 
+    # ADD COLUMN splices its column in as "..., new_col ..., FOREIGN KEY"
+    sql = re.sub(r"\s*,\s*", ", ", sql)
+
     return re.sub(r"\s+", " ", sql).strip().lower()
 
 
@@ -93,75 +96,11 @@ INSERT INTO method_calls
     , git_commit
     , parameters_used
     ) VALUES (1, 0, 'Group.run_motion_correction', '{}', 'h', '{}');
-
-INSERT INTO experiments
-    ( exp_id, exp_name, exp_type
-    , exp_start, mouse_id
-    , height_px, width_px, height_um, width_um
-    , frame_count, frame_rate
-    , laser_power_920, laser_power_1040
-    , loop_acq_interval_s
-    ) VALUES
-        ( 1, '20260317_m317_e1', 'loop'
-        , '2026-03-17 10:00:00', 'm317'
-        , 512, 512, 512.0, 512.0
-        , 280, 14.0
-        , 10, 0
-        , 10.0
-        );
-
-INSERT INTO acquisitions
-    (acq_id
-    , exp_id
-    , acq_start
-    , raw_path
-    ) VALUES
-        ( 1
-        , 1
-        , '2026-03-17 10:00:01'
-        , '20260317\m317\e1\raw\20260317_m317_e1_00001.tif'
-        );
-
-INSERT INTO programs
-    ( program_id
-    , exp_id
-    , program_name
-    , program_type
-    , program_start
-    , program_path
-    ) VALUES
-        ( 1
-        , 1
-        , 'program_1'
-        , 'passive'
-        , '2026-03-17 10:00:00'
-        , '20260317\m317\e1\olfactometer\program_1_Events.csv'
-        );
-
-INSERT INTO mcor_files
-    ( acq_id
-    , mcor_path
-    , last_updated_by
-    ) VALUES
-        ( 1
-        , '20260317\m317\e1\processed\mcor\20260317_m317_e1_00001_mcor.tif'
-        , 1
-        );
-
-INSERT INTO outputs
-    ( method_call_id
-    , file_path
-    , removed
-    ) VALUES
-        ( 1
-        , '20260317\m317\e1\movies\preview.avi'
-        , FALSE
-        );
 """
 
 
 def migrated_db(tmp_path):
-    """An old DB seeded with Windows-style paths, walked forward one version."""
+    """An old DB with one recorded call, walked forward one version."""
     main_folder = tmp_path / "main"
     (main_folder / ODYN_FOLDER).mkdir(parents=True)
 
@@ -181,73 +120,76 @@ def migrated_db(tmp_path):
     return old
 
 
-def test_migration_normalizes_stored_paths(tmp_path):
-    """
-    Paths are stored relative to main_folder so the DB works from any machine,
-    but rows written on Windows kept backslashes and did not resolve elsewhere.
-    """
-    con = sqlite3.connect(migrated_db(tmp_path))
-
-    try:
-        stored = [
-            con.execute("SELECT raw_path FROM acquisitions;").fetchone()[0],
-            con.execute("SELECT program_path FROM programs;").fetchone()[0],
-            con.execute("SELECT mcor_path FROM mcor_files;").fetchone()[0],
-            con.execute("SELECT file_path FROM outputs;").fetchone()[0],
-        ]
-    finally:
-        con.close()
-
-    assert not any("\\" in path for path in stored), stored
-    assert stored[0] == "20260317/m317/e1/raw/20260317_m317_e1_00001.tif"
-
-
-def test_migration_backfills_mcor_source(tmp_path):
-    """Everything already stored was produced by run_motion_correction."""
-    con = sqlite3.connect(migrated_db(tmp_path))
-
-    try:
-        row = con.execute(
-            "SELECT source, approved, last_updated_by FROM mcor_files;"
-        ).fetchone()
-    finally:
-        con.close()
-
-    assert row == ("caiman", 0, 1)
-
-
-def test_mcor_source_is_required_and_checked(tmp_path):
-    """
-    No default on purpose: a default would silently mislabel a source the
-    caller forgot to pass, which is the thing the column exists to prevent.
-    """
-    con = sqlite3.connect(migrated_db(tmp_path))
-
-    try:
-        with pytest.raises(sqlite3.IntegrityError):
-            con.execute("""
-                INSERT INTO mcor_files (acq_id, mcor_path, last_updated_by)
-                    VALUES (2, 'a/b.tif', 1);
-            """)
-
-        with pytest.raises(sqlite3.IntegrityError):
-            con.execute("""
-                INSERT INTO mcor_files (acq_id, mcor_path, source, last_updated_by)
-                    VALUES (2, 'a/b.tif', 'normcorre', 1);
-            """)
-    finally:
-        con.close()
-
-
-def test_migration_preserves_unrelated_rows(tmp_path):
+def test_migration_keeps_calls_and_leaves_their_end_unknown(tmp_path):
+    """When earlier calls ended was never recorded, so it is not made up."""
     con = sqlite3.connect(migrated_db(tmp_path))
 
     try:
         row = con.execute("""
-            SELECT method_name, call_output, parameters_used
+            SELECT method_name, parameters_used, ended_at
                 FROM method_calls WHERE method_call_id = 1;
         """).fetchone()
     finally:
         con.close()
 
-    assert row == ("Group.run_motion_correction", None, "{}")
+    assert row == ("Group.run_motion_correction", "{}", None)
+
+
+def test_ended_at_must_be_a_datetime(tmp_path):
+    con = sqlite3.connect(migrated_db(tmp_path))
+
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute("UPDATE method_calls SET ended_at = 'yesterday';")
+
+        con.execute("UPDATE method_calls SET ended_at = '2026-09-16 10:00:00';")
+    finally:
+        con.close()
+
+
+def test_migration_waits_for_calls_that_have_not_ended(tmp_path, monkeypatch):
+    """
+    A current database stands in for the next version's old one, with a
+    migration that changes nothing, so only the open-call check is tested.
+    """
+    main_folder = tmp_path / "main"
+    (main_folder / ODYN_FOLDER).mkdir(parents=True)
+    db_path = main_folder / ODYN_FOLDER / "odyn.db"
+    build(db_path, CREATE_SQL, SCHEMA_VERSION - 1)
+
+    no_op = tmp_path / "no_op.sql"
+    no_op.write_text("SELECT 1;")
+    monkeypatch.setattr("odyn.migrate.LATEST_MIGRATION", no_op)
+
+    con = sqlite3.connect(db_path)
+    con.executescript(SEED)  # a call with no ended_at, started just now
+    con.commit()
+    con.close()
+
+    with pytest.raises(RuntimeError, match="1 recorded calls have not ended"):
+        migrate(main_folder)
+
+    migrate(main_folder, force=True)
+
+    con = sqlite3.connect(db_path)
+    assert con.execute("PRAGMA user_version;").fetchone()[0] == SCHEMA_VERSION
+    con.close()
+
+
+def test_old_calls_do_not_block_a_migration(tmp_path, monkeypatch):
+    main_folder = tmp_path / "main"
+    (main_folder / ODYN_FOLDER).mkdir(parents=True)
+    db_path = main_folder / ODYN_FOLDER / "odyn.db"
+    build(db_path, CREATE_SQL, SCHEMA_VERSION - 1)
+
+    no_op = tmp_path / "no_op.sql"
+    no_op.write_text("SELECT 1;")
+    monkeypatch.setattr("odyn.migrate.LATEST_MIGRATION", no_op)
+
+    con = sqlite3.connect(db_path)
+    con.executescript(SEED)
+    con.execute("UPDATE method_calls SET called_at = '2020-01-01 00:00:00';")
+    con.commit()
+    con.close()
+
+    migrate(main_folder)

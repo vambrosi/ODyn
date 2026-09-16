@@ -397,7 +397,7 @@ class Group(CallRecorder):
             query = f"SELECT * FROM method_calls WHERE group_id = {self.group_id};"
 
             self._method_calls = pd.read_sql_query(
-                query, con, parse_dates=["called_at"]
+                query, con, parse_dates=["called_at", "ended_at"]
             )
             self._method_calls.set_index("method_call_id", inplace=True)
 

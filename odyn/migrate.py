@@ -26,12 +26,23 @@ from .utils import DB_TIMEOUT_S, database_path, logger
 # - Bump the SCHEMA_VERSION to match;
 # - Run test_migration.py, then `python -m odyn.tools diagram`.
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# Calls running for longer than this limit are probably dead
+RUNNING_FOR_AT_MOST = "-2 days"
 LATEST_MIGRATION = Path(__file__).parent / "latest.sql"
 
 
-def migrate(main_folder: str | Path, project: None | str = None) -> None:
-    """Migrate DB from v(SCHEMA_VERSION-1) up to vSCHEMA_VERSION."""
+def migrate(
+    main_folder: str | Path, project: None | str = None, force: bool = False
+) -> None:
+    """
+    Migrate DB from v(SCHEMA_VERSION-1) up to vSCHEMA_VERSION.
+
+    Refuses while recorded calls are still running, since they may write
+    through the old schema when they finish. `force` goes ahead anyway, for
+    calls known to be dead.
+    """
 
     db_path = database_path(main_folder, project)
     if not db_path.exists():
@@ -54,6 +65,8 @@ def migrate(main_folder: str | Path, project: None | str = None) -> None:
 
             if version != SCHEMA_VERSION - 1:
                 raise RuntimeError(f"Expected v{SCHEMA_VERSION - 1} but got v{version}")
+
+            check_no_open_calls(con, force)
 
             check_integrity(con)
 
@@ -105,6 +118,55 @@ def migrate(main_folder: str | Path, project: None | str = None) -> None:
 
         finally:
             con.close()
+
+
+def open_calls(con: sqlite3.Connection) -> None | list[tuple]:
+    """
+    Recorded calls that started recently and have not ended.
+
+    Returns `(method_call_id, method_name, group_id, called_at)` rows, or `None`
+    for a database too old to record when calls end.
+    """
+    columns = {row[1] for row in con.execute("PRAGMA table_info(method_calls);")}
+
+    if "ended_at" not in columns:
+        return None
+
+    return con.execute(
+        """
+        SELECT method_call_id, method_name, group_id, called_at
+            FROM method_calls
+            WHERE ended_at IS NULL
+              AND called_at >= datetime('now', 'localtime', ?)
+            ORDER BY method_call_id;
+        """,
+        [RUNNING_FOR_AT_MOST],
+    ).fetchall()
+
+
+def check_no_open_calls(con: sqlite3.Connection, force: bool) -> None:
+    running = open_calls(con)
+
+    if running is None:
+        logger.warning("This database does not record when calls end.")
+        return
+
+    if not running:
+        return
+
+    listed = "\n".join(
+        f"  call {call_id}: {name} (group {group}) since {since}"
+        for call_id, name, group, since in running
+    )
+
+    if not force:
+        raise RuntimeError(
+            f"{len(running)} recorded calls have not ended:\n{listed}\n"
+            "Wait for them, or use force=True (or --force)."
+        )
+
+    logger.warning(f"Migrating despite {len(running)} calls that have not ended:")
+    logger.warning(listed)
 
 
 def check_integrity(con: sqlite3.Connection) -> None:

@@ -361,6 +361,7 @@ def record_call(func):
                           , call_flag = ?
                           , call_output = ?
                           , parameters_used = ?
+                          , ended_at = datetime('now', 'localtime')
                         WHERE method_call_id = ?
                     """,
                     [

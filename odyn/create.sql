@@ -1,4 +1,4 @@
--- CREATE DATABASE WITH SCHEMA v2
+-- CREATE DATABASE WITH SCHEMA v3
 CREATE TABLE IF NOT EXISTS mice
     ( mouse_id          TEXT PRIMARY KEY
     , mouse_sex         TEXT NOT NULL CHECK(mouse_sex IN ('M', 'F'))
@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS method_calls
     , call_flag         INTEGER NOT NULL DEFAULT 0
     , call_output       TEXT CHECK(call_output IS NULL OR json_valid(call_output))
     , parameters_used   TEXT NOT NULL CHECK(json_valid(parameters_used))
+    , ended_at          TEXT CHECK(ended_at IS NULL OR datetime(ended_at) IS NOT NULL)
 
     , FOREIGN KEY (group_id) REFERENCES groups(group_id)
     ) STRICT;

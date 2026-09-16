@@ -39,7 +39,7 @@ from pathlib import Path
 
 from .database import Database, _has_database
 from .locking import DatabaseLock, _describe
-from .migrate import SCHEMA_VERSION, migrate
+from .migrate import SCHEMA_VERSION, migrate, open_calls
 from .utils import (
     DB_TIMEOUT_S,
     CallFrame,
@@ -237,6 +237,7 @@ class Admin(CallRecorder):
 
         with self._raw_connection() as con:
             version = con.execute("PRAGMA user_version;").fetchone()[0]
+            running = open_calls(con)
 
         backups = sorted((self.path.parent / BACKUPS_FOLDER).glob("*.db"))
         snapshot = self.path.parent / SNAPSHOTS_FOLDER / self.path.name
@@ -247,6 +248,7 @@ class Admin(CallRecorder):
             "schema_version": version,
             "code_schema_version": SCHEMA_VERSION,
             "lock": _describe(holder) if holder else "free",
+            "open_calls": running,
             "backups": [path.name for path in backups],
             "snapshot": (
                 time.strftime(
@@ -260,6 +262,18 @@ class Admin(CallRecorder):
         logger.info(f"Database:  {status['path']} ({status['size_mb']} MB)")
         logger.info(f"Schema:    v{version} (this code expects v{SCHEMA_VERSION})")
         logger.info(f"Lock:      {status['lock']}")
+
+        if running is None:
+            logger.info("Calls:     this schema does not record when calls end")
+            
+        else:
+            logger.info(f"Calls:     {len(running)} started recently and not ended")
+
+            for call_id, name, group, since in running:
+                logger.info(
+                    f"             {call_id}: {name} (group {group}) since {since}"
+                )
+
         logger.info(f"Backups:   {len(backups)}")
         logger.info(f"Snapshot:  {status['snapshot'] or 'none'}")
 
@@ -294,14 +308,19 @@ class Admin(CallRecorder):
         logger.warning("Deleted the lock file.")
         return True
 
-    def migrate(self) -> None:
-        """Upgrade the database schema to the version this code expects."""
+    def migrate(self, *, force: bool = False) -> None:
+        """
+        Upgrade the database schema to the version this code expects.
+
+        Refuses while recorded calls have not ended (see `status`); `force=True`
+        goes ahead, for calls whose processes are known to be dead.
+        """
         if self._db is not None:
             raise RuntimeError(
                 "This Admin has the database open. Use a new Admin to migrate."
             )
 
-        migrate(self.main_folder, self.project)
+        migrate(self.main_folder, self.project, force=force)
 
 
 # --------------------------------------------------------------------------- #
@@ -391,7 +410,9 @@ def main(argv: None | list[str] = None) -> int:
     commands.add_parser("unlock", help="delete a stuck lock").add_argument(
         "--yes", action="store_true"
     )
-    commands.add_parser("migrate", help="upgrade the schema")
+    commands.add_parser("migrate", help="upgrade the schema").add_argument(
+        "--force", action="store_true", help="even if recorded calls have not ended"
+    )
 
     args = parser.parse_args(argv)
     admin = Admin(args.main_folder, project=args.project)
@@ -421,7 +442,7 @@ def main(argv: None | list[str] = None) -> int:
                 admin.unlock(yes=True)
 
     elif args.command == "migrate":
-        admin.migrate()
+        admin.migrate(force=args.force)
 
     return 0
 

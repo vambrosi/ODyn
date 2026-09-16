@@ -454,7 +454,7 @@ class Database(CallRecorder):
             query = "SELECT * FROM method_calls;"
 
             self._method_calls = pd.read_sql_query(
-                query, con, parse_dates=["called_at"]
+                query, con, parse_dates=["called_at", "ended_at"]
             )
             self._method_calls.set_index("method_call_id", inplace=True)
 

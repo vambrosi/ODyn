@@ -175,6 +175,28 @@ def test_status_reports_version_and_lock(admin):
     assert status["lock"] == "free"
 
 
+def test_calls_record_when_they_end(admin):
+    admin.sql(statements="UPDATE odors SET odor_name = 'z' WHERE odor_id = 1;")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        admin.sql(statements="INSERT INTO odors (odor_name) VALUES (NULL);")
+
+    calls = admin.db.method_calls
+    assert calls["ended_at"].notna().all() and len(calls) == 2
+
+
+def test_status_lists_calls_that_have_not_ended(admin):
+    with admin.db._locked() as con, con:
+        con.execute("""
+            INSERT INTO method_calls
+                (group_id, method_name, parameter_inputs, git_commit, parameters_used)
+                VALUES (0, 'Group.run_motion_correction', '{}', 'h', '{}');
+        """)
+
+    (call,) = admin.status()["open_calls"]
+    assert call[1] == "Group.run_motion_correction"
+
+
 def test_unlock_needs_yes(admin):
     lock = DatabaseLock(admin.path)
     lock.path.write_text(
