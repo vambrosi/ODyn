@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import subprocess
 
 from collections.abc import Sequence
@@ -43,6 +44,38 @@ OUTPUTS_FOLDER = "outputs"
 
 # Default wait before "database locked"
 DB_TIMEOUT_S = 30
+
+
+def check_name(kind: str, name: str) -> None:
+    """
+    Refuse a name that is not safe as a file name on every machine.
+
+    Used for anything that becomes a file or folder name, like projects and
+    backups, so they all follow the same rule.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+        raise ValueError(
+            f"{kind} names are letters, digits, '_', '-' and '.', starting with "
+            f"a letter or digit, but got {name!r}."
+        )
+
+
+def database_path(main_folder: str | Path, project: None | str = None) -> Path:
+    """
+    Where the database of `main_folder` (or of one of its projects) lives.
+
+    `None` is the shared `.odyn/odyn.db`; a project is `.odyn/projects/<name>.db`.
+    """
+    odyn_folder = Path(main_folder) / ODYN_FOLDER
+
+    if project is None:
+        return odyn_folder / "odyn.db"
+
+    # The project name becomes the file name
+    check_name("Project", project)
+
+    return odyn_folder / PROJECTS_FOLDER / f"{project}.db"
+
 
 # List is invariant     => list[float] is not a list[Value]
 # Sequence is covariant => list[float] is a list[Value]
@@ -100,9 +133,7 @@ GROUP_ACQUISITION_TRIALS = """
 """
 
 
-def _acquisition_trials(
-    con: Connection, query: str, params: list = []
-) -> pd.DataFrame:
+def _acquisition_trials(con: Connection, query: str, params: list = []) -> pd.DataFrame:
     """
     Shared body of `Database.acquisition_trials` / `Group.acquisition_trials`.
 
@@ -318,7 +349,9 @@ def record_call(func):
             self._call_stack.pop()
             logger.removeHandler(handler)
 
-            call_output = json.dumps(jsonable(frame.output)) if frame.output is not None else None
+            call_output = (
+                json.dumps(jsonable(frame.output)) if frame.output is not None else None
+            )
 
             with db._locked() as con, con:
                 con.execute(

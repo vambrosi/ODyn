@@ -1,49 +1,39 @@
 """
-Database schema migrations. Run this script using:
-    `python -m odyn.migrate db_main_folder`
-
-To only regenerate the schema diagram (needs GraphViz `dot`):
-    `python -m odyn.migrate --diagram`
+Database schema migrations. Run them through the admin tool:
+    `python -m odyn.admin <main_folder> [--project <name>] migrate`
 
 To inspect older migrations run:
     `git log -p odyn/latest.sql`
 
-This script:
-- Backs up DB to `.odyn/backups/snapshot_v<OLD>.db`
+A migration:
+- Backs up DB to `backups/snapshot_v<OLD>.db` beside it
 - Applies `latest.sql` migration to DB
 - Updates `user_version`
-- Regenerates the schema diagram (`schema.svg`) from `create.sql`
 """
 
 from __future__ import annotations
 
 import sqlite3
-import subprocess
-import sys
 
 from pathlib import Path
 
 from .locking import DatabaseLock
-from .utils import DB_TIMEOUT_S, ODYN_FOLDER, logger
+from .utils import DB_TIMEOUT_S, database_path, logger
 
 # When adding a new migration you should:
 # - Overwrite latest.sql with the latest migration;
 # - Overwrite create.sql with compatible DB schema;
 # - Bump the SCHEMA_VERSION to match;
-# - Run this script and test_migration.py.
+# - Run test_migration.py, then `python -m odyn.tools diagram`.
 
 SCHEMA_VERSION = 2
 LATEST_MIGRATION = Path(__file__).parent / "latest.sql"
 
-CREATE_SCRIPT = Path(__file__).parent / "create.sql"
-DIAGRAM_SCRIPT = Path(__file__).parent / "diagram.sql"
-SCHEMA_DIAGRAM = Path(__file__).parent / "schema.svg"
 
-
-def migrate(main_folder: str | Path) -> None:
+def migrate(main_folder: str | Path, project: None | str = None) -> None:
     """Migrate DB from v(SCHEMA_VERSION-1) up to vSCHEMA_VERSION."""
 
-    db_path = Path(main_folder) / ODYN_FOLDER / "odyn.db"
+    db_path = database_path(main_folder, project)
     if not db_path.exists():
         raise FileNotFoundError(f"No database at '{db_path}'.")
 
@@ -116,47 +106,6 @@ def migrate(main_folder: str | Path) -> None:
         finally:
             con.close()
 
-    # Keep the diagram in sync with the schema.
-    generate_diagram()
-
-
-def generate_diagram() -> None:
-    """
-    Regenerate `schema.svg` from `create.sql` (needs GraphViz `dot`).
-
-    Builds a in-memory DB from the current schema, renders it to GraphViz
-    DOT via `diagram.sql`, and pipes that through `dot`. Skips
-    with a warning if `dot` is not installed.
-    """
-
-    con = sqlite3.connect(":memory:")
-
-    try:
-        con.executescript(CREATE_SCRIPT.read_text())
-        rows = con.execute(DIAGRAM_SCRIPT.read_text()).fetchall()
-    finally:
-        con.close()
-
-    # SQLite3 CLI joins result rows with newlines.
-    # We do the same here so the DOT statements stay on separate lines.
-    dot = "\n".join((row[0] or "") for row in rows)
-
-    try:
-        result = subprocess.run(
-            ["dot", "-Tsvg"], input=dot, capture_output=True, text=True, check=True
-        )
-
-    except FileNotFoundError:
-        logger.warning("GraphViz 'dot' not found; skipping schema.svg regeneration.")
-        return
-
-    except subprocess.CalledProcessError as error:
-        logger.warning(f"Could not generate schema diagram: {error.stderr.strip()}")
-        return
-
-    SCHEMA_DIAGRAM.write_text(result.stdout)
-    logger.info(f"Regenerated schema diagram at '{SCHEMA_DIAGRAM}'.")
-
 
 def check_integrity(con: sqlite3.Connection) -> None:
     result = con.execute("PRAGMA integrity_check;").fetchone()[0]
@@ -170,13 +119,3 @@ def check_foreign_keys(con: sqlite3.Connection) -> None:
 
     if violations:
         raise RuntimeError(f"Foreign key violations: {violations}")
-
-
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("USAGE: python -m odyn.migrate <main_folder> | --diagram")
-
-    if sys.argv[1] == "--diagram":
-        generate_diagram()
-    else:
-        migrate(sys.argv[1])

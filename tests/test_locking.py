@@ -16,17 +16,7 @@ import pytest
 from odyn import Database
 from odyn.locking import STALE_AFTER_S, DatabaseLock
 from odyn.migrate import SCHEMA_VERSION
-from odyn.utils import logger
 from test_add_mcor_files import build, write_mcor
-
-
-@pytest.fixture
-def odyn_log(caplog):
-    """`caplog` for odyn's logger, which does not pass records up to the root."""
-    logger.addHandler(caplog.handler)
-    yield caplog
-    logger.removeHandler(caplog.handler)
-
 
 # --------------------------------------------------------------------------- #
 # The lock itself

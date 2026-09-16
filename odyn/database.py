@@ -141,7 +141,6 @@ class Database(CallRecorder):
         update=False,
         project: None | str = None,
         can_create: bool = False,
-        _is_test=False,
     ):
         """
         **PARAMETERS**
@@ -158,9 +157,6 @@ class Database(CallRecorder):
         experiment and neither will know, so use one when work should be kept
         apart, not to split work that has to be compared later.
         """
-        # NOTE: _is_test is deliberately not documented above.
-        #       See _copy_for_test for more details.
-
         # Resolved so that every path built from it is absolute and symlink
         # free. Stored paths are relative to this, and the code that makes
         # them relative resolves its side, so leaving this one as given makes
@@ -168,27 +164,7 @@ class Database(CallRecorder):
         self.main_folder = Path(path).resolve()
         self.project: Final[None | str] = project
 
-        odyn_folder = self.main_folder / ODYN_FOLDER
-
-        if project is None:
-            live = odyn_folder / "odyn.db"
-
-        else:
-            # Project name is the db file name so it needs to work everywhere
-            # For simplicity, we allow only ASCII alphanumerics and underscores
-            if not project or not all(
-                letter.isascii() and (letter.isalnum() or letter == "_")
-                for letter in project
-            ):
-                raise ValueError(
-                    "'project' must be letters, digits and "
-                    f"underscores, but instead got {project!r}."
-                )
-
-            live = odyn_folder / PROJECTS_FOLDER / f"{project}.db"
-
-        self._is_test: Final[bool] = _is_test
-        self.path: Final[Path] = self._copy_for_test(live) if _is_test else live
+        self.path: Final[Path] = database_path(self.main_folder, project)
 
         # Database has a default group to record its calls
         self.group_id: Final[int] = 0
@@ -581,49 +557,15 @@ class Database(CallRecorder):
             raise RuntimeError(
                 f"Database schema is v{version} but the code expects "
                 f"v{SCHEMA_VERSION}. Run the migration:\n"
-                f"    python -m odyn.migrate '{self.main_folder}'"
+                f"    python -m odyn.admin '{self.main_folder}'"
+                + (f" --project {self.project}" if self.project else "")
+                + " migrate"
             )
 
         raise RuntimeError(
             f"Database schema is v{version} but the code expects v{SCHEMA_VERSION}. "
             "Your code is out of date! Pull the latest version and restart Python."
         )
-
-    def _copy_for_test(self, source: Path) -> Path:
-        """
-        Returns path to a fresh snapshot of the database.
-        For tests only, via `Database(main_folder, _is_test=True)`.
-
-        PROTECTS DATABASE, BUT ACCESS REAL DATA.
-
-        `source` is whichever database was asked for, so testing against a
-        project copies that project rather than the shared one.
-        """
-        if not source.exists():
-            raise FileNotFoundError(f"No database at '{source}' to copy.")
-
-        # Named after the source, so two projects cannot overwrite each
-        # other's test copy
-        copy = self.main_folder / ODYN_FOLDER / "tests" / source.name
-        copy.parent.mkdir(parents=True, exist_ok=True)
-        copy.unlink(missing_ok=True)
-
-        # Use the online backup API rather than a file copy, holding the
-        # source's lock since it is read like any other use of it.
-        with DatabaseLock(source):
-            origin = sqlite3.connect(source, timeout=DB_TIMEOUT_S)
-            destination = sqlite3.connect(copy)
-
-            try:
-                origin.backup(destination)
-            finally:
-                destination.close()
-                origin.close()
-
-        logger.warning(f"TEST COPY: '{copy.resolve()}'")
-        logger.warning("The shared database will not see anything you do here.")
-
-        return copy
 
     def _get_raw_metadata(self, path: Path) -> None | tuple[Object, Object]:
         tif = TiffFile(path)
