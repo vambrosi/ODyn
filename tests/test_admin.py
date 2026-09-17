@@ -154,6 +154,10 @@ def test_project_names_are_checked(admin):
         with pytest.raises(ValueError, match="Project names are letters"):
             Admin(admin.main_folder, project=bad)
 
+    for reserved in ("main", "Main", "mAIN"):
+        with pytest.raises(ValueError, match="reserved for the main database"):
+            Database(admin.main_folder, project=reserved, can_create=True)
+
     Database(admin.main_folder, project="2026-09-16_before.cleanup", can_create=True)
 
 

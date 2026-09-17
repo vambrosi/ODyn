@@ -77,6 +77,10 @@ def database_path(main_folder: str | Path, project: None | str = None) -> Path:
     # The project name becomes the file name
     check_name("Project", project)
 
+    # Backups name the main database `main`, so a project cannot take that name
+    if project.lower() == "main":
+        raise ValueError(f"'main' is reserved for the main database, got {project!r}.")
+
     return odyn_folder / PROJECTS_FOLDER / f"{project}.db"
 
 
