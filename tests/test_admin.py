@@ -219,8 +219,21 @@ def test_status_lists_calls_that_have_not_ended(admin):
     with admin.db._locked() as con, con:
         con.execute("""
             INSERT INTO method_calls
-                (group_id, method_name, parameter_inputs, git_commit, parameters_used)
-                VALUES (0, 'Group.run_motion_correction', '{}', 'h', '{}');
+                ( group_id
+                , user
+                , method_name
+                , module
+                , code
+                , parameter_inputs
+                , parameters_used
+                ) VALUES (0
+                         , 'someone'
+                         , 'Group.run_motion_correction'
+                         , 'odyn.groups'
+                         , '{}'
+                         , '{}'
+                         , '{}'
+                         );
         """)
 
     (call,) = admin.status()["open_calls"]

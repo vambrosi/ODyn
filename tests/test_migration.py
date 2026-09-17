@@ -87,19 +87,52 @@ def test_migration_matches_fresh_schema(tmp_path):
     con.close()
 
 
-# A minimal FK-valid chain. `migrate` runs PRAGMA foreign_key_check afterwards,
+# Minimal FK-valid chains. `migrate` runs PRAGMA foreign_key_check afterwards,
 # so orphan rows would fail the migration rather than the assertion.
 SEED = r"""
 INSERT INTO groups (group_id) VALUES (0);
 
 INSERT INTO method_calls
-    ( method_call_id
-    , group_id
-    , method_name
-    , parameter_inputs
-    , git_commit
-    , parameters_used
-    ) VALUES (1, 0, 'Group.run_motion_correction', '{}', 'h', '{}');
+    ( method_call_id, group_id, method_name
+    , parameter_inputs, git_commit, parameters_used
+    , ended_at
+    ) VALUES
+        ( 1, 0, 'Group.run_motion_correction'
+        , '{"is_test": true}', 'abc123', '{}'
+        , '2026-09-16 10:00:00'
+        ),
+
+        ( 2, 0, 'Database.add_experiment'
+        , '{}', 'unknown-hash', '{}'
+        , '2026-09-16 10:00:00'
+        ),
+
+        ( 3, 0, 'Group.outcome_count'
+        , '{}', 'abc123', '{}'
+        , NULL
+        );
+
+UPDATE method_calls
+    SET called_at = '2020-01-01 00:00:00'
+    WHERE ended_at IS NULL;
+
+INSERT INTO outputs (method_call_id, file_path, removed)
+    VALUES (1, 'a.png', FALSE);
+"""
+
+# The same call in the current schema, for the tests that stand a current
+# database in for the next version's old one.
+CURRENT_SEED = r"""
+INSERT INTO groups (group_id) VALUES (0);
+
+INSERT INTO method_calls
+    ( method_call_id, group_id, user
+    , method_name, module, code
+    , parameter_inputs, parameters_used
+    ) VALUES ( 1, 0, 'someone'
+             , 'Group.run_motion_correction', 'odyn.groups', '{}'
+             , '{}', '{}'
+             );
 """
 
 
@@ -124,19 +157,55 @@ def migrated_db(tmp_path):
     return old
 
 
-def test_migration_keeps_calls_and_leaves_their_end_unknown(tmp_path):
-    """When earlier calls ended was never recorded, so it is not made up."""
+def test_migration_keeps_calls_and_moves_the_commit_into_code(tmp_path):
+    """What was never recorded is left unknown rather than made up."""
     con = sqlite3.connect(migrated_db(tmp_path))
 
     try:
-        row = con.execute("""
-            SELECT method_name, parameters_used, ended_at
-                FROM method_calls WHERE method_call_id = 1;
-        """).fetchone()
+        rows = con.execute("""
+            SELECT method_call_id, user, module, code
+                 , environment, consumed_calls
+                 , parameter_inputs, ended_at
+                FROM method_calls ORDER BY method_call_id;
+        """).fetchall()
+
+        outputs = con.execute("SELECT method_call_id FROM outputs;").fetchall()
     finally:
         con.close()
 
-    assert row == ("Group.run_motion_correction", "{}", None)
+    assert rows == [
+        (
+            1,
+            "unknown",
+            "odyn.groups",
+            '{"odyn":{"commit":"abc123","dirty":null}}',
+            None,
+            None,
+            '{"is_test": true}',
+            "2026-09-16 10:00:00",
+        ),
+        (
+            2,
+            "unknown",
+            "odyn.database",
+            '{"odyn":{"commit":null,"dirty":null}}',
+            None,
+            None,
+            "{}",
+            "2026-09-16 10:00:00",
+        ),
+        (
+            3,
+            "unknown",
+            "odyn.groups",
+            '{"odyn":{"commit":"abc123","dirty":null}}',
+            None,
+            None,
+            "{}",
+            None,
+        ),
+    ]
+    assert outputs == [(1,)]
 
 
 def test_ended_at_must_be_a_datetime(tmp_path):
@@ -166,7 +235,7 @@ def test_migration_waits_for_calls_that_have_not_ended(tmp_path, monkeypatch):
     monkeypatch.setattr("odyn.migrate.LATEST_MIGRATION", no_op)
 
     con = sqlite3.connect(db_path)
-    con.executescript(SEED)  # a call with no ended_at, started just now
+    con.executescript(CURRENT_SEED)  # a call with no ended_at, started just now
     con.commit()
     con.close()
 
@@ -191,7 +260,7 @@ def test_old_calls_do_not_block_a_migration(tmp_path, monkeypatch):
     monkeypatch.setattr("odyn.migrate.LATEST_MIGRATION", no_op)
 
     con = sqlite3.connect(db_path)
-    con.executescript(SEED)
+    con.executescript(CURRENT_SEED)
     con.execute("UPDATE method_calls SET called_at = '2020-01-01 00:00:00';")
     con.commit()
     con.close()

@@ -6,7 +6,11 @@ DataFrame index, a `Path`, a threshold that came back NaN -- and none of those
 are JSON. `jsonable` turns them into something the `json_valid` CHECKs accept.
 """
 
+import importlib
 import json
+import platform
+import shutil
+import subprocess
 
 from datetime import date, datetime, time
 
@@ -15,7 +19,7 @@ import pandas as pd
 import pytest
 
 from odyn import Database, record_call
-from odyn.utils import jsonable
+from odyn.utils import get_code, jsonable
 
 # --------------------------------------------------------------------------- #
 # jsonable
@@ -117,3 +121,101 @@ def test_awkward_arguments_are_recorded(tmp_path):
     assert used == inputs
     assert output == {"ids": [1, 2], "threshold": None, "when": "2026-09-17 09:30:00"}
     assert row[3] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Provenance
+# --------------------------------------------------------------------------- #
+
+
+def git(folder, *args):
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        cwd=folder,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def repo(tmp_path):
+    """A git repository named `project` with one module committed."""
+    if shutil.which("git") is None:
+        pytest.skip("needs git")
+
+    folder = tmp_path / "project"
+    folder.mkdir()
+    (folder / "analysis.py").write_text("def run(group, *, x=1):\n    return x\n")
+
+    git(folder, "init", "-q")
+    git(folder, "add", ".")
+    git(folder, "commit", "-q", "-m", "first")
+
+    return folder
+
+
+def recorded_calls(db):
+    with db._locked() as con:
+        return con.execute("""
+            SELECT user, method_name, module, code, environment, consumed_calls
+                FROM method_calls ORDER BY method_call_id;
+        """).fetchall()
+
+
+@record_call
+def produce(db):
+    db.set_output({"value": 1})
+
+
+@record_call
+def consume(db):
+    db.latest_output("Database.produce")
+
+
+def test_calls_record_who_where_and_with_what(tmp_path, monkeypatch):
+    monkeypatch.setenv("ODYN_USER", "ana")
+    db = Database(tmp_path, can_create=True)
+
+    produce(db)
+
+    user, name, module, code, environment, consumed = recorded_calls(db)[0]
+
+    assert (user, name, module, consumed) == (
+        "ana",
+        "Database.produce",
+        "test_record_call",
+        None,
+    )
+    assert json.loads(environment)["python"] == platform.python_version()
+
+    if "odyn" in json.loads(code):
+        assert set(json.loads(code)["odyn"]) == {"commit", "dirty"}
+
+
+def test_a_call_records_the_outputs_it_read(tmp_path):
+    db = Database(tmp_path, can_create=True)
+
+    produce(db)
+    consume(db)
+    db.latest_output("Database.produce")  # outside a call: nothing to record
+
+    calls = recorded_calls(db)
+
+    assert len(calls) == 2
+    assert json.loads(calls[1][5]) == [1]
+
+
+def test_code_names_the_repository_a_function_comes_from(repo, monkeypatch):
+    monkeypatch.syspath_prepend(str(repo))
+    analysis = importlib.import_module("analysis")
+
+    (state,) = [
+        info for name, info in get_code(analysis.run).items() if name == "project"
+    ]
+    assert state["dirty"] is False
+
+    (repo / "notes.txt").write_text("untracked files are not code that ran")
+    assert get_code(analysis.run)["project"]["dirty"] is False
+
+    (repo / "analysis.py").write_text("def run(group, *, x=2):\n    return x\n")
+    assert get_code(analysis.run)["project"]["dirty"] is True

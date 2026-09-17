@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import functools
+import getpass
+import inspect
 import json
 import logging
 import math
 import os
+import platform
 import re
 import subprocess
+import sys
 import time
 
 from collections.abc import Sequence
@@ -249,6 +253,9 @@ class CallFrame:
     output: Object | None = None
     used: Object = field(default_factory=dict)
 
+    # Calls whose output this call read through `latest_output`
+    consumed: list[int] = field(default_factory=list)
+
 
 class CallRecorder:
     """
@@ -287,6 +294,12 @@ class CallRecorder:
         """Flag the current call and abort it by raising RuntimeError."""
         self.add_flag(flag)
         raise RuntimeError(message)
+
+    def note_consumed(self, call_id: int) -> None:
+        """Record that the current call read `call_id`'s output."""
+        # Does nothing outside a recorded call
+        if self._call_stack and call_id not in self._call_stack[-1].consumed:
+            self._call_stack[-1].consumed.append(call_id)
 
     def add_output_file(self, path: str | Path) -> None:
         """Record a file in `outputs` (path relative to main_folder)."""
@@ -332,23 +345,32 @@ def record_call(func):
         # methods may change them during the call.
         parameters_used = {**(func.__kwdefaults__ or {}), **kwargs}
 
+        # Asked before taking the lock, since it runs git.
+        code = get_code(func, _caller_file())
+
         with db._locked() as con, con:
             cur = con.cursor()
             cur.execute(
                 """
                 INSERT INTO method_calls
                     ( group_id
+                    , user
                     , method_name
+                    , module
+                    , code
+                    , environment
                     , parameter_inputs
-                    , git_commit
                     , parameters_used
-                    ) VALUES (?, ?, ?, ?, ?);
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 [
                     self.group_id,
+                    get_user(),
                     f"{type(self).__name__}.{func.__name__}",
+                    func.__module__,
+                    json.dumps(code),
+                    json.dumps(get_environment()),
                     json.dumps(jsonable(kwargs)),
-                    get_git_hash(),
                     json.dumps(jsonable(parameters_used)),
                 ],
             )
@@ -387,6 +409,7 @@ def record_call(func):
                           , call_flag = ?
                           , call_output = ?
                           , parameters_used = ?
+                          , consumed_calls = ?
                           , ended_at = datetime('now', 'localtime')
                         WHERE method_call_id = ?
                     """,
@@ -395,6 +418,7 @@ def record_call(func):
                         int(frame.flag),
                         call_output,
                         json.dumps(jsonable(frame.used)),
+                        json.dumps(frame.consumed) if frame.consumed else None,
                         call_id,
                     ],
                 )
@@ -501,23 +525,143 @@ def jsonable(value):
     return str(value)
 
 
-# TODO: - Add failsafe in case git is not on the path
-#       - Embed commit hash in pip installation
-def get_git_hash():
-    try:
-        # Get odyn path
-        package_root = Path(__file__).resolve().parent.parent
+# --------------------------------------------------------------------------- #
+# Provenance
+# --------------------------------------------------------------------------- #
 
-        # Get commit hash for that directory
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=package_root,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
+ODYN_ROOT = Path(__file__).resolve().parent.parent
+
+# Packages whose version is recorded with every call:
+#   `name: (distributions, module)`
+# The module is the fallback for a conda package with no pip metadata
+# (conda's OpenCV has none), and is only read if something already imported it.
+
+ENVIRONMENT_PACKAGES = {
+    "numpy": (("numpy",), "numpy"),
+    "pandas": (("pandas",), "pandas"),
+    "scipy": (("scipy",), "scipy"),
+    "opencv": (("opencv-python", "opencv-python-headless", "opencv"), "cv2"),
+    "caiman": (("caiman",), "caiman"),
+    "tifffile": (("tifffile",), "tifffile"),
+    "h5py": (("h5py",), "h5py"),
+}
+
+
+def get_user() -> str:
+    """Who is running the call: `ODYN_USER` if set, else the computer login."""
+    # Shared computers stay logged in as one user, so `ODYN_USER` is how
+    # people tell themselves apart there.
+    return os.environ.get("ODYN_USER") or getpass.getuser()
+
+
+def _git(*args: str, cwd: str | Path) -> str:
+    return subprocess.check_output(
+        ["git", *args],
+        cwd=cwd,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+
+
+@functools.cache
+def _repo_root(folder: str) -> None | Path:
+    """The git work tree holding `folder`, or None."""
+    try:
+        return Path(_git("rev-parse", "--show-toplevel", cwd=folder).strip())
 
     except Exception:
-        return "unknown-hash"
+        # No git, not a repository, or a folder that no longer exists
+        return None
+
+
+def _repo_state(root: Path) -> None | Object:
+    """`{commit, dirty}` of the work tree at `root`."""
+    # Not cached, unlike the root: a notebook left open while files are edited
+    # or another commit is checked out must not keep recording the old state.
+    try:
+        commit = _git("rev-parse", "HEAD", cwd=root).strip()
+
+        # Untracked files do not change the code that ran
+        changes = _git("status", "--porcelain", "--untracked-files=no", cwd=root)
+
+    except Exception:
+        return None
+
+    return {"commit": commit, "dirty": bool(changes.strip())}
+
+
+def _caller_file() -> None | str:
+    """The file that called into odyn, skipping the decorators in this file."""
+    frame = sys._getframe(1)
+
+    while frame is not None and frame.f_code.co_filename == __file__:
+        frame = frame.f_back
+
+    return frame.f_code.co_filename if frame is not None else None
+
+
+def get_code(func, caller_file: None | str = None) -> Object:
+    """
+    Which code ran, per git repository: `{name: {"commit": ..., "dirty": ...}}`.
+
+    Looks where `func` is defined, at odyn itself, and at the file that called
+    it, so a script in a project repository is recorded too. odyn is always
+    named `odyn`; other repositories go by their folder name. Folders outside
+    any repository are left out.
+    """
+    folders = [ODYN_ROOT]
+
+    try:
+        folders.append(Path(inspect.getfile(func)).resolve().parent)
+
+    except TypeError:
+        pass  # no source file
+
+    # Notebooks and the REPL report names like '<stdin>' that are not files
+    if caller_file and Path(caller_file).is_file():
+        folders.append(Path(caller_file).resolve().parent)
+
+    code: Object = {}
+    odyn_root = _repo_root(str(ODYN_ROOT))
+
+    for folder in folders:
+        root = _repo_root(str(folder))
+        name = "odyn" if root == odyn_root else root.name if root else None
+
+        if name is None or name in code:
+            continue
+
+        state = _repo_state(root)
+
+        if state is not None:
+            code[name] = state
+
+    return code
+
+
+@functools.cache
+def get_environment() -> Object:
+    """Python and the versions of `ENVIRONMENT_PACKAGES`, once per process."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    found: Object = {"python": platform.python_version()}
+
+    for name, (distributions, module) in ENVIRONMENT_PACKAGES.items():
+        for distribution in distributions:
+            try:
+                found[name] = version(distribution)
+                break
+
+            except PackageNotFoundError:
+                continue
+
+        else:
+            imported = sys.modules.get(module)
+
+            if getattr(imported, "__version__", None):
+                found[name] = str(imported.__version__)
+
+    return found
 
 
 # --------------------------------------------------------------------------- #

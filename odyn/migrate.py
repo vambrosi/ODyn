@@ -26,7 +26,7 @@ from .utils import DB_TIMEOUT_S, backup_path, database_path, logger
 # - Bump the SCHEMA_VERSION to match;
 # - Run test_migration.py, then `python -m odyn.tools diagram`.
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Calls running for longer than this limit are probably dead
 RUNNING_FOR_AT_MOST = "-2 days"
