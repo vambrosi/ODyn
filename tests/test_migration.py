@@ -77,6 +77,10 @@ def test_migration_matches_fresh_schema(tmp_path):
     migrate(main_folder)
 
     assert get_schema(old) == get_schema(fresh)
+
+    (backup,) = (main_folder / ODYN_FOLDER / "backups").glob("*.db")
+    assert backup.name.endswith(f"-main-snapshot-v{SCHEMA_VERSION - 1}.db")
+
     con = sqlite3.connect(old)
 
     assert con.execute("PRAGMA user_version;").fetchone()[0] == SCHEMA_VERSION

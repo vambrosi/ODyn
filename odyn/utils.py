@@ -7,6 +7,7 @@ import math
 import os
 import re
 import subprocess
+import time
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -39,6 +40,9 @@ INFO_FOLDER = ".odyn/olfactometer/Log/Info"
 #   - its own files (scripts, outputs, movies) in '<main_folder>/projects/<name>'
 PROJECTS_FOLDER = "projects"
 
+# Backups of every database, in '<main_folder>/.odyn/backups'
+BACKUPS_FOLDER = "backups"
+
 # Where saved results go, under the project folder or the main folder
 OUTPUTS_FOLDER = "outputs"
 
@@ -50,8 +54,7 @@ def check_name(kind: str, name: str) -> None:
     """
     Refuse a name that is not safe as a file name on every machine.
 
-    Used for anything that becomes a file or folder name, like projects and
-    backups, so they all follow the same rule.
+    Used for anything that becomes a file or folder name, like project names.
     """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
         raise ValueError(
@@ -75,6 +78,24 @@ def database_path(main_folder: str | Path, project: None | str = None) -> Path:
     check_name("Project", project)
 
     return odyn_folder / PROJECTS_FOLDER / f"{project}.db"
+
+
+def backup_path(main_folder: str | Path, project: None | str, kind: str) -> Path:
+    """
+    Where a new backup of a database goes.
+
+    Backups of the main database and of every project share one folder, as
+    `.odyn/backups/<time>-<project or main>-<kind>.db`, so they sort by when
+    they were made and never clash when copied together.
+    """
+    database_path(main_folder, project)  # checks the project name
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    label = "main" if project is None else project
+
+    return (
+        Path(main_folder) / ODYN_FOLDER / BACKUPS_FOLDER / f"{stamp}-{label}-{kind}.db"
+    )
 
 
 # List is invariant     => list[float] is not a list[Value]

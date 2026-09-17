@@ -6,7 +6,7 @@ To inspect older migrations run:
     `git log -p odyn/latest.sql`
 
 A migration:
-- Backs up DB to `backups/snapshot_v<OLD>.db` beside it
+- Backs up DB to `.odyn/backups/<time>-<project or main>-snapshot-v<OLD>.db`
 - Applies `latest.sql` migration to DB
 - Updates `user_version`
 """
@@ -18,7 +18,7 @@ import sqlite3
 from pathlib import Path
 
 from .locking import DatabaseLock
-from .utils import DB_TIMEOUT_S, database_path, logger
+from .utils import DB_TIMEOUT_S, backup_path, database_path, logger
 
 # When adding a new migration you should:
 # - Overwrite latest.sql with the latest migration;
@@ -71,18 +71,22 @@ def migrate(
             check_integrity(con)
 
             # Backs up DB using SQLite online backup API
-            backups = db_path.parent / "backups"
-            backups.mkdir(exist_ok=True)
+            backup = backup_path(main_folder, project, f"snapshot-v{version}")
+            backup.parent.mkdir(parents=True, exist_ok=True)
 
-            backup_path = backups / f"snapshot_v{version}.db"
-            dest = sqlite3.connect(backup_path)
+            # Only another migration of this database, in the same second,
+            # could have written it (and it would have to wait for the lock).
+            if backup.exists():
+                raise FileExistsError(f"'{backup}' already exists. Try again.")
+
+            dest = sqlite3.connect(backup)
 
             try:
                 con.backup(dest)
             finally:
                 dest.close()
 
-            logger.info(f"Backed up database to '{backup_path}'.")
+            logger.info(f"Backed up database to '{backup}'.")
 
             # Dropping tables can violate FOREIGN KEY contraints
             migration_script = LATEST_MIGRATION.read_text()

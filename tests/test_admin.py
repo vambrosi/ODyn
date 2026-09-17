@@ -20,6 +20,16 @@ def odor_names(db):
     return set(db.from_query("SELECT odor_name FROM odors;")["odor_name"])
 
 
+def backups(main_folder):
+    return sorted((main_folder / ".odyn" / "backups").glob("*.db"))
+
+
+@pytest.fixture
+def same_second(monkeypatch):
+    """Every backup name gets the same time, as if made in the same second."""
+    monkeypatch.setattr("odyn.utils.time.strftime", lambda _: "20260916-120000")
+
+
 @pytest.fixture
 def admin(tmp_path):
     Database(tmp_path, can_create=True)
@@ -39,7 +49,8 @@ def test_sql_backs_up_applies_and_is_recorded(admin):
     assert rows == 1
     assert odor_names(admin.db) == before | {"new odor"}
 
-    (backup,) = (admin.path.parent / "backups").glob("before-sql-*.db")
+    (backup,) = backups(admin.main_folder)
+    assert backup.name.endswith("-main-before-sql-1.db")
     old = sqlite3.connect(backup)
     assert "new odor" not in {
         row[0] for row in old.execute("SELECT odor_name FROM odors;")
@@ -58,7 +69,7 @@ def test_several_statements_are_all_or_nothing(admin):
         )
 
     assert "first" not in odor_names(admin.db)
-    assert not list((admin.path.parent / "backups").glob("*"))
+    assert not list((admin.main_folder / ".odyn" / "backups").glob("*"))
     assert not admin.db._con.in_transaction
 
 
@@ -98,35 +109,50 @@ def test_edits_run_under_the_lock(admin):
 # --------------------------------------------------------------------------- #
 
 
-def test_backup_writes_a_checked_copy(admin):
-    path = admin.backup("before-cleanup")
+def test_backup_writes_a_checked_copy(admin, same_second):
+    path = admin.backup()
 
-    assert path == admin.path.parent / "backups" / "before-cleanup.db"
+    assert path == backups(admin.main_folder)[0]
+    assert path.name == "20260916-120000-main-manual-backup.db"
     con = sqlite3.connect(path)
     assert con.execute("PRAGMA integrity_check;").fetchone()[0] == "ok"
     con.close()
     assert not list(path.parent.glob(".*.tmp"))
 
 
-def test_backup_never_overwrites(admin):
-    path = admin.backup("same")
+def test_backup_never_overwrites(admin, same_second):
+    path = admin.backup()
     written = path.stat().st_mtime_ns
 
-    with pytest.raises(FileExistsError, match="Delete it or choose another name"):
-        admin.backup("same.db")
+    with pytest.raises(FileExistsError, match="Delete it or try again"):
+        admin.backup()
 
     assert path.stat().st_mtime_ns == written
 
 
-def test_backup_and_project_names_follow_one_rule(admin):
-    for bad in ("../elsewhere", ".hidden", "with space", ""):
-        with pytest.raises(ValueError, match="Backup names are letters"):
-            admin.backup(bad)
+def test_backups_of_every_database_share_one_folder(admin, same_second):
+    Database(admin.main_folder, project="p1", can_create=True)
+    project = Admin(admin.main_folder, project="p1")
 
+    project.backup()
+    admin.backup()
+    project.sql(statements="INSERT INTO odors (odor_name) VALUES ('x');")
+
+    assert [path.name for path in backups(admin.main_folder)] == [
+        "20260916-120000-main-manual-backup.db",
+        "20260916-120000-p1-before-sql-1.db",
+        "20260916-120000-p1-manual-backup.db",
+    ]
+    assert project.status()["backups"] == [
+        "20260916-120000-p1-before-sql-1.db",
+        "20260916-120000-p1-manual-backup.db",
+    ]
+
+
+def test_project_names_are_checked(admin):
+    for bad in ("../elsewhere", ".hidden", "with space", ""):
         with pytest.raises(ValueError, match="Project names are letters"):
             Admin(admin.main_folder, project=bad)
-
-    assert admin.backup("2026-09-16_before.cleanup").exists()
 
     Database(admin.main_folder, project="2026-09-16_before.cleanup", can_create=True)
 
@@ -249,8 +275,8 @@ def test_command_line(admin, tmp_path):
     main([folder, "script", str(script)])
     assert "file" in odor_names(admin.db)
 
-    main([folder, "backup", "from-cli"])
-    assert (admin.path.parent / "backups" / "from-cli.db").exists()
+    main([folder, "backup"])
+    assert backups(admin.main_folder)[-1].name.endswith("-main-manual-backup.db")
 
     main([folder, "snapshot"])
     main([folder, "unlock", "--yes"])

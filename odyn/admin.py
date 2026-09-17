@@ -9,7 +9,7 @@ run while other people and cluster jobs are using the database.
 python -m odyn.admin <main_folder> [--project NAME] status
 python -m odyn.admin <main_folder> sql "UPDATE ...; DELETE ..."
 python -m odyn.admin <main_folder> script edits.sql
-python -m odyn.admin <main_folder> backup NAME
+python -m odyn.admin <main_folder> backup
 python -m odyn.admin <main_folder> snapshot
 python -m odyn.admin <main_folder> unlock [--yes]
 python -m odyn.admin <main_folder> migrate
@@ -41,16 +41,17 @@ from .database import Database, _has_database
 from .locking import DatabaseLock, _describe
 from .migrate import SCHEMA_VERSION, migrate, open_calls
 from .utils import (
+    BACKUPS_FOLDER,
     DB_TIMEOUT_S,
+    ODYN_FOLDER,
     CallFrame,
     CallRecorder,
-    check_name,
+    backup_path,
     database_path,
     logger,
     record_call,
 )
 
-BACKUPS_FOLDER = "backups"
 SNAPSHOTS_FOLDER = "snapshots"
 
 
@@ -65,7 +66,7 @@ class Admin(CallRecorder):
     admin.status()                                 # version, lock, copies
     admin.sql(statements="UPDATE ...")             # back up, then apply
     admin.script("edits.sql")                      # the same, from a file
-    admin.backup("before-cleanup")                 # backups/before-cleanup.db
+    admin.backup()                                 # .odyn/backups/<time>-main-manual-backup.db
     admin.snapshot()                               # snapshots/odyn.db for other tools
     admin.unlock(yes=True)                         # remove a stuck lock
     admin.migrate()                                # upgrade the schema
@@ -107,7 +108,8 @@ class Admin(CallRecorder):
         Back up the database, then run `statements` as one transaction.
 
         Either every statement is applied or none is. The backup goes to
-        `backups/before-sql-<time>-<call id>.db`, and the call is recorded.
+        `.odyn/backups/<time>-<project or main>-before-sql-<call id>.db`, and the
+        call is recorded with its path.
         Do not put `BEGIN` or `COMMIT` in `statements`.
 
         **RETURNS**
@@ -122,8 +124,9 @@ class Admin(CallRecorder):
             raise ValueError("No SQL statements given.")
 
         db = self.db
-        name = f"before-sql-{time.strftime('%Y%m%d-%H%M%S')}-{self.current_call_id}"
-        target = self.path.parent / BACKUPS_FOLDER / f"{name}.db"
+        # The call id keeps quick edits in the same second apart
+        kind = f"before-sql-{self.current_call_id}"
+        target = backup_path(self.main_folder, self.project, kind)
 
         # The backup and the change happen in one hold of the lock, so the
         # backup is exactly the database the change was applied to.
@@ -163,17 +166,15 @@ class Admin(CallRecorder):
     # Copies
     # ----------------------------------------------------------------------- #
 
-    def backup(self, name: str) -> Path:
+    def backup(self) -> Path:
         """
-        Copy the database to `backups/<name>.db` beside it, checked afterwards.
+        Copy the database to `.odyn/backups`, checked afterwards.
 
-        Never overwrites: if the name is taken, delete the old copy first or
-        choose another name.
+        The copy is `<time>-<project or main>-manual-backup.db`. Backups of every
+        database share that folder and sort by when they were made. Never
+        overwrites an existing file.
         """
-        name = name.removesuffix(".db")
-        check_name("Backup", name)
-
-        target = self.path.parent / BACKUPS_FOLDER / f"{name}.db"
+        target = backup_path(self.main_folder, self.project, "manual-backup")
 
         with self._raw_connection() as con:
             temp = _claim_and_copy(con, target)
@@ -239,7 +240,13 @@ class Admin(CallRecorder):
             version = con.execute("PRAGMA user_version;").fetchone()[0]
             running = open_calls(con)
 
-        backups = sorted((self.path.parent / BACKUPS_FOLDER).glob("*.db"))
+        # The folder is shared, so only this database's backups
+        label = "main" if self.project is None else self.project
+        backups = sorted(
+            (self.main_folder / ODYN_FOLDER / BACKUPS_FOLDER).glob(
+                f"????????-??????-{label}-*.db"
+            )
+        )
         snapshot = self.path.parent / SNAPSHOTS_FOLDER / self.path.name
 
         status = {
@@ -265,7 +272,7 @@ class Admin(CallRecorder):
 
         if running is None:
             logger.info("Calls:     this schema does not record when calls end")
-            
+
         else:
             logger.info(f"Calls:     {len(running)} started recently and not ended")
 
@@ -353,7 +360,7 @@ def _claim_and_copy(con: sqlite3.Connection, target: Path) -> Path:
         os.close(os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
     except FileExistsError:
         raise FileExistsError(
-            f"'{target}' already exists. Delete it or choose another name."
+            f"'{target}' already exists. Delete it or try again."
         ) from None
 
     try:
@@ -405,7 +412,7 @@ def main(argv: None | list[str] = None) -> int:
     commands.add_parser("sql", help="back up, then run SQL").add_argument("statements")
     commands.add_parser("script", help="the same, from a file").add_argument("file")
 
-    commands.add_parser("backup", help="copy to backups/NAME.db").add_argument("name")
+    commands.add_parser("backup", help="copy to .odyn/backups")
     commands.add_parser("snapshot", help="refresh the copy other programs read")
     commands.add_parser("unlock", help="delete a stuck lock").add_argument(
         "--yes", action="store_true"
@@ -427,7 +434,7 @@ def main(argv: None | list[str] = None) -> int:
         admin.script(args.file)
 
     elif args.command == "backup":
-        admin.backup(args.name)
+        admin.backup()
 
     elif args.command == "snapshot":
         admin.snapshot()
