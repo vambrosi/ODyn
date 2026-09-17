@@ -11,15 +11,13 @@ import time
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from enum import Enum, IntEnum, IntFlag
+from enum import IntFlag
 from io import StringIO
 from pathlib import Path
-from tqdm.auto import tqdm
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias, Union
 
 if TYPE_CHECKING:
     from .database import Database
-    from .groups import Group
     from datetime import datetime
     from sqlite3 import Connection
 
@@ -104,9 +102,12 @@ def backup_path(main_folder: str | Path, project: None | str, kind: str) -> Path
 
 # List is invariant     => list[float] is not a list[Value]
 # Sequence is covariant => list[float] is a list[Value]
-type BasicTypes = None | bool | int | float | str | datetime
-type Value = BasicTypes | Object | Sequence[Value]
-type Object = dict[str, Value]
+#
+# `TypeAlias` rather than a `type` statement, which needs Python 3.12. These are
+# evaluated where they are written, so names not defined yet are quoted.
+BasicTypes: TypeAlias = Union[None, bool, int, float, str, "datetime"]
+Value: TypeAlias = Union[BasicTypes, "Object", Sequence["Value"]]
+Object: TypeAlias = dict[str, "Value"]
 
 # --------------------------------------------------------------------------- #
 # Database queries
@@ -481,9 +482,18 @@ def jsonable(value):
     if hasattr(value, "tolist"):
         return jsonable(value.tolist())
 
-    # datetime, date, time, pandas Timestamp
+    # datetime, date, time, pandas Timestamp.
+    #
+    # A space instead of 'T', like SQLite's `datetime('now')`. `sep` goes as a
+    # keyword because `date` and `time` take none: they raise TypeError and fall
+    # back, whereas `time.isoformat(" ")` would read it as a timespec and raise
+    # ValueError instead.
     if hasattr(value, "isoformat"):
-        return value.isoformat()
+        try:
+            return value.isoformat(sep=" ")
+
+        except TypeError:
+            return value.isoformat()
 
     if isinstance(value, os.PathLike):
         return os.fspath(value)

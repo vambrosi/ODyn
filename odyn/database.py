@@ -35,6 +35,7 @@ from collections import defaultdict
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import time, datetime, timedelta
+from enum import IntEnum, IntFlag
 from pathlib import Path
 from scipy.signal import find_peaks
 from sqlite3 import Connection, Cursor
@@ -45,11 +46,26 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from tqdm.auto import tqdm
+
 from .groups import Group
 from .locking import DatabaseLock
 from .migrate import SCHEMA_VERSION
-from .utils import *
-from .utils import CallFrame, CallRecorder
+from .utils import (
+    ACQUISITION_TRIALS,
+    CHECK,
+    CROSS,
+    DB_TIMEOUT_S,
+    INFO_FOLDER,
+    OUTPUTS_FOLDER,
+    PROJECTS_FOLDER,
+    CallFrame,
+    CallRecorder,
+    Object,
+    database_path,
+    logger,
+    record_call,
+)
 from .utils import _acquisition_trials, _method_calls_dataframe
 
 # --------------------------------------------------------------------------- #
@@ -1390,8 +1406,8 @@ def _db_insert(cur: Cursor, table_name: str, data: Object | list[Object]) -> int
 
     insertion_query = (
         f"INSERT INTO {table_name} "
-        f"({", ".join(template.keys())}) "
-        f"VALUES (:{", :".join(template.keys())});"
+        f"({', '.join(template.keys())}) "
+        f"VALUES (:{', :'.join(template.keys())});"
     )
 
     if isinstance(data, list):
@@ -1773,7 +1789,7 @@ def _parse_program_starts(db: Database, start: datetime) -> list[tuple[datetime,
         db.main_folder
         / INFO_FOLDER
         / start.date().strftime("%Y%m")
-        / f"Program_{start.date().strftime("%Y%m%d")}.txt"
+        / f"Program_{start.date().strftime('%Y%m%d')}.txt"
     )
 
     starts = []

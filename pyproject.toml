@@ -7,7 +7,23 @@ name = "odyn"
 readme = "README.md"
 version = "0.0.1"
 
-dependencies = ["tomlkit"]
+# Also what Black targets.
+requires-python = ">=3.10"
+
+# caiman and OpenCV come from the conda `caiman`
+dependencies = [
+    "bokeh",
+    "h5py",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "scipy",
+    "tifffile",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "scikit-image"]
 
 [tool.setuptools]
 packages = ["odyn"]

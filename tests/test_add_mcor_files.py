@@ -6,8 +6,6 @@ The risk it guards against is a wrong file being attached to an acquisition,
 which would quietly corrupt every analysis downstream.
 """
 
-import sqlite3
-
 import numpy as np
 import pytest
 import tifffile
