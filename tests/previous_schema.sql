@@ -1,4 +1,4 @@
--- CREATE DATABASE WITH SCHEMA v3
+-- CREATE DATABASE WITH SCHEMA v4
 CREATE TABLE IF NOT EXISTS mice
     ( mouse_id          TEXT PRIMARY KEY
     , mouse_sex         TEXT NOT NULL CHECK(mouse_sex IN ('M', 'F'))
@@ -117,17 +117,34 @@ CREATE TABLE IF NOT EXISTS odors
     , odor_name TEXT NOT NULL
     ) STRICT;
 
+-- One row per `@record_call` call.
+--
+-- NOTES:
+-- - `group_id` is which object recorded the call (0 for the `Database`), not
+--   what the call is about.
+-- - `user` is `ODYN_USER` if set, otherwise the computer's login name.
+-- - `module` is where the function is defined (`func.__module__`).
+-- - `code` is the commit of each repository involved, and whether it had
+--   uncommitted edits: {"odyn": {"commit": "a1b2c3d...", "dirty": true}, ...}
+-- - `environment` holds the versions of a few named packages, not a full list.
+-- - `consumed_calls` lists the calls whose output `latest_output` read.
+-- - `ended_at` is NULL while the call runs, or if its process died.
+
 CREATE TABLE IF NOT EXISTS method_calls
     ( method_call_id    INTEGER PRIMARY KEY
     , group_id          INTEGER NOT NULL
+    , user              TEXT NOT NULL
     , called_at         TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     , method_name       TEXT NOT NULL
+    , module            TEXT NOT NULL
+    , code              TEXT NOT NULL CHECK(json_valid(code))
+    , environment       TEXT CHECK(environment IS NULL OR json_valid(environment))
     , parameter_inputs  TEXT NOT NULL CHECK(json_valid(parameter_inputs))
-    , git_commit        TEXT NOT NULL
+    , parameters_used   TEXT NOT NULL CHECK(json_valid(parameters_used))
+    , consumed_calls    TEXT CHECK(consumed_calls IS NULL OR json_valid(consumed_calls))
     , call_log          TEXT NOT NULL DEFAULT ''
     , call_flag         INTEGER NOT NULL DEFAULT 0
     , call_output       TEXT CHECK(call_output IS NULL OR json_valid(call_output))
-    , parameters_used   TEXT NOT NULL CHECK(json_valid(parameters_used))
     , ended_at          TEXT CHECK(ended_at IS NULL OR datetime(ended_at) IS NOT NULL)
 
     , FOREIGN KEY (group_id) REFERENCES groups(group_id)

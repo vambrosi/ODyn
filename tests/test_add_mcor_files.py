@@ -31,17 +31,22 @@ def build(tmp_path, acquisitions=3):
     db = Database(tmp_path, can_create=True)
 
     with db._locked() as con, con:
+        con.execute("INSERT INTO mice (mouse_id) VALUES (1);")
+        con.execute(
+            "INSERT INTO sessions (session_id, mouse_id, session_date) "
+            "VALUES (1, 1, '2026-01-01');"
+        )
         con.execute(
             """
             INSERT INTO experiments
-                ( exp_id, exp_name, exp_type, exp_start, mouse_id
+                ( exp_id, session_id, exp_name, exp_type, exp_path, exp_start
                 , height_px, width_px, height_um, width_um, frame_count, frame_rate
-                , laser_power_920, laser_power_1040, loop_acq_interval_s
-                ) VALUES ( 1, ?, 'loop', '2026-01-01 10:00:00', 'm001'
+                , objective
+                ) VALUES ( 1, 1, ?, 'loop', ?, '2026-01-01 10:00:00'
                          , ?, ?, ?, ?, ?
-                         , 14.0, 10, 0, 10.0);
+                         , 14.0, 20);
             """,
-            [STEM, HEIGHT, WIDTH, float(HEIGHT), float(WIDTH), FRAMES],
+            [STEM, EXP_DIR, HEIGHT, WIDTH, float(HEIGHT), float(WIDTH), FRAMES],
         )
 
         for index in range(acquisitions):

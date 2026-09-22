@@ -1,82 +1,19 @@
--- MIGRATION v3 -> v4
+-- NO MIGRATION v4 -> v5
 --
--- CHANGES:
--- - Add method_calls.user, module, code, environment and consumed_calls.
--- - Drop method_calls.git_commit; its commit moves into `code`.
+-- v5 is a rebuild, not a migration, so this file holds no statements and
+-- `migrate.py` refuses (`MIGRATES_FROM = None`) before it would be read.
 --
--- NOTES:
--- - Usual create, copy, and drop to add NOT NULL columns without a default.
--- - Calls recorded before this migration get:
---      (1) user 'unknown';
---      (2) module from the class in method_name ('unknown' for custom functions)
---      (3) {"odyn": {"commit": <git_commit>, "dirty": null}}
---      (4) environment and consumed_calls stay NULL.
-
-CREATE TABLE method_calls_v4
-    ( method_call_id    INTEGER PRIMARY KEY
-    , group_id          INTEGER NOT NULL
-    , user              TEXT NOT NULL
-    , called_at         TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
-    , method_name       TEXT NOT NULL
-    , module            TEXT NOT NULL
-    , code              TEXT NOT NULL CHECK(json_valid(code))
-    , environment       TEXT CHECK(environment IS NULL OR json_valid(environment))
-    , parameter_inputs  TEXT NOT NULL CHECK(json_valid(parameter_inputs))
-    , parameters_used   TEXT NOT NULL CHECK(json_valid(parameters_used))
-    , consumed_calls    TEXT CHECK(consumed_calls IS NULL OR json_valid(consumed_calls))
-    , call_log          TEXT NOT NULL DEFAULT ''
-    , call_flag         INTEGER NOT NULL DEFAULT 0
-    , call_output       TEXT CHECK(call_output IS NULL OR json_valid(call_output))
-    , ended_at          TEXT CHECK(ended_at IS NULL OR datetime(ended_at) IS NOT NULL)
-
-    , FOREIGN KEY (group_id) REFERENCES groups(group_id)
-    ) STRICT;
-
-INSERT INTO method_calls_v4
-    ( method_call_id
-    , group_id
-    , user
-    , called_at
-    , method_name
-    , module
-    , code
-    , environment
-    , parameter_inputs
-    , parameters_used
-    , consumed_calls
-    , call_log
-    , call_flag
-    , call_output
-    , ended_at
-    )
-    SELECT method_call_id
-         , group_id
-         , 'unknown'
-         , called_at
-         , method_name
-         , CASE
-               WHEN method_name LIKE 'Database.%' THEN 'odyn.database'
-               WHEN method_name LIKE 'Group.%' THEN 'odyn.groups'
-               WHEN method_name LIKE 'Admin.%' THEN 'odyn.admin'
-               ELSE 'unknown'
-           END
-         , json_object(
-               'odyn',
-               json_object(
-                   'commit', NULLIF(git_commit, 'unknown-hash'),
-                   'dirty', NULL
-               )
-           )
-         , NULL
-         , parameter_inputs
-         , parameters_used
-         , NULL
-         , call_log
-         , call_flag
-         , call_output
-         , ended_at
-        FROM method_calls;
-
-DROP TABLE method_calls;
-
-ALTER TABLE method_calls_v4 RENAME TO method_calls;
+-- The previous migration is still in the history:
+--     git log -p odyn/latest.sql
+--
+-- WHY THERE IS NO MIGRATION:
+-- - `sessions`, `users`, `streams`, `sync_blocks`, the odor panel tables and
+--   the annotation tables are new, and what would fill them (which experiments
+--   share a day, who ran a call, which vials were loaded) is not in a v4 file.
+-- - `experiments` loses `mouse_id` and the rig-setting columns and gains
+--   `session_id`, `exp_path` and a required `objective`; `acquisitions` loses
+--   its sync-derived columns to `sync_blocks`, which need the sync H5 re-read.
+--
+-- WHAT TO DO INSTEAD:
+-- Start a new project database, `Database(main_folder, project="main-sync")`,
+-- and ingest into it. The v4 database stays readable with the tagged release.

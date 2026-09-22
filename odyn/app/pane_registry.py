@@ -1,0 +1,683 @@
+"""
+The registries: users, mice, odors, panels and vials.
+
+Each is a table of what the database holds beside a form to add to it. These
+write straight to the database (through the worker), since a mouse or a vial
+is a fact on its own and does not wait for the end of the day.
+"""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QSplitter,
+    QTableView,
+    QVBoxLayout,
+    QWidget,
+)
+
+from .context import Context
+from .fields import COLUMN_FIELDS
+from .forms import Form, RecipeForm
+from .style import text_style
+from .models import FrameModel, fit_columns
+
+
+def _table() -> QTableView:
+    view = QTableView()
+    view.setModel(FrameModel())
+    view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+    view.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+    view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+    view.setAlternatingRowColors(True)
+    fit_columns(view)
+
+    return view
+
+
+def _model(view: QTableView) -> FrameModel:
+    model = view.model()
+    assert isinstance(model, FrameModel)
+
+    return model
+
+
+class UsersPane(QWidget):
+    """
+    Who is using the app: one button per person, like a login screen.
+
+    Users are added with `python -m odyn.admin <folder> add-user <login>
+    "<Name>"`; the login is what the workstations know the person by, the
+    name is what shows here.
+    """
+
+    picked = Signal(str)
+
+    def __init__(self, context: Context, parent=None):
+        super().__init__(parent)
+        self.context = context
+        self.buttons: dict[str, QPushButton] = {}
+
+        outer = QVBoxLayout(self)
+        outer.addStretch(2)
+
+        title = QLabel("Users")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 22px; font-weight: bold;")
+        outer.addWidget(title)
+
+        self.hint = QLabel("")
+        self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hint.setStyleSheet(text_style("computed"))
+        outer.addWidget(self.hint)
+        outer.addSpacing(16)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.names = QVBoxLayout()
+        self.names.setSpacing(8)
+        row.addLayout(self.names)
+        row.addStretch(1)
+        outer.addLayout(row)
+        outer.addStretch(3)
+
+        context.changed.connect(self.reload)
+        self.reload()
+
+    def reload(self) -> None:
+        self.context.run(lambda db: db.users, self._show, "users")
+
+    def _show(self, users) -> None:
+        while self.names.count():
+            item = self.names.takeAt(0)
+            widget = item.widget()
+
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+        self.buttons = {}
+        active = users[~users["retired"].astype(bool)].sort_values("display_name")
+        current = self.context.user
+
+        for _, row in active.iterrows():
+            user_name = str(row["user_name"])
+            label = str(row["display_name"])
+            button = QPushButton(label)
+            button.setMinimumSize(320, 48)
+            button.setStyleSheet("font-size: 16px;")
+            button.setCheckable(True)
+            button.setChecked(user_name == current)
+            button.clicked.connect(lambda _=False, name=user_name: self._pick(name))
+            self.buttons[user_name] = button
+            self.names.addWidget(button)
+
+        if active.empty:
+            self.hint.setText(
+                "No users yet: add one with  python -m odyn.admin <folder> "
+                'add-user <login> "<Name>"'
+            )
+        elif current in self.buttons:
+            self.hint.setText(f"Signed in as {self.buttons[current].text()}")
+        else:
+            self.hint.setText("Click on your name")
+
+    def _pick(self, user_name: str) -> None:
+        for name, button in self.buttons.items():
+            button.setChecked(name == user_name)
+
+        self.hint.setText(f"Signed in as {self.buttons[user_name].text()}")
+
+        if user_name != self.context.user:
+            self.context.set_user(user_name)
+
+        self.picked.emit(user_name)
+
+
+class MicePane(QWidget):
+    """The mice, and a form to register or update one."""
+
+    def __init__(self, context: Context, parent=None):
+        super().__init__(parent)
+        self.context = context
+
+        layout = QHBoxLayout(self)
+        self.table = _table()
+        layout.addWidget(self.table, 2)
+
+        side = QVBoxLayout()
+        box = QGroupBox("Register or update a mouse")
+        box_layout = QVBoxLayout(box)
+        self.form = Form(list(COLUMN_FIELDS["mouse"]))
+        box_layout.addWidget(self.form)
+
+        lines = QFormLayout()
+        self.lines = QLineEdit()
+        self.lines.setPlaceholderText("DAT-Cre: het, TIGRE: het")
+        self.lines.setToolTip(
+            "The lines the animal carries and its genotype for each, as "
+            "'line: wt|het|hom', separated by commas. Leave a genotype out "
+            "when it is not known. Blank leaves the stored lines alone."
+        )
+        lines.addRow("Lines", self.lines)
+        box_layout.addLayout(lines)
+
+        button = QPushButton("Save mouse")
+        button.clicked.connect(self._save)
+        box_layout.addWidget(button)
+
+        side.addWidget(box)
+        side.addStretch(1)
+        layout.addLayout(side, 1)
+
+        self.table.doubleClicked.connect(self._pick)
+        context.changed.connect(self.reload)
+        self.reload()
+
+    def reload(self) -> None:
+        def load(db):
+            mice = db.mice.copy()
+            lines = db.mouse_lines
+
+            if len(lines):
+                carried = lines.groupby(level=0).apply(
+                    lambda rows: ", ".join(
+                        f"{line}: {genotype}" if genotype else str(line)
+                        for line, genotype in zip(rows["line"], rows["genotype"])
+                    )
+                )
+                mice["lines"] = carried.reindex(mice.index)
+            else:
+                mice["lines"] = None
+
+            return mice
+
+        self.context.run(load, lambda mice: _model(self.table).set_frame(mice), "mice")
+
+    def _pick(self, index) -> None:
+        row = _model(self.table).row_values(index.row())
+        self.form.set_values(
+            {
+                "mouse_id": row.get("mouse_id"),
+                "sex": row.get("mouse_sex"),
+                "dob": row.get("mouse_dob"),
+                "sensor": row.get("sensor"),
+            }
+        )
+        self.lines.setText(str(row.get("lines") or ""))
+
+    def _save(self) -> None:
+        values = self.form.values()
+
+        if "mouse_id" not in values:
+            self.context.report("Mouse", "A mouse needs its number.")
+            return
+
+        lines = _parse_lines(self.lines.text())
+
+        self.context.run(
+            lambda db: db.set_mouse(
+                mouse_id=values["mouse_id"],
+                sex=values.get("sex"),
+                dob=values.get("dob"),
+                sensor=values.get("sensor"),
+                lines=lines,
+            ),
+            None,
+            "set_mouse",
+            writes=True,
+        )
+
+
+def _parse_lines(text: str) -> None | dict[str, None | str]:
+    """`'DAT-Cre: het, TIGRE'` -> `{'DAT-Cre': 'het', 'TIGRE': None}`; blank -> None."""
+    text = text.strip()
+
+    if not text:
+        return None
+
+    lines: dict[str, None | str] = {}
+
+    for part in text.split(","):
+        if not part.strip():
+            continue
+
+        name, _, genotype = part.partition(":")
+        lines[name.strip()] = genotype.strip() or None
+
+    return lines
+
+
+class OdorsPane(QWidget):
+    """The odor registry, and a form to add one or correct its facts."""
+
+    def __init__(self, context: Context, parent=None):
+        super().__init__(parent)
+        self.context = context
+        self.chemicals: list[tuple[int, str]] = []
+
+        layout = QHBoxLayout(self)
+        self.table = _table()
+        layout.addWidget(self.table, 2)
+
+        box = QGroupBox("Add or update an odor")
+        form = QFormLayout(box)
+        self.odor_id = QSpinBox()
+        self.odor_id.setRange(0, 9999)
+        self.name = QLineEdit()
+        self.pressure = QLineEdit()
+        self.pressure.setPlaceholderText("e.g 10 (empty for mixes)")
+        self.source = QLineEdit()
+        self.source.setPlaceholderText("e.g. PubChem")
+
+        form.addRow("Odor ID", self.odor_id)
+        form.addRow("Name", self.name)
+        form.addRow("Vapor pressure (mmHg)", self.pressure)
+        form.addRow("VP source", self.source)
+
+        # A mix is what it is made of: two or more chemicals, fixed once added
+        self.components_box = QVBoxLayout()
+        self.components: list[QComboBox] = []
+        self.kind = QLabel("")
+        self.kind.setStyleSheet(text_style("computed"))
+        add_component = QPushButton("Add a component")
+        add_component.clicked.connect(self._add_component)
+        form.addRow("Composition", self.kind)
+        form.addRow(self.components_box)
+        form.addRow(add_component)
+
+        add = QPushButton("Add odor")
+        add.clicked.connect(self._add)
+        update = QPushButton("Update the odor with this #")
+        update.clicked.connect(self._update)
+        form.addRow(add)
+        form.addRow(update)
+
+        side = QVBoxLayout()
+        side.addWidget(box)
+        side.addStretch(1)
+        layout.addLayout(side, 1)
+
+        self.table.doubleClicked.connect(self._pick)
+        context.changed.connect(self.reload)
+        self._refresh_kind()
+        self.reload()
+
+    def reload(self) -> None:
+        def load(db):
+            odors = db.odors.copy()
+            names = odors["odor_name"]
+            parts = db.odor_components["component_id"].map(
+                lambda i: f"{i} {names.get(i, '?')}"
+            )
+            made_of = parts.groupby(level=0).agg(" + ".join)
+            odors["components"] = made_of.reindex(odors.index).where(
+                odors["mix"].astype(bool), ""
+            )
+            chemicals = [
+                (int(i), str(n))
+                for i, n in names[~odors["mix"].astype(bool)].items()
+                if i != 0  # the solvent is not mixed in
+            ]
+
+            return odors, chemicals
+
+        def show(loaded):
+            odors, self.chemicals = loaded
+            _model(self.table).set_frame(odors)
+
+        self.context.run(load, show, "odors")
+
+    def _pick(self, index) -> None:
+        row = _model(self.table).row_values(index.row())
+        self.odor_id.setValue(int(row["odor_id"]))
+        self.name.setText(str(row.get("odor_name") or ""))
+        pressure = row.get("vapor_pressure_mmhg")
+        self.pressure.setText(
+            "" if pressure is None or pressure != pressure else f"{pressure:g}"
+        )
+        self.source.setText(str(row.get("vapor_pressure_source") or ""))
+        self._clear_components()
+
+    def _add_component(self) -> None:
+        picker = QComboBox()
+
+        for odor_id, name in self.chemicals:
+            picker.addItem(f"{odor_id} - {name}", odor_id)
+
+        remove = QPushButton("remove")
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(picker, 1)
+        row.addWidget(remove)
+        remove.clicked.connect(lambda: self._remove_component(picker, holder))
+        self.components.append(picker)
+        self.components_box.addWidget(holder)
+        self._refresh_kind()
+
+    def _remove_component(self, picker: QComboBox, holder: QWidget) -> None:
+        self.components.remove(picker)
+        holder.setParent(None)
+        holder.deleteLater()
+        self._refresh_kind()
+
+    def _clear_components(self) -> None:
+        while self.components_box.count():
+            item = self.components_box.takeAt(0)
+            widget = item.widget()
+
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+        self.components = []
+        self._refresh_kind()
+
+    def _refresh_kind(self) -> None:
+        n = len(self.components)
+        self.kind.setText("1 odor (just itself)" if n == 0 else f"a mix of {n} odors")
+
+    def _component_ids(self) -> list[int]:
+        return [int(picker.currentData()) for picker in self.components]
+
+    def _fields(self) -> dict:
+        pressure = self.pressure.text().strip()
+
+        return {
+            "odor_id": self.odor_id.value(),
+            "odor_name": self.name.text().strip() or None,
+            "vapor_pressure_mmhg": float(pressure) if pressure else None,
+            "vapor_pressure_source": self.source.text().strip() or None,
+        }
+
+    def _add(self) -> None:
+        try:
+            fields = self._fields()
+        except ValueError:
+            self.context.report("Odor", "The vapor pressure is a number.")
+            return
+
+        if not fields["odor_name"]:
+            self.context.report("Odor", "An odor needs a name.")
+            return
+
+        components = self._component_ids()
+        self.context.run(
+            lambda db: db.add_odor(components=components or None, **fields),
+            lambda _: self._clear_components(),
+            "add_odor",
+            writes=True,
+        )
+
+    def _update(self) -> None:
+        try:
+            fields = self._fields()
+        except ValueError:
+            self.context.report("Odor", "The vapor pressure is a number.")
+            return
+
+        if self.components:
+            self.context.report(
+                "Odor", "What a mix is made of does not change; add a new odor."
+            )
+            return
+
+        self.context.run(
+            lambda db: db.update_odor(**fields), None, "update_odor", writes=True
+        )
+
+
+def current_vials(vials):
+    """
+    The vial that is in each position of each panel now: the one made last
+    (the highest `vial_id` among those made the same day), ordered by panel
+    and position, so remade racks do not pile up in the table.
+    """
+    if vials.empty:
+        return vials
+
+    ordered = vials.sort_values(
+        ["panel_name", "vial_position", "made_on"], na_position="first"
+    ).reset_index()
+    latest = ordered.groupby(["panel_id", "vial_position"], sort=False).tail(1)
+    latest = latest.sort_values(["panel_name", "vial_position"])
+
+    return latest.set_index("vial_id")
+
+
+class PanelsPane(QWidget):
+    """Panels and their vials, with the recipe calculator for new ones."""
+
+    def __init__(self, context: Context, parent=None):
+        super().__init__(parent)
+        self.context = context
+        self.odors: list[tuple[int, str]] = []
+        self.chemicals: dict[int, tuple[str, None | float]] = {}
+        self.made_of: dict[int, list[int]] = {}
+        self._panels = None
+        self._vial_odors = None
+        self._all_vials = None
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        layout = QVBoxLayout(self)
+        layout.addWidget(splitter)
+
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.addWidget(
+            QLabel(
+                "Vials in the olfactometer: the latest made for each panel and position"
+            )
+        )
+        self.table = _table()
+        left_layout.addWidget(self.table, 1)
+
+        new_panel = QHBoxLayout()
+        self.panel_name = QLineEdit()
+        self.panel_name.setPlaceholderText("new panel name, e.g. print_v3")
+        add_panel = QPushButton("Add panel")
+        add_panel.clicked.connect(self._add_panel)
+        new_panel.addWidget(self.panel_name, 1)
+        new_panel.addWidget(add_panel)
+        left_layout.addLayout(new_panel)
+        splitter.addWidget(left)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+
+        head = QFormLayout()
+        self.panel = QComboBox()
+        self.made_on = QLineEdit()
+        self.made_on.setPlaceholderText("YYYY-MM-DD, blank for today")
+        head.addRow("Panel", self.panel)
+        head.addRow("Made on", self.made_on)
+        right_layout.addLayout(head)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self.recipes_widget = QWidget()
+        self.recipes = QVBoxLayout(self.recipes_widget)
+        self.recipes.addStretch(1)
+        scroll.setWidget(self.recipes_widget)
+        right_layout.addWidget(scroll, 1)
+
+        buttons = QHBoxLayout()
+        add_vial = QPushButton("Add a vial to the list")
+        add_vial.clicked.connect(self._add_recipe)
+        copy_last = QPushButton("Copy the panel's last rack")
+        copy_last.clicked.connect(self._copy_last)
+        save = QPushButton("Save these vials")
+        save.clicked.connect(self._save)
+        buttons.addWidget(add_vial)
+        buttons.addWidget(copy_last)
+        buttons.addStretch(1)
+        buttons.addWidget(save)
+        right_layout.addLayout(buttons)
+
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([800, 400])
+
+        self.forms: list[RecipeForm] = []
+
+        context.changed.connect(self.reload)
+        self.reload()
+
+    def reload(self) -> None:
+        def load(db):
+            vials = db.vials.join(db.panels["panel_name"], on="panel_id")
+            vials = vials.join(db.odors["odor_name"], on="odor_id")
+            columns = [
+                "panel_name",
+                "vial_position",
+                "odor_name",
+                "made_on",
+                "vial_sccm",
+                "total_sccm",
+                "total_volume_ml",
+                "solvent_volume_ml",
+            ]
+            active = db.odors[~db.odors["retired"].astype(bool)]
+            odors = [(int(i), str(n)) for i, n in active["odor_name"].items()]
+            chemicals = {
+                int(i): (
+                    str(row["odor_name"]),
+                    (
+                        None
+                        if row["vapor_pressure_mmhg"] != row["vapor_pressure_mmhg"]
+                        else float(row["vapor_pressure_mmhg"])
+                    ),
+                )
+                for i, row in db.odors[~db.odors["mix"].astype(bool)].iterrows()
+            }
+            made_of: dict[int, list[int]] = {}
+
+            for odor_id, component_id in db.odor_components["component_id"].items():
+                made_of.setdefault(int(odor_id), []).append(int(component_id))
+
+            return (
+                current_vials(vials)[columns],
+                db.panels,
+                odors,
+                (chemicals, made_of),
+                db.vial_odors,
+                db.vials,
+            )
+
+        self.context.run(load, self._show, "vials")
+
+    def _show(self, loaded) -> None:
+        vials, panels, odors, (chemicals, made_of), vial_odors, all_vials = loaded
+        _model(self.table).set_frame(vials)
+        self.odors, self.chemicals, self.made_of = odors, chemicals, made_of
+        self._panels, self._vial_odors, self._all_vials = panels, vial_odors, all_vials
+
+        current = self.panel.currentText()
+        self.panel.blockSignals(True)
+        self.panel.clear()
+        self.panel.addItems([str(name) for name in panels["panel_name"]])
+        if current:
+            self.panel.setCurrentText(current)
+        self.panel.blockSignals(False)
+
+    def _add_panel(self) -> None:
+        name = self.panel_name.text().strip()
+
+        if not name:
+            return
+
+        self.context.run(
+            lambda db: db.add_panel(panel_name=name),
+            lambda _: self.panel_name.clear(),
+            "add_panel",
+            writes=True,
+        )
+
+    def _add_recipe(self) -> RecipeForm:
+        form = RecipeForm(self.odors, self.chemicals, self.made_of)
+        form.position.setValue(len(self.forms) + 1)
+        self.forms.append(form)
+        self.recipes.insertWidget(self.recipes.count() - 1, form)
+
+        return form
+
+    def _copy_last(self) -> None:
+        """Fill the list with the panel's most recent rack, ready to re-date."""
+        panel = self.panel.currentText()
+        panel_ids = self._panels.index[self._panels["panel_name"] == panel]
+
+        if not len(panel_ids) or not len(self._all_vials):
+            return
+
+        mine = self._all_vials[self._all_vials["panel_id"] == panel_ids[0]]
+
+        # The newest vial per position: rows are inserted in order, so the
+        # highest id in a position is the last one made
+        latest = (
+            mine.reset_index()
+            .sort_values("vial_id")
+            .drop_duplicates("vial_position", keep="last")
+        )
+
+        self._clear_forms()
+
+        for _, row in latest.iterrows():
+            form = self._add_recipe()
+            form.position.setValue(int(row["vial_position"]))
+            form.delivered.setCurrentIndex(
+                max(form.delivered.findData(int(row["odor_id"])), 0)
+            )
+            form.vial_sccm.setValue(float(row["vial_sccm"]))
+            form.total_sccm.setValue(float(row["total_sccm"]))
+            form.total_volume.setValue(float(row["total_volume_ml"]))
+
+            if row["vial_id"] not in self._vial_odors.index:
+                continue
+
+            pipetted = self._vial_odors.loc[[row["vial_id"]]]
+            form.set_targets(
+                {
+                    int(c["odor_id"]): float(c["target_ppm"])
+                    for _, c in pipetted.iterrows()
+                }
+            )
+
+    def _clear_forms(self) -> None:
+        for form in self.forms:
+            form.setParent(None)
+            form.deleteLater()
+
+        self.forms = []
+
+    def _save(self) -> None:
+        panel = self.panel.currentText()
+
+        if not panel:
+            self.context.report("Vials", "Pick a panel, or add one first.")
+            return
+
+        if not self.forms:
+            self.context.report("Vials", "Nothing to save: add a vial to the list.")
+            return
+
+        vials = [form.vial() for form in self.forms]
+        made_on = self.made_on.text().strip() or None
+
+        self.context.run(
+            lambda db: db.add_vials(panel_name=panel, vials=vials, made_on=made_on),
+            lambda _: self._clear_forms(),
+            "add_vials",
+            writes=True,
+        )

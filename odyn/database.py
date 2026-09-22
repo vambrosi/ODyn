@@ -1,49 +1,16 @@
-# --------------------------------------------------------------------------- #
-# NOTE:
-#   - Programs with same name can be different
-#   - RWD Olfactometer trigger
-#   - All odors have concentration, even monomolecular ones (add to DB)
-#   - Not in metadata: Odor Dilution (%v/v), Odor Made in Date
-#   - Inconsistent a:b and a/b usage
-#   - Record vial to odor association
-#
-# TODO:
-#   - Add mcors that where already made to DB.
-#   - Assert that non-passive trials have a non "na" outcome
-#   - Start a test suite (so far only for DB tests)
-#   - Add quality control plots for ported MATLAB code
-#   - Add pavlovian reward to warm ups
-#
-#   - What to do about some particular experiments?
-#       - '20250703/SID200' has more trials in .csv than in H5
-#
-# MAYBE TODO:
-#   - Add 'computer' column/prefix when there is a folder in the table.
-#   ( Paths starting with "." should be still relative to the
-#       main_folder which is independent of the computer )
-#   - Maybe use some env/global variables like $SERVER, $COMPUTER_NAME.
-#   - Maybe should add small db for consolidation in folders that are not relative.
-#   - Add git hash to every db entry? (To help db updates...)
-#   - Make a function that creates .py file containing the whole
-#     processing/analysis pipeline, to run on the server.
-# --------------------------------------------------------------------------- #
-
 import json
+import re
 import sqlite3
 
-from collections import defaultdict
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import time, datetime, timedelta
+from datetime import date, time, datetime, timedelta
 from enum import IntEnum, IntFlag
 from pathlib import Path
-from scipy.signal import find_peaks
 from sqlite3 import Connection, Cursor
 from tifffile import TiffFile, TiffPage
 from typing import Final
 
-import h5py
-import numpy as np
 import pandas as pd
 
 from tqdm.auto import tqdm
@@ -51,33 +18,75 @@ from tqdm.auto import tqdm
 from .groups import Group
 from .locking import DatabaseLock
 from .migrate import SCHEMA_VERSION
+from .sync import DecodedSync, decode, summary
 from .utils import (
     ACQUISITION_TRIALS,
+    ACQUISITIONS,
+    ANNOTATION_KEYS,
+    ANNOTATION_TARGETS,
+    ANNOTATIONS,
     CHECK,
     CROSS,
     DB_TIMEOUT_S,
+    EVENTS,
+    EXPERIMENT_VIALS,
+    EXPERIMENTS,
+    GROUP_EXPERIMENTS,
     INFO_FOLDER,
+    MCOR_FILES,
+    METHOD_CALLS,
+    MICE,
+    MOUSE_LINES,
+    ODORS,
+    ODOR_COMPONENTS,
+    OUTPUTS,
     OUTPUTS_FOLDER,
+    PANELS,
+    PROGRAMS,
     PROJECTS_FOLDER,
+    SESSIONS,
+    STREAMS,
+    SYNC_BLOCKS,
+    TRIALS,
+    USERS,
+    VIAL_ODORS,
+    VIALS,
     CallFrame,
     CallRecorder,
     Object,
+    TableSpec,
+    Value,
     database_path,
+    get_user,
     logger,
     record_call,
 )
-from .utils import _acquisition_trials, _method_calls_dataframe
+from .utils import _method_calls_dataframe, _read_table
 
 # --------------------------------------------------------------------------- #
 # Constants
 # --------------------------------------------------------------------------- #
 
-TIMEDELTA_MS = timedelta(milliseconds=1)
-H5_TOLERANCE = timedelta(milliseconds=100)
 DT_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 
 # Tolerance for ScanImage settings silent rounding
 WHOLE_TOLERANCE = 0.01
+
+# TIFF metadata that is tier 3 in `create.sql`: recorded, but read by nothing in
+# odyn, so it is stored as annotations instead of columns. Read out of the same
+# dict as the columns so the across-TIFF consistency check still sees it.
+RIG_ANNOTATIONS = ("laser_power_920", "laser_power_1040", "loop_acq_interval_s")
+
+# What ScanImage calls a recording of each `exp_type`. A z-stack is a grab with
+# several slices, so the TIFF cannot tell the two apart; the caller does.
+ACQ_STATES = {"loop": "loop", "grab": "grab", "zstack": "grab"}
+
+# Where the GUI leaves the olfactometer's own definition of the programs an
+# experiment ran, one JSON file per program, inside the experiment folder.
+OLFACTOMETER_FOLDER = "olfactometer"
+
+# Where the sync H5 of an experiment lives, inside the experiment folder
+SYNC_FOLDER = "sync"
 
 # TODO: Make program types part of the database
 PROGRAM_TYPES = [
@@ -97,12 +106,29 @@ class ExpFlag(IntFlag):
     """
 
     ALREADY_IN_DB = 1 << 1  # experiment already present, nothing inserted
-    MULTIPLE_H5 = 1 << 2  # more than one H5 file in the folder, skipped
     UNSUPPORTED_METADATA = 1 << 3  # TIFF does not have expected metadata format
     METADATA_CHANGED = 1 << 4  # TIFF metadata changed, skipped
-    H5_UNMATCHED_ACQ = 1 << 5  # some H5 trials had no matching acquisition
-    TRIAL_NO_ACQ = 1 << 6  # some trials matched H5 but had no acquisition
-    NOT_A_GRAB = 1 << 7  # add_grab_folder found a file that was not a grab
+    NOT_THE_SESSION = 1 << 5  # file names disagree with the session given
+    WRONG_ACQ_STATE = 1 << 7  # a TIFF is not what `exp_type` says (loop/grab)
+    NO_PROGRAM_CONFIG = 1 << 8  # a program has no olfactometer definition
+
+
+class SyncFlag(IntFlag):
+    """
+    call_flag bits for `Database.decode_sync` (bit 0 reserved by `CallFlag.RAISED`).
+    """
+
+    NO_SYNC_FILE = 1 << 1  # nothing to decode in <experiment>/sync/
+    MULTIPLE_SYNC_FILES = 1 << 2  # more than one H5 there and none was named
+    INTERRUPTED = 1 << 3  # the recording was not stopped properly
+    FRAGMENTS = 1 << 4  # short bursts were set aside
+    BLOCK_COUNT_MISMATCH = 1 << 5  # bursts and acquisitions do not pair up
+    TRIAL_COUNT_MISMATCH = 1 << 6  # odor bursts and trials do not pair up
+    ODOR_PULSES = 1 << 7  # a burst with no valve pulse, or more than one
+    CLOCK_SKEW = 1 << 8  # the two computers disagree beyond `max_skew_s`
+    NO_CAMERA = 1 << 9  # an acquisition without camera strobes (no pupil)
+    FRAME_COUNT = 1 << 10  # frames in a burst differ from the ScanImage setting
+    NO_TRIALS = 1 << 11  # the experiment has no trials to match the odor bursts to
 
 
 class TrialPhase(IntEnum):
@@ -125,27 +151,25 @@ class Database(CallRecorder):
 
     **USAGE**
     ```python
-    db = Database(main_folder)
+    db = Database(main_folder, project="main-sync")
     ```
 
     **RELEVANT PROPERTIES**
     ```python
         db.groups             # `List` of `Group`s for processing/analysis
 
-        db.acquisitions       # `DataFrame` with acquisition metadata
-        db.events             # `DataFrame` with olfactometer events
-        db.experiments        # `DataFrame` with experiment metadata
-        db.mcor_files         # `DataFrame` with mcor files metadata
-        db.method_calls       # `DataFrame` with `@record_call` functions
-        db.odors              # `DataFrame` with current list of odors
-        db.programs           # `DataFrame` with one entry per _Event.csv_ file
-        db.trials             # `DataFrame` with all olfactometer trials
+        db.mice               # `DataFrame` per table: mice, sessions, experiments,
+        db.experiments        #   acquisitions, streams, sync_blocks, programs,
+        db.acquisitions       #   trials, events, odors, panels, vials, vial_odors,
+        db.annotations        #   experiment_vials, annotation_keys, annotations,
+        db.method_calls       #   method_calls, outputs, users, mcor_files
     ```
 
     **RELEVANT METHODS**
     ```python
-        db.add_experiment(...)          # Add a new experiment folder
-        db.update(...)                  # Find and add all experiment folders
+        db.add_experiment(...)          # Add a recording folder to a session
+        db.add_annotations(...)         # Record facts about a row
+        db.annotations_for("experiment")# One column per annotation key
         db.latest_calls(method_name)    # `DataFrame` with `method_name` calls
         db.from_query(sql)              # `DataFrame` from a SQL `SELECT`
     ```
@@ -154,19 +178,21 @@ class Database(CallRecorder):
     def __init__(
         self,
         path: str | Path,
-        update=False,
         project: None | str = None,
         can_create: bool = False,
+        user: None | str = None,
     ):
         """
         **PARAMETERS**
         - `path` is the main folder holding the experiment folders
-        - `update` searches the main folder for experiments to add
         - `project` is a separate database in the same main folder, at
         `.odyn/projects/<project>.db`. `None` is the shared one.
         - `can_create` makes a new, empty database if none is found. Leave it
         `False` to get an error instead, so a typo in `path` or `project` does
         not quietly create a database somewhere else.
+        - `user` is recorded as the author of every call made through this
+        object. Leave it out to use the computer login (or `ODYN_USER`), pass
+        it on a shared login or someone else's computer.
 
         **ALERT**
         Projects do not see each other. Two of them can hold the same
@@ -179,6 +205,7 @@ class Database(CallRecorder):
         # relative_to fail on a relative main folder or through a symlink.
         self.main_folder = Path(path).resolve()
         self.project: Final[None | str] = project
+        self.user: Final[str] = user or get_user()
 
         self.path: Final[Path] = database_path(self.main_folder, project)
 
@@ -187,18 +214,8 @@ class Database(CallRecorder):
 
         # Initialize "private" variables
         self._call_stack: list[CallFrame] = []
-        self._acquisitions: None | pd.DataFrame = None
-        self._acquisition_trials: None | pd.DataFrame = None
-        self._events: None | pd.DataFrame = None
-        self._experiments: None | pd.DataFrame = None
+        self._tables: dict[str, pd.DataFrame] = {}
         self._groups: dict[int, Group] = {}  # Caches groups one-by-one
-        self._group_experiments: None | pd.DataFrame = None
-        self._mcor_files: None | pd.DataFrame = None
-        self._method_calls: None | pd.DataFrame = None
-        self._odors: None | pd.DataFrame = None
-        self._outputs: None | pd.DataFrame = None
-        self._programs: None | pd.DataFrame = None
-        self._trials: None | pd.DataFrame = None
 
         # Checked before anything to not leave traces due to a typo.
         if not can_create and not _has_database(self.path):
@@ -236,10 +253,6 @@ class Database(CallRecorder):
                     # Fresh DB is already at the latest schema
                     con.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
 
-                    # Insert default database group
-                    query = "INSERT OR IGNORE INTO groups (group_id) VALUES (?);"
-                    con.execute(query, [self.group_id])
-
                 logger.info(f"Database created at: '{self.path.resolve()}'")
 
             else:
@@ -250,9 +263,6 @@ class Database(CallRecorder):
 
             self._con.execute("PRAGMA foreign_keys = ON;")
             self._data_version = self._con.execute("PRAGMA data_version;").fetchone()[0]
-
-        if update:
-            self.update()
 
     def __del__(self):
         # `__init__` can raise before the connection exists (a bad `project`,
@@ -291,6 +301,26 @@ class Database(CallRecorder):
                     self._con.rollback()
                     logger.error("Rolled back changes that were never committed.")
 
+    @contextmanager
+    def _writing(self) -> Generator[Cursor]:
+        """
+        One transaction with foreign keys on, for the writers below.
+
+        ```python
+        with self._writing() as cur:
+            _db_insert(cur, "mice", {...})
+        ```
+
+        The caches are dropped on the way out, since something changed.
+        """
+        with self._locked() as con, con:
+            cur = con.cursor()
+            cur.execute("PRAGMA foreign_keys = ON;")
+
+            yield cur
+
+        self._reset_caches()
+
     @property
     def project_folder(self) -> Path:
         """
@@ -319,27 +349,6 @@ class Database(CallRecorder):
         """
         return self.main_folder if self.project is None else self.project_folder
 
-    # ----------------------------------------------------------------------- #
-    # SQLite Tables as DataFrames
-    # ----------------------------------------------------------------------- #
-
-    @property
-    def acquisitions(self) -> pd.DataFrame:
-        """`DataFrame` with acquisition metadata"""
-        with self._locked() as con:
-            self._refresh_if_stale()
-
-            if self._acquisitions is not None:
-                return self._acquisitions
-
-            query = "SELECT * FROM acquisitions;"
-            self._acquisitions = pd.read_sql_query(
-                query, con, parse_dates=["acq_start", "odor_start", "odor_end"]
-            )
-            self._acquisitions.set_index("acq_id", inplace=True)
-
-            return self._acquisitions
-
     @property
     def outputs_folder(self) -> Path:
         """
@@ -350,59 +359,156 @@ class Database(CallRecorder):
         """
         return self.files_folder / OUTPUTS_FOLDER
 
+    # ----------------------------------------------------------------------- #
+    # SQLite Tables as DataFrames
+    # ----------------------------------------------------------------------- #
+
+    def _table(self, spec: TableSpec) -> pd.DataFrame:
+        """The cached DataFrame of `spec`, read on first use."""
+        with self._locked() as con:
+            self._refresh_if_stale()
+
+            if spec.name not in self._tables:
+                self._tables[spec.name] = _read_table(con, spec, spec.all_rows)
+
+            return self._tables[spec.name]
+
+    @property
+    def users(self) -> pd.DataFrame:
+        """`DataFrame` with the names that can author a call"""
+        return self._table(USERS)
+
+    @property
+    def mice(self) -> pd.DataFrame:
+        """`DataFrame` with one row per mouse"""
+        return self._table(MICE)
+
+    @property
+    def mouse_lines(self) -> pd.DataFrame:
+        """`DataFrame` with one row per mouse and line it carries"""
+        return self._table(MOUSE_LINES)
+
+    @property
+    def sessions(self) -> pd.DataFrame:
+        """`DataFrame` with one row per mouse and day"""
+        return self._table(SESSIONS)
+
+    @property
+    def experiments(self) -> pd.DataFrame:
+        """`DataFrame` with experiment metadata"""
+        return self._table(EXPERIMENTS)
+
+    @property
+    def group_experiments(self) -> pd.DataFrame:
+        """`DataFrame` with both group and experiment data"""
+        return self._table(GROUP_EXPERIMENTS)
+
+    @property
+    def acquisitions(self) -> pd.DataFrame:
+        """
+        `DataFrame` with acquisition metadata
+
+        The `sync_*` columns come from the decoded sync file and are empty
+        until `decode_sync` has run for the experiment.
+        """
+        return self._table(ACQUISITIONS)
+
     @property
     def acquisition_trials(self) -> pd.DataFrame:
         """
         `DataFrame` with each acquisition and the associated trial data.
 
-        Odor starts and ends are prepended with `acq` or `trial` depending
-        on the table of origin. The former come from H5 timings and the
-        later from olfactometer event files. Acquisitions that are not
-        associated with a trial are kept, just with null entries.
+        `sync_*` columns come from the DAQ sync file and `trial_*` ones from
+        the olfactometer event files. Acquisitions that are not associated
+        with a trial are kept, just with null entries.
 
         To compute `events` timedeltas use the trial (olfactometer) timings.
         """
-        with self._locked() as con:
-            self._refresh_if_stale()
+        return self._table(ACQUISITION_TRIALS)
 
-            if self._acquisition_trials is not None:
-                return self._acquisition_trials
+    @property
+    def streams(self) -> pd.DataFrame:
+        """`DataFrame` with the whole-file recordings (sync H5, videos)"""
+        return self._table(STREAMS)
 
-            self._acquisition_trials = _acquisition_trials(con, ACQUISITION_TRIALS)
-            return self._acquisition_trials
+    @property
+    def sync_blocks(self) -> pd.DataFrame:
+        """`DataFrame` with the decoded frame bursts of every sync file"""
+        return self._table(SYNC_BLOCKS)
+
+    @property
+    def mcor_files(self) -> pd.DataFrame:
+        """`DataFrame` with mcor files metadata"""
+        return self._table(MCOR_FILES)
+
+    @property
+    def programs(self) -> pd.DataFrame:
+        """`DataFrame` with one entry per olfactometer run"""
+        return self._table(PROGRAMS)
+
+    @property
+    def trials(self) -> pd.DataFrame:
+        """`DataFrame` with all olfactometer trials"""
+        return self._table(TRIALS)
 
     @property
     def events(self) -> pd.DataFrame:
         """`DataFrame` with olfactometer events"""
-        with self._locked() as con:
-            self._refresh_if_stale()
-
-            if self._events is not None:
-                return self._events
-
-            query = "SELECT * FROM events;"
-
-            self._events = pd.read_sql_query(query, con, parse_dates=["event_time"])
-            self._events.set_index("event_id", inplace=True)
-
-            return self._events
+        return self._table(EVENTS)
 
     @property
-    def experiments(self) -> pd.DataFrame:
-        """`DataFrame` with experiment metadata"""
-        with self._locked() as con:
-            self._refresh_if_stale()
+    def odors(self) -> pd.DataFrame:
+        """`DataFrame` with the odor registry, ids as in the olfactometer"""
+        return self._table(ODORS)
 
-            if self._experiments is not None:
-                return self._experiments
+    @property
+    def odor_components(self) -> pd.DataFrame:
+        """`DataFrame` with the single chemicals each mix is made of"""
+        return self._table(ODOR_COMPONENTS)
 
-            query = "SELECT * FROM experiments;"
-            self._experiments = pd.read_sql_query(
-                query, con, parse_dates=["exp_start", "added_to_db_at"]
-            )
-            self._experiments.set_index("exp_id", inplace=True)
+    @property
+    def panels(self) -> pd.DataFrame:
+        """`DataFrame` with the named sets of vials"""
+        return self._table(PANELS)
 
-            return self._experiments
+    @property
+    def vials(self) -> pd.DataFrame:
+        """`DataFrame` with one row per physical vial as made up"""
+        return self._table(VIALS)
+
+    @property
+    def vial_odors(self) -> pd.DataFrame:
+        """`DataFrame` with what was pipetted into each vial"""
+        return self._table(VIAL_ODORS)
+
+    @property
+    def experiment_vials(self) -> pd.DataFrame:
+        """`DataFrame` with which vials each experiment ran"""
+        return self._table(EXPERIMENT_VIALS)
+
+    @property
+    def annotation_keys(self) -> pd.DataFrame:
+        """`DataFrame` with what can be annotated, indexed by `(applies_to, key)`"""
+        return self._table(ANNOTATION_KEYS)
+
+    @property
+    def annotations(self) -> pd.DataFrame:
+        """
+        `DataFrame` with every annotation ever written, oldest first.
+
+        Use `annotations_for(...)` for the current value of each key.
+        """
+        return self._table(ANNOTATIONS)
+
+    @property
+    def method_calls(self) -> pd.DataFrame:
+        """`DataFrame` with `@record_call` functions"""
+        return self._table(METHOD_CALLS)
+
+    @property
+    def outputs(self) -> pd.DataFrame:
+        """`DataFrame` with output files of functions"""
+        return self._table(OUTPUTS)
 
     @property
     def groups(self) -> dict[int, Group]:
@@ -422,138 +528,143 @@ class Database(CallRecorder):
 
         return self._groups[group_id]
 
-    @property
-    def group_experiments(self) -> pd.DataFrame:
-        """`DataFrame` with both group and experiment data"""
-        with self._locked() as con:
-            self._refresh_if_stale()
+    def annotations_for(self, target_type: str) -> pd.DataFrame:
+        """
+        One row per annotated `session`/`experiment`/`program`/... , one column per key.
 
-            if self._group_experiments is not None:
-                return self._group_experiments
+        **EXAMPLE**
+        ```python
+        deep = db.annotations_for("experiment").query("fov_depth_um > 200")
+        db.experiments.join(deep, how="inner")
+        ```
 
-            query = """
-                SELECT group_id, e.* FROM group_experiments AS ge
-                    JOIN experiments AS e ON e.exp_id = ge.exp_id
-                    WHERE group_id != ?;
-            """
-            self._group_experiments = pd.read_sql_query(
-                query, con, params=[self.group_id]
-            )
-            self._group_experiments.set_index("group_id", inplace=True)
+        Every key holds one value, so each column is a plain number, string or
+        date and the table behaves like any other. Annotations are append-only,
+        so what appears here is the latest value written for each key (a key
+        cleared with `None` reads as missing); the earlier ones are in
+        `db.annotations`.
+        """
+        keys = self.annotation_keys
 
-            return self._group_experiments
-
-    @property
-    def mcor_files(self) -> pd.DataFrame:
-        """`DataFrame` with mcor files metadata"""
-        with self._locked() as con:
-            self._refresh_if_stale()
-
-            if self._mcor_files is not None:
-                return self._mcor_files
-
-            query = "SELECT * FROM mcor_files;"
-            self._mcor_files = pd.read_sql_query(query, con)
-            self._mcor_files.set_index("acq_id", inplace=True)
-
-            return self._mcor_files
-
-    @property
-    def method_calls(self) -> pd.DataFrame:
-        """`DataFrame` with `@record_call` functions"""
-        with self._locked() as con:
-            self._refresh_if_stale()
-
-            if self._method_calls is not None:
-                return self._method_calls
-
-            query = "SELECT * FROM method_calls;"
-
-            self._method_calls = pd.read_sql_query(
-                query, con, parse_dates=["called_at", "ended_at"]
-            )
-            self._method_calls.set_index("method_call_id", inplace=True)
-
-            self._method_calls["parameter_inputs"] = self._method_calls[
-                "parameter_inputs"
-            ].apply(json.loads)
-            self._method_calls["parameters_used"] = self._method_calls[
-                "parameters_used"
-            ].apply(json.loads)
-
-            self._method_calls["call_output"] = self._method_calls["call_output"].apply(
-                lambda s: json.loads(s) if isinstance(s, str) else None
+        if target_type not in keys.index.get_level_values("applies_to"):
+            raise ValueError(
+                f"Nothing can be annotated on a {target_type!r}. Use one of: "
+                f"{sorted(set(keys.index.get_level_values('applies_to')))}."
             )
 
-            return self._method_calls
+        wanted = keys.xs(target_type, level="applies_to")
 
-    @property
-    def odors(self) -> pd.DataFrame:
-        """`DataFrame` with current list of odors"""
+        rows = self.annotations
+        rows = rows[
+            (rows["target_type"] == target_type) & rows["key"].isin(wanted.index)
+        ]
+
+        # Append-only, so the last row written for a key is its current value.
+        # `annotation_id` rises with time and is the index, hence sorting on it.
+        current = rows.sort_index().drop_duplicates(
+            subset=["target_id", "key"], keep="last"
+        )
+
+        frame = current.pivot(index="target_id", columns="key", values="value")
+        frame.columns.name = None
+        frame.index.name = ANNOTATION_TARGETS[target_type].index
+
+        # `value` is an ANY column, so a column arrives as object dtype even when
+        # every entry in it is a number. The registry says which is which.
+        for key, declared in wanted["value_type"].items():
+            if key not in frame.columns:
+                continue
+
+            if declared in ("integer", "real"):
+                frame[key] = pd.to_numeric(frame[key], errors="coerce")
+
+            elif declared == "boolean":
+                # Kept as `object` of Python bools and None: a nullable boolean
+                # dtype would turn the missing ones into `pd.NA`, which is
+                # neither True nor False and trips `if value:` checks.
+                frame[key] = (
+                    frame[key]
+                    .map(lambda x: None if pd.isna(x) else bool(x))
+                    .astype(object)
+                )
+
+            elif declared == "date":
+                frame[key] = pd.to_datetime(frame[key], errors="coerce")
+
+        return frame
+
+    def missing_annotations(self) -> pd.DataFrame:
+        """
+        Everything still to be filled in before this project's data is finished.
+
+        One row per `(target_type, target_id, key)` that is marked `required` in
+        `db.annotation_keys` and holds no value yet (never written, or cleared).
+        """
+        keys = self.annotation_keys
+        required = keys[keys["required"].astype(bool) & ~keys["retired"].astype(bool)]
+
+        rows = []
+
         with self._locked() as con:
-            self._refresh_if_stale()
+            for (applies_to, key), entry in required.iterrows():
+                spec = ANNOTATION_TARGETS[applies_to]
 
-            if self._odors is not None:
-                return self._odors
+                # Group 0 is the database's own row, not something to annotate
+                skip = "WHERE t.group_id != 0" if applies_to == "group" else ""
 
-            query = "SELECT * FROM odors;"
+                found = con.execute(
+                    f"""
+                    SELECT t.{spec.index} AS target_id FROM {spec.name} AS t
+                        {skip}
+                        GROUP BY t.{spec.index}
+                        HAVING (
+                            SELECT a.value FROM annotations AS a
+                                WHERE a.target_type = ? AND a.key = ?
+                                  AND a.target_id = t.{spec.index}
+                                ORDER BY a.annotation_id DESC LIMIT 1
+                        ) IS NULL;
+                    """,
+                    [applies_to, key],
+                ).fetchall()
 
-            self._odors = pd.read_sql_query(query, con)
-            self._odors.set_index("odor_id", inplace=True)
+                rows.extend(
+                    {
+                        "target_type": applies_to,
+                        "target_id": row["target_id"],
+                        "key": key,
+                        "label": entry["label"],
+                    }
+                    for row in found
+                )
 
-            return self._odors
+        return pd.DataFrame(rows, columns=["target_type", "target_id", "key", "label"])
 
-    @property
-    def outputs(self) -> pd.DataFrame:
-        """`DataFrame` with output files of functions"""
+    def session_for(self, mouse_id: int | str, session_date: Value) -> None | int:
+        """
+        The `session_id` of a mouse on a day, or `None` if there is none.
+
+        **EXAMPLE**
+        ```python
+        db.session_for("m442", "2026-07-08")
+        ```
+        """
         with self._locked() as con:
-            self._refresh_if_stale()
+            row = con.execute(
+                "SELECT session_id FROM sessions WHERE mouse_id = ? AND session_date = ?;",
+                [_mouse_number(mouse_id), _date_string(session_date)],
+            ).fetchone()
 
-            if self._outputs is not None:
-                return self._outputs
+        return None if row is None else int(row["session_id"])
 
-            query = "SELECT * FROM outputs;"
-
-            self._outputs = pd.read_sql_query(query, con)
-            self._outputs.set_index("output_id", inplace=True)
-
-            return self._outputs
-
-    @property
-    def programs(self) -> pd.DataFrame:
-        """`DataFrame` with one entry per _Event.csv_ file"""
+    def experiment_for(self, session_id: int, exp_name: str) -> None | int:
+        """The `exp_id` of an experiment by name within a session, or `None`."""
         with self._locked() as con:
-            self._refresh_if_stale()
+            row = con.execute(
+                "SELECT exp_id FROM experiments WHERE session_id = ? AND exp_name = ?;",
+                [int(session_id), exp_name],
+            ).fetchone()
 
-            if self._programs is not None:
-                return self._programs
-
-            query = "SELECT * FROM programs;"
-
-            self._programs = pd.read_sql_query(
-                query, con, parse_dates=["program_start"]
-            )
-            self._programs.set_index("program_id", inplace=True)
-
-            return self._programs
-
-    @property
-    def trials(self) -> pd.DataFrame:
-        """`DataFrame` with all olfactometer trials"""
-        with self._locked() as con:
-            self._refresh_if_stale()
-
-            if self._trials is not None:
-                return self._trials
-
-            query = "SELECT * FROM trials;"
-
-            self._trials = pd.read_sql_query(
-                query, con, parse_dates=["trial_start", "odor_start", "odor_end"]
-            )
-            self._trials.set_index("trial_id", inplace=True)
-
-            return self._trials
+        return None if row is None else int(row["exp_id"])
 
     # ----------------------------------------------------------------------- #
     # Private Methods
@@ -603,8 +714,7 @@ class Database(CallRecorder):
 
         experiment: Object = {
             "exp_name": "_".join(file_stem_parts[:-1]),
-            "exp_type": SI_metadata["SI.acqState"],
-            "mouse_id": file_stem_parts[1],
+            "acq_state": SI_metadata["SI.acqState"],
             "height_px": tif.pages[0].tags["ImageLength"].value,
             "width_px": tif.pages[0].tags["ImageWidth"].value,
             "frame_count": _whole_number(
@@ -673,28 +783,11 @@ class Database(CallRecorder):
             self._reset_caches()
 
     def _reset_caches(self) -> None:
-        self._acquisitions = None
-        self._acquisition_trials = None
-        self._events = None
-        self._experiments = None
-        self._group_experiments = None
-        self._mcor_files = None
-        self._method_calls = None
-        self._outputs = None
-        self._programs = None
-        self._trials = None
+        self._tables.clear()
 
         # In case a specific group can still be accessed
         for group in self._groups.values():
-            group._acquisitions = None
-            group._acquisition_trials = None
-            group._events = None
-            group._experiments = None
-            group._mcor_files = None
-            group._method_calls = None
-            group._outputs = None
-            group._programs = None
-            group._trials = None
+            group._tables.clear()
 
         self._groups.clear()
 
@@ -754,9 +847,7 @@ class Database(CallRecorder):
                 )
                 return self._group(group_id)
 
-        with self._locked() as con, con:
-            cur = con.cursor()
-
+        with self._writing() as cur:
             cur.execute("INSERT INTO groups DEFAULT VALUES;")
             group_id = cur.lastrowid
 
@@ -765,12 +856,11 @@ class Database(CallRecorder):
                 [(group_id, exp_id) for exp_id in target],
             )
 
-        # Reset group_experiments cache
-        self._group_experiments = None
+        assert group_id is not None
 
         return self._group(group_id)
 
-    def from_query(self, query: str) -> pd.DataFrame:
+    def from_query(self, query: str, params: list = []) -> pd.DataFrame:
         """
         Creates a pandas DataFrame from a SQL query (reading only).
 
@@ -786,7 +876,7 @@ class Database(CallRecorder):
         ```
         """
         with self._locked() as con:
-            frame = pd.read_sql_query(query, con)
+            frame = pd.read_sql_query(query, con, params=params)
 
             if con.in_transaction:
                 con.rollback()
@@ -797,7 +887,12 @@ class Database(CallRecorder):
         return frame
 
     def latest_calls(self, method_name: str) -> pd.DataFrame:
-        """Return DataFrame with all calls to 'method_name'."""
+        """
+        `DataFrame` with all calls to `method_name`, newest first.
+
+        The inputs of each call are the `input_*` columns and its recorded
+        output the `output_*` ones.
+        """
 
         query = """
             SELECT * FROM method_calls
@@ -829,178 +924,791 @@ class Database(CallRecorder):
         return json.loads(row["call_output"])
 
     # ----------------------------------------------------------------------- #
-    # Updating the Database
+    # People and subjects
     # ----------------------------------------------------------------------- #
 
     @record_call
-    def add_grab_folder(
+    def add_user(self, *, user_name: str, display_name: None | str = None) -> int:
+        """
+        Add a name to the user picker.
+
+        **USAGE**
+        ```python
+        db.add_user(user_name="vinicius", display_name="Vinicius")
+        ```
+
+        `user_name` is what `method_calls.user` records; `display_name` is what
+        the GUI shows, and defaults to the same. Returns the `user_id`.
+        """
+        name = str(user_name).strip()
+        shown = name if display_name is None else str(display_name).strip()
+
+        if not name or not shown:
+            raise ValueError("A user needs a name.")
+
+        with self._writing() as cur:
+            user_id = _db_insert(
+                cur, "users", {"user_name": name, "display_name": shown}
+            )
+
+        logger.info(f"Added user '{name}'. {CHECK}")
+
+        return user_id
+
+    @record_call
+    def retire_user(self, *, user_name: str, retired: bool = True) -> None:
+        """
+        Take a name out of the picker (`retired=False` puts it back).
+
+        What the person recorded keeps their name; only the picker changes.
+        """
+        with self._writing() as cur:
+            changed = cur.execute(
+                "UPDATE users SET retired = ? WHERE user_name = ?;",
+                [bool(retired), str(user_name).strip()],
+            ).rowcount
+
+        if not changed:
+            raise ValueError(f"No user named {user_name!r}.")
+
+        was = "Retired" if retired else "Brought back"
+        logger.info(f"{was} user '{user_name}'. {CHECK}")
+
+    @record_call
+    def set_mouse(
         self,
         *,
-        rel_path: str,
-        rel_raw_paths: None | list[str] = None,
-    ) -> None:
+        mouse_id: int | str,
+        sex: None | str = None,
+        dob: None | Value = None,
+        lines: None | dict[str, None | str] = None,
+        sensor: None | str = None,
+    ) -> int:
         """
-        Add a folder of grabs, each as its own experiment
+        Record what is known about an animal, creating its row if it is new.
+
+        **USAGE**
+        ```python
+        db.set_mouse(
+            mouse_id="m442",
+            sex="F",
+            dob="2026-01-22",
+            lines={"DAT-Cre": "het", "TIGRE": "het"},
+            sensor="GCaMP8s",
+        )
+        ```
 
         **PARAMETERS**
-        - `rel_path` is the experiment folder path relative to the `main_folder`
-        - `rel_raw_paths` is the raw files list (if None it searches the raw folder)
+        - `mouse_id` is the number (the SID), or a name like `'m442'` to take
+        it from
+        - `sex` is `'M'` or `'F'`, in either case
+        - `dob` is the date of birth, `YYYY-MM-DD`
+        - `lines` maps each mutation the animal carries to `'wt'`, `'het'`,
+        `'hom'`, or `None` when the line is known but the genotyping is not
+        - `sensor` is what the animal expresses
+
+        Returns the `mouse_id`. Anything left out keeps the value already
+        stored, so this can be called repeatedly as details arrive. Passing
+        `lines={}` clears the line; `lines=None` leaves it alone.
+        """
+        number = _mouse_number(mouse_id)
+        stored_sex = None if sex is None else str(sex).strip().upper()
+
+        if stored_sex not in (None, "M", "F"):
+            raise ValueError(f"Sex must be 'M' or 'F', not {sex!r}.")
+
+        born = None if dob is None else _date_string(dob)
+        carried = None if lines is None else _mouse_lines(lines)
+
+        with self._writing() as cur:
+            # COALESCE so that a field left out of this call does not erase what
+            # an earlier one wrote: the details arrive from different people.
+            cur.execute(
+                """
+                INSERT INTO mice (mouse_id, mouse_sex, mouse_dob, sensor)
+                    VALUES (:mouse_id, :sex, :dob, :sensor)
+                ON CONFLICT(mouse_id) DO UPDATE SET
+                      mouse_sex = COALESCE(:sex, mouse_sex)
+                    , mouse_dob = COALESCE(:dob, mouse_dob)
+                    , sensor    = COALESCE(:sensor, sensor);
+                """,
+                {"mouse_id": number, "sex": stored_sex, "dob": born, "sensor": sensor},
+            )
+
+            if carried is not None:
+                # Replaced as a whole: a mouse carries one set of mutations, and
+                # a correction usually rewrites more than one of them.
+                cur.execute("DELETE FROM mouse_lines WHERE mouse_id = ?;", [number])
+
+                for line, genotype in carried.items():
+                    _db_insert(
+                        cur,
+                        "mouse_lines",
+                        {"mouse_id": number, "line": line, "genotype": genotype},
+                    )
+
+        cross = "unknown line" if not carried else " x ".join(carried)
+
+        logger.info(f"Mouse {number} recorded ({cross}). {CHECK}")
+
+        return number
+
+    @record_call
+    def add_session(self, *, mouse_id: int | str, session_date: Value) -> int:
+        """
+        Start a session: one mouse, one day. Returns its `session_id`.
+
+        **USAGE**
+        ```python
+        session_id = db.add_session(mouse_id="m442", session_date="2026-07-08")
+        ```
+
+        The mouse must be registered (`set_mouse`) first. A session that already
+        exists is an error; look it up with `session_for` instead.
+        """
+        number = _mouse_number(mouse_id)
+        day = _date_string(session_date)
+
+        try:
+            with self._writing() as cur:
+                session_id = _db_insert(
+                    cur, "sessions", {"mouse_id": number, "session_date": day}
+                )
+
+        except sqlite3.IntegrityError as error:
+            if "FOREIGN KEY" in str(error):
+                raise ValueError(
+                    f"Mouse {number} is not registered. Add it with `set_mouse` first."
+                ) from error
+
+            raise ValueError(
+                f"Mouse {number} already has a session on {day}; "
+                f"use `session_for` to find it."
+            ) from error
+
+        logger.info(f"Session {session_id}: mouse {number} on {day}. {CHECK}")
+
+        return session_id
+
+    # ----------------------------------------------------------------------- #
+    # Odors and panels
+    # ----------------------------------------------------------------------- #
+
+    @record_call
+    def add_odor(
+        self,
+        *,
+        odor_id: int,
+        odor_name: str,
+        components: None | list[int] = None,
+        vapor_pressure_mmhg: None | float = None,
+        vapor_pressure_source: None | str = None,
+    ) -> None:
+        """
+        Register an odor, with the number the olfactometer knows it by.
+
+        **USAGE**
+        ```python
+        db.add_odor(
+            odor_id=45,
+            odor_name="2-hexanone",
+            vapor_pressure_mmhg=11.6,
+            vapor_pressure_source="PubChem",
+        )
+        db.add_odor(odor_id=46, odor_name="sigma", components=[45, 4])
+        ```
+
+        `components` makes it a mix: the numbers of the single chemicals it is
+        made of, two or more, fixed from here on (a vial of the mix only picks
+        each one's concentration). Left out, the odor is a single chemical,
+        whose vapor pressure (mmHg at 25 C) is what the vial recipe needs.
+        """
+        component_ids = [int(c) for c in components or []]
+
+        if len(component_ids) == 1:
+            raise ValueError(
+                "A mix has at least two components; a single chemical lists none."
+            )
+
+        if len(set(component_ids)) != len(component_ids):
+            raise ValueError("A component is listed twice.")
+
+        with self._writing() as cur:
+            mixes = {
+                row["odor_id"]: bool(row["mix"])
+                for row in cur.execute("SELECT odor_id, mix FROM odors;")
+            }
+
+            for component_id in component_ids:
+                if component_id not in mixes:
+                    raise ValueError(f"No odor with id {component_id} to mix in.")
+
+                if mixes[component_id]:
+                    raise ValueError(
+                        f"Component {component_id} is itself a mix; list its chemicals."
+                    )
+
+            _db_insert(
+                cur,
+                "odors",
+                {
+                    "odor_id": int(odor_id),
+                    "odor_name": str(odor_name).strip(),
+                    "mix": bool(component_ids),
+                    "vapor_pressure_mmhg": _optional_real(vapor_pressure_mmhg),
+                    "vapor_pressure_source": vapor_pressure_source,
+                },
+            )
+
+            for component_id in component_ids:
+                _db_insert(
+                    cur,
+                    "odor_components",
+                    {"odor_id": int(odor_id), "component_id": component_id},
+                )
+
+        logger.info(f"Added odor {odor_id} '{odor_name}'. {CHECK}")
+
+    @record_call
+    def update_odor(
+        self,
+        *,
+        odor_id: int,
+        odor_name: None | str = None,
+        vapor_pressure_mmhg: None | float = None,
+        vapor_pressure_source: None | str = None,
+        retired: None | bool = None,
+    ) -> None:
+        """
+        Correct what is recorded about an odor. Only what is passed changes.
+
+        The number is not changeable: it is the olfactometer's, and the trials
+        already refer to it. `retired=True` takes the odor out of the pickers.
+        """
+        changes = {
+            "odor_name": None if odor_name is None else str(odor_name).strip(),
+            "vapor_pressure_mmhg": _optional_real(vapor_pressure_mmhg),
+            "vapor_pressure_source": vapor_pressure_source,
+            "retired": None if retired is None else bool(retired),
+        }
+        changes = {
+            column: value for column, value in changes.items() if value is not None
+        }
+
+        if not changes:
+            raise ValueError("Nothing to change.")
+
+        with self._writing() as cur:
+            changed = cur.execute(
+                f"UPDATE odors SET {', '.join(f'{c} = :{c}' for c in changes)} "
+                f"WHERE odor_id = :odor_id;",
+                {**changes, "odor_id": int(odor_id)},
+            ).rowcount
+
+        if not changed:
+            raise ValueError(f"No odor with id {odor_id}.")
+
+        logger.info(f"Updated odor {odor_id}: {changes}. {CHECK}")
+
+    @record_call
+    def add_panel(self, *, panel_name: str, description: None | str = None) -> int:
+        """
+        Name a set of vials, e.g. `"print_v3"`. Returns the `panel_id`.
+
+        The panel is only a label; what is in it is what `add_vials` records.
+        """
+        with self._writing() as cur:
+            panel_id = _db_insert(
+                cur,
+                "panels",
+                {"panel_name": str(panel_name).strip(), "description": description},
+            )
+
+        logger.info(f"Added panel '{panel_name}'. {CHECK}")
+
+        return panel_id
+
+    @record_call
+    def add_vials(
+        self,
+        *,
+        panel_name: str,
+        vials: list[Object],
+        made_on: None | Value = None,
+    ) -> list[int]:
+        """
+        Record physical vials as made up, in a panel. Returns their `vial_id`s.
+
+        **USAGE**
+        ```python
+        db.add_vials(
+            panel_name="print_v3",
+            made_on="2026-07-06",
+            vials=[
+                {
+                    "vial_position": 4,
+                    "odor_id": 17,                # alpha, a mix
+                    "vial_sccm": 200,
+                    "total_sccm": 1500,
+                    "total_volume_ml": 5,
+                    "solvent_volume_ml": 4.9,
+                    "components": [
+                        {"odor_id": 4, "target_ppm": 44.2, "liquid_ul": 60, "percent_vv": 1.2},
+                        {"odor_id": 10, "target_ppm": 13.3, "liquid_ul": 40, "percent_vv": 0.8},
+                    ],
+                },
+                {"vial_position": 3, "odor_id": 0, "vial_sccm": 200,
+                 "total_sccm": 1500, "total_volume_ml": 5},   # mineral oil
+            ],
+        )
+        ```
+
+        **PARAMETERS**
+        - `panel_name` names a panel added with `add_panel`
+        - `vials` is one dict per vial: `vial_position`, `odor_id` (what the
+        olfactometer delivers), `vial_sccm`, `total_sccm`, `total_volume_ml`,
+        optionally `solvent_volume_ml`, `made_on` and `components`
+        - `components` is one dict per chemical pipetted in, with `odor_id`,
+        `target_ppm` and the computed `liquid_ul` and `percent_vv`. A mix
+        lists exactly its `odor_components`; a pure odor lists itself once;
+        mineral oil lists nothing
+        - `made_on` is the date for every vial without one of its own; it
+        defaults to today, since vials are usually recorded as they are made
+
+        Remaking a rack is a new call: a vial an experiment has run is never
+        edited, so what was in the olfactometer stays on record.
+        """
+        day = _date_string(datetime.now() if made_on is None else made_on)
+
+        with self._writing() as cur:
+            panel_id = _panel_id(cur, panel_name)
+            mixes = {
+                row["odor_id"]: bool(row["mix"])
+                for row in cur.execute("SELECT odor_id, mix FROM odors;")
+            }
+            made_of: dict[int, set[int]] = {}
+
+            for row in cur.execute(
+                "SELECT odor_id, component_id FROM odor_components;"
+            ):
+                made_of.setdefault(row["odor_id"], set()).add(row["component_id"])
+
+            vial_ids = []
+
+            for vial in vials:
+                vial_ids.append(_insert_vial(cur, panel_id, vial, day, mixes, made_of))
+
+        logger.info(f"Added {len(vial_ids)} vials to panel '{panel_name}'. {CHECK}")
+
+        return vial_ids
+
+    @record_call
+    def set_experiment_vials(self, *, exp_id: int, vial_ids: list[int]) -> None:
+        """
+        Record which vials were in the olfactometer for an experiment.
+
+        **USAGE**
+        ```python
+        db.set_experiment_vials(exp_id=12, vial_ids=[1, 2, 3, 4])
+        ```
+
+        Replaces the whole set: a rack is only true as a whole. The vials must
+        all come from one panel and sit in different positions.
+        """
+        ids = sorted({int(v) for v in vial_ids})
+
+        with self._writing() as cur:
+            placeholders = ", ".join("?" * len(ids))
+            rows = cur.execute(
+                f"SELECT vial_id, panel_id, vial_position FROM vials "
+                f"WHERE vial_id IN ({placeholders});",
+                ids,
+            ).fetchall()
+
+            missing = set(ids) - {row["vial_id"] for row in rows}
+            if missing:
+                raise ValueError(f"No vials with ids {sorted(missing)}.")
+
+            if len({row["panel_id"] for row in rows}) > 1:
+                raise ValueError("An experiment runs vials from one panel only.")
+
+            positions = [row["vial_position"] for row in rows]
+            if len(positions) != len(set(positions)):
+                raise ValueError("Two of these vials sit in the same position.")
+
+            cur.execute("DELETE FROM experiment_vials WHERE exp_id = ?;", [int(exp_id)])
+            cur.executemany(
+                "INSERT INTO experiment_vials (exp_id, vial_id) VALUES (?, ?);",
+                [(int(exp_id), vial_id) for vial_id in ids],
+            )
+
+        logger.info(f"Experiment {exp_id} ran vials {ids}. {CHECK}")
+
+    # ----------------------------------------------------------------------- #
+    # Annotations
+    # ----------------------------------------------------------------------- #
+
+    @record_call
+    def add_annotations(
+        self, *, target_type: str, target_id: int, values: dict[str, Value]
+    ) -> None:
+        """
+        Record things about an experiment, session, mouse, program, etc.
+
+        **PARAMETERS**
+        - `target_type` is what this is about: `'mouse'`, `'session'`,
+        `'experiment'`, `'program'`, `'acquisition'` or `'group'`.
+        - `target_id` is that row's id (on the target_type table)
+        - `values` maps keys from `db.annotation_keys` to their values, which
+        have to match the type each key was registered with. `None` clears a
+        key.
 
         **EXAMPLE**
         ```python
-        db.add_grab_folder(rel_path="20260623/m462/e2")
-
-        Files already in the database are skipped, so running this again after
-        adding more grabs to the folder only adds the new ones.
+        db.add_annotations(
+            target_type="experiment",
+            target_id=12,
+            values={"fov_depth_um": 70, "fov_description": "medial-rostral left bulb"},
+        )
         ```
+
+        **ALERT**
+        odyn's processing does not use annotations. Those are for analysis
+        only. Anything the pipeline has to use must be a column instead.
+
+        Annotations are never overwritten. Writing a key twice keeps both, and
+        the later one is used (so the whole history stays visible).
         """
-        logger.info("Adding grabs to database...")
+        if not values:
+            raise ValueError("Nothing to annotate.")
 
-        exp_path = self.main_folder / rel_path
+        with self._writing() as cur:
+            for key, value in values.items():
+                _db_annotate(
+                    cur,
+                    target_type=target_type,
+                    target_id=target_id,
+                    key=key,
+                    value=value,
+                    method_call_id=self.current_call_id,
+                )
 
-        assert exp_path.is_dir(), f"Folder not found: '{exp_path.resolve()}'"
-
-        raw_paths = (
-            sorted(exp_path.glob("raw/[!.]?*.tif"))
-            if rel_raw_paths is None
-            else [self.main_folder / p for p in rel_raw_paths]
+        logger.info(
+            f"Annotated {target_type} {target_id}: {', '.join(values)}. {CHECK}"
         )
 
-        assert raw_paths, "Did not find any raw/*.tif files."
+    @record_call
+    def add_annotation_key(
+        self,
+        *,
+        applies_to: str,
+        key: str,
+        label: str,
+        value_type: str,
+        description: str,
+        unit: None | str = None,
+        allowed_values: None | list = None,
+        source: str = "user",
+        required: bool = False,
+    ) -> None:
+        """
+        Register something new that can be annotated in this project.
 
-        logger.info(f"Processing folder: '{exp_path.resolve()}'")
+        **PARAMETERS**
+        - `applies_to` is `'mouse'`, `'session'`, `'experiment'`, `'program'`,
+        `'acquisition'` or `'group'`
+        - `key` is what `add_annotations` will be called with
+        - `value_type` is `'text'`, `'long_text'`, `'integer'`, `'real'`,
+        `'boolean'`, `'date'`, or `'enum'`; an `'enum'` needs `allowed_values`.
+        `'long_text'` is stored like `'text'` and says a form should give it a
+        box rather than a line
+        - `source` says how the value arrives: `'user'` (typed in),
+        `'metadata'` (read from a file) or `'computed'` (from other fields)
+        - `required` means the data is not finished until this is filled in
 
-        added = []
+        **EXAMPLE**
+        ```python
+        db.add_annotation_key(
+            applies_to="experiment",
+            key="uses_odor_batch",
+            label="Odor batch used",
+            value_type="text",
+            description="Which batch of odor was used.",
+        )
+        ```
 
-        for raw_path in tqdm(raw_paths, desc="Loading TIFF Metadata"):
-            # Read outside the transaction (to not write lock).
-            raw_metadata = self._get_raw_metadata(raw_path)
+        Keys are never deleted, because old values would stop making sense. If
+        you want to stop using a particular key, use `retire_annotation_key`.
+        """
+        with self._writing() as cur:
+            _db_insert(
+                cur,
+                "annotation_keys",
+                {
+                    "applies_to": applies_to,
+                    "key": key,
+                    "label": label,
+                    "value_type": value_type,
+                    "allowed_values": (
+                        None if allowed_values is None else json.dumps(allowed_values)
+                    ),
+                    "unit": unit,
+                    "description": description,
+                    "source": source,
+                    "required": bool(required),
+                    "retired": False,
+                },
+            )
 
-            if raw_metadata is None:
-                logger.info(
-                    f"  Skipped file {raw_path} (metadata format not supported)"
-                )
-                self.add_flag(ExpFlag.UNSUPPORTED_METADATA)
-                continue
+        logger.info(f"Registered annotation '{key}' for a {applies_to}. {CHECK}")
 
-            experiment, acquisition = raw_metadata
+    @record_call
+    def update_annotation_key(
+        self,
+        *,
+        applies_to: str,
+        key: str,
+        label: None | str = None,
+        description: None | str = None,
+        unit: None | str = None,
+        add_values: None | list = None,
+        source: None | str = None,
+        required: None | bool = None,
+    ) -> None:
+        """
+        Change how an annotation is presented, without touching its values.
 
-            if experiment["exp_type"] != "grab":
-                logger.warning(f"  Skipped '{raw_path.name}' (not a grab).")
-                self.add_flag(ExpFlag.NOT_A_GRAB)
-                continue
+        **USAGE**
+        ```python
+        db.update_annotation_key(
+            applies_to="experiment",
+            key="depth_class",
+            add_values=["intermediate"],
+        )
+        ```
 
-            # We keep the trailing number to differentiate grabs
-            #   (differently from the add_experiment)
-            experiment["exp_name"] = raw_path.stem
+        Only what is passed changes. `add_values` appends options to an enum;
+        options are never removed, since values may already use them. The type
+        is not changeable either, for the same reason: register a new key.
+        """
+        with self._writing() as cur:
+            row = cur.execute(
+                "SELECT value_type, allowed_values FROM annotation_keys "
+                "WHERE applies_to = ? AND key = ?;",
+                [applies_to, key],
+            ).fetchone()
 
-            # Type checking because Object is too generic
-            assert isinstance(experiment["exp_start"], datetime)
-            exp_start_str = experiment["exp_start"].strftime(DT_FORMAT)
+            if row is None:
+                raise ValueError(f"No annotation key '{key}' for a {applies_to}.")
 
-            # One transaction per grab/experiment as in add_experiment
-            # User can rerun it fails in a couple files (or just skip them)
-            with self._locked() as con, con:
-                cur = con.cursor()
-                cur.execute("PRAGMA foreign_keys = ON;")
+            changes: Object = {
+                "label": label,
+                "description": description,
+                "unit": unit,
+                "source": source,
+                "required": None if required is None else bool(required),
+            }
+            changes = {c: v for c, v in changes.items() if v is not None}
 
-                cur.execute(
-                    "SELECT EXISTS(SELECT 1 FROM experiments WHERE exp_start = ?);",
-                    [exp_start_str],
-                )
+            if add_values:
+                if row["value_type"] != "enum":
+                    raise ValueError(f"'{key}' is not an enum.")
 
-                if cur.fetchone()[0]:
-                    logger.info(f"  '{raw_path.name}' already in DB.")
-                    self.add_flag(ExpFlag.ALREADY_IN_DB)
-                    continue
+                options = json.loads(row["allowed_values"])
+                options += [str(v) for v in add_values if str(v) not in options]
+                changes["allowed_values"] = json.dumps(options)
 
-                exp_id = _db_insert(
-                    cur, "experiments", {**experiment, "exp_start": exp_start_str}
-                )
+            if not changes:
+                raise ValueError("Nothing to change.")
 
-                cur.execute("INSERT INTO groups DEFAULT VALUES;")
-                group_id = cur.lastrowid
+            cur.execute(
+                f"UPDATE annotation_keys SET {', '.join(f'{c} = :{c}' for c in changes)} "
+                "WHERE applies_to = :applies_to AND key = :key;",
+                {**changes, "applies_to": applies_to, "key": key},
+            )
 
-                cur.execute(
-                    "INSERT INTO group_experiments (group_id, exp_id) VALUES (?, ?);",
-                    [group_id, exp_id],
-                )
+        logger.info(f"Updated annotation '{key}' for a {applies_to}. {CHECK}")
 
-                # Type checking because Object is too generic
-                acq_start = acquisition["acq_start"]
-                assert isinstance(acq_start, datetime)
+    @record_call
+    def retire_annotation_key(
+        self, *, applies_to: str, key: str, retired: bool = True
+    ) -> None:
+        """
+        Stop offering an annotation, without losing what was already written.
 
-                _db_insert(
-                    cur,
-                    "acquisitions",
-                    {
-                        **acquisition,
-                        "exp_id": exp_id,
-                        "acq_start": acq_start.strftime(DT_FORMAT),
-                    },
-                )
+        **USAGE**
+        ```python
+        db.retire_annotation_key(applies_to="experiment", key="cohort")
+        db.retire_annotation_key(
+            applies_to="experiment",
+            key="cohort",
+            retired=False,
+        )
+        ```
 
-            added.append(raw_path.stem)
+        **PARAMETERS**
+        - `applies_to` and `key` name the annotation, as in `db.annotation_keys`
+        - `retired=False` brings it back, for when one is retired by mistake
 
-        self.set_output({"added": added})
-        self._reset_caches()
+        A retired key is refused by `add_annotations` and dropped from
+        `db.missing_annotations()`, but everything written under it stays in
+        `db.annotations` and keeps showing up in `db.annotations_for(...)`.
+        """
+        with self._writing() as cur:
+            changed = cur.execute(
+                """
+                UPDATE annotation_keys
+                    SET retired = ?
+                    WHERE applies_to = ? AND key = ?;
+                """,
+                [bool(retired), applies_to, key],
+            ).rowcount
 
-        logger.info(f"Added {len(added)} of {len(raw_paths)} grabs. {CHECK}")
+        if not changed:
+            raise ValueError(
+                f"No annotation key '{key}' for a {applies_to}. Check "
+                f"'db.annotation_keys' for the ones this project has."
+            )
+
+        was = "Retired" if retired else "Brought back"
+        logger.info(f"{was} annotation '{key}' for a {applies_to}. {CHECK}")
+
+    # ----------------------------------------------------------------------- #
+    # Recordings
+    # ----------------------------------------------------------------------- #
 
     @record_call
     def add_experiment(
         self,
         *,
-        rel_path: str,
+        session_id: int,
+        exp_path: str,
+        objective: int,
         rel_raw_paths: None | list[str] = None,
-    ) -> None:
+    ) -> None | int:
         """
-        Add a new experiment folder to the database
+        Add a loop recording folder to a session. Returns its `exp_id`.
 
         **PARAMETERS**
-        - `rel_path` is the experiment folder path relative to the `main_folder`
+        - `session_id` is the session (mouse and day) the recording belongs to
+        - `exp_path` is the experiment folder path relative to the `main_folder`
+        - `objective` is the objective it was imaged through (10, 20, ...)
         - `rel_raw_paths` is the raw files list (if None it searches the raw folder)
 
         **EXAMPLE**
         ```python
-        db.add_experiment(rel_path="20260623/m462/e2")
+        db.add_experiment(session_id=3, exp_path="20260623/m462/e2", objective=20)
         ```
+
+        Reads the TIFFs, the olfactometer event files and the program
+        definitions in `<exp_path>/olfactometer/`, and inserts the experiment,
+        its acquisitions, programs, trials and events in one transaction. The
+        sync file is decoded separately (`decode_sync`).
+
+        Returns `None` when nothing was added: the experiment was already in
+        the database, or the files did not pass the checks (see the log).
         """
+        added = self._add_recordings(
+            session_id=int(session_id),
+            exp_path=exp_path,
+            objective=int(objective),
+            exp_type="loop",
+            rel_raw_paths=rel_raw_paths,
+        )
 
-        logger.info("Adding experiment to database...")
+        return added[0] if added else None
 
-        # Basically, everything in this function is done in a single transaction
-        # because if something fails we rollback all insertions.
-        exp_path = self.main_folder / rel_path
+    @record_call
+    def add_grabs(
+        self,
+        *,
+        session_id: int,
+        exp_path: str,
+        objective: int,
+        exp_type: str = "grab",
+        rel_raw_paths: None | list[str] = None,
+    ) -> list[int]:
+        """
+        Add a folder of grabs (or z-stacks), each as its own experiment.
 
-        assert exp_path.is_dir(), f"Folder not found: '{exp_path.resolve()}'"
+        **PARAMETERS**
+        - `session_id` is the session (mouse and day) the recordings belong to
+        - `exp_path` is the folder path relative to the `main_folder`
+        - `objective` is the objective they were imaged through
+        - `exp_type` is `'grab'` or `'zstack'`
+        - `rel_raw_paths` is the raw files list (if None it searches the raw folder)
 
-        # Fetch raw file paths list if not provided
+        **EXAMPLE**
+        ```python
+        db.add_grabs(session_id=3, exp_path="20260623/m462/grabs", objective=20)
+        ```
+
+        Files already in the database are skipped, so running this again after
+        adding more grabs to the folder only adds the new ones. Returns the
+        `exp_id`s added.
+        """
+        if exp_type not in ("grab", "zstack"):
+            raise ValueError(f"exp_type is 'grab' or 'zstack', not {exp_type!r}.")
+
+        return self._add_recordings(
+            session_id=int(session_id),
+            exp_path=exp_path,
+            objective=int(objective),
+            exp_type=exp_type,
+            rel_raw_paths=rel_raw_paths,
+        )
+
+    def _add_recordings(
+        self,
+        *,
+        session_id: int,
+        exp_path: str,
+        objective: int,
+        exp_type: str,
+        rel_raw_paths: None | list[str],
+    ) -> list[int]:
+        """
+        Shared body of `add_experiment` and `add_grabs`.
+
+        A loop is one experiment holding every TIFF in the folder; a grab or
+        z-stack folder holds one experiment per TIFF. Files are read without
+        the database lock, which is taken for the short lookups and once for
+        the inserts, so a failure anywhere leaves nothing behind.
+        """
+        logger.info(f"Adding {exp_type} recordings to database...")
+
+        folder = self.main_folder / exp_path
+        assert folder.is_dir(), f"Folder not found: '{folder.resolve()}'"
+
         raw_paths = (
-            sorted(exp_path.glob("raw/[!.]?*.tif"))
+            sorted(folder.glob("raw/[!.]?*.tif"))
             if rel_raw_paths is None
             else [self.main_folder / p for p in rel_raw_paths]
         )
+        assert raw_paths, "Did not find any raw/*.tif files."
 
-        logger.info(f"Processing folder: '{exp_path.resolve()}'")
+        logger.info(f"Processing folder: '{folder.resolve()}'")
 
-        # Files are read without holding the database lock, which is only taken
-        # for the short lookups below and once for all the inserts at the end.
-        # So a failure anywhere still leaves nothing behind.
+        with self._locked() as con:
+            session = con.execute(
+                "SELECT session_id, mouse_id, session_date FROM sessions "
+                "WHERE session_id = ?;",
+                [session_id],
+            ).fetchone()
 
-        # --------------------------------------------------------------- #
+        if session is None:
+            raise ValueError(f"There is no session {session_id}.")
+
+        rel_folder = folder.resolve().relative_to(self.main_folder).as_posix()
+
+        # ----------------------------------------------------------------- #
         # Phase 1: Load
-        # --------------------------------------------------------------- #
+        # ----------------------------------------------------------------- #
 
-        experiment: None | Object = None
-        acquisitions: list[Object] = []
-        h5_data: None | dict = None
-        event_files: list[Path] = []
-
+        # One experiment per loop folder, one per TIFF otherwise
+        recordings: list[tuple[Object, list[Object]]] = []
         last_exp_data: None | Object = None
         checks_failed = 0
-
-        assert raw_paths, "Did not find any raw/*.tif files."
 
         for raw_path in tqdm(raw_paths, desc="Loading TIFF Metadata"):
             raw_metadata = self._get_raw_metadata(raw_path)
@@ -1014,66 +1722,30 @@ class Database(CallRecorder):
 
             exp_data, acq = raw_metadata
 
-            if last_exp_data is None:
-                # Don't do anything if experiment is already in the DB.
-                #
-                # Formatted rather than passed as a datetime: the column
-                # holds DT_FORMAT strings, and sqlite3's adapter writes
-                # isoformat, which drops '.000000' when the epoch lands
-                # exactly on a second. The two then never compare equal, so
-                # this says "not present" and the insert below fails on
-                # UNIQUE instead of returning quietly.
-                assert isinstance(exp_data["exp_start"], datetime)
-                exp_start_str = exp_data["exp_start"].strftime(DT_FORMAT)
+            if exp_data.pop("acq_state") != ACQ_STATES[exp_type]:
+                logger.warning(f"  Skipped '{raw_path.name}' (not a {exp_type}).")
+                self.add_flag(ExpFlag.WRONG_ACQ_STATE)
+                continue
 
-                with self._locked() as con:
-                    already_added = _experiment_exists(con, exp_start_str)
+            if exp_type != "loop":
+                # Grabs keep the trailing number, to tell them apart
+                exp_data["exp_name"] = raw_path.stem
+                recordings.append((exp_data, [acq]))
 
-                if already_added:
-                    logger.info("Experiment already in DB.")
-                    self.add_flag(ExpFlag.ALREADY_IN_DB)
-                    return
+            elif not recordings:
+                recordings.append((exp_data, [acq]))
 
-                experiment = exp_data
-
-                # Load H5 and event files before metadata checks
-                # (Checks take some time so better to not do them if possible)
-                h5_paths = list(exp_path.glob("[!.]?*.h5"))
-
-                if len(h5_paths) > 1:
-                    logger.error(
-                        f"There is more than one H5 file in this experiment folder. {CROSS}"
+            else:
+                if last_exp_data != exp_data:
+                    checks_failed += 1
+                    logger.warning(
+                        f"'{raw_path.relative_to(self.main_folder)}' metadata"
+                        " is inconsistent with the previous acquisition."
                     )
 
-                    for path in h5_paths:
-                        relative_path = path.relative_to(self.main_folder)
-                        logger.warning(f"  {relative_path}")
-
-                    logger.error("Experiment will not be added to the DB.")
-                    self.add_flag(ExpFlag.MULTIPLE_H5)
-                    return
-
-                # Type checking because Object is too generic
-                assert isinstance(experiment["exp_start"], datetime)
-                h5_data = _get_h5_metadata(h5_paths, experiment["exp_start"])
-
-                event_files = sorted(
-                    exp_path.rglob("[!.]?*Events.csv"),
-                    key=lambda x: x.stat().st_mtime,
-                )
-
-                logger.info(f"Found {len(event_files)} olfactometer event files.")
-
-            elif last_exp_data != exp_data:
-                checks_failed += 1
-
-                logger.warning(
-                    f"'{raw_path.relative_to(self.main_folder)}' metadata"
-                    " is inconsistent with the previous acquisition."
-                )
+                recordings[0][1].append(acq)
 
             last_exp_data = exp_data
-            acquisitions.append(acq)
 
         if checks_failed > 0:
             logger.error(
@@ -1082,127 +1754,74 @@ class Database(CallRecorder):
             logger.info("Are there multiple loops or grabs in the same folder?")
             logger.error("Experiment will not be added to the DB.")
             self.add_flag(ExpFlag.METADATA_CHANGED)
-            return
+            return []
+
+        if not recordings:
+            logger.error(
+                f"No {exp_type} TIFF with the expected metadata found. {CROSS}"
+            )
+            return []
+
+        # The session is given, not read off the files; but the file names say
+        # which mouse and day ScanImage was told, and a disagreement means the
+        # folder is not what the caller thinks it is.
+        for experiment, _ in recordings:
+            _check_session(experiment, session, self)
 
         logger.info(f"Passed all TIFF metadata checks! {CHECK}")
 
-        assert (
-            experiment is not None
-        ), "Could not find any TIFF file with the expected metadata format."
-
-        # Parse all event files into structured program/trial dicts
+        # Olfactometer programs, only for loops
         programs_data: list[dict] = []
 
-        if event_files:
-            with self._locked() as con:
-                rows = con.execute("SELECT odor_name, odor_id FROM odors;").fetchall()
+        if exp_type == "loop":
+            programs_data = self._load_programs(folder)
 
-            odors: dict[str, int] = {name: id for name, id in rows}
+        # ----------------------------------------------------------------- #
+        # Phase 2: Insert
+        # ----------------------------------------------------------------- #
 
-            stem_split = event_files[0].stem.split("-")
-            events_start = datetime.strptime(
-                " ".join(stem_split[-3:-1]), "%Y_%m_%d %H_%M_%S"
-            )
-            program_starts = _parse_program_starts(self, events_start)
+        added: list[int] = []
 
-            programs_data = _load_event_data(
-                event_files, program_starts, odors, self.main_folder
-            )
+        for experiment, acquisitions in recordings:
+            # Formatted rather than passed as a datetime: the column holds
+            # DT_FORMAT strings, and sqlite3's adapter writes isoformat, which
+            # drops '.000000' when the epoch lands exactly on a second.
+            exp_start = experiment.pop("exp_start")
+            assert isinstance(exp_start, datetime)
+            exp_start_str = exp_start.strftime(DT_FORMAT)
 
-        # --------------------------------------------------------------- #
-        # Phase 2: Match
-        # --------------------------------------------------------------- #
+            rig_settings = {key: experiment.pop(key) for key in RIG_ANNOTATIONS}
 
-        # Acquisitions <-> H5 trials
-        # Result: h5_idx -> (acq_idx, h5_to_acq_ms)
-        acq_to_h5: dict[int, tuple[int, float]] = {}
+            # One transaction per experiment, so a folder of grabs that fails
+            # on one file keeps the others.
+            with self._writing() as cur:
+                if _experiment_exists(cur, exp_start_str):
+                    logger.info(f"'{experiment['exp_name']}' already in DB.")
+                    self.add_flag(ExpFlag.ALREADY_IN_DB)
+                    continue
 
-        if h5_data and acquisitions:
-            acq_to_h5 = _match_acq_to_h5(acquisitions, h5_data)
+                exp_id = _db_insert(
+                    cur,
+                    "experiments",
+                    {
+                        **experiment,
+                        "session_id": session_id,
+                        "exp_type": exp_type,
+                        "exp_path": rel_folder,
+                        "exp_start": exp_start_str,
+                        "objective": objective,
+                    },
+                )
 
-        # Pool all event trial starts across programs
-        # event_trial_pool[i] = (program_idx, trial_idx, trial_start)
-        trials: list[tuple[int, int, datetime]] = [
-            (program_idx, trial_idx, trial["trial_start"])
-            for program_idx, program in enumerate(programs_data)
-            for trial_idx, trial in enumerate(program["trials"])
-        ]
+                cur.execute("INSERT INTO groups DEFAULT VALUES;")
+                group_id = cur.lastrowid
 
-        # CSV trials <-> H5 trials
-        # Result: pool_idx -> (h5_idx, h5_to_trial_ms)
-        csv_to_h5: dict[int, tuple[int, float]] = {}
+                cur.execute(
+                    "INSERT INTO group_experiments (group_id, exp_id) VALUES (?, ?);",
+                    [group_id, exp_id],
+                )
 
-        if h5_data and trials:
-            trial_starts = [x[2] for x in trials]
-            csv_to_h5 = _match_csv_to_h5(trial_starts, h5_data)
-
-        # Build lookup: (program_idx, trial_idx) -> (h5_idx, h5_to_trial_ms)
-        trial_to_h5: dict[tuple[int, int], tuple[int, float]] = {
-            (trials[pool_idx][0], trials[pool_idx][1]): (
-                h5_idx,
-                h5_to_trial_ms,
-            )
-            for pool_idx, (h5_idx, h5_to_trial_ms) in csv_to_h5.items()
-        }
-
-        with self._locked() as con, con:
-            cur = con.cursor()
-            cur.execute("PRAGMA foreign_keys = ON;")
-
-            # Checked again now that the lock is held. Someone may have added
-            # the same experiment while the files were being read.
-            if _experiment_exists(cur, exp_start_str):
-                logger.info("Experiment already in DB.")
-                self.add_flag(ExpFlag.ALREADY_IN_DB)
-                return
-
-            # --------------------------------------------------------------- #
-            # Phase 3: Insert
-            # --------------------------------------------------------------- #
-
-            exp_id = _db_insert(
-                cur, "experiments", {**experiment, "exp_start": exp_start_str}
-            )
-
-            cur.execute("INSERT INTO groups DEFAULT VALUES;")
-            group_id = cur.lastrowid
-
-            cur.execute(
-                "INSERT INTO group_experiments (group_id, exp_id) VALUES (?, ?);",
-                [group_id, exp_id],
-            )
-
-            # Insert acquisitions matched to H5 trials (with odor timing from H5)
-            h5_to_acq_id: dict[int, int] = {}
-            matched_acq_indices: set[int] = set()
-
-            if h5_data:
-                for h5_idx, (acq_idx, delta_ms) in acq_to_h5.items():
-                    # Type checking because Object is too generic
-                    acq_start = acquisitions[acq_idx]["acq_start"]
-                    assert isinstance(acq_start, datetime)
-
-                    acq = {
-                        **acquisitions[acq_idx],
-                        "exp_id": exp_id,
-                        "acq_start": acq_start.strftime(DT_FORMAT),
-                        "odor_start": _to_datetime_str(h5_data["odor_starts"][h5_idx]),
-                        "odor_end": _to_datetime_str(h5_data["odor_ends"][h5_idx]),
-                        "h5_to_acq_ms": delta_ms,
-                    }
-                    h5_to_acq_id[h5_idx] = _db_insert(cur, "acquisitions", acq)
-                    matched_acq_indices.add(acq_idx)
-
-            # Fallback: insert acquisitions with no matching H5 trial
-            #
-            # Formatted like the matched ones above, not left to sqlite3's
-            # adapter. The adapter writes isoformat, which drops '.000000' when
-            # the microseconds are zero, so the two loops would put two formats
-            # in one column -- and `read_sql_query` infers the format from the
-            # first row and silently returns NaT for every row unlike it.
-            for acq_idx, acq in enumerate(acquisitions):
-                if acq_idx not in matched_acq_indices:
-                    # Type checking because Object is too generic
+                for acq in acquisitions:
                     acq_start = acq["acq_start"]
                     assert isinstance(acq_start, datetime)
 
@@ -1216,175 +1835,347 @@ class Database(CallRecorder):
                         },
                     )
 
-            # Insert programs, trials, and events
-            for program_idx, program_data in enumerate(programs_data):
-                metadata = program_data["metadata"]
-                assert isinstance(metadata["program_start"], datetime)
+                for key, value in rig_settings.items():
+                    _db_annotate(
+                        cur,
+                        target_type="experiment",
+                        target_id=exp_id,
+                        key=key,
+                        value=value,
+                        method_call_id=self.current_call_id,
+                    )
 
-                program_id = _db_insert(
+                for program_data in programs_data:
+                    _insert_program(cur, exp_id, program_data)
+
+            added.append(exp_id)
+            logger.info(f"Added '{experiment['exp_name']}' (exp_id = {exp_id}).")
+
+        self.set_output({"exp_ids": added})
+
+        logger.info(f"Added {len(added)} of {len(recordings)} {exp_type}s. {CHECK}")
+
+        return added
+
+    @record_call
+    def decode_sync(
+        self,
+        *,
+        exp_id: int,
+        sync_path: None | str = None,
+        max_skew_s: float = 5.0,
+    ) -> None:
+        """
+        Decode an experiment's sync file into `streams` and `sync_blocks`.
+
+        **PARAMETERS**
+        - `exp_id` is the experiment the file was recorded for
+        - `sync_path` is the H5 file, relative to the `main_folder`. Left out,
+        it is the one file in `<experiment>/sync/`
+        - `max_skew_s` is how far the ScanImage and olfactometer clocks may
+        disagree before the call is flagged (the match itself is by order, so
+        this is a sanity check, not a tolerance)
+
+        **EXAMPLE**
+        ```python
+        db.decode_sync(exp_id=12)
+        ```
+
+        Frame-clock bursts are matched to the experiment's acquisitions in
+        order, and the bursts with an odor pulse to its trials in order, which
+        fills `trials.acq_id`. Running it again replaces what the earlier run
+        wrote, so a sync file copied late or a corrected one is not a problem.
+        """
+        with self._locked() as con:
+            experiment = con.execute(
+                "SELECT exp_path, frame_count FROM experiments WHERE exp_id = ?;",
+                [int(exp_id)],
+            ).fetchone()
+
+            if experiment is None:
+                raise ValueError(f"There is no experiment {exp_id}.")
+
+            acquisitions = con.execute(
+                "SELECT acq_id, acq_start FROM acquisitions "
+                "WHERE exp_id = ? ORDER BY acq_start;",
+                [int(exp_id)],
+            ).fetchall()
+
+            trials = con.execute(
+                "SELECT trial_id, trial_odor_start FROM trials "
+                "WHERE exp_id = ? ORDER BY trial_start;",
+                [int(exp_id)],
+            ).fetchall()
+
+        path = self._sync_file(experiment["exp_path"], sync_path)
+        rel_path = path.relative_to(self.main_folder).as_posix()
+
+        logger.info(f"Decoding '{rel_path}'...")
+
+        # Read without the lock: a file is hundreds of megabytes
+        decoded = decode(path)
+
+        self._check_sync(decoded, acquisitions, trials, experiment["frame_count"])
+
+        blocks = decoded.blocks
+        acq_ids = [row["acq_id"] for row in acquisitions]
+        odor_blocks = [(i, b) for i, b in enumerate(blocks) if b.odor_pulses]
+
+        # Clock skew between the two computers, one number per acquisition.
+        # Wall clock on the olfactometer side needs the file's start time.
+        skews: list[None | float] = []
+
+        for block, row in zip(blocks, acquisitions):
+            started = decoded.time_at(block.start_sample)
+            acq_start = datetime.strptime(row["acq_start"], DT_FORMAT)
+
+            skews.append(
+                None
+                if started is None
+                else (acq_start - started).total_seconds() * 1000
+            )
+
+        finite = [abs(s) for s in skews if s is not None]
+
+        if finite and max(finite) > max_skew_s * 1000:
+            self.add_flag(SyncFlag.CLOCK_SKEW)
+            logger.warning(
+                f"ScanImage and olfactometer clocks differ by up to "
+                f"{max(finite) / 1000:.1f} s. {CROSS}"
+            )
+
+        # Trials share the olfactometer's clock with the sync file, so their
+        # odor onsets should agree to well under a second.
+        trial_skews = []
+
+        for (_, block), row in zip(odor_blocks, trials):
+            assert block.odor_on_sample is not None
+            valve = decoded.time_at(block.odor_on_sample)
+
+            if valve is not None:
+                logged = datetime.strptime(row["trial_odor_start"], DT_FORMAT)
+                trial_skews.append(abs((logged - valve).total_seconds()))
+
+        if trial_skews and max(trial_skews) > max_skew_s:
+            self.add_flag(SyncFlag.CLOCK_SKEW)
+            logger.warning(
+                f"Trial odor onsets and valve pulses differ by up to "
+                f"{max(trial_skews):.1f} s. {CROSS}"
+            )
+
+        header = decoded.header
+
+        with self._writing() as cur:
+            # Replaced as a whole: the rows of one file are one decode
+            cur.execute(
+                "DELETE FROM streams WHERE exp_id = ? AND stream_type = 'sync';",
+                [int(exp_id)],
+            )
+            cur.execute(
+                "UPDATE trials SET acq_id = NULL WHERE exp_id = ?;", [int(exp_id)]
+            )
+
+            stream_id = _db_insert(
+                cur,
+                "streams",
+                {
+                    "exp_id": int(exp_id),
+                    "stream_type": "sync",
+                    "file_path": rel_path,
+                    "rate_hz": header.rate_hz,
+                    "start_time": _optional_datetime_str(header.start_time),
+                    "stop_time": _optional_datetime_str(header.stop_time),
+                    "n_samples": header.n_samples,
+                    "attributes": json.dumps(header.attributes),
+                    "method_call_id": self.current_call_id,
+                },
+            )
+
+            for block, acq_id, skew in zip(blocks, acq_ids, skews):
+                _db_insert(
                     cur,
-                    "programs",
+                    "sync_blocks",
                     {
-                        **metadata,
-                        "exp_id": exp_id,
-                        "program_start": metadata["program_start"].strftime(DT_FORMAT),
+                        "stream_id": stream_id,
+                        "sync_block": block.sync_block,
+                        "acq_id": acq_id,
+                        "sync_start_sample": block.start_sample,
+                        "sync_frame_count": block.frame_count,
+                        "sync_frame_period_s": block.frame_period_s,
+                        "sync_odor_pulses": block.odor_pulses,
+                        "sync_odor_on_frame": block.odor_on_frame,
+                        "sync_odor_off_frame": block.odor_off_frame,
+                        "sync_odor_on_residual_s": block.odor_on_residual_s,
+                        "sync_odor_start": _optional_datetime_str(
+                            None
+                            if block.odor_on_sample is None
+                            else decoded.time_at(block.odor_on_sample)
+                        ),
+                        "sync_odor_end": _optional_datetime_str(
+                            None
+                            if block.odor_off_sample is None
+                            else decoded.time_at(block.odor_off_sample)
+                        ),
+                        "sync_camera_frames": block.camera_frames,
+                        "clock_offset_ms": skew,
+                        "method_call_id": self.current_call_id,
                     },
                 )
 
-                # Pass 1: insert trials, collect trial_ids by index
-                trial_ids: dict[int, int] = {}
-
-                for trial_idx, trial in enumerate(program_data["trials"]):
-                    acq_id = None
-                    h5_to_trial_ms = None
-
-                    if (program_idx, trial_idx) in trial_to_h5:
-                        h5_idx, delta_ms = trial_to_h5[(program_idx, trial_idx)]
-                        acq_id = h5_to_acq_id.get(h5_idx)
-                        if acq_id is not None:
-                            h5_to_trial_ms = delta_ms
-
-                    trial_ids[trial_idx] = _db_insert(
-                        cur,
-                        "trials",
-                        {
-                            "trial_start": trial["trial_start"].strftime(DT_FORMAT),
-                            "odor_start": trial["odor_start"].strftime(DT_FORMAT),
-                            "odor_end": trial["odor_end"].strftime(DT_FORMAT),
-                            "odor_id": trial["odor_id"],
-                            "outcome": trial["outcome"],
-                            "acq_id": acq_id,
-                            "h5_to_trial_ms": h5_to_trial_ms,
-                            "program_id": program_id,
-                            "exp_id": exp_id,
-                        },
-                    )
-
-                # Pass 2: insert all events in order
-                for trial_idx, event in program_data["events"]:
-                    _db_insert(
-                        cur,
-                        "events",
-                        {
-                            **event,
-                            "program_id": program_id,
-                            "trial_id": trial_ids.get(trial_idx),
-                        },
-                    )
-
-        # --------------------------------------------------------------- #
-        # Reporting
-        # --------------------------------------------------------------- #
-
-        if h5_data:
-            n_h5 = len(h5_data["trial_starts"])
-            n_matched_acq = len(acq_to_h5)
-
-            if n_matched_acq < n_h5:
-                self.add_flag(ExpFlag.H5_UNMATCHED_ACQ)
-                logger.warning(
-                    f"{n_h5 - n_matched_acq} H5 trials without "
-                    f"matching acquisition. {CROSS}"
-                )
-            else:
-                logger.info(f"All H5 trials matched to acquisitions. {CHECK}")
-
-        if trials:
-            n_events = len(trials)
-            n_matched = len(csv_to_h5)
-
-            if n_matched < n_events:
-                logger.info(f"{n_events - n_matched} trials without H5 match.")
-
-            n_with_acq = sum(
-                1
-                for (h5_idx, _) in trial_to_h5.values()
-                if h5_to_acq_id.get(h5_idx) is not None
+            cur.executemany(
+                "UPDATE trials SET acq_id = ? WHERE trial_id = ?;",
+                [
+                    (acq_ids[index], row["trial_id"])
+                    for (index, _), row in zip(odor_blocks, trials)
+                ],
             )
 
-            if n_with_acq < n_matched:
-                self.add_flag(ExpFlag.TRIAL_NO_ACQ)
-                logger.warning(
-                    f"{n_matched - n_with_acq} trials matched "
-                    f"to H5 but no acquisition. {CROSS}"
-                )
-            elif event_files:
-                logger.info(f"All matched trials have acquisitions. {CHECK}")
+        self.set_output(
+            {
+                **summary(decoded),
+                "stream_id": stream_id,
+                "matched_trials": len(trials),
+                "clock_offset_ms": None if not finite else max(finite),
+            }
+        )
 
-        self._reset_caches()
+        logger.info(
+            f"Decoded {len(blocks)} acquisitions and matched {len(trials)} "
+            f"trials. {CHECK}"
+        )
 
-    @record_call
-    def update(self) -> None:
-        """
-        Find and add all experiments folders in the `main_folder` to the database.
+    def _sync_file(self, exp_path: str, sync_path: None | str) -> Path:
+        """The sync file to decode, named or found in `<experiment>/sync/`."""
+        if sync_path is not None:
+            path = self.main_folder / sync_path
 
-        Experiment folders are folders that contain a `raw` subfolder with
-        ScanImage TIFFs.
+            if not path.is_file():
+                self.fail(SyncFlag.NO_SYNC_FILE, f"No sync file at '{path}'.")
 
-        It skips the ones that are already included in database.
-        """
+            return path.resolve()
 
-        # ----------------------------------------------------------------------- #
-        #
-        # Collect all TIFF files that satisfy:
-        #   1) File is inside a "raw" folder that don't start with a '.'
-        #   2) File was made by scanimage (and has metadata)
-        #
-        # We will log all files that satisfy (1) but not (2), and we will
-        # group acquisitions with the same loop start time. We assume that:
-        #
-        #     acqs share a loop start time <=> acqs share a raw folder
-        #
-        # We will also collect data from all *Events.csv that share an experiment
-        # folder with a raw TIFF file.
-        #
-        # Check schema.svg to see the current database schema diagram!
-        #
-        # I used preProcessing_v2.m and other scripts in that file as a baseline
-        # for what metadata has to be collected, and what needs to be checked.
-        #
-        # TODO:
-        #   1) Make sure all relevant data is added to the db.
-        #   2) (SEE NOTE) Add option to overwrite experiment data?
-        #
-        # NOTE:
-        #   - Should not overwrite experiment data and keep calls, because calls
-        #     will not be reproducible. Better to add an added_by tag and create
-        #     a new experiment every time the metadata is recomputed. Only the
-        #     experiment with the latest added_by would be reproducible.
-        #
-        # ----------------------------------------------------------------------- #
+        folder = self.main_folder / exp_path / SYNC_FOLDER
+        found = sorted(folder.glob("*.h5")) if folder.is_dir() else []
+        found = [p for p in found if not p.name.startswith(".")]
 
-        logger.info("Updating the database...")
-        logger.info("Searching for raw files ('**/raw/*.tif')...")
+        if not found:
+            self.fail(
+                SyncFlag.NO_SYNC_FILE,
+                f"No sync file in '{folder}'. Copy the H5 there, or name it "
+                "with `sync_path`.",
+            )
 
-        raw_paths = sorted(self.main_folder.rglob("raw/[!.]?*.tif"))
-        assert raw_paths, f"Found no .tif files in: '{self.main_folder.resolve()}'"
+        if len(found) > 1:
+            self.fail(
+                SyncFlag.MULTIPLE_SYNC_FILES,
+                f"{len(found)} H5 files in '{folder}'; name one with `sync_path`.",
+            )
 
-        logger.info(f"Found {len(raw_paths)} raw TIFF files.")
+        return found[0].resolve()
 
-        # Split files into experiments
-        experiments: defaultdict[str, list[str]] = defaultdict(list)
+    def _check_sync(
+        self,
+        decoded: DecodedSync,
+        acquisitions: list,
+        trials: list,
+        frame_count: int,
+    ) -> None:
+        """Flag what is off about a decode, and refuse what cannot be matched."""
+        blocks = decoded.blocks
 
-        for raw_path in raw_paths:
-            exp_path = raw_path.parent.parent
+        if decoded.header.interrupted:
+            self.add_flag(SyncFlag.INTERRUPTED)
+            logger.warning("The recording was not stopped properly (no stop time).")
 
-            # Path are relative to main_folder to be computer independent
-            # This makes the DB method_call parameters reusable
+        if decoded.fragments:
+            self.add_flag(SyncFlag.FRAGMENTS)
+            sizes = [f.frame_count for f in decoded.fragments]
+            logger.warning(f"Set aside {len(sizes)} short bursts of {sizes} frames.")
 
-            rel_path = exp_path.relative_to(self.main_folder).as_posix()
-            raw_path_rel = raw_path.relative_to(self.main_folder).as_posix()
-            experiments[rel_path].append(raw_path_rel)
+        if len(blocks) != len(acquisitions):
+            self.fail(
+                SyncFlag.BLOCK_COUNT_MISMATCH,
+                f"The sync file has {len(blocks)} frame bursts but the experiment "
+                f"has {len(acquisitions)} acquisitions, so they cannot be matched "
+                "in order.",
+            )
 
-        # Add experiments to the database
-        for path in experiments:
-            try:
-                self.add_experiment(rel_path=path, rel_raw_paths=experiments[path])
+        odd = [b.sync_block for b in blocks if b.odor_pulses != 1]
 
-            except Exception:
-                logger.exception("Failed to add experiment")
+        if odd:
+            self.add_flag(SyncFlag.ODOR_PULSES)
+            logger.warning(f"Bursts {odd} do not have exactly one odor pulse.")
 
-        logger.info("Database updated!")
+        with_odor = sum(1 for b in blocks if b.odor_pulses)
+
+        if not trials:
+            self.add_flag(SyncFlag.NO_TRIALS)
+            logger.warning(
+                "The experiment has no trials (no olfactometer Events file was "
+                "ingested), so the odor bursts are stored unmatched."
+            )
+
+        elif with_odor != len(trials):
+            self.fail(
+                SyncFlag.TRIAL_COUNT_MISMATCH,
+                f"{with_odor} bursts have an odor pulse but the experiment has "
+                f"{len(trials)} trials, so they cannot be matched in order.",
+            )
+
+        wrong = [b.sync_block for b in blocks if b.frame_count != frame_count]
+
+        if wrong:
+            self.add_flag(SyncFlag.FRAME_COUNT)
+            logger.warning(
+                f"Bursts {wrong} do not have the {frame_count} frames ScanImage "
+                "was set to."
+            )
+
+        no_camera = [b.sync_block for b in blocks if not b.camera_frames]
+
+        if no_camera:
+            self.add_flag(SyncFlag.NO_CAMERA)
+            logger.warning(f"No camera strobes during bursts {no_camera} (no pupil).")
+
+    def _load_programs(self, folder: Path) -> list[dict]:
+        """Parse the olfactometer event files of an experiment folder."""
+        event_files = sorted(
+            folder.rglob("[!.]?*Events.csv"), key=lambda x: x.stat().st_mtime
+        )
+
+        logger.info(f"Found {len(event_files)} olfactometer event files.")
+
+        if not event_files:
+            return []
+
+        with self._locked() as con:
+            rows = con.execute("SELECT odor_name, odor_id FROM odors;").fetchall()
+
+        odors: dict[str, int] = {name: id for name, id in rows}
+
+        stem_split = event_files[0].stem.split("-")
+        events_start = datetime.strptime(
+            " ".join(stem_split[-3:-1]), "%Y_%m_%d %H_%M_%S"
+        )
+        program_starts = _parse_program_starts(self, events_start)
+
+        programs_data = _load_event_data(
+            event_files, program_starts, odors, self.main_folder
+        )
+
+        configs = _program_configs(folder / OLFACTOMETER_FOLDER)
+
+        for program_data in programs_data:
+            name = program_data["metadata"]["program_name"]
+            config = configs.get(name)
+
+            if config is None:
+                logger.warning(f"No olfactometer definition found for '{name}'.")
+                self.add_flag(ExpFlag.NO_PROGRAM_CONFIG)
+
+            program_data["metadata"]["program_config"] = config
+
+        return programs_data
 
 
 def _has_database(path: Path) -> bool:
@@ -1401,6 +2192,114 @@ def _experiment_exists(con: Connection | Cursor, exp_start_str: str) -> bool:
     ).fetchone()
 
     return bool(row[0])
+
+
+def _check_session(experiment: Object, session: sqlite3.Row, db: Database) -> None:
+    """
+    Refuse a recording whose file names disagree with the session given.
+
+    ScanImage names files `<date>_m<mouse>_<...>`, from what was typed into it.
+    A folder submitted under the wrong session would land its acquisitions on
+    the wrong mouse or day, with nothing to say so.
+    """
+    name = str(experiment["exp_name"])
+    match = re.match(r"(\d{8})_([A-Za-z]*\d+)_", name)
+
+    if match is None:
+        logger.warning(f"Cannot read a mouse and a day out of '{name}'.")
+        return
+
+    day = datetime.strptime(match.group(1), "%Y%m%d").date().isoformat()
+    mouse = _mouse_number(match.group(2))
+
+    if (mouse, day) != (session["mouse_id"], session["session_date"]):
+        db.fail(
+            ExpFlag.NOT_THE_SESSION,
+            f"'{name}' is mouse {mouse} on {day}, but session "
+            f"{session['session_id']} is mouse {session['mouse_id']} on "
+            f"{session['session_date']}.",
+        )
+
+
+def _insert_program(cur: Cursor, exp_id: int, program_data: dict) -> int:
+    """Insert one program with its trials and events."""
+    metadata = program_data["metadata"]
+    assert isinstance(metadata["program_start"], datetime)
+
+    program_id = _db_insert(
+        cur,
+        "programs",
+        {
+            **metadata,
+            "exp_id": exp_id,
+            "program_start": metadata["program_start"].strftime(DT_FORMAT),
+        },
+    )
+
+    # Pass 1: insert trials, collect trial_ids by index
+    trial_ids: dict[int, int] = {}
+
+    for trial_idx, trial in enumerate(program_data["trials"]):
+        trial_ids[trial_idx] = _db_insert(
+            cur,
+            "trials",
+            {
+                "trial_start": trial["trial_start"].strftime(DT_FORMAT),
+                "trial_odor_start": trial["odor_start"].strftime(DT_FORMAT),
+                "trial_odor_end": trial["odor_end"].strftime(DT_FORMAT),
+                "odor_id": trial["odor_id"],
+                "outcome": trial["outcome"],
+                "acq_id": None,
+                "program_id": program_id,
+                "exp_id": exp_id,
+            },
+        )
+
+    # Pass 2: insert all events in order
+    for trial_idx, event in program_data["events"]:
+        _db_insert(
+            cur,
+            "events",
+            {**event, "program_id": program_id, "trial_id": trial_ids.get(trial_idx)},
+        )
+
+    return program_id
+
+
+def _program_configs(folder: Path) -> dict[str, str]:
+    """
+    The olfactometer's program definitions left in an experiment folder.
+
+    One JSON file per program, as the olfactometer's `Program.config` holds it
+    (a dict with a `Name`). Keyed by that name, as JSON text ready to store.
+    """
+    configs: dict[str, str] = {}
+
+    if not folder.is_dir():
+        return configs
+
+    for path in sorted(folder.glob("*.json")):
+        if path.name.startswith("."):
+            continue
+
+        try:
+            loaded = json.loads(path.read_text())
+
+        except ValueError:
+            logger.warning(f"Could not read '{path.name}' as JSON.")
+            continue
+
+        # Either the program itself or the tree node that wraps it
+        program = loaded.get("Program", loaded) if isinstance(loaded, dict) else None
+        name = program.get("Name") if isinstance(program, dict) else None
+
+        if name is None:
+            logger.warning(f"'{path.name}' does not look like a program definition.")
+            continue
+
+        configs[name] = json.dumps(program)
+
+    return configs
 
 
 def _db_insert(cur: Cursor, table_name: str, data: Object | list[Object]) -> int:
@@ -1430,82 +2329,363 @@ def _db_insert(cur: Cursor, table_name: str, data: Object | list[Object]) -> int
 
 
 # --------------------------------------------------------------------------- #
-# Data Parsing and Matching
+# Subjects and odors
 # --------------------------------------------------------------------------- #
 
 
-def _get_h5_metadata(
-    paths: list[Path], exp_start: datetime
-) -> None | dict[str, np.ndarray]:
-    # There must be at most one path
-    if not paths:
+def _mouse_number(name: int | str) -> int:
+    """
+    The number a mouse is known by, from the name its folders and files use.
+
+    Raises `ValueError` for a name that is not a number with an optional letter
+    prefix, since guessing which animal was meant would attach a recording to
+    the wrong one.
+
+    **EXAMPLE**
+    ```python
+    _mouse_number("m442")   # 442
+    ```
+    """
+    match = re.fullmatch(r"[A-Za-z]*0*(\d+)", str(name).strip())
+
+    # Zero is the placeholder people write when a recording is not about a
+    # particular animal, so it names no mouse either.
+    if match is None or int(match.group(1)) == 0:
+        raise ValueError(
+            f"Cannot tell which mouse {name!r} is. A name is an optional prefix "
+            f"and a number above zero, as in 'm442'."
+        )
+
+    return int(match.group(1))
+
+
+GENOTYPES = {
+    "wt": "wt",
+    "wildtype": "wt",
+    "wild type": "wt",
+    "+/+": "wt",
+    "het": "het",
+    "heterozygous": "het",
+    "+/-": "het",
+    "hom": "hom",
+    "homozygous": "hom",
+    "-/-": "hom",
+}
+
+
+def _mouse_lines(lines: dict[str, None | str]) -> dict[str, None | str]:
+    """
+    Clean a line-to-genotype mapping for storage.
+
+    Line names keep the spelling they were given, minus surrounding spaces.
+    The genotype is matched case-insensitively against the spellings people
+    write and stored as `'wt'`, `'het'` or `'hom'`; `None` stays `None`, meaning
+    the mouse carries the mutation but was not genotyped for it.
+
+    **EXAMPLE**
+    ```python
+    _mouse_lines({"TH-Cre ": "Het", "TIGRE": None})
+    # {"TH-Cre": "het", "TIGRE": None}
+    ```
+    """
+    cleaned: dict[str, None | str] = {}
+
+    for line, genotype in lines.items():
+        name = str(line).strip()
+
+        if not name:
+            raise ValueError("A line needs a name.")
+
+        if genotype is None:
+            cleaned[name] = None
+            continue
+
+        known = GENOTYPES.get(str(genotype).strip().lower())
+
+        if known is None:
+            raise ValueError(
+                f"Cannot tell what {genotype!r} means for {name}. Use one of: "
+                f"{sorted(set(GENOTYPES.values()))}."
+            )
+
+        cleaned[name] = known
+
+    return cleaned
+
+
+def _date_string(value: Value) -> str:
+    """A date as `YYYY-MM-DD`, from a date, a datetime or an ISO string."""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+
+    if isinstance(value, date):
+        return value.isoformat()
+
+    try:
+        return date.fromisoformat(str(value).strip()).isoformat()
+
+    except ValueError as error:
+        raise ValueError(f"Not a date (YYYY-MM-DD): {value!r}.") from error
+
+
+def _optional_datetime_str(value: None | datetime) -> None | str:
+    return None if value is None else value.strftime(DT_FORMAT)
+
+
+def _optional_real(value: Value) -> None | float:
+    if value is None:
         return None
 
-    path = paths[0]
+    number = float(value)  # type: ignore[arg-type]
 
-    # Very similar to getScopeH5Timestamps
-    logger.info(f"Getting timing data from: '{path}'")
+    if number != number:  # NaN reads as "not given"
+        return None
 
-    # Parse experiment start time
-    exp_start_np = np.datetime64(exp_start)
+    return number
 
-    with h5py.File(path) as f:
-        samplerate = f.attrs["samplerate"]
 
-        imaging_TTL = f["ImagingWindow"][:]
-        odor_TTL = f["OdorDelivery"][:]
+def _panel_id(cur: Cursor, panel_name: str) -> int:
+    row = cur.execute(
+        "SELECT panel_id FROM panels WHERE panel_name = ?;", [str(panel_name).strip()]
+    ).fetchone()
 
-        # TODO: (Vinicius)
-        #   Maybe change the way we find starts? Because adding the distance argument
-        #   picks the highest and not the first choice (both in MATLAB and Python).
+    if row is None:
+        raise ValueError(f"No panel named {panel_name!r}. Add it with `add_panel`.")
 
-        # NOTE: (Priscilla, from MATLAB code, adapted)
-        #   Added distance to deal with problematic file where
-        #   code found 2 peaks right next to each other
+    return int(row["panel_id"])
 
-        trial_starts, _ = find_peaks(
-            np.diff(imaging_TTL), height=2.0, distance=samplerate / 2
+
+VIAL_COLUMNS = ("vial_sccm", "total_sccm", "total_volume_ml")
+
+
+def _insert_vial(
+    cur: Cursor,
+    panel_id: int,
+    vial: Object,
+    day: str,
+    mixes: dict[int, bool],
+    made_of: dict[int, set[int]],
+) -> int:
+    """Insert one vial with its components, checking the recipe makes sense."""
+    missing = [c for c in ("vial_position", "odor_id", *VIAL_COLUMNS) if c not in vial]
+
+    if missing:
+        raise ValueError(f"A vial needs {missing} (got {sorted(vial)}).")
+
+    odor_id = int(vial["odor_id"])  # type: ignore[arg-type]
+
+    if odor_id not in mixes:
+        raise ValueError(f"No odor with id {odor_id}.")
+
+    components = vial.get("components") or []
+    assert isinstance(components, list)
+
+    component_ids = [int(c["odor_id"]) for c in components]  # type: ignore[index]
+
+    for component_id in component_ids:
+        if mixes.get(component_id, True):
+            raise ValueError(
+                f"Component {component_id} of vial {vial['vial_position']} is "
+                "not a single chemical."
+            )
+
+    if mixes[odor_id]:
+        if set(component_ids) != made_of.get(odor_id, set()):
+            raise ValueError(
+                f"Vial {vial['vial_position']} holds mix {odor_id}, which is made "
+                f"of {sorted(made_of.get(odor_id, ()))}; list exactly those."
+            )
+
+    elif set(component_ids) - {odor_id}:
+        raise ValueError(
+            f"Vial {vial['vial_position']} holds odor {odor_id}, a single "
+            f"chemical, so its only component can be itself."
         )
-        odor_starts, _ = find_peaks(
-            np.diff(odor_TTL), height=2.0, distance=samplerate / 10
+
+    made_on = vial.get("made_on")
+
+    vial_id = _db_insert(
+        cur,
+        "vials",
+        {
+            "panel_id": panel_id,
+            "vial_position": int(vial["vial_position"]),  # type: ignore[arg-type]
+            "odor_id": odor_id,
+            **{column: float(vial[column]) for column in VIAL_COLUMNS},  # type: ignore[arg-type]
+            "solvent_volume_ml": _optional_real(vial.get("solvent_volume_ml")),
+            "made_on": day if made_on is None else _date_string(made_on),
+        },
+    )
+
+    for component in components:
+        assert isinstance(component, dict)
+
+        _db_insert(
+            cur,
+            "vial_odors",
+            {
+                "vial_id": vial_id,
+                "odor_id": int(component["odor_id"]),  # type: ignore[arg-type]
+                "target_ppm": float(component["target_ppm"]),  # type: ignore[arg-type]
+                "liquid_ul": _optional_real(component.get("liquid_ul")),
+                "percent_vv": _optional_real(component.get("percent_vv")),
+            },
         )
-        odor_ends, _ = find_peaks(
-            -np.diff(odor_TTL), height=2.0, distance=samplerate / 10
+
+    return vial_id
+
+
+# --------------------------------------------------------------------------- #
+# Annotations
+# --------------------------------------------------------------------------- #
+
+
+def _db_annotate(
+    cur: Cursor,
+    *,
+    target_type: str,
+    target_id: int,
+    key: str,
+    value: Value,
+    method_call_id: int,
+) -> int:
+    """Write one annotation, checking the target and the registry first."""
+
+    # `target_id` usually arrives as a numpy integer, because the obvious way to
+    # get one is out of a DataFrame index. That is not an `int` to `isinstance`
+    # and sqlite3 will not adapt it, so coerce rather than refuse.
+    target_id = int(target_id)
+
+    # No foreign key can cover a polymorphic target, so this stands in for one:
+    # without it an annotation can name a row that does not exist, and nothing
+    # would ever say so.
+    if target_type not in ANNOTATION_TARGETS:
+        raise ValueError(
+            f"Cannot annotate a {target_type!r}. Use one of: "
+            f"{sorted(ANNOTATION_TARGETS)}."
         )
 
-        # Returns None if no trials where found
-        if len(trial_starts) == 0:
-            logger.info("No trial triggers found in this H5 file.")
-            return None
+    spec = ANNOTATION_TARGETS[target_type]
 
-        # Shift everything by first trial start, to match FrameTimestamp_sec data
-        # FrameTimestamp_sec always starts at zero, so they almost exactly match
-        shift = trial_starts[0]
+    exists = cur.execute(
+        f"SELECT EXISTS(SELECT 1 FROM {spec.name} WHERE {spec.index} = ?);",
+        [target_id],
+    ).fetchone()[0]
 
-        trial_starts -= shift
-        odor_starts -= shift
-        odor_ends -= shift
+    if not exists:
+        raise ValueError(f"There is no {target_type} {target_id} to annotate.")
 
-        assert len(trial_starts) == len(odor_starts) == len(odor_ends), (
-            f"The following do not match:\n"
-            f"    Number of trials {len(trial_starts)}\n"
-            f"    Odor presentation starts {len(odor_starts)}\n"
-            f"    Odor presentation ends {len(odor_ends)}"
+    # The registry declares a type per key and SQLite cannot enforce it: the
+    # column is ANY, which is what lets a number stay a number. So the check
+    # lives here, on the only path that writes.
+    row = cur.execute(
+        "SELECT value_type, allowed_values, retired "
+        "  FROM annotation_keys "
+        "  WHERE applies_to = ? AND key = ?;",
+        [target_type, key],
+    ).fetchone()
+
+    if row is None:
+        raise ValueError(
+            f"No annotation key '{key}' for a {target_type}. Register it in "
+            f"`annotation_keys` first, or check the spelling."
         )
 
-        logger.info(f"Found {len(trial_starts)} trial starts in the H5 file.")
+    # Retiring is what a project has instead of deleting a key: old values stay
+    # readable, new ones are not taken.
+    if row["retired"]:
+        raise ValueError(
+            f"Annotation '{key}' is retired for a {target_type}, so it does not "
+            f"take new values. What was written under it is still readable. Use "
+            f"`retire_annotation_key(..., retired=False)` to bring it back."
+        )
 
-        # Convert to timedeltas
-        trial_starts = (trial_starts / samplerate * 1e9).astype("timedelta64[ns]")
-        odor_starts = (odor_starts / samplerate * 1e9).astype("timedelta64[ns]")
-        odor_ends = (odor_ends / samplerate * 1e9).astype("timedelta64[ns]")
+    # NULL clears the key: the latest row wins, so it reads as unset from now
+    # on while what it used to say stays in the history.
+    stored = (
+        None
+        if value is None
+        else _annotation_value(key, value, row["value_type"], row["allowed_values"])
+    )
 
-        # Return the datetimes to be matched with acquisition frame times
-        return {
-            "trial_starts": exp_start_np + trial_starts,
-            "odor_starts": exp_start_np + odor_starts,
-            "odor_ends": exp_start_np + odor_ends,
-        }
+    return _db_insert(
+        cur,
+        "annotations",
+        {
+            "target_type": target_type,
+            "target_id": target_id,
+            "key": key,
+            "value": stored,
+            "method_call_id": method_call_id,
+        },
+    )
+
+
+BOOLEAN_WORDS = {
+    "true": True,
+    "yes": True,
+    "y": True,
+    "1": True,
+    "false": False,
+    "no": False,
+    "n": False,
+    "0": False,
+}
+
+
+def _annotation_value(
+    key: str, value: Value, value_type: str, allowed_values: None | str
+) -> Value:
+    """Coerce `value` to what the registry says `key` holds, or explain why not."""
+
+    try:
+        match value_type:
+            case "integer":
+                number = float(value)  # type: ignore[arg-type]
+
+                if not number.is_integer():
+                    raise ValueError("not a whole number")
+
+                return int(number)
+
+            case "real":
+                return float(value)  # type: ignore[arg-type]
+
+            case "boolean":
+                if isinstance(value, str):
+                    if value.strip().lower() not in BOOLEAN_WORDS:
+                        raise ValueError("not yes or no")
+
+                    return int(BOOLEAN_WORDS[value.strip().lower()])
+
+                return int(bool(value))
+
+            case "date":
+                return _date_string(value)
+
+            case "enum":
+                options = json.loads(allowed_values or "[]")
+                chosen = [o for o in options if o.lower() == str(value).strip().lower()]
+
+                if not chosen:
+                    raise ValueError(f"expected one of {options}")
+
+                return chosen[0]
+
+            case _:
+                # 'text' and 'long_text', stored as written
+                return str(value)
+
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"Annotation '{key}' is declared {value_type} "
+            f"but got {value!r} ({error})."
+        ) from error
+
+
+# --------------------------------------------------------------------------- #
+# Olfactometer files
+# --------------------------------------------------------------------------- #
 
 
 def _load_event_data(
@@ -1670,92 +2850,6 @@ def _load_event_data(
     return programs
 
 
-def _match_acq_to_h5(
-    acquisitions: list[Object],
-    h5_data: dict[str, np.ndarray],
-) -> dict[int, tuple[int, float]]:
-    """
-    Match acquisitions to H5 trials by nearest timestamp.
-
-    h5_to_acq_ms stores the signed difference (acq_start - h5_trial_start) in ms.
-
-    Returns dict: h5_idx -> (acq_idx, h5_to_acq_ms)
-    """
-    h5_dts = [_to_datetime(t) for t in h5_data["trial_starts"]]
-    matches: dict[int, tuple[int, float]] = {}
-    h5_ptr = 0
-
-    for acq_idx, acq in enumerate(acquisitions):
-        # Type checking because Object is too generic
-        acq_start = acq["acq_start"]
-        assert isinstance(acq_start, datetime)
-
-        # Advance h5 pointer past trials clearly before this acquisition
-        while h5_ptr < len(h5_dts) - 1 and h5_dts[h5_ptr] < acq_start - H5_TOLERANCE:
-            h5_ptr += 1
-
-        if h5_ptr < len(h5_dts):
-            delta = acq_start - h5_dts[h5_ptr]
-            if abs(delta) < H5_TOLERANCE:
-                matches[h5_ptr] = (acq_idx, delta / TIMEDELTA_MS)
-                h5_ptr += 1
-
-    return matches
-
-
-def _match_csv_to_h5(
-    csv_starts: list[datetime],
-    h5_data: dict[str, np.ndarray],
-) -> dict[int, tuple[int, float]]:
-    """
-    Find the best alignment of CSV trial starts with H5 trial starts.
-
-    This function searches for the starting position k in the csv_starts list
-    such that csv_starts[k:k+n_h5] best aligns with h5 trial starts (minimizing
-    std of pairwise differences). Unmatched trials at the boundaries are left out.
-
-    h5_to_trial_ms stores the signed difference (csv_start - h5_start) in ms.
-
-    Returns dict: pool_idx -> (h5_idx, h5_to_trial_ms)
-    """
-    h5_starts = [_to_datetime(t) for t in h5_data["trial_starts"]]
-    n_h5 = len(h5_starts)
-    n_events = len(csv_starts)
-
-    if n_events == 0 or n_h5 == 0:
-        return {}
-
-    if n_events < n_h5:
-        logger.warning(
-            f"Fewer trial starts in the CSV files ({n_events})"
-            f" than in the H5 file ({n_h5}). Matching as many as possible."
-        )
-        n_h5 = n_events
-
-    # Use offsets from the first H5 trial for numerical stability
-    base = h5_starts[0]
-    h5_ms = np.array([(t - base).total_seconds() * 1000 for t in h5_starts[:n_h5]])
-    trial_ms = np.array([(t - base).total_seconds() * 1000 for t in csv_starts])
-
-    best_k = 0
-    best_std = float("inf")
-
-    for k in range(n_events - n_h5 + 1):
-        std = float(np.std(trial_ms[k : k + n_h5] - h5_ms))
-        if std < best_std:
-            best_std = std
-            best_k = k
-
-    diffs = trial_ms[best_k : best_k + n_h5] - h5_ms
-
-    logger.info(
-        f"Average clock offset (event - h5):"
-        f" {float(np.mean(diffs)):.1f} ms, std: {best_std:.1f} ms"
-    )
-
-    return {best_k + j: (j, float(diffs[j])) for j in range(n_h5)}
-
-
 def _parse_event_file(path: Path, program_start: datetime) -> pd.DataFrame:
     """
     Perform simple parsing into a DataFrame to be iterated over.
@@ -1837,12 +2931,3 @@ def _whole_number(value, field: str, path: Path) -> int:
         )
 
     return nearest
-
-
-def _to_datetime(dt: np.datetime64) -> datetime:
-    dt_str = np.datetime_as_string(dt).item()
-    return datetime.fromisoformat(dt_str)
-
-
-def _to_datetime_str(dt: np.datetime64) -> str:
-    return _to_datetime(dt).strftime(DT_FORMAT)

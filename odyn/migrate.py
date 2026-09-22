@@ -23,10 +23,15 @@ from .utils import DB_TIMEOUT_S, backup_path, database_path, logger
 # When adding a new migration you should:
 # - Overwrite latest.sql with the latest migration;
 # - Overwrite create.sql with compatible DB schema;
-# - Bump the SCHEMA_VERSION to match;
+# - Bump the SCHEMA_VERSION to match, and set MIGRATES_FROM;
 # - Run test_migration.py, then `python -m odyn.tools diagram`.
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+
+# Which version `latest.sql` upgrades from, or None when a version is a rebuild
+# rather than a migration: a new database is started from `create.sql` and the
+# old one stays readable with the tagged older code. v5 is such a rebuild.
+MIGRATES_FROM: None | int = None
 
 # Calls running for longer than this limit are probably dead
 RUNNING_FOR_AT_MOST = "-2 days"
@@ -37,7 +42,7 @@ def migrate(
     main_folder: str | Path, project: None | str = None, force: bool = False
 ) -> None:
     """
-    Migrate DB from v(SCHEMA_VERSION-1) up to vSCHEMA_VERSION.
+    Migrate DB from vMIGRATES_FROM up to vSCHEMA_VERSION.
 
     Refuses while recorded calls are still running, since they may write
     through the old schema when they finish. `force` goes ahead anyway, for
@@ -63,8 +68,15 @@ def migrate(
                 logger.info(f"Database already at v{SCHEMA_VERSION}.")
                 return
 
-            if version != SCHEMA_VERSION - 1:
-                raise RuntimeError(f"Expected v{SCHEMA_VERSION - 1} but got v{version}")
+            if MIGRATES_FROM is None:
+                raise RuntimeError(
+                    f"Schema v{SCHEMA_VERSION} is a rebuild, not a migration, so "
+                    f"there is no upgrade path from v{version}. Start a new "
+                    "database (a project) and keep this one for the older code."
+                )
+
+            if version != MIGRATES_FROM:
+                raise RuntimeError(f"Expected v{MIGRATES_FROM} but got v{version}")
 
             check_no_open_calls(con, force)
 

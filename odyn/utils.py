@@ -114,85 +114,315 @@ Value: TypeAlias = Union[BasicTypes, "Object", Sequence["Value"]]
 Object: TypeAlias = dict[str, "Value"]
 
 # --------------------------------------------------------------------------- #
-# Database queries
+# Tables
 # --------------------------------------------------------------------------- #
 
-# Two ways of accessing the same view, kept together so drifts are visible.
-#
-# ASSUMPTIONS:
-# - Some acquisitions don't have trials (thus, we use LEFT JOIN);
-# - At most one trial per acquisition, so no row-splitting.
-#
-# NOTES:
-# - 'a.*' rather than a column list, to allow for new columns;
-# - trial columns are named to leave out some and rename other collisions.
+# `Database` exposes every table as a cached DataFrame, and `Group` exposes the
+# same tables restricted to its experiments. Each pair differs only in the SQL,
+# so both queries live side by side in one spec and one reader serves both
+# classes: the cache check, the read, the date parsing, the index and the
+# normalization below happen in exactly one place.
 
-ACQUISITION_TRIALS = """
-    SELECT a.*
-         , t.trial_id
-         , t.trial_start
-         , t.odor_start AS trial_odor_start
-         , t.odor_end   AS trial_odor_end
-         , t.odor_id
-         , t.outcome
-         , t.h5_to_trial_ms
-         , t.program_id
-         , p.program_type
-        FROM acquisitions AS a
-        LEFT JOIN trials   AS t ON t.acq_id = a.acq_id
-        LEFT JOIN programs AS p ON p.program_id = t.program_id;
+
+@dataclass(frozen=True)
+class TableSpec:
+    """
+    How one table is read as a DataFrame.
+
+    - `name` is the attribute (`db.acquisitions`) and the cache key;
+    - `index` is the column that becomes the index;
+    - `all_rows` is the query `Database` runs, `in_group` the one `Group` runs
+      with its `group_id` as the single `?` parameter (`None` when the table
+      has no per-group meaning);
+    - `dates` are parsed as datetimes and `json` columns as Python objects.
+    """
+
+    name: str
+    index: str
+    all_rows: str
+    in_group: None | str = None
+    dates: tuple[str, ...] = ()
+    json: tuple[str, ...] = ()
+
+
+# Columns `sync_blocks` adds to an acquisition. It is one row per acquisition
+# and was split out for storage reasons (it arrives when the sync file is
+# decoded, and a re-decode replaces it whole), not because it describes
+# something else, so it is joined back wherever acquisitions are read. LEFT,
+# because those rows are missing until the decode runs.
+_SYNC_COLUMNS = """
+         , s.stream_id
+         , s.sync_block
+         , s.sync_start_sample
+         , s.sync_frame_count
+         , s.sync_frame_period_s
+         , s.sync_odor_pulses
+         , s.sync_odor_on_frame
+         , s.sync_odor_off_frame
+         , s.sync_odor_on_residual_s
+         , s.sync_odor_start
+         , s.sync_odor_end
+         , s.sync_camera_frames
+         , s.clock_offset_ms
 """
 
-GROUP_ACQUISITION_TRIALS = """
-    SELECT a.*
+# Trial columns added to an acquisition. At most one trial per acquisition, so
+# the join never splits a row; acquisitions without a trial keep NULLs.
+_TRIAL_COLUMNS = """
          , t.trial_id
          , t.trial_start
-         , t.odor_start AS trial_odor_start
-         , t.odor_end   AS trial_odor_end
+         , t.trial_odor_start
+         , t.trial_odor_end
          , t.odor_id
          , t.outcome
-         , t.h5_to_trial_ms
          , t.program_id
          , p.program_type
+"""
+
+# The join chain that restricts a table to a group's experiments
+_GROUP_EXPERIMENTS = """
         FROM group_experiments AS g
-        JOIN experiments   AS e ON e.exp_id = g.exp_id
-        JOIN acquisitions  AS a ON a.exp_id = e.exp_id
-        LEFT JOIN trials   AS t ON t.acq_id = a.acq_id
-        LEFT JOIN programs AS p ON p.program_id = t.program_id
-        WHERE g.group_id = ?;
+        JOIN experiments AS e ON e.exp_id = g.exp_id
 """
 
 
-def _acquisition_trials(con: Connection, query: str, params: list = []) -> pd.DataFrame:
+def _simple(name: str, index: str, dates=(), json=(), via: None | str = None):
     """
-    Shared body of `Database.acquisition_trials` / `Group.acquisition_trials`.
+    A spec for `SELECT * FROM name`, restricted to a group through `via`.
 
-    When used with the queries above, it returns a left join between the
-    acquisitions and trials tables. Both have odor window timings, which come
-    from the H5 + TIFF metadata and the olfactometer events, respectively.
-    Those can disagree significantly, so they are all kept in the join.
+    `via` is the join from `experiments AS e` down to the table, aliased `x`,
+    e.g. `"JOIN acquisitions AS x ON x.exp_id = e.exp_id"`. Tables with no
+    per-group meaning leave it out.
     """
-    frame = pd.read_sql_query(
-        query,
-        con,
-        params=params,
-        # Names as the query returns them, before the rename below
-        parse_dates=[
-            "acq_start",
-            "odor_start",
-            "odor_end",
-            "trial_start",
-            "trial_odor_start",
-            "trial_odor_end",
-        ],
+    in_group = None
+
+    if via is not None:
+        in_group = f"SELECT x.* {_GROUP_EXPERIMENTS} {via} WHERE g.group_id = ?;"
+
+    return TableSpec(
+        name,
+        index,
+        f"SELECT * FROM {name};",
+        in_group,
+        tuple(dates),
+        tuple(json),
     )
 
-    frame = frame.rename(
-        columns={"odor_start": "acq_odor_start", "odor_end": "acq_odor_end"}
-    )
-    frame.set_index("acq_id", inplace=True)
 
-    return frame
+USERS = _simple("users", "user_id")
+MICE = _simple("mice", "mouse_id", dates=["added_to_db_at"])
+MOUSE_LINES = TableSpec("mouse_lines", "mouse_id", "SELECT * FROM mouse_lines;")
+SESSIONS = _simple(
+    "sessions",
+    "session_id",
+    dates=["added_to_db_at"],
+    via="JOIN sessions AS x ON x.session_id = e.session_id",
+)
+EXPERIMENTS = TableSpec(
+    "experiments",
+    "exp_id",
+    "SELECT * FROM experiments;",
+    f"SELECT e.* {_GROUP_EXPERIMENTS} WHERE g.group_id = ?;",
+    dates=("exp_start", "added_to_db_at"),
+)
+GROUP_EXPERIMENTS = TableSpec(
+    "group_experiments",
+    "group_id",
+    # Group 0 is the database's own row and has no experiments
+    f"SELECT g.group_id, e.* {_GROUP_EXPERIMENTS} WHERE g.group_id != 0;",
+    dates=("exp_start", "added_to_db_at"),
+)
+ACQUISITIONS = TableSpec(
+    "acquisitions",
+    "acq_id",
+    f"""
+    SELECT a.*
+         {_SYNC_COLUMNS}
+        FROM acquisitions AS a
+        LEFT JOIN sync_blocks AS s ON s.acq_id = a.acq_id;
+    """,
+    f"""
+    SELECT a.*
+         {_SYNC_COLUMNS}
+        {_GROUP_EXPERIMENTS}
+        JOIN acquisitions AS a ON a.exp_id = e.exp_id
+        LEFT JOIN sync_blocks AS s ON s.acq_id = a.acq_id
+        WHERE g.group_id = ?;
+    """,
+    dates=("acq_start", "sync_odor_start", "sync_odor_end"),
+)
+ACQUISITION_TRIALS = TableSpec(
+    "acquisition_trials",
+    "acq_id",
+    f"""
+    SELECT a.*
+         {_SYNC_COLUMNS}
+         {_TRIAL_COLUMNS}
+        FROM acquisitions AS a
+        LEFT JOIN sync_blocks AS s ON s.acq_id = a.acq_id
+        LEFT JOIN trials      AS t ON t.acq_id = a.acq_id
+        LEFT JOIN programs    AS p ON p.program_id = t.program_id;
+    """,
+    f"""
+    SELECT a.*
+         {_SYNC_COLUMNS}
+         {_TRIAL_COLUMNS}
+        {_GROUP_EXPERIMENTS}
+        JOIN acquisitions     AS a ON a.exp_id = e.exp_id
+        LEFT JOIN sync_blocks AS s ON s.acq_id = a.acq_id
+        LEFT JOIN trials      AS t ON t.acq_id = a.acq_id
+        LEFT JOIN programs    AS p ON p.program_id = t.program_id
+        WHERE g.group_id = ?;
+    """,
+    dates=(
+        "acq_start",
+        "sync_odor_start",
+        "sync_odor_end",
+        "trial_start",
+        "trial_odor_start",
+        "trial_odor_end",
+    ),
+)
+STREAMS = _simple(
+    "streams",
+    "stream_id",
+    dates=["start_time", "stop_time"],
+    json=["attributes"],
+    via="JOIN streams AS x ON x.exp_id = e.exp_id",
+)
+SYNC_BLOCKS = TableSpec(
+    "sync_blocks",
+    "acq_id",
+    "SELECT * FROM sync_blocks;",
+    f"""
+    SELECT x.* {_GROUP_EXPERIMENTS}
+        JOIN streams     AS s ON s.exp_id = e.exp_id
+        JOIN sync_blocks AS x ON x.stream_id = s.stream_id
+        WHERE g.group_id = ?;
+    """,
+    dates=("sync_odor_start", "sync_odor_end"),
+)
+MCOR_FILES = _simple(
+    "mcor_files",
+    "acq_id",
+    via="JOIN acquisitions AS a ON a.exp_id = e.exp_id "
+    "JOIN mcor_files AS x ON x.acq_id = a.acq_id",
+)
+PROGRAMS = _simple(
+    "programs",
+    "program_id",
+    dates=["program_start"],
+    json=["program_config"],
+    via="JOIN programs AS x ON x.exp_id = e.exp_id",
+)
+TRIALS = _simple(
+    "trials",
+    "trial_id",
+    dates=["trial_start", "trial_odor_start", "trial_odor_end"],
+    via="JOIN programs AS p ON p.exp_id = e.exp_id "
+    "JOIN trials AS x ON x.program_id = p.program_id",
+)
+EVENTS = _simple(
+    "events",
+    "event_id",
+    dates=["event_time"],
+    via="JOIN programs AS p ON p.exp_id = e.exp_id "
+    "JOIN events AS x ON x.program_id = p.program_id",
+)
+ODORS = _simple("odors", "odor_id")
+ODOR_COMPONENTS = TableSpec(
+    "odor_components", "odor_id", "SELECT * FROM odor_components;"
+)
+PANELS = _simple("panels", "panel_id", dates=["added_to_db_at"])
+VIALS = _simple("vials", "vial_id", dates=["made_on", "added_to_db_at"])
+VIAL_ODORS = TableSpec("vial_odors", "vial_id", "SELECT * FROM vial_odors;")
+EXPERIMENT_VIALS = TableSpec(
+    "experiment_vials",
+    "exp_id",
+    "SELECT * FROM experiment_vials;",
+    f"SELECT x.* {_GROUP_EXPERIMENTS} "
+    "JOIN experiment_vials AS x ON x.exp_id = e.exp_id WHERE g.group_id = ?;",
+)
+ANNOTATION_KEYS = TableSpec(
+    "annotation_keys",
+    "applies_to",  # the reader sets a (applies_to, key) index, see `_read_table`
+    "SELECT * FROM annotation_keys;",
+    json=("allowed_values",),
+)
+ANNOTATIONS = _simple("annotations", "annotation_id")
+METHOD_CALLS = TableSpec(
+    "method_calls",
+    "method_call_id",
+    "SELECT * FROM method_calls;",
+    "SELECT * FROM method_calls WHERE group_id = ?;",
+    dates=("called_at", "ended_at"),
+    json=(
+        "parameter_inputs",
+        "parameters_used",
+        "call_output",
+        "code",
+        "environment",
+        "consumed_calls",
+    ),
+)
+OUTPUTS = TableSpec(
+    "outputs",
+    "output_id",
+    "SELECT * FROM outputs;",
+    """
+    SELECT o.* FROM method_calls AS mc
+        JOIN outputs AS o ON o.method_call_id = mc.method_call_id
+        WHERE mc.group_id = ?;
+    """,
+)
+
+# What an annotation can be attached to, and where that row lives. The target
+# is polymorphic, so SQLite cannot check `annotations.target_id` with a foreign
+# key and this stands in for one. Keep it in step with `applies_to` in
+# `create.sql`.
+ANNOTATION_TARGETS: dict[str, TableSpec] = {
+    "mouse": MICE,
+    "session": SESSIONS,
+    "experiment": EXPERIMENTS,
+    "program": PROGRAMS,
+    "acquisition": ACQUISITIONS,
+    "group": TableSpec("groups", "group_id", "SELECT * FROM groups;"),
+}
+
+
+def _read_table(
+    con: Connection, spec: TableSpec, query: str, params: list = []
+) -> pd.DataFrame:
+    """
+    Read one table as the DataFrame the properties hand out.
+
+    Besides the dates and the index, it settles what pandas would otherwise
+    decide by version: a column with nothing but NULLs comes back as `object`
+    of `None` on one pandas and as `str` of `NaN` on another, and a viewer
+    written against one crashes on the other. Here every text column is
+    `object` with `None` for NULL, JSON columns hold Python objects (`None`
+    for NULL) and numbers keep NaN, on every machine.
+    """
+    frame = pd.read_sql_query(query, con, params=params, parse_dates=list(spec.dates))
+
+    for column in frame.columns:
+        if column in spec.dates:
+            continue
+
+        if column in spec.json:
+            frame[column] = frame[column].map(
+                lambda text: json.loads(text) if isinstance(text, str) else None
+            )
+
+        elif not pd.api.types.is_numeric_dtype(frame[column]):
+            frame[column] = (
+                frame[column].astype(object).where(frame[column].notna(), None)
+            )
+
+    if spec is ANNOTATION_KEYS:
+        return frame.set_index(["applies_to", "key"])
+
+    return frame.set_index(spec.index)
 
 
 def _method_calls_dataframe(con: Connection, query: str, params: list) -> pd.DataFrame:
@@ -202,28 +432,25 @@ def _method_calls_dataframe(con: Connection, query: str, params: list) -> pd.Dat
     Shared body of Database.latest_calls / Group.latest_calls. `query` must
     select from method_calls and return the method_call_id column.
 
+    The effective inputs of each call come back as `input_<name>` columns and
+    its output as `output_<name>` columns, so an input and an output with the
+    same name never land on each other.
+
     NOTE: json_normalize raises on None on macOS but yields no columns on
     Windows, so missing JSON is coerced to {} (no columns, every OS).
     """
+    frame = _read_table(con, METHOD_CALLS, query, params)
 
-    df = pd.read_sql_query(query, con, params=params)
-    df.set_index("method_call_id", inplace=True)
+    used = frame["parameters_used"].map(lambda x: x or {})
+    output = frame["call_output"].map(lambda x: x or {})
 
-    df["parameter_inputs"] = df["parameter_inputs"].apply(json.loads)
-    df["parameters_used"] = df["parameters_used"].apply(json.loads)
-    df["call_output"] = df["call_output"].apply(
-        lambda s: json.loads(s) if isinstance(s, str) else {}
+    inputs = pd.json_normalize(list(used)).set_index(frame.index).add_prefix("input_")
+    outputs = (
+        pd.json_normalize(list(output)).set_index(frame.index).add_prefix("output_")
     )
 
-    df_parameters_used = pd.json_normalize(df.parameters_used).set_index(df.index)
-    df_output = pd.json_normalize(df.call_output).set_index(df.index)
-
     return pd.concat(
-        [
-            df.drop(columns=["parameters_used", "call_output"]),
-            df_parameters_used,
-            df_output,
-        ],
+        [frame.drop(columns=["parameters_used", "call_output"]), inputs, outputs],
         axis=1,
     )
 
@@ -261,10 +488,11 @@ class CallRecorder:
     """
     `@record_call` helpers shared by `Database` and `Group`.
 
-    Subclasses initialize `_call_stack` and `_outputs`.
+    Subclasses initialize `_call_stack` and `_tables`.
     """
 
     _call_stack: list[CallFrame]
+    _tables: dict[str, pd.DataFrame]
 
     @property
     def _recording_db(self) -> Database:
@@ -313,8 +541,8 @@ class CallRecorder:
             )
 
         # The outputs table is shared, so drop both cached views.
-        self._outputs = None
-        db._outputs = None
+        self._tables.pop("outputs", None)
+        db._tables.pop("outputs", None)
 
 
 def record_call(func):
@@ -365,7 +593,7 @@ def record_call(func):
                 """,
                 [
                     self.group_id,
-                    get_user(),
+                    db.user,
                     f"{type(self).__name__}.{func.__name__}",
                     func.__module__,
                     json.dumps(code),
@@ -378,10 +606,9 @@ def record_call(func):
 
         logger.info(f"Recorded method call to db (method_call_id = {call_id}).")
 
-        # Reset method_calls caches
-        self._method_calls = None
-        if self.group_id != 0:
-            db._method_calls = None
+        # A recorded call is a new row in method_calls, for both views
+        self._tables.pop("method_calls", None)
+        db._tables.pop("method_calls", None)
 
         frame = CallFrame(call_id, used=dict(parameters_used))
         self._call_stack.append(frame)

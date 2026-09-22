@@ -50,11 +50,12 @@ from skimage.transform import PiecewiseAffineTransform, warp
 
 OUTPUT_FOLDER = Path(__file__).resolve().parents[1] / "tmp" / "generated_data"
 
-# Experiment metadata
-EXP_DATE = "20260101"
-MOUSE = "m001"
+# Experiment metadata. The folder date is derived so that passing `generate` a
+# different `start` cannot leave the two disagreeing.
+MOUSE = "m1"
 EXP = "e1"
 EXP_START = datetime(2026, 1, 1, 10, 0, 0)
+EXP_DATE = EXP_START.strftime("%Y%m%d")
 
 # Acquisition parameters
 ACQUISITIONS = 4
@@ -312,12 +313,18 @@ def generate(
     frame_rate: float = FRAME_RATE,
     motion: float = 1.0,
     seed: int = 0,
+    mouse: str = MOUSE,
+    exp: str = EXP,
+    start: datetime = EXP_START,
+    acq_state: str = "loop",
 ) -> dict:
     """
     Write the recording and return what went into it.
 
     `out` becomes a `main_folder`, holding one experiment at
-    `<date>/<mouse>/<exp>/raw/`.
+    `<date>/<mouse>/<exp>/raw/`, where the date comes from `start`. `acq_state`
+    is what ScanImage writes: `"loop"` for an experiment, `"grab"` for grabs
+    and z-stacks.
 
     `motion` scales every displacement. Pass `0` for a still recording, which is
     lets you see the response by itself. (Can be used as mcor comparison.)
@@ -340,8 +347,9 @@ def generate(
             f"  {DECAY_S} s = {DECAY_S * frame_rate:.2f} frames"
         )
 
-    exp_name = f"{EXP_DATE}_{MOUSE}_{EXP}"
-    raw_folder = output_folder / EXP_DATE / MOUSE / EXP / "raw"
+    exp_date = start.strftime("%Y%m%d")
+    exp_name = f"{exp_date}_{mouse}_{exp}"
+    raw_folder = output_folder / exp_date / mouse / exp / "raw"
 
     cells = _glomeruli(rng, height, width, um_per_px)
     edge_px = EDGE_UM / um_per_px
@@ -392,16 +400,22 @@ def generate(
 
         # `epoch` is the start of the loop and must be identical in every
         # raw file for that experiment, or add_experiment will reject it.
-        # The acquisition's own start is epoch + frameTimestamps_sec.
+        # The acquisition's own start is epoch + frameTimestamps_sec. A grab
+        # is a recording of its own, so each file gets its own epoch.
         started = index * LOOP_INTERVAL_S
         name = f"{exp_name}_{index + 1:05d}.tif"
+
+        if acq_state == "loop":
+            epoch, offset = start, started
+        else:
+            epoch, offset = start + timedelta(seconds=started), 0.0
 
         _write_tiff(
             raw_folder / name,
             noisy,
             frame_data="\n".join(
                 [
-                    "SI.acqState = 'loop'",
+                    f"SI.acqState = '{acq_state}'",
                     "SI.hBeams.powers = [10 0]",
                     f"SI.hStackManager.framesPerSlice = {frames}",
                     f"SI.hRoiManager.scanFrameRate = {frame_rate}",
@@ -411,8 +425,8 @@ def generate(
             description="\n".join(
                 [
                     "frameNumbers = 1",
-                    f"frameTimestamps_sec = {started:.6f}",
-                    f"epoch = [{EXP_START:%Y %m %d %H %M} {EXP_START.second:.3f}]",
+                    f"frameTimestamps_sec = {offset:.6f}",
+                    f"epoch = [{epoch:%Y %m %d %H %M} {epoch.second:.3f}]",
                 ]
             ),
             um_per_px=um_per_px,
@@ -420,8 +434,8 @@ def generate(
 
         truth["acquisitions"].append(
             {
-                "raw_path": f"{EXP_DATE}/{MOUSE}/{EXP}/raw/{name}",
-                "acq_start": (EXP_START + timedelta(seconds=started)).isoformat(),
+                "raw_path": f"{exp_date}/{mouse}/{exp}/raw/{name}",
+                "acq_start": (start + timedelta(seconds=started)).isoformat(),
                 "mean_shift_px": np.abs(offsets).mean(axis=(1, 2)).round(3).tolist(),
             }
         )

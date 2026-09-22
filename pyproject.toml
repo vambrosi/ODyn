@@ -23,10 +23,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# the entry app (`python -m odyn.app`); `nidaqmx` only on the olfactometer PC
+gui = ["PySide6"]
 test = ["pytest", "scikit-image"]
 
 [tool.setuptools]
-packages = ["odyn"]
+packages = ["odyn", "odyn.app"]
 
 [tool.setuptools.package-data]
 odyn = ["*.sql"]
+"odyn.app" = ["icons/*.svg"]

@@ -58,7 +58,8 @@ def test_sql_backs_up_applies_and_is_recorded(admin):
     old.close()
 
     call = admin.db.latest_calls("Admin.sql").iloc[0]
-    assert call["rows"] == 1 and call["backup"].startswith(".odyn/backups/")
+    assert call["output_rows"] == 1
+    assert call["output_backup"].startswith(".odyn/backups/")
 
 
 def test_several_statements_are_all_or_nothing(admin):
@@ -298,3 +299,17 @@ def test_command_line(admin, tmp_path):
     main([folder, "snapshot"])
     main([folder, "unlock", "--yes"])
     main([folder, "status"])
+
+
+def test_users_are_added_and_retired_from_the_command_line(admin):
+    from odyn.admin import main
+
+    folder = str(admin.main_folder)
+    assert main([folder, "add-user", "ana", "Ana Silva"]) == 0
+
+    users = admin.db.users.set_index("user_name")
+    assert users.loc["ana", "display_name"] == "Ana Silva"
+    assert not users.loc["ana", "retired"]
+
+    assert main([folder, "retire-user", "ana"]) == 0
+    assert admin.db.users.set_index("user_name").loc["ana", "retired"]

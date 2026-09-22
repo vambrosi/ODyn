@@ -1,0 +1,389 @@
+"""
+Turning a draft into database rows: check first, then submit.
+
+`check` looks at a draft and the folders it points to and lists what is wrong,
+saying which problems block a submit and which are only worth knowing.
+`submit` runs the checks, then does the day's work in order: the session row,
+its annotations, each experiment folder (ingested, annotated, its vials
+recorded, its sync file decoded), and finally moves the draft aside.
+
+Every step that writes is a recorded `Database` call, and a step that has
+already been done is remembered in the draft (`submitted_exp_id`), so a
+submit that failed halfway can be run again without ingesting twice.
+
+**USAGE**
+```python
+problems = check(db, draft)
+result = submit(db, draft)          # refuses while a blocking problem stands
+result = submit(db, draft, force=True)
+```
+
+No Qt in here: the window calls these from a worker thread and shows what
+comes back.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from ..database import SYNC_FOLDER
+from ..utils import logger
+from .draft import EXPERIMENT_SETTINGS, EXPERIMENT_TYPES, Draft
+from .fields import form_fields, missing_required
+
+RAW_FOLDER = "raw"
+EVENTS_PATTERN = "*Events.csv"
+
+
+@dataclass(frozen=True)
+class Problem:
+    """One thing wrong with a draft, and whether it stops the submit."""
+
+    where: str  # 'session', 'e1', 'vials', ...
+    message: str
+    blocking: bool = True
+
+    def __str__(self) -> str:
+        kind = "" if self.blocking else " (can submit anyway)"
+
+        return f"{self.where}: {self.message}{kind}"
+
+
+@dataclass
+class Written:
+    """What one submit put in the database."""
+
+    session_id: None | int = None
+    experiments: dict[str, int] = field(default_factory=dict)
+    annotations: int = 0
+    decoded: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    decode_failed: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class SubmitResult:
+    """The outcome of `submit`: what was written, and what was wrong."""
+
+    label: str
+    problems: list[Problem] = field(default_factory=list)
+    written: None | Written = None
+    error: None | str = None
+
+    @property
+    def blocked(self) -> bool:
+        return any(problem.blocking for problem in self.problems)
+
+    @property
+    def submitted(self) -> bool:
+        return self.written is not None and self.error is None
+
+
+# --------------------------------------------------------------------------- #
+# Checking
+# --------------------------------------------------------------------------- #
+
+
+def check(db, draft: Draft) -> list[Problem]:
+    """
+    Everything wrong with a draft, blocking problems first.
+
+    Looks at the database (is the mouse registered, are the vials real) and at
+    the share (are the recordings there), but writes nothing.
+    """
+    problems: list[Problem] = []
+
+    if draft.mouse_id is None:
+        problems.append(Problem("session", "No mouse picked."))
+        return problems
+
+    if draft.mouse_id not in db.mice.index:
+        problems.append(
+            Problem("session", f"Mouse {draft.mouse_id} is not registered.")
+        )
+
+    session_fields = form_fields(db, "session")
+    problems += _field_problems(
+        "session",
+        session_fields,
+        {**draft.session, "mouse_id": draft.mouse_id, "session_date": draft.date},
+    )
+
+    folder = Path(db.main_folder) / draft.folder
+
+    if not draft.experiments:
+        problems.append(Problem("session", "No experiments listed.", blocking=False))
+
+    elif not folder.is_dir():
+        problems.append(
+            Problem(
+                "session",
+                f"Folder '{draft.folder}' is not on the share yet. Copy the "
+                "recordings over first.",
+            )
+        )
+
+    experiment_fields = form_fields(db, "experiment")
+
+    for entry in draft.experiments:
+        name = str(entry.get("name", ""))
+        where = name or "experiment"
+
+        if not name:
+            problems.append(Problem("experiment", "An experiment has no name."))
+            continue
+
+        if entry.get("exp_type") not in EXPERIMENT_TYPES:
+            problems.append(Problem(where, f"Type must be one of {EXPERIMENT_TYPES}."))
+
+        if entry.get("objective") in (None, ""):
+            problems.append(Problem(where, "No objective set."))
+
+        problems += _field_problems(where, experiment_fields, entry)
+
+        if entry.get("submitted_exp_id") is not None:
+            continue  # already in the database; the files were checked then
+
+        if folder.is_dir():
+            problems += _folder_problems(where, folder / name, entry.get("exp_type"))
+
+    if draft.vial_ids:
+        known = set(db.vials.index)
+        missing = sorted(set(draft.vial_ids) - known)
+
+        if missing:
+            problems.append(Problem("vials", f"No vials with ids {missing}."))
+
+        else:
+            panels = set(db.vials.loc[draft.vial_ids, "panel_id"])
+
+            if len(panels) > 1:
+                problems.append(
+                    Problem("vials", "The vials come from more than one panel.")
+                )
+
+    problems.sort(key=lambda problem: not problem.blocking)
+
+    return problems
+
+
+def _field_problems(where: str, fields, values: dict) -> list[Problem]:
+    """Values that do not read as their type, and required ones left empty."""
+    problems = []
+
+    for field_ in fields:
+        if not field_.editable or field_.key not in values:
+            continue
+
+        try:
+            field_.parse(values[field_.key])
+        except ValueError as error:
+            problems.append(Problem(where, str(error)))
+
+    for field_ in missing_required(fields, values):
+        if field_.key == "objective":
+            continue  # blocking above, since ingestion needs it
+
+        problems.append(
+            Problem(where, f"{field_.label} is not filled in.", blocking=False)
+        )
+
+    return problems
+
+
+def _folder_problems(where: str, folder: Path, exp_type) -> list[Problem]:
+    """What an experiment folder is missing."""
+    problems = []
+
+    if not folder.is_dir():
+        return [Problem(where, f"Folder '{folder.name}' is not on the share yet.")]
+
+    tiffs = sorted((folder / RAW_FOLDER).glob("[!.]?*.tif"))
+
+    if not tiffs:
+        problems.append(Problem(where, f"No TIFFs in '{folder.name}/{RAW_FOLDER}'."))
+
+    if exp_type == "loop":
+        if not any(folder.rglob(EVENTS_PATTERN)):
+            problems.append(
+                Problem(where, "No olfactometer Events file found.", blocking=False)
+            )
+
+        syncs = [
+            p for p in (folder / SYNC_FOLDER).glob("*.h5") if not p.name.startswith(".")
+        ]
+
+        if not syncs:
+            problems.append(
+                Problem(
+                    where,
+                    f"No sync file in '{folder.name}/{SYNC_FOLDER}'; the odor "
+                    "frames stay unknown until one is decoded.",
+                    blocking=False,
+                )
+            )
+
+        elif len(syncs) > 1:
+            problems.append(
+                Problem(
+                    where, f"{len(syncs)} sync files in '{folder.name}/{SYNC_FOLDER}'."
+                )
+            )
+
+    return problems
+
+
+# --------------------------------------------------------------------------- #
+# Submitting
+# --------------------------------------------------------------------------- #
+
+
+def submit(db, draft: Draft, *, force: bool = False) -> SubmitResult:
+    """
+    Put a finished draft in the database.
+
+    Refuses while `check` finds a blocking problem, unless `force`. Otherwise
+    creates (or finds) the session, writes its annotations, and for each
+    experiment folder ingests it, annotates it, records its vials and decodes
+    its sync file. Steps already done by an earlier attempt are skipped, so
+    the call is safe to repeat after fixing what stopped it.
+    """
+    result = SubmitResult(draft.label, check(db, draft))
+
+    if result.blocked and not force:
+        return result
+
+    written = Written()
+
+    try:
+        _submit(db, draft, written)
+
+    except Exception as error:  # a failed step is reported, not raised
+        logger.exception(f"Submit of {draft.label} failed")
+        result.error = f"{type(error).__name__}: {error}"
+
+    result.written = written
+
+    if result.error is None:
+        draft.archive()
+
+    return result
+
+
+def _submit(db, draft: Draft, written: Written) -> None:
+    assert draft.mouse_id is not None
+
+    session_id = draft.session_id
+
+    if session_id is None:
+        session_id = db.session_for(draft.mouse_id, draft.date)
+
+    if session_id is None:
+        session_id = db.add_session(mouse_id=draft.mouse_id, session_date=draft.date)
+
+    draft.identify(session_id=session_id)
+    written.session_id = session_id
+
+    values = _annotation_values(db, "session", draft.session)
+
+    if values:
+        db.add_annotations(target_type="session", target_id=session_id, values=values)
+        written.annotations += len(values)
+
+    for entry in draft.experiments:
+        name = str(entry["name"])
+        exp_path = f"{draft.folder}/{name}"
+        exp_id = entry.get("submitted_exp_id")
+
+        if exp_id is None:
+            exp_id = _ingest(db, session_id, exp_path, entry)
+
+        if exp_id is None:
+            written.skipped.append(name)
+            continue
+
+        draft.set_experiment(name, submitted_exp_id=int(exp_id))
+        written.experiments[name] = int(exp_id)
+
+        values = _annotation_values(db, "experiment", entry)
+
+        if values:
+            db.add_annotations(
+                target_type="experiment", target_id=exp_id, values=values
+            )
+            written.annotations += len(values)
+
+        if draft.vial_ids:
+            db.set_experiment_vials(exp_id=exp_id, vial_ids=draft.vial_ids)
+
+        if entry.get("exp_type") == "loop" and _has_sync(db, exp_path):
+            # The experiment is in either way; a decode that refuses (a burst
+            # count that does not match, say) is reported and can be rerun
+            # once the file is sorted out.
+            try:
+                db.decode_sync(exp_id=exp_id)
+                written.decoded.append(name)
+
+            except Exception as error:
+                logger.exception(f"Decoding the sync file of {name} failed")
+                written.decode_failed[name] = f"{type(error).__name__}: {error}"
+
+
+def _ingest(db, session_id: int, exp_path: str, entry: dict) -> None | int:
+    """Add the folder's recordings, or find them if they are already in."""
+    objective = int(entry["objective"])
+    exp_type = entry.get("exp_type", "loop")
+
+    if exp_type == "loop":
+        exp_id = db.add_experiment(
+            session_id=session_id, exp_path=exp_path, objective=objective
+        )
+
+    else:
+        added = db.add_grabs(
+            session_id=session_id,
+            exp_path=exp_path,
+            objective=objective,
+            exp_type=exp_type,
+        )
+        # A grab folder is several experiments; the annotations go on the
+        # folder's first one, which is what the draft entry stands for
+        exp_id = added[0] if added else None
+
+    if exp_id is not None:
+        return exp_id
+
+    # Already in the database (an earlier attempt, or someone else's)
+    rows = db.from_query(
+        "SELECT exp_id FROM experiments WHERE session_id = ? AND exp_path = ? "
+        "ORDER BY exp_id;",
+        [session_id, exp_path],
+    )
+
+    return None if rows.empty else int(rows["exp_id"].iloc[0])
+
+
+def _annotation_values(db, applies_to: str, values: dict) -> dict:
+    """The typed values a draft section holds for the registry's keys."""
+    parsed = {}
+
+    for field_ in form_fields(db, applies_to):
+        if field_.key in EXPERIMENT_SETTINGS or not field_.editable:
+            continue
+
+        if field_.key in ("mouse_id", "session_date", "objective"):
+            continue  # columns, not annotations
+
+        if field_.key in values:
+            parsed[field_.key] = field_.parse(values[field_.key])
+
+    return parsed
+
+
+def _has_sync(db, exp_path: str) -> bool:
+    folder = Path(db.main_folder) / exp_path / SYNC_FOLDER
+
+    return folder.is_dir() and any(
+        p for p in folder.glob("*.h5") if not p.name.startswith(".")
+    )

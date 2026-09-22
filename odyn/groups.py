@@ -28,7 +28,6 @@ import os
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from enum import Enum, IntFlag
 from typing import cast, Final, TYPE_CHECKING
 
@@ -44,20 +43,33 @@ from matplotlib import colormaps
 from tqdm.auto import tqdm
 
 from .utils import (
+    ACQUISITION_TRIALS,
+    ACQUISITIONS,
     CHECK,
     CROSS,
-    GROUP_ACQUISITION_TRIALS,
+    EVENTS,
+    EXPERIMENT_VIALS,
+    EXPERIMENTS,
+    MCOR_FILES,
+    METHOD_CALLS,
     ODYN_FOLDER,
+    OUTPUTS,
+    PROGRAMS,
+    SESSIONS,
+    STREAMS,
+    SYNC_BLOCKS,
+    TRIALS,
     CallFrame,
     CallRecorder,
     Object,
+    TableSpec,
     clamp,
     logger,
     memorize_params,
     record_call,
     um_to_pixels,
 )
-from .utils import _acquisition_trials, _method_calls_dataframe
+from .utils import _method_calls_dataframe, _read_table
 
 # caiman is imported where it is used, since it is slow to import.
 if TYPE_CHECKING:
@@ -246,15 +258,7 @@ class Group(CallRecorder):
         self.db = db
 
         # Initialize "private" variables
-        self._acquisitions: None | pd.DataFrame = None
-        self._acquisition_trials: None | pd.DataFrame = None
-        self._events: None | pd.DataFrame = None
-        self._experiments: None | pd.DataFrame = None
-        self._mcor_files: None | pd.DataFrame = None
-        self._method_calls: None | pd.DataFrame = None
-        self._outputs: None | pd.DataFrame = None
-        self._programs: None | pd.DataFrame = None
-        self._trials: None | pd.DataFrame = None
+        self._tables: dict[str, pd.DataFrame] = {}
 
         self._call_stack: list[CallFrame] = []
         self.movies: dict[tuple[MovieType, ...], LazyMovie] = {}
@@ -276,116 +280,77 @@ class Group(CallRecorder):
     # SQLite Tables as DataFrames
     # ----------------------------------------------------------------------- #
 
-    @property
-    def acquisitions(self) -> pd.DataFrame:
-        """`DataFrame` with acquisition metadata"""
+    def _table(self, spec: TableSpec) -> pd.DataFrame:
+        """The cached DataFrame of `spec`, restricted to this group."""
+        assert spec.in_group is not None, f"{spec.name} has no per-group view"
+
         with self.db._locked() as con:
             self.db._refresh_if_stale()
 
-            if self._acquisitions is not None:
-                return self._acquisitions
+            if spec.name not in self._tables:
+                self._tables[spec.name] = _read_table(
+                    con, spec, spec.in_group, [self.group_id]
+                )
 
-            query = f"""
-                SELECT a.* FROM group_experiments AS g
-                    JOIN experiments  AS e ON e.exp_id = g.exp_id
-                    JOIN acquisitions AS a ON a.exp_id = e.exp_id
-                    WHERE g.group_id = {self.group_id};
-            """
+            return self._tables[spec.name]
 
-            self._acquisitions = pd.read_sql_query(
-                query, con, parse_dates=["acq_start", "odor_start", "odor_end"]
-            )
-            self._acquisitions.set_index("acq_id", inplace=True)
+    @property
+    def acquisitions(self) -> pd.DataFrame:
+        """
+        `DataFrame` with acquisition metadata
 
-            return self._acquisitions
+        The `sync_*` columns come from the decoded sync file and are empty
+        until `decode_sync` has run for the experiment.
+        """
+        return self._table(ACQUISITIONS)
 
     @property
     def acquisition_trials(self) -> pd.DataFrame:
         """
         `DataFrame` with each acquisition and the associated trial data.
 
-        Odor starts and ends are prepended with `acq` or `trial` depending
-        on the table of origin. The former come from H5 timings and the
-        later from olfactometer event files. Acquisitions that are not
-        associated with a trial are kept, just with null entries.
+        `sync_*` columns come from the DAQ sync file and `trial_*` ones from
+        the olfactometer event files. Acquisitions that are not associated
+        with a trial are kept, just with null entries.
 
         To compute `events` timedeltas use the trial (olfactometer) timings.
         """
-        with self.db._locked() as con:
-            self.db._refresh_if_stale()
-
-            if self._acquisition_trials is not None:
-                return self._acquisition_trials
-
-            self._acquisition_trials = _acquisition_trials(
-                con, GROUP_ACQUISITION_TRIALS, [self.group_id]
-            )
-            return self._acquisition_trials
+        return self._table(ACQUISITION_TRIALS)
 
     @property
     def events(self) -> pd.DataFrame:
         """`DataFrame` with olfactometer events"""
-        with self.db._locked() as con:
-            self.db._refresh_if_stale()
-
-            if self._events is not None:
-                return self._events
-
-            query = f"""
-                SELECT e.* FROM group_experiments AS g
-                    JOIN experiments AS x ON x.exp_id     = g.exp_id
-                    JOIN programs    AS p ON p.exp_id     = x.exp_id
-                    JOIN events      AS e ON e.program_id = p.program_id
-                    WHERE g.group_id = {self.group_id};
-            """
-
-            self._events = pd.read_sql_query(query, con, parse_dates=["event_time"])
-            self._events.set_index("event_id", inplace=True)
-
-            return self._events
+        return self._table(EVENTS)
 
     @property
     def experiments(self) -> pd.DataFrame:
         """`DataFrame` with experiment metadata"""
-        with self.db._locked() as con:
-            self.db._refresh_if_stale()
+        return self._table(EXPERIMENTS)
 
-            if self._experiments is not None:
-                return self._experiments
+    @property
+    def sessions(self) -> pd.DataFrame:
+        """`DataFrame` with the sessions of this group's experiments"""
+        return self._table(SESSIONS)
 
-            query = f"""
-                SELECT e.* FROM group_experiments AS ge
-                    JOIN experiments AS e ON e.exp_id = ge.exp_id
-                    WHERE ge.group_id = {self.group_id};
-            """
-            self._experiments = pd.read_sql_query(
-                query, con, parse_dates=["exp_start", "added_to_db_at"]
-            )
-            self._experiments.set_index("exp_id", inplace=True)
+    @property
+    def streams(self) -> pd.DataFrame:
+        """`DataFrame` with the whole-file recordings (sync H5, videos)"""
+        return self._table(STREAMS)
 
-            return self._experiments
+    @property
+    def sync_blocks(self) -> pd.DataFrame:
+        """`DataFrame` with the decoded frame bursts of the sync files"""
+        return self._table(SYNC_BLOCKS)
+
+    @property
+    def experiment_vials(self) -> pd.DataFrame:
+        """`DataFrame` with which vials each experiment ran"""
+        return self._table(EXPERIMENT_VIALS)
 
     @property
     def mcor_files(self) -> pd.DataFrame:
         """`DataFrame` with mcor files metadata"""
-        with self.db._locked() as con:
-            self.db._refresh_if_stale()
-
-            if self._mcor_files is not None:
-                return self._mcor_files
-
-            query = f"""
-                SELECT m.* FROM group_experiments AS g
-                    JOIN experiments  AS e ON e.exp_id = g.exp_id
-                    JOIN acquisitions AS a ON a.exp_id = e.exp_id
-                    JOIN mcor_files   AS m ON m.acq_id = a.acq_id
-                    WHERE g.group_id = {self.group_id};
-            """
-
-            self._mcor_files = pd.read_sql_query(query, con)
-            self._mcor_files.set_index("acq_id", inplace=True)
-
-            return self._mcor_files
+        return self._table(MCOR_FILES)
 
     @property
     def approved_mcor_files(self) -> pd.DataFrame:
@@ -400,99 +365,22 @@ class Group(CallRecorder):
     @property
     def method_calls(self) -> pd.DataFrame:
         """`DataFrame` with `@record_call` functions"""
-        with self.db._locked() as con:
-            self.db._refresh_if_stale()
-
-            if self._method_calls is not None:
-                return self._method_calls
-
-            query = f"SELECT * FROM method_calls WHERE group_id = {self.group_id};"
-
-            self._method_calls = pd.read_sql_query(
-                query, con, parse_dates=["called_at", "ended_at"]
-            )
-            self._method_calls.set_index("method_call_id", inplace=True)
-
-            self._method_calls["parameter_inputs"] = self._method_calls[
-                "parameter_inputs"
-            ].apply(json.loads)
-            self._method_calls["parameters_used"] = self._method_calls[
-                "parameters_used"
-            ].apply(json.loads)
-
-            self._method_calls["call_output"] = self._method_calls["call_output"].apply(
-                lambda s: json.loads(s) if isinstance(s, str) else None
-            )
-
-            return self._method_calls
+        return self._table(METHOD_CALLS)
 
     @property
     def outputs(self) -> pd.DataFrame:
         """`DataFrame` with output files of functions"""
-        with self.db._locked() as con:
-            self.db._refresh_if_stale()
-
-            if self._outputs is not None:
-                return self._outputs
-
-            query = f"""
-                SELECT o.* FROM group_experiments AS ge
-                    JOIN method_calls AS mc ON ge.group_id = mc.group_id
-                    JOIN outputs AS o ON mc.method_call_id = o.method_call_id
-                    WHERE ge.group_id = {self.group_id};
-            """
-
-            self._outputs = pd.read_sql_query(query, con)
-            self._outputs.set_index("output_id", inplace=True)
-
-            return self._outputs
+        return self._table(OUTPUTS)
 
     @property
     def programs(self) -> pd.DataFrame:
-        """`DataFrame` with one entry per _Event.csv_ file"""
-        with self.db._locked() as con:
-            self.db._refresh_if_stale()
-
-            if self._programs is not None:
-                return self._programs
-
-            query = f"""
-                SELECT p.* FROM group_experiments AS g
-                    JOIN experiments AS e ON e.exp_id = g.exp_id
-                    JOIN programs    AS p ON p.exp_id = e.exp_id
-                    WHERE g.group_id = {self.group_id};
-            """
-
-            self._programs = pd.read_sql_query(
-                query, con, parse_dates=["program_start"]
-            )
-            self._programs.set_index("program_id", inplace=True)
-
-            return self._programs
+        """`DataFrame` with one entry per olfactometer run"""
+        return self._table(PROGRAMS)
 
     @property
     def trials(self) -> pd.DataFrame:
         """`DataFrame` with all olfactometer trials"""
-        with self.db._locked() as con:
-            self.db._refresh_if_stale()
-
-            if self._trials is not None:
-                return self._trials
-
-            query = f"""
-                SELECT t.* FROM group_experiments AS g
-                    JOIN experiments AS x ON x.exp_id     = g.exp_id
-                    JOIN programs    AS p ON p.exp_id     = x.exp_id
-                    JOIN trials      AS t ON t.program_id = p.program_id
-                    WHERE g.group_id = {self.group_id};
-            """
-
-            self._trials = pd.read_sql_query(
-                query, con, parse_dates=["trial_start", "odor_start", "odor_end"]
-            )
-            self._trials.set_index("trial_id", inplace=True)
-
-            return self._trials
+        return self._table(TRIALS)
 
     # ----------------------------------------------------------------------- #
     # Database Queries
@@ -574,8 +462,12 @@ class Group(CallRecorder):
         calls = self.latest_calls("Group.run_motion_correction")
 
         # These columns will only appear in future calls, so we guard against it.
-        if {"is_test", "mmap_names"} <= set(calls.columns):
-            tests = calls[calls["is_test"].eq(True) & calls["mmap_names"].notna()]
+        # `latest_calls` only has a column for a parameter or an output some
+        # call actually recorded, so neither is there until one has.
+        if {"input_is_test", "output_mmap_names"} <= set(calls.columns):
+            tests = calls[
+                calls["input_is_test"].eq(True) & calls["output_mmap_names"].notna()
+            ]
 
         # Otherwise, make it empty to fail below.
         else:
@@ -585,7 +477,7 @@ class Group(CallRecorder):
             raise RuntimeError(f"{self!r} has no test motion correction. ")
 
         temp_folder = Path(get_tempdir())
-        mmap_paths = [temp_folder / name for name in tests.iloc[0]["mmap_names"]]
+        mmap_paths = [temp_folder / name for name in tests.iloc[0]["output_mmap_names"]]
 
         # Pair .mmap with the raw file it came from by name
         acq_ids: list[int] = []
@@ -615,25 +507,9 @@ class Group(CallRecorder):
         return acq_ids, raw_paths, matched
 
     def _reset_caches(self) -> None:
-        self._acquisitions = None
-        self._acquisition_trials = None
-        self._events = None
-        self._experiments = None
-        self._mcor_files = None
-        self._method_calls = None
-        self._outputs = None
-        self._programs = None
-        self._trials = None
-
-        self.db._acquisitions = None
-        self.db._acquisition_trials = None
-        self.db._events = None
-        self.db._experiments = None
-        self.db._mcor_files = None
-        self.db._method_calls = None
-        self.db._outputs = None
-        self.db._programs = None
-        self.db._trials = None
+        # Both views of the same tables
+        self._tables.clear()
+        self.db._tables.clear()
 
     # ----------------------------------------------------------------------- #
     # ROI masks
@@ -2045,8 +1921,8 @@ class Group(CallRecorder):
                 )
 
         # Reset mcor DataFrames
-        self._mcor_files = None
-        self.db._mcor_files = None
+        self._tables.pop("mcor_files", None)
+        self.db._tables.pop("mcor_files", None)
 
     @record_call
     def add_mcor_files(
@@ -2238,8 +2114,8 @@ class Group(CallRecorder):
         logger.info(f"{CHECK} Added {len(rows)} {mcor_source.value} files.")
 
         # Reset mcor DataFrames
-        self._mcor_files = None
-        self.db._mcor_files = None
+        self._tables.pop("mcor_files", None)
+        self.db._tables.pop("mcor_files", None)
 
     @record_call
     def approve_mcor_files(self, *, exclude_acq_ids: Sequence[int] = ()) -> None:
@@ -2303,8 +2179,8 @@ class Group(CallRecorder):
         logger.info(f"{CHECK} Approved {len(approved)} of {len(acq_ids)} mcor files.")
 
         # Reset mcor DataFrames
-        self._mcor_files = None
-        self.db._mcor_files = None
+        self._tables.pop("mcor_files", None)
+        self.db._tables.pop("mcor_files", None)
 
     def _check_mcor_group(
         self, acq_ids: list[int], change_mcor_group: bool = False
@@ -2414,12 +2290,15 @@ class Group(CallRecorder):
                 else f"{self!r} has no mcor files."
             )
 
-        # An acquisition might not be associated with an odor (no `odor_start`).
-        # We drop them to avoid NaNs in the np.max and np.min below.
-        acquisitions = usable[usable["odor_start"].notna()]
+        # An acquisition has no odor onset until its sync file is decoded. We
+        # drop them to avoid NaNs in the np.max and np.min below.
+        acquisitions = usable[usable["sync_odor_on_frame"].notna()]
 
         if not len(acquisitions):
-            raise RuntimeError("Found no mcor files with an odor onset.")
+            raise RuntimeError(
+                "Found no mcor files with an odor onset. Decode the sync file "
+                "in '<experiment>/sync/' first ('db.decode_sync')."
+            )
 
         elif len(acquisitions) < len(usable):
             no_odor = len(usable) - len(acquisitions)
@@ -2430,12 +2309,9 @@ class Group(CallRecorder):
         frame_rates = experiments["frame_rate"].to_numpy()
         frame_counts = experiments["frame_count"].to_numpy()
 
-        onset_frames = np.rint(
-            (acquisitions["odor_start"] - acquisitions["acq_start"])
-            .dt.total_seconds()
-            .to_numpy()
-            * frame_rates
-        )
+        # Measured on the DAQ, where the frame clock and the valve share one
+        # recording, so no arithmetic between two computers' clocks is needed.
+        onset_frames = acquisitions["sync_odor_on_frame"].to_numpy(dtype=float)
 
         frame_rate = float(frame_rates.mean())
         photobleach_frame = round(photobleach_window_s * frame_rate)
@@ -2468,11 +2344,15 @@ class Group(CallRecorder):
             photobleach_window_s, only_approved
         )
 
-        onset_delay = cast(
-            datetime, self.acquisitions.loc[acq_id, "odor_start"]
-        ) - cast(datetime, self.acquisitions.loc[acq_id, "acq_start"])
+        onset_frame = self.acquisitions.loc[acq_id, "sync_odor_on_frame"]
 
-        onset_frame = int(round(onset_delay.total_seconds() * frame_rate))
+        if pd.isna(onset_frame):
+            raise RuntimeError(
+                f"Acquisition {acq_id} has no odor onset, so it cannot be "
+                f"aligned. Decode the sync file in '<experiment>/sync/' first."
+            )
+
+        onset_frame = int(onset_frame)
 
         path = self.db.main_folder / cast(str, usable.loc[acq_id, "mcor_path"])
 
@@ -2580,8 +2460,8 @@ class Group(CallRecorder):
 
         # We need odor onsets to align frames so we leave out acquisitions
         # that don't have those (same as '_common_frames').
-        chosen = list(usable[usable["odor_start"].notna()].index)
-        no_starts = list(usable[usable["odor_start"].isna()].index)
+        chosen = list(usable[usable["sync_odor_on_frame"].notna()].index)
+        no_starts = list(usable[usable["sync_odor_on_frame"].isna()].index)
 
         if no_starts:
             logger.warning(
@@ -2910,7 +2790,9 @@ class Group(CallRecorder):
                 extension,
             )
 
-            odor_s = (rows["odor_end"] - rows["odor_start"]).dt.total_seconds()
+            odor_s = (
+                rows["trial_odor_end"] - rows["trial_odor_start"]
+            ).dt.total_seconds()
             _save_movie(
                 path,
                 total,

@@ -230,23 +230,42 @@ def test_ingestion_and_reads_run_under_the_lock(tmp_path):
     db = Database(tmp_path, can_create=True)
     unlocked = watch(db)
 
-    db.add_experiment(rel_path="20260101/m001/e1")
-    db.add_experiment(rel_path="20260101/m001/e1")  # already there
+    db.set_mouse(mouse_id="m1")
+    session_id = db.add_session(mouse_id="m1", session_date="2026-01-01")
+    db.add_experiment(session_id=session_id, exp_path="20260101/m1/e1", objective=20)
+    db.add_experiment(session_id=session_id, exp_path="20260101/m1/e1", objective=20)
 
     for table in (
         "acquisitions",
         "acquisition_trials",
+        "annotation_keys",
+        "annotations",
         "events",
+        "experiment_vials",
         "experiments",
         "group_experiments",
         "mcor_files",
         "method_calls",
+        "mice",
+        "mouse_lines",
         "odors",
         "outputs",
+        "panels",
         "programs",
+        "sessions",
+        "streams",
+        "sync_blocks",
         "trials",
+        "users",
+        "vial_odors",
+        "vials",
     ):
         getattr(db, table)
+
+    db.annotations_for("experiment")
+    db.missing_annotations()
+    db.session_for("m1", "2026-01-01")
+    db.experiment_for(session_id, "20260101_m1_e1")
 
     db.from_query("SELECT count(*) FROM experiments;")
     db.latest_calls("add_experiment")
@@ -258,11 +277,15 @@ def test_ingestion_and_reads_run_under_the_lock(tmp_path):
         "acquisitions",
         "acquisition_trials",
         "events",
+        "experiment_vials",
         "experiments",
         "mcor_files",
         "method_calls",
         "outputs",
         "programs",
+        "sessions",
+        "streams",
+        "sync_blocks",
         "trials",
     ):
         getattr(group, table)

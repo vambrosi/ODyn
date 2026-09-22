@@ -13,6 +13,8 @@ python -m odyn.admin <main_folder> backup
 python -m odyn.admin <main_folder> snapshot
 python -m odyn.admin <main_folder> unlock [--yes]
 python -m odyn.admin <main_folder> migrate
+python -m odyn.admin <main_folder> add-user <login> "<Full Name>"
+python -m odyn.admin <main_folder> retire-user <login>
 ```
 
 **PYTHON**
@@ -87,6 +89,7 @@ class Admin(CallRecorder):
         # Calls recorded from here belong to the database.
         self.group_id = 0
         self._call_stack: list[CallFrame] = []
+        self._tables: dict = {}  # never filled; `record_call` clears it
         self._db: None | Database = None
 
     @property
@@ -421,6 +424,13 @@ def main(argv: None | list[str] = None) -> int:
         "--force", action="store_true", help="even if recorded calls have not ended"
     )
 
+    add_user = commands.add_parser("add-user", help="someone who can use the app")
+    add_user.add_argument("user_name", help="the login handle, as on the workstations")
+    add_user.add_argument("display_name", help="the person's name, as the app shows it")
+    commands.add_parser(
+        "retire-user", help="take a name off the app's list"
+    ).add_argument("user_name")
+
     args = parser.parse_args(argv)
     admin = Admin(args.main_folder, project=args.project)
 
@@ -450,6 +460,12 @@ def main(argv: None | list[str] = None) -> int:
 
     elif args.command == "migrate":
         admin.migrate(force=args.force)
+
+    elif args.command == "add-user":
+        admin.db.add_user(user_name=args.user_name, display_name=args.display_name)
+
+    elif args.command == "retire-user":
+        admin.db.retire_user(user_name=args.user_name)
 
     return 0
 

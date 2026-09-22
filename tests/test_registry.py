@@ -1,0 +1,284 @@
+"""
+The registries the GUI fills before any recording: users, mice, sessions,
+odors, panels and vials.
+"""
+
+import pytest
+
+from odyn import Database
+
+
+@pytest.fixture
+def db(tmp_path):
+    return Database(tmp_path, can_create=True, user="tester")
+
+
+# --------------------------------------------------------------------------- #
+# Users
+# --------------------------------------------------------------------------- #
+
+
+def test_users_are_picked_by_name(db):
+    db.add_user(user_name="vinicius", display_name="Vinicius")
+    db.add_user(user_name="pa")
+
+    users = db.users.set_index("user_name")
+    assert users.loc["vinicius", "display_name"] == "Vinicius"
+    assert users.loc["pa", "display_name"] == "pa"
+    assert not users["retired"].any()
+
+    db.retire_user(user_name="pa")
+    assert bool(db.users.set_index("user_name").loc["pa", "retired"])
+
+    with pytest.raises(ValueError, match="No user"):
+        db.retire_user(user_name="nobody")
+
+
+def test_the_database_user_authors_every_call(db):
+    db.add_user(user_name="x")
+    assert set(db.method_calls["user"]) == {"tester"}
+
+
+# --------------------------------------------------------------------------- #
+# Mice and sessions
+# --------------------------------------------------------------------------- #
+
+
+def test_mouse_details_accumulate_across_calls(db):
+    assert db.set_mouse(mouse_id="m442", sex="f") == 442
+    db.set_mouse(
+        mouse_id=442, dob="2026-01-22", lines={"DAT-Cre": "Het", "TIGRE": None}
+    )
+    db.set_mouse(mouse_id="m442", sensor="GCaMP8s")
+
+    mouse = db.mice.loc[442]
+    assert mouse["mouse_sex"] == "F"
+    assert mouse["mouse_dob"] == "2026-01-22"
+    assert mouse["sensor"] == "GCaMP8s"
+
+    lines = db.mouse_lines.loc[[442]].set_index("line")["genotype"]
+    assert lines.to_dict() == {"DAT-Cre": "het", "TIGRE": None}
+
+    # `lines={}` clears, `lines=None` leaves alone
+    db.set_mouse(mouse_id=442, lines={})
+    assert 442 not in db.mouse_lines.index
+    assert db.mice.loc[442, "sensor"] == "GCaMP8s"
+
+
+@pytest.mark.parametrize("bad", ["m0", "mouse", "", "x-1"])
+def test_a_mouse_needs_a_number(db, bad):
+    with pytest.raises(ValueError, match="which mouse"):
+        db.set_mouse(mouse_id=bad)
+
+
+def test_sessions_need_a_registered_mouse(db):
+    with pytest.raises(ValueError, match="not registered"):
+        db.add_session(mouse_id=442, session_date="2026-07-08")
+
+    db.set_mouse(mouse_id=442)
+    session_id = db.add_session(mouse_id="m442", session_date="2026-07-08")
+
+    assert db.session_for("m442", "2026-07-08") == session_id
+    assert db.session_for(442, "2026-07-09") is None
+    assert db.sessions.loc[session_id, "session_date"] == "2026-07-08"
+
+    with pytest.raises(ValueError, match="already has a session"):
+        db.add_session(mouse_id=442, session_date="2026-07-08")
+
+    with pytest.raises(ValueError, match="Not a date"):
+        db.add_session(mouse_id=442, session_date="July 8")
+
+
+# --------------------------------------------------------------------------- #
+# Odors
+# --------------------------------------------------------------------------- #
+
+
+def test_the_registry_is_seeded_with_the_olfactometer_numbers(db):
+    odors = db.odors
+    assert odors.loc[1, "odor_name"] == "eugenol"
+    assert odors.loc[17, "odor_name"] == "alpha" and odors.loc[17, "mix"]
+    assert not odors.loc[1, "mix"]
+    assert sorted(db.odor_components.loc[17, "component_id"]) == [4, 10]
+    assert odors.loc[4, "vapor_pressure_mmhg"] == pytest.approx(7.78)
+    assert odors.loc[0, "vapor_pressure_source"] is None  # mineral oil, on every pandas
+
+
+def test_odors_are_added_and_corrected(db):
+    db.add_odor(odor_id=45, odor_name="2-hexanone")
+    assert not db.odors.loc[45, "mix"]
+    assert db.odors.loc[45, "vapor_pressure_mmhg"] is None or (
+        db.odors.loc[45, "vapor_pressure_mmhg"]
+        != db.odors.loc[45, "vapor_pressure_mmhg"]
+    )
+
+    db.update_odor(
+        odor_id=45, vapor_pressure_mmhg=11.6, vapor_pressure_source="PubChem"
+    )
+    assert db.odors.loc[45, "vapor_pressure_mmhg"] == pytest.approx(11.6)
+    assert db.odors.loc[45, "vapor_pressure_source"] == "PubChem"
+
+    db.update_odor(odor_id=45, retired=True)
+    assert bool(db.odors.loc[45, "retired"])
+
+    with pytest.raises(ValueError, match="No odor"):
+        db.update_odor(odor_id=999, odor_name="x")
+
+    with pytest.raises(ValueError, match="Nothing to change"):
+        db.update_odor(odor_id=45)
+
+
+def test_a_mix_is_its_components(db):
+    db.add_odor(odor_id=45, odor_name="sigma", components=[4, 10])
+    assert db.odors.loc[45, "mix"]
+    assert sorted(db.odor_components.loc[45, "component_id"]) == [4, 10]
+
+    with pytest.raises(ValueError, match="at least two"):
+        db.add_odor(odor_id=46, odor_name="one", components=[4])
+
+    with pytest.raises(ValueError, match="itself a mix"):
+        db.add_odor(odor_id=46, odor_name="nested", components=[45, 4])
+
+    with pytest.raises(ValueError, match="No odor"):
+        db.add_odor(odor_id=46, odor_name="ghost", components=[4, 999])
+
+    with pytest.raises(ValueError, match="listed twice"):
+        db.add_odor(odor_id=46, odor_name="twice", components=[4, 4])
+
+    assert 46 not in db.odors.index
+
+
+# --------------------------------------------------------------------------- #
+# Panels and vials
+# --------------------------------------------------------------------------- #
+
+RACK = [
+    {
+        "vial_position": 1,
+        "odor_id": 1,  # eugenol, pure
+        "vial_sccm": 200,
+        "total_sccm": 1500,
+        "total_volume_ml": 5,
+        "solvent_volume_ml": 4.99,
+        "components": [
+            {"odor_id": 1, "target_ppm": 0.3, "liquid_ul": 12.5, "percent_vv": 0.25}
+        ],
+    },
+    {
+        "vial_position": 3,
+        "odor_id": 0,  # mineral oil
+        "vial_sccm": 200,
+        "total_sccm": 1500,
+        "total_volume_ml": 5,
+    },
+    {
+        "vial_position": 4,
+        "odor_id": 17,  # alpha, a mix
+        "vial_sccm": 200,
+        "total_sccm": 1500,
+        "total_volume_ml": 5,
+        "made_on": "2026-07-01",
+        "components": [
+            {"odor_id": 4, "target_ppm": 44.2},
+            {"odor_id": 10, "target_ppm": 13.3},
+        ],
+    },
+]
+
+
+def test_vials_record_the_rack_as_made(db):
+    db.add_panel(panel_name="print_v3", description="16 odors")
+    ids = db.add_vials(panel_name="print_v3", vials=RACK, made_on="2026-07-06")
+
+    vials = db.vials.loc[ids]
+    assert list(vials["vial_position"]) == [1, 3, 4]
+    assert list(vials["made_on"].dt.strftime("%Y-%m-%d")) == [
+        "2026-07-06",
+        "2026-07-06",
+        "2026-07-01",
+    ]
+    assert vials.loc[ids[0], "solvent_volume_ml"] == pytest.approx(4.99)
+
+    components = db.vial_odors.loc[[ids[2]]].set_index("odor_id")
+    assert components["target_ppm"].to_dict() == {4: 44.2, 10: 13.3}
+    assert ids[1] not in db.vial_odors.index
+
+    # Recorded as they are made: today unless said otherwise
+    later = db.add_vials(panel_name="print_v3", vials=RACK[:1])
+    assert (
+        db.vials.loc[later[0], "made_on"].date() == __import__("datetime").date.today()
+    )
+
+
+@pytest.mark.parametrize(
+    "vial, message",
+    [
+        (
+            {**RACK[0], "components": [{"odor_id": 2, "target_ppm": 1}]},
+            "only component",
+        ),
+        ({**RACK[2], "components": []}, "list exactly those"),
+        (
+            {**RACK[2], "components": [{"odor_id": 4, "target_ppm": 1}]},
+            "list exactly those",
+        ),
+        (
+            {**RACK[2], "components": [{"odor_id": 18, "target_ppm": 1}]},
+            "not a single chemical",
+        ),
+        ({**RACK[0], "odor_id": 999}, "No odor"),
+        ({"vial_position": 1, "odor_id": 1}, "A vial needs"),
+    ],
+)
+def test_a_recipe_that_makes_no_sense_is_refused(db, vial, message):
+    db.add_panel(panel_name="p")
+
+    with pytest.raises(ValueError, match=message):
+        db.add_vials(panel_name="p", vials=[vial])
+
+    assert len(db.vials) == 0
+
+
+def test_vials_need_a_panel(db):
+    with pytest.raises(ValueError, match="No panel"):
+        db.add_vials(panel_name="nope", vials=RACK)
+
+
+def test_an_experiment_runs_one_rack(db, tmp_path):
+    db.add_panel(panel_name="a")
+    db.add_panel(panel_name="b")
+    rack_a = db.add_vials(panel_name="a", vials=RACK)
+    rack_b = db.add_vials(panel_name="b", vials=RACK[:1])
+    remade = db.add_vials(panel_name="a", vials=RACK[:1])
+
+    db.set_mouse(mouse_id=1)
+    session_id = db.add_session(mouse_id=1, session_date="2026-01-01")
+
+    with db._writing() as cur:
+        cur.execute(
+            """
+            INSERT INTO experiments
+                ( exp_id, session_id, exp_name, exp_type, exp_path, exp_start
+                , height_px, width_px, height_um, width_um, frame_count
+                , frame_rate, objective
+                ) VALUES (7, ?, 'e1', 'loop', 'p', '2026-01-01 10:00:00'
+                         , 1, 1, 1, 1, 1, 1, 20);
+            """,
+            [session_id],
+        )
+
+    db.set_experiment_vials(exp_id=7, vial_ids=rack_a)
+    assert sorted(db.experiment_vials.loc[[7], "vial_id"]) == sorted(rack_a)
+
+    # Declarative: the new set replaces the old one
+    db.set_experiment_vials(exp_id=7, vial_ids=rack_a[1:])
+    assert sorted(db.experiment_vials.loc[[7], "vial_id"]) == sorted(rack_a[1:])
+
+    with pytest.raises(ValueError, match="one panel"):
+        db.set_experiment_vials(exp_id=7, vial_ids=rack_a + rack_b)
+
+    with pytest.raises(ValueError, match="same position"):
+        db.set_experiment_vials(exp_id=7, vial_ids=rack_a + remade)
+
+    with pytest.raises(ValueError, match="No vials"):
+        db.set_experiment_vials(exp_id=7, vial_ids=[999])
