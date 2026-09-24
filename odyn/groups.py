@@ -436,10 +436,9 @@ class Group(CallRecorder):
                 return self._outputs
 
             query = f"""
-                SELECT o.* FROM group_experiments AS ge
-                    JOIN method_calls AS mc ON ge.group_id = mc.group_id
-                    JOIN outputs AS o ON mc.method_call_id = o.method_call_id
-                    WHERE ge.group_id = {self.group_id};
+                SELECT o.* FROM outputs AS o
+                    JOIN method_calls AS mc ON mc.method_call_id = o.method_call_id
+                    WHERE mc.group_id = {self.group_id};
             """
 
             self._outputs = pd.read_sql_query(query, con)
