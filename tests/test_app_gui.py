@@ -696,3 +696,43 @@ def test_remove_marks_and_undo_brings_back(window, tmp_path):
     assert draft.experiment("e1")["goal"] == "typed by hand"
     assert (id(draft), "e1") in window.today
     assert not undo.isEnabled()
+
+
+def test_guide_points_at_every_bar_button_with_no_session(window):
+    guide = window.guide
+    assert not guide.isVisible()
+
+    window._after_login()  # no session yet
+    QApplication.processEvents()
+    assert guide.isVisible()
+
+    pointers = guide.pointers()
+    texts = [p.text for p in pointers]
+    assert texts[:7] == ["Users", "Mice", "Odors", "Panels", "Tables", "QC", "Recorder"]
+    assert "Add session" in texts and "Undo the last remove" in texts
+
+    # each arrow ends right beside its own button, and no two labels overlap
+    buttons = {
+        a.toolTip(): window.left.widgetForAction(a)
+        for a in window.page_actions.values()
+    }
+    users = buttons["Users"]
+    corner = users.mapTo(window.centralWidget(), users.rect().topLeft())
+    assert abs(pointers[0].end.x() - (corner.x() + users.width())) <= 5
+    assert corner.y() <= pointers[0].end.y() <= corner.y() + users.height()
+    labels = [p.label for p in pointers]
+    assert not any(
+        a.intersects(b) for i, a in enumerate(labels) for b in labels[i + 1 :]
+    )
+
+    # a short window drops labels rather than piling them up
+    window.resize(1000, 380)
+    QApplication.processEvents()
+    labels = [p.label for p in guide.pointers()]
+    assert not any(
+        a.intersects(b) for i, a in enumerate(labels) for b in labels[i + 1 :]
+    )
+
+    # any other page hides it
+    window.page_actions[window.mice].trigger()
+    assert not guide.isVisible()

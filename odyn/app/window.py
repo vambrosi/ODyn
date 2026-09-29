@@ -36,6 +36,7 @@ from ..utils import logger
 from . import style
 from .context import Context
 from .draft import Draft, drafts_folder
+from .guide import Guide
 from .pane_qc import QcPane
 from .pane_recorder import RecorderPane
 from .pane_registry import MicePane, OdorsPane, PanelsPane, UsersPane
@@ -148,7 +149,7 @@ class MainWindow(QMainWindow):
             ("panels", "Panels", self.panels),
             ("tables", "Tables", self.tables),
             None,
-            ("qc", "QC", self.qc),
+            ("qc", "Quality Control", self.qc),
             "foot",
             ("recorder", "Recorder", self.recorder),
         ):
@@ -167,6 +168,8 @@ class MainWindow(QMainWindow):
         self.today: dict[tuple[int, None | str], QAction] = {}
         self.today_extras: list[QAction] = []
 
+        self.commands: list[QAction] = []
+
         for key, tip, action in (
             ("add-session", "Add session", self._add_session),
             ("add-experiment", "Add experiment", self.sessions.add_experiment),
@@ -177,6 +180,7 @@ class MainWindow(QMainWindow):
         ):
             command = self._command(self.right, icon(key), tip)
             command.triggered.connect(lambda _=False, a=action: a())
+            self.commands.append(command)
 
             if key == "undo":
                 self.undo_action = command
@@ -227,6 +231,29 @@ class MainWindow(QMainWindow):
 
         # Picking a name is the first thing to do; the day's work comes next
         self.users.picked.connect(lambda _: self._after_login())
+
+        # With no session selected, arrows explain the bars' buttons. Undo and
+        # Remove say what they do in general, not their current state.
+        self.guide = Guide(
+            central,
+            lambda: [
+                (self.left, list(self.page_actions.values()), {}),
+                (
+                    self.right,
+                    self.commands,
+                    {
+                        self.undo_action: "Undo the last remove",
+                        self.remove_action: "Remove the selected session/experiment",
+                    },
+                ),
+            ],
+            keep_clear=self.sessions.no_session_page.message,
+        )
+        self.pages.currentChanged.connect(
+            lambda: self.guide.set_active(
+                self.pages.currentWidget() is self.sessions.no_session_page
+            )
+        )
 
         self._show_user(self.context.user)
         self._rebuild_today()
