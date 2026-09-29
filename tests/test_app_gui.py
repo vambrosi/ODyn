@@ -1,7 +1,8 @@
 """
 The entry app's widgets, offscreen: the window opens on a fresh database,
-the registries write through the worker, the table browser reads, and the
-recorder writes a sync file where `submit` will look for it.
+the bars switch pages and list the day's sessions, the registries write
+through the worker, the table browser reads, and the recorder writes a sync
+file where `submit` will look for it.
 """
 
 import os
@@ -95,21 +96,28 @@ def window(app, tmp_path):
     window.close()
 
 
-def test_window_opens_with_every_tab(window):
-    titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+def test_window_opens_on_users_with_every_page_in_the_left_bar(window):
+    tips = [a.toolTip() for a in window.left.actions() if not a.isSeparator()]
 
-    assert titles == [
-        "Users",
-        "Session",
-        "Recorder",
-        "Odors",
-        "Panels",
-        "Mice",
-        "Tables",
-        "QC",
-    ]
-    assert window.tabs.currentWidget() is window.users
+    assert tips[:6] == ["Users", "Mice", "Odors", "Panels", "Tables", "QC"]
+    assert tips[-1] == "Recorder"
+    assert window.pages.currentWidget() is window.users
+    assert window.page_actions[window.users].isChecked()
     assert "tester" in window.user_label.text()
+
+    # every page's button shows it
+    window.page_actions[window.tables].trigger()
+    assert window.pages.currentWidget() is window.tables
+    assert window.view == "page"
+
+    # no session yet: the right bar holds only the day's actions
+    assert window.today == {}
+    assert [a.toolTip() for a in window.right.actions() if a.toolTip()] == [
+        "Add session",
+        "Add experiment",
+        "Check session",
+        "Submit session",
+    ]
 
 
 def test_users_pane_is_a_login_screen(window, tmp_path):
@@ -130,7 +138,9 @@ def test_users_pane_is_a_login_screen(window, tmp_path):
     assert window.context.user == "ana"
     assert users.buttons["ana"].isChecked() and not users.buttons["bo"].isChecked()
     assert "Ana Silva" in users.hint.text() and "ana" in window.user_label.text()
-    assert window.tabs.currentWidget() is window.session
+    # the day's work comes next: with no session yet, the page says where to add one
+    assert window.pages.currentWidget() is window.sessions.session_page
+    assert "add one" in window.sessions.session_page.identity.title()
 
     # the worker's database now signs calls as ana
     db.set_mouse(mouse_id=1)  # a reader opens fine beside the worker
@@ -228,10 +238,10 @@ def test_recorder_records_into_the_session_folder(window, tmp_path):
     draft = Draft.start(tmp_path / "drafts", user="tester").identify(
         mouse_id=7, date="2026-09-22"
     )
-    window.session.reload_drafts()
+    window.sessions.reload_drafts()
     assert window.recorder.draft is draft or window.recorder.draft.path == draft.path
 
-    draft = window.session.current  # the pane's own copy, loaded from disk
+    draft = window.sessions.current  # the window's own copy, loaded from disk
     draft.set_experiment("e1")
     window.context.announce_draft()
     recorder: RecorderPane = window.recorder
@@ -253,9 +263,9 @@ def test_recorder_records_into_the_session_folder(window, tmp_path):
         assert h5["filter_changes"].shape == (1, 3)
 
     # the draft now lists the experiment the recorder made
-    shown = window.session.current
+    shown = window.sessions.current
     assert shown is not None and shown.experiment("e1") is not None
-    assert window.session.tabs.count() == 1
+    assert list(window.today) == [(id(shown), None), (id(shown), "e1")]
 
 
 def test_recording_path_layout(tmp_path):
@@ -424,10 +434,10 @@ def test_session_pane_picks_a_panel_and_its_installed_vials(window, tmp_path):
     window.context.changed.emit()
     settle(window.context)
 
-    session = window.session
-    session._new()
+    sessions = window.sessions
+    sessions.new()
     settle(window.context)
-    picker = session.vial_list
+    picker = sessions.session_page.vial_list
     assert picker.table.rowCount() == 0
 
     picker.panel.setCurrentIndex(picker.panel.findData(1))
@@ -435,15 +445,15 @@ def test_session_pane_picks_a_panel_and_its_installed_vials(window, tmp_path):
     assert [picker.table.item(r, 1).text() for r in range(3)] == ["1", "2", "3"]
     assert picker._rows == [old[1], new[0], old[2]]
     assert picker.checked() == picker._rows
-    assert sorted(session.current.vial_ids) == sorted(picker._rows)
+    assert sorted(sessions.current.vial_ids) == sorted(picker._rows)
 
     from PySide6.QtCore import Qt
 
     picker.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)  # mineral oil out
-    assert sorted(session.current.vial_ids) == sorted([old[1], new[0]])
+    assert sorted(sessions.current.vial_ids) == sorted([old[1], new[0]])
 
     # shown again, the draft's vials bring their panel back with the box as left
-    session.refresh_current()
+    sessions.refresh_current()
     assert picker.panel_id() == 1
     assert picker.checked() == [old[1], new[0]]
 
@@ -454,17 +464,18 @@ def test_session_and_recorder_share_one_selection(window, tmp_path):
     window.context.changed.emit()
     settle(window.context)
 
-    session, recorder, context = window.session, window.recorder, window.context
-    session._new()
+    sessions, recorder, context = window.sessions, window.recorder, window.context
+    window._add_session()
     settle(window.context)
-    draft = session.current
+    draft = sessions.current
     assert context.draft is draft and context.experiment is None
     assert "no mouse yet" in recorder.session_label.text()
 
-    # picking the mouse shows in the recorder at once
-    session.mouse.setCurrentText("m5")
+    # picking the mouse shows in the recorder at once, and on the right bar
+    sessions.session_page.mouse.setCurrentText("m5")
     assert draft.mouse_id == 5
     assert draft.folder in recorder.session_label.text()
+    assert window.today[(id(draft), None)].toolTip() == draft.label
 
     # nothing to record into until the session lists an experiment
     assert recorder.experiment.count() == 0
@@ -472,31 +483,42 @@ def test_session_and_recorder_share_one_selection(window, tmp_path):
     assert recorder.recording is None
     assert "Add an experiment" in context.last_report[1]
 
-    # experiments added in the session tab are the recorder's only choices,
-    # the one in front is the one picked
-    draft.set_experiment("e1")
-    draft.set_experiment("e2")
-    context.announce_draft()
-    session.refresh_current()
+    # experiments added to the session are the recorder's only choices, the
+    # one added last is the one picked
+    sessions.add_experiment("e1")
+    sessions.add_experiment("e2")
     assert [
         recorder.experiment.itemText(i) for i in range(recorder.experiment.count())
     ] == ["e1", "e2"]
     assert context.experiment == "e2" and recorder.experiment.currentText() == "e2"
 
-    # switching tabs in the session pane moves the recorder; and back
-    session.tabs.setCurrentIndex(0)
+    assert window.view == "experiment"
+    assert window.group.checkedAction() is window.today[(id(draft), "e2")]
+
+    # opening another experiment moves the recorder; and back
+    window.open_experiment(draft, "e1")
     assert context.experiment == "e1" and recorder.experiment.currentText() == "e1"
     recorder.experiment.setCurrentText("e2")
-    assert context.experiment == "e2" and session.tabs.currentIndex() == 1
+    assert context.experiment == "e2"
+    assert window.group.checkedAction() is window.today[(id(draft), "e2")]
+    assert sessions.experiment_page.name == "e2"
 
-    # removing the experiment in front drops it everywhere, no phantom name
-    session._remove_experiment()
+    # removing the experiment shown drops it everywhere, no phantom name
+    sessions.remove_experiment()
     assert [str(e["name"]) for e in draft.experiments] == ["e1"]
     assert context.experiment == "e1"
     assert [
         recorder.experiment.itemText(i) for i in range(recorder.experiment.count())
     ] == ["e1"]
     assert recorder.experiment.currentText() == "e1"
+    assert list(window.today) == [(id(draft), None), (id(draft), "e1")]
+    assert sessions.experiment_page.name == "e1"
+
+    # and removing the last one falls back to the session page
+    sessions.remove_experiment()
+    assert window.view == "session" and context.experiment is None
+    assert window.pages.currentWidget() is sessions.session_page
+    assert window.group.checkedAction() is window.today[(id(draft), None)]
 
 
 def test_quick_maths_warns_when_imaging_outlasts_the_trial(app):
@@ -522,19 +544,92 @@ def test_quick_maths_warns_when_imaging_outlasts_the_trial(app):
     assert not form.overrun.isVisibleTo(form)
 
 
-def test_experiment_tab_has_the_objective_in_its_form(window, tmp_path):
-    session = window.session
-    session._new()
+def test_experiment_page_has_the_objective_in_its_form(window, tmp_path):
+    sessions = window.sessions
+    window._add_session()
     settle(window.context)
-    draft = session.current
-    draft.set_experiment("e1", exp_type="loop")
-    window.context.announce_draft()
-    session.refresh_current()
+    draft = sessions.current
+    sessions.add_experiment("e1")
+    assert window.pages.currentWidget() is sessions.experiment_page
 
-    tab = session.tabs.widget(0)
+    tab = sessions.experiment_page.shown
     assert list(tab.form.rows)[0] == "objective"
     assert not hasattr(tab, "exp_type")
 
     tab.form.rows["objective"].editor.setCurrentText("20")
     assert draft.experiment("e1")["objective"] == 20
     assert draft.experiment("e1")["exp_type"] == "loop"
+
+
+def test_right_bar_lists_sessions_in_the_order_started(window, tmp_path):
+    db = Database(tmp_path / "data", user="tester")
+    db.set_mouse(mouse_id=442)
+    window.context.changed.emit()
+    settle(window.context)
+
+    window._add_session()
+    first = window.sessions.current
+    window.sessions.session_page.mouse.setCurrentText("m442")
+    window.sessions.add_experiment("e1")
+    window._add_session()
+    second = window.sessions.current
+    settle(window.context)
+
+    # a session is named by its mouse, or by its place before it has one
+    assert list(window.today) == [
+        (id(first), None),
+        (id(first), "e1"),
+        (id(second), None),
+    ]
+    assert window.sessions.label(first) == "m442"
+    assert window.sessions.label(second) == "s2"
+    assert window.today[(id(first), "e1")].toolTip() == f"{first.label} / e1"
+    assert window.group.checkedAction() is window.today[(id(second), None)]
+
+    # the day's actions act on the session selected last
+    window.today[(id(first), None)].trigger()
+    assert window.context.draft is first and window.view == "session"
+    window.sessions.discard()
+    settle(window.context)
+    assert [d is second for d in window.sessions.drafts] == [True]
+    assert window.context.draft is second
+    assert window.group.checkedAction() is window.today[(id(second), None)]
+
+
+def test_check_opens_the_panel_and_the_log_follows_the_database(window):
+    panel = window.panel
+    assert not panel.is_open()
+
+    window._add_session()
+    window.sessions.check()
+    settle(window.context)
+    assert panel.is_open() and panel.current == panel.NAMES.index("Check")
+    assert "no mouse" in panel.texts["Check"].toPlainText()
+
+    # a write logs on the worker's thread; the line arrives in the Log tab
+    window.mice.form.set_values({"mouse_id": "m8"})
+    window.mice._save()
+    settle(window.context)
+    assert "Mouse 8 recorded" in panel.texts["Log"].toPlainText()
+
+    # clicking the open tab closes the panel; another tab opens it on that tab
+    panel.buttons.button(panel.current).click()
+    assert not panel.is_open()
+    panel.buttons.button(panel.NAMES.index("Log")).click()
+    assert panel.is_open() and panel.current == panel.NAMES.index("Log")
+
+
+def test_bottom_bar_shows_what_is_hovered_and_what_the_app_says(window):
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QEnterEvent
+
+    button = window.left.widgetForAction(window.page_actions[window.mice])
+    QApplication.sendEvent(
+        button, QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5))
+    )
+    assert window.tip.text() == "Mice"
+    QApplication.sendEvent(button, QEvent(QEvent.Type.Leave))
+    assert window.tip.text() == ""
+
+    window.context.status.emit("Saved 3 annotations")
+    assert window.tip.text() == "Saved 3 annotations"

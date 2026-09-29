@@ -10,9 +10,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 RADIUS = 6
+
+# Text sizes, in points: the bottom panel (its tab buttons and its output) and
+# the bottom bar's texts' distance from the window's sides
+PANEL_FONT_PT = 13
+STATUS_INSET_PX = 14
+
+# The icons in the side bars, and the room around the buttons: the foot is
+# larger so the last button does not sit on the bottom bar's line
+BAR_ICON_PX = 28
+BAR_MARGINS = (6, 8, 6, 14)
+
+# The session and experiment pages stop growing at this width and are
+# centered in what is left
+PAGE_MAX_PX = 800
 
 # Styling a control's frame makes Qt drop the native arrows, so they are
 # drawn from these (a mid gray that reads on light and dark backgrounds)
@@ -143,3 +158,122 @@ def apply(app: None | QApplication = None) -> None:
 
     if app is not None and app.styleSheet() != STYLESHEET:
         app.setStyleSheet(STYLESHEET)
+
+
+def mix(color: QColor, other: QColor, amount: float) -> QColor:
+    """`color` moved `amount` of the way to `other`."""
+    return QColor(
+        *(
+            round(x + (y - x) * amount)
+            for x, y in zip(color.getRgb()[:3], other.getRgb()[:3])
+        )
+    )
+
+
+def window_colors() -> dict[str, str]:
+    """
+    The window's own colors, from the palette so light and dark both work.
+
+    `line` is every division (beside the bars, above the bottom panel, above
+    the bottom bar); `soft` is the background of the bottom panel's open tab;
+    `dim` the text of the others.
+    """
+    palette = QApplication.palette()
+    window = palette.color(QPalette.ColorRole.Window)
+    text = palette.color(QPalette.ColorRole.WindowText)
+
+    return {
+        "line": window.darker(165 if is_dark() else 118).name(),
+        "soft": mix(window, text, 0.12).name(),
+        "dim": mix(text, window, 0.35).name(),
+    }
+
+
+def window_stylesheet() -> str:
+    """
+    What the main window adds to `STYLESHEET`: square frames and plain
+    division lines everywhere; only buttons and input fields are rounded.
+    """
+    c = window_colors()
+
+    return f"""
+QScrollArea {{
+    border: none;
+}}
+QGroupBox, QListWidget, QTableView {{
+    border-radius: 0px;
+}}
+QFrame#line {{
+    background: {c['line']};
+    border: none;
+}}
+QStatusBar {{
+    background: palette(window);
+    border-top: 1px solid {c['line']};
+}}
+QStatusBar::item {{
+    border: none;
+}}
+QSplitter#middle::handle:vertical {{
+    /* one line at the top of a 5 px handle, so it is easy to grab; the
+       rest is the bottom panel's color */
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {c['line']}, stop:0.2 {c['line']},
+        stop:0.21 palette(base), stop:1 palette(base));
+}}
+QToolBar {{
+    background: palette(window);
+    border: none;
+    spacing: 4px;
+}}
+QToolBar::separator {{
+    background: {c['line']};
+    height: 1px;
+    margin: 6px 4px;
+}}
+QToolBar QToolButton {{
+    border: 1px solid transparent;
+    border-radius: {RADIUS}px;
+    padding: 4px;
+}}
+QToolBar QToolButton:hover {{
+    background: palette(midlight);
+    border-color: palette(highlight);
+}}
+QToolBar QToolButton:checked {{
+    background: palette(highlight);
+    border-color: palette(highlight);
+}}
+QWidget#bottomPanel {{
+    background: palette(base);
+}}
+QPushButton#panelTab {{
+    font-size: {PANEL_FONT_PT}pt;
+    background: transparent;
+    border: none;
+    border-radius: {RADIUS}px;
+    padding: 3px 10px;
+    color: {c['dim']};
+}}
+QPushButton#panelTab:hover {{
+    color: palette(window-text);
+}}
+QPushButton#panelTab:checked {{
+    background: {c['soft']};
+    color: palette(window-text);
+}}
+QToolButton#panelToggle {{
+    border: none;
+    border-radius: {RADIUS}px;
+    padding: 2px;
+}}
+QToolButton#panelToggle:hover {{
+    background: {c['soft']};
+}}
+QPlainTextEdit#panelText {{
+    background: palette(base);
+    color: palette(window-text);
+    border: none;
+    padding: 0px 6px;
+}}
+"""

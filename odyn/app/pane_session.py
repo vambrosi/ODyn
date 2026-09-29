@@ -2,30 +2,26 @@
 The day's work: one draft per session, filled in as the experiment runs and
 submitted at the end.
 
-Left: the pending drafts, and a button for a new one. Right: the session's
-mouse and date, its annotations, one tab per experiment folder (settings,
-annotations, the trial block calculator), the vials loaded, and Check /
-Submit with what they found.
+Two pages show the selected draft (`Context.draft`): the **session page**
+(mouse, date, folder, the session's annotations, the odor panel, and the
+session's actions) and the **experiment page** (one experiment folder's
+settings, annotations and trial block calculator). `Sessions` owns the drafts
+and the actions that both the pages and the window's right bar call; what
+Check and Submit find goes out through `Sessions.reported`.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
-    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
-    QSplitter,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +31,7 @@ from .draft import EXPERIMENT_SETTINGS, Draft
 from .fields import Field, form_fields
 from .forms import Form, PanelPicker, TimingForm
 from .pane_registry import current_vials
+from .style import PAGE_MAX_PX, text_style
 from .submit import check, submit
 
 TIMING_KEYS = (
@@ -48,8 +45,46 @@ TIMING_KEYS = (
 )
 
 
-class ExperimentTab(QWidget):
-    """One experiment folder of the session: its settings and annotations."""
+def centered(inner: QWidget) -> QScrollArea:
+    """`inner` in a scroll area, no wider than `PAGE_MAX_PX` and centered."""
+    inner.setMaximumWidth(PAGE_MAX_PX)
+    holder = QWidget()
+    row = QHBoxLayout(holder)
+    row.setContentsMargins(0, 0, 0, 0)
+    # The page grows first; the stretches only take what is past its maximum
+    row.addStretch(0)
+    row.addWidget(inner, 1)
+    row.addStretch(0)
+
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setWidget(holder)
+
+    return area
+
+
+def end_row(usual: list[QPushButton], rare: list[QPushButton]) -> QHBoxLayout:
+    """The buttons at the end of a page: the usual ones left, the rare right."""
+    row = QHBoxLayout()
+
+    for button in usual:
+        row.addWidget(button)
+
+    row.addStretch(1)
+
+    for button in rare:
+        row.addWidget(button)
+
+    return row
+
+
+def session_label(draft: Draft, position: int) -> str:
+    """How the right bar names a session: its mouse, or `s<n>` before one."""
+    return f"s{position + 1}" if draft.mouse_id is None else f"m{draft.mouse_id}"
+
+
+class ExperimentForm(QWidget):
+    """One experiment folder of a session: its settings and annotations."""
 
     def __init__(self, draft: Draft, name: str, fields: list[Field], parent=None):
         super().__init__(parent)
@@ -59,10 +94,10 @@ class ExperimentTab(QWidget):
         entry = draft.experiment(name) or {}
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        # The kind of recording is what the button that made the tab said; the
-        # objective is the form's first row, the block keys are drawn by the
-        # calculator instead of as plain rows
+        # The objective is the form's first row; the block keys are drawn by
+        # the calculator instead of as plain rows
         plain = [f for f in fields if f.key not in TIMING_KEYS]
         self.form = Form(plain)
         self.form.set_values(
@@ -76,7 +111,7 @@ class ExperimentTab(QWidget):
         self.timing.changed.connect(lambda: self._set(**self.timing.values()))
 
         row = QHBoxLayout()
-        row.addWidget(self.form, 1)
+        row.addWidget(self.form, 1, Qt.AlignmentFlag.AlignTop)
         row.addWidget(self.timing, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(row)
 
@@ -96,124 +131,256 @@ class ExperimentTab(QWidget):
         self.draft.set_experiment(self.name, **fields)
 
 
-class SessionPane(QWidget):
-    """The drafts and the one being filled in."""
+class SessionPage(QWidget):
+    """The selected draft's session: who, when, what was noted, which vials."""
 
-    def __init__(self, context: Context, parent=None):
+    def __init__(self, sessions: Sessions, parent=None):
         super().__init__(parent)
-        self.context = context
-        self.drafts: list[Draft] = []
-        self.current: None | Draft = None
-        self.session_fields: list[Field] = []
-        self.experiment_fields: list[Field] = []
-        self.mice: list[int] = []
-        self.panels: list[tuple[int, str]] = []
-        self.vials = None
+        self.sessions = sessions
+        self.context = sessions.context
+        self.draft: None | Draft = None
+        self.form: None | Form = None
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout = QVBoxLayout(self)
-        layout.addWidget(splitter)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
 
-        # Left: the drafts
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.addWidget(QLabel("Sessions in progress"))
-        self.list = QListWidget()
-        self.list.currentRowChanged.connect(self._select)
-        left_layout.addWidget(self.list, 1)
-
-        new = QPushButton("New session")
-        new.clicked.connect(self._new)
-        discard = QPushButton("Discard session")
-        discard.clicked.connect(self._discard)
-        left_layout.addWidget(new)
-        left_layout.addWidget(discard)
-        splitter.addWidget(left)
-
-        # Right: the draft
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        self.right = QWidget()
-        self.right_layout = QVBoxLayout(self.right)
-        scroll.setWidget(self.right)
-        splitter.addWidget(scroll)
-        splitter.setSizes([250, 900])
-
-        identity = QGroupBox("Session")
-        identity_form = QFormLayout(identity)
+        # The session's identity, as one row
+        self.identity = QGroupBox("Session")
+        row = QHBoxLayout(self.identity)
         self.mouse = QComboBox()
         self.mouse.setEditable(True)
+        self.mouse.setMinimumWidth(120)
         self.mouse.currentTextChanged.connect(self._mouse_changed)
         self.date = QLineEdit()
         self.date.setPlaceholderText("YYYY-MM-DD")
+        self.date.setMaximumWidth(130)
         self.date.editingFinished.connect(self._date_changed)
         self.folder = QLabel()
-        identity_form.addRow("Mouse *", self.mouse)
-        identity_form.addRow("Date *", self.date)
-        identity_form.addRow("Folder", self.folder)
-        self.right_layout.addWidget(identity)
+        self.folder.setStyleSheet(text_style("computed"))
 
-        self.session_box = QGroupBox("Info")
-        self.session_box_layout = QVBoxLayout(self.session_box)
-        self.session_form: None | Form = None
-        self.right_layout.addWidget(self.session_box)
+        for label, widget in (
+            ("Mouse *", self.mouse),
+            ("Date *", self.date),
+            ("Folder", self.folder),
+        ):
+            row.addWidget(QLabel(label))
+            row.addWidget(widget)
+            row.addSpacing(18)
 
-        experiments = QGroupBox("Experiments")
-        experiments_layout = QVBoxLayout(experiments)
-        self.tabs = QTabWidget()
-        self.tabs.currentChanged.connect(self._tab_changed)
-        experiments_layout.addWidget(self.tabs)
-        buttons = QHBoxLayout()
-        add_loop = QPushButton("Add loop")
-        add_loop.clicked.connect(lambda: self._add_experiment("loop"))
-        add_grabs = QPushButton("Add grabs folder")
-        add_grabs.clicked.connect(lambda: self._add_experiment("grab"))
-        add_stacks = QPushButton("Add z-stacks folder")
-        add_stacks.clicked.connect(lambda: self._add_experiment("zstack"))
-        remove = QPushButton("Remove")
-        remove.clicked.connect(self._remove_experiment)
+        row.addStretch(1)
+        layout.addWidget(self.identity)
 
-        # What a grab or a z-stack needs is not settled yet
-        for button in (add_grabs, add_stacks):
-            button.setEnabled(False)
-            button.setToolTip("Not available yet.")
-        for button in (add_loop, add_grabs, add_stacks):
-            buttons.addWidget(button)
-        buttons.addStretch(1)
-        buttons.addWidget(remove)
-        experiments_layout.addLayout(buttons)
-        self.right_layout.addWidget(experiments)
+        self.info = QGroupBox("Info")
+        self.info_layout = QVBoxLayout(self.info)
+        layout.addWidget(self.info)
 
         vials = QGroupBox("Odor panel")
         vials_layout = QVBoxLayout(vials)
         self.vial_list = PanelPicker()
         self.vial_list.changed.connect(self._vials_changed)
         vials_layout.addWidget(self.vial_list)
-        self.right_layout.addWidget(vials)
+        layout.addWidget(vials)
 
-        actions = QHBoxLayout()
-        check_button = QPushButton("Check")
-        check_button.clicked.connect(self._check)
-        submit_button = QPushButton("Submit session")
-        submit_button.clicked.connect(self._submit)
-        actions.addWidget(check_button)
-        actions.addWidget(submit_button)
-        actions.addStretch(1)
-        self.right_layout.addLayout(actions)
+        buttons = {}
 
-        self.report = QPlainTextEdit()
-        self.report.setReadOnly(True)
-        self.report.setFixedHeight(140)
-        self.right_layout.addWidget(self.report)
-        self.right_layout.addStretch(1)
+        for text, action in (
+            ("Add experiment", sessions.add_experiment),
+            ("Check session", sessions.check),
+            ("Submit session", sessions.submit),
+            ("Remove session", sessions.discard),
+        ):
+            buttons[text] = QPushButton(text)
+            buttons[text].clicked.connect(lambda _=False, a=action: a())
 
-        self.right.setEnabled(False)
+        layout.addLayout(
+            end_row(
+                [
+                    buttons[t]
+                    for t in ("Add experiment", "Check session", "Submit session")
+                ],
+                [buttons["Remove session"]],
+            )
+        )
+        layout.addStretch(1)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(centered(inner))
+        self.body = inner
+        self.show_draft(None)
+
+    def show_draft(self, draft: None | Draft) -> None:
+        """Fill the page from `draft`; with None, an empty, disabled page."""
+        self.draft = draft
+        self.body.setEnabled(draft is not None)
+
+        self.mouse.blockSignals(True)
+        self.mouse.clear()
+        self.mouse.addItems(["", *[f"m{m}" for m in self.sessions.mice]])
+        self.mouse.setCurrentText(
+            "" if draft is None or draft.mouse_id is None else f"m{draft.mouse_id}"
+        )
+        self.mouse.blockSignals(False)
+        self.date.setText("" if draft is None else draft.date)
+        self._refresh_identity()
+
+        if self.form is not None:
+            self.form.setParent(None)
+            self.form.deleteLater()
+            self.form = None
+
+        if draft is not None:
+            self.form = Form(self.sessions.session_fields)
+            self.form.set_values(draft.session)
+            self.form.changed.connect(
+                lambda key, value: draft.update_session(**{key: value})
+            )
+            self.info_layout.addWidget(self.form)
+
+        self.vial_list.blockSignals(True)
+        self.vial_list.set_panels(self.sessions.panels, self.sessions.vials)
+        self.vial_list.show_vials([] if draft is None else draft.vial_ids)
+        self.vial_list.blockSignals(False)
+
+    def _refresh_identity(self) -> None:
+        draft = self.draft
+
+        if draft is None:
+            self.identity.setTitle("No session: add one from the right bar")
+            self.folder.setText("")
+        elif draft.mouse_id is None:
+            self.identity.setTitle(f"Session {draft.label}")
+            self.folder.setText("pick a mouse")
+        else:
+            self.identity.setTitle(f"Session {draft.label}")
+            self.folder.setText(draft.folder)
+
+    def _mouse_changed(self, text: str) -> None:
+        if self.draft is None:
+            return
+
+        text = text.strip().lstrip("mM")
+
+        try:
+            mouse_id = int(text) if text else None
+        except ValueError:
+            return
+
+        if mouse_id is not None:
+            self.draft.identify(mouse_id=mouse_id)
+            self._refresh_identity()
+            self.context.announce_draft()
+
+    def _date_changed(self) -> None:
+        if self.draft is None or self.date.text() == self.draft.date:
+            return
+
+        try:
+            self.draft.identify(date=self.date.text())
+        except ValueError as error:
+            self.context.report("Date", str(error))
+            return
+
+        self._refresh_identity()
+        self.context.announce_draft()
+
+    def _vials_changed(self) -> None:
+        if self.draft is not None:
+            self.draft.set_vials(self.vial_list.checked())
+
+
+class ExperimentPage(QWidget):
+    """One experiment of the selected draft, and the button to remove it."""
+
+    def __init__(self, sessions: Sessions, parent=None):
+        super().__init__(parent)
+        self.sessions = sessions
+        self.draft: None | Draft = None
+        self.name: None | str = None
+        self.shown: None | ExperimentForm = None
+
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        self.box = QGroupBox("Experiment")
+        self.box_layout = QVBoxLayout(self.box)
+        layout.addWidget(self.box)
+
+        remove = QPushButton("Remove experiment")
+        remove.clicked.connect(lambda: sessions.remove_experiment(self.name))
+        layout.addLayout(end_row([], [remove]))
+        layout.addStretch(1)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(centered(inner))
+
+    def show_experiment(self, draft: None | Draft, name: None | str) -> None:
+        """Fill the page from experiment `name` of `draft`."""
+        if self.shown is not None:
+            self.shown.setParent(None)
+            self.shown.deleteLater()
+            self.shown = None
+
+        self.draft, self.name = draft, name
+
+        if draft is None or name is None or draft.experiment(name) is None:
+            self.box.setTitle("Experiment")
+            return
+
+        self.box.setTitle(f"Experiment {name}  ({draft.label})")
+        self.shown = ExperimentForm(draft, name, self.sessions.experiment_fields)
+        self.box_layout.addWidget(self.shown)
+
+
+class Sessions(QObject):
+    """
+    The drafts in progress and what can be done to them.
+
+    `drafts` is in the order the sessions were started. The pages and the
+    window's right bar call `new`, `discard`, `add_experiment`,
+    `remove_experiment`, `check` and `submit`; each acts on the selected
+    draft (`Context.draft`).
+
+    - `listed` fires when drafts come or go (the right bar rebuilds);
+    - `reported(text)` carries what Check or Submit found;
+    - `experiment_added(name)` fires once a new experiment is selected.
+    """
+
+    listed = Signal()
+    reported = Signal(str)
+    experiment_added = Signal(str)
+
+    def __init__(self, context: Context, parent=None):
+        super().__init__(parent)
+        self.context = context
+        self.drafts: list[Draft] = []
+        self.session_fields: list[Field] = []
+        self.experiment_fields: list[Field] = []
+        self.mice: list[int] = []
+        self.panels: list[tuple[int, str]] = []
+        self.vials = None
+
+        self.session_page = SessionPage(self)
+        self.experiment_page = ExperimentPage(self)
 
         context.changed.connect(self.reload_choices)
         context.selection_changed.connect(self._follow_selection)
         context.draft_changed.connect(self._follow_draft)
         self.reload_choices()
         self.reload_drafts()
+
+    @property
+    def current(self) -> None | Draft:
+        """The selected draft, when it is one of these."""
+        draft = self.context.draft
+
+        return draft if any(draft is d for d in self.drafts) else None
+
+    def position(self, draft: Draft) -> int:
+        return next(i for i, d in enumerate(self.drafts) if d is draft)
+
+    def label(self, draft: Draft) -> str:
+        return session_label(draft, self.position(draft))
 
     # ----------------------------------------------------------------- #
     # Loading
@@ -244,268 +411,172 @@ class SessionPane(QWidget):
         self.experiment_fields = experiment_fields
         self.mice = mice
         self.panels, self.vials = panels, vials
-        self.vial_list.blockSignals(True)
-        self.vial_list.set_panels(panels, vials)
-        self.vial_list.blockSignals(False)
-
-        current = self.mouse.currentText()
-        self.mouse.blockSignals(True)
-        self.mouse.clear()
-        self.mouse.addItems(["", *[f"m{m}" for m in mice]])
-        self.mouse.setCurrentText(current)
-        self.mouse.blockSignals(False)
-
-        if self.current is not None:
-            self._show(self.current)
+        self.refresh_current()
 
     def reload_drafts(self) -> None:
-        self.drafts = Draft.pending(self.context.drafts)
-        self.list.blockSignals(True)
-        self.list.clear()
-
-        for draft in self.drafts:
-            QListWidgetItem(draft.label, self.list)
-
-        self.list.blockSignals(False)
-
-        if self.drafts:
-            self.list.setCurrentRow(0)
-        else:
-            self.current = None
-            self.right.setEnabled(False)
-            self.context.select(None)
-
-    def _select(self, row: int) -> None:
-        if row < 0 or row >= len(self.drafts):
-            self.current = None
-            self.right.setEnabled(False)
-            self.context.select(None)
-            return
-
-        self._show(self.drafts[row])
+        """Read the drafts from disk; select the first unless one still is."""
+        self.drafts = sorted(
+            Draft.pending(self.context.drafts), key=lambda d: d.path.name
+        )
+        kept = next(
+            (
+                d
+                for d in self.drafts
+                if self.context.draft is not None and d.path == self.context.draft.path
+            ),
+            None,
+        )
+        self.listed.emit()
+        self.context.select(kept or (self.drafts[0] if self.drafts else None))
+        self.refresh_current()
 
     def refresh_current(self) -> None:
-        """Redraw the shown draft after something else (the recorder) changed it."""
-        if self.current is not None:
-            self._show(self.current)
+        """Redraw both pages from the selected draft."""
+        self.session_page.show_draft(self.current)
+        self.experiment_page.show_experiment(self.current, self.context.experiment)
 
-    def _follow_draft(self) -> None:
-        """The draft changed elsewhere: redraw if its experiments differ."""
+    def _follow_selection(self) -> None:
         draft = self.current
 
-        if draft is None or draft is not self.context.draft:
-            return
+        if self.session_page.draft is not draft:
+            self.session_page.show_draft(draft)
 
-        shown = [
-            self.tabs.widget(i).name
-            for i in range(self.tabs.count())
-            if isinstance(self.tabs.widget(i), ExperimentTab)
-        ]
+        page = self.experiment_page
 
-        if shown != [str(e["name"]) for e in draft.experiments]:
-            self._show(draft)
+        if page.draft is not draft or page.name != self.context.experiment:
+            page.show_experiment(draft, self.context.experiment)
 
-    def _show(self, draft: Draft) -> None:
-        self.current = draft
-        self.right.setEnabled(True)
+    def _follow_draft(self) -> None:
+        """The selected draft changed (mouse, date, experiments)."""
+        draft = self.current
+        page = self.experiment_page
 
-        self.mouse.blockSignals(True)
-        self.mouse.setCurrentText(
-            "" if draft.mouse_id is None else f"m{draft.mouse_id}"
-        )
-        self.mouse.blockSignals(False)
-        self.date.setText(draft.date)
-        self._refresh_folder()
-
-        if self.session_form is not None:
-            self.session_form.setParent(None)
-            self.session_form.deleteLater()
-
-        self.session_form = Form(self.session_fields)
-        self.session_form.set_values(draft.session)
-        self.session_form.changed.connect(
-            lambda key, value: draft.update_session(**{key: value})
-        )
-        self.session_box_layout.addWidget(self.session_form)
-
-        self.tabs.blockSignals(True)
-        self.tabs.clear()
-        for entry in draft.experiments:
-            tab = ExperimentTab(draft, str(entry["name"]), self.experiment_fields)
-            self.tabs.addTab(tab, str(entry["name"]))
-        self.tabs.blockSignals(False)
-
-        self.vial_list.blockSignals(True)
-        self.vial_list.show_vials(draft.vial_ids)
-        self.vial_list.blockSignals(False)
-        self.report.clear()
-
-        # This draft is now the one every tab works on; keep its experiment
-        # if it is still there, else the last one
-        wanted = self.context.experiment if self.context.draft is draft else None
-        self.context.select(draft, wanted)
-        self._follow_selection()
-
-    def _refresh_folder(self) -> None:
-        if self.current is None or self.current.mouse_id is None:
-            self.folder.setText("pick a mouse")
-            return
-
-        self.folder.setText(self.current.folder)
+        if draft is not None and page.name != self.context.experiment:
+            page.show_experiment(draft, self.context.experiment)
+        elif draft is not None and page.shown is not None:
+            page.box.setTitle(f"Experiment {page.name}  ({draft.label})")
 
     # ----------------------------------------------------------------- #
-    # Editing
+    # Actions
     # ----------------------------------------------------------------- #
 
-    def _new(self) -> None:
+    def new(self) -> Draft:
+        """Start a session, listed last, and select it."""
         draft = Draft.start(self.context.drafts, user=self.context.user)
-        self.drafts.insert(0, draft)
-        self.list.insertItem(0, QListWidgetItem(draft.label))
-        self.list.setCurrentRow(0)
+        self.drafts.append(draft)
+        self.listed.emit()
+        self.context.select(draft)
 
-    def _discard(self) -> None:
-        if self.current is None:
+        return draft
+
+    def discard(self) -> None:
+        """Delete the selected draft and select its neighbor."""
+        draft = self.current
+
+        if draft is None:
             return
 
-        self.current.discard()
-        self.reload_drafts()
+        # The next session takes its place, else the one before
+        position = self.position(draft)
+        draft.discard()
+        self.drafts.pop(position)
+        self.listed.emit()
+        neighbors = self.drafts[position : position + 1] or self.drafts[-1:]
+        self.context.select(neighbors[0] if neighbors else None)
+        self.refresh_current()
 
-    def _mouse_changed(self, text: str) -> None:
-        if self.current is None:
+    def add_experiment(self, name: None | str = None, exp_type: str = "loop") -> None:
+        """
+        Add an experiment folder to the selected draft, asking for its name
+        (`e<n+1>` offered) unless given, and select it.
+        """
+        draft = self.current
+
+        if draft is None:
+            self.context.report("Experiment", "Add a session first.")
             return
 
-        text = text.strip().lstrip("mM")
-
-        try:
-            mouse_id = int(text) if text else None
-        except ValueError:
-            return
-
-        if mouse_id is not None:
-            self.current.identify(mouse_id=mouse_id)
-            self._refresh_folder()
-            self.list.currentItem().setText(self.current.label)
-            self.context.announce_draft()
-
-    def _date_changed(self) -> None:
-        if self.current is None:
-            return
-
-        try:
-            self.current.identify(date=self.date.text())
-        except ValueError as error:
-            self.context.report("Date", str(error))
-            return
-
-        self._refresh_folder()
-        self.list.currentItem().setText(self.current.label)
-        self.context.announce_draft()
-
-    def _add_experiment(self, exp_type: str) -> None:
-        if self.current is None:
-            return
-
-        if exp_type == "loop":
+        if name is None:
             numbers = [
                 int(e["name"][1:])
-                for e in self.current.experiments
+                for e in draft.experiments
                 if str(e["name"]).startswith("e") and str(e["name"])[1:].isdigit()
             ]
-            default = f"e{max(numbers, default=0) + 1}"
-        else:
-            default = "grabs" if exp_type == "grab" else "zstacks"
+            name, ok = QInputDialog.getText(
+                self.context.window,
+                "Folder name",
+                "Experiment folder:",
+                text=f"e{max(numbers, default=0) + 1}",
+            )
 
-        name, ok = QInputDialog.getText(
-            self, "Folder name", "Experiment folder:", text=default
-        )
+            if not ok:
+                return
+
         name = name.strip()
 
-        if not ok or not name:
+        if not name:
             return
 
-        if self.current.experiment(name) is not None:
+        if draft.experiment(name) is not None:
             self.context.report("Experiment", f"'{name}' is already listed.")
             return
 
-        self.current.set_experiment(name, exp_type=exp_type)
-        tab = ExperimentTab(self.current, name, self.experiment_fields)
-        self.tabs.addTab(tab, name)
+        draft.set_experiment(name, exp_type=exp_type)
         self.context.announce_draft()
-        self.tabs.setCurrentWidget(tab)  # selects it through `_tab_changed`
+        self.context.select(draft, name)
+        self.experiment_added.emit(name)
 
-    def _remove_experiment(self) -> None:
-        tab = self.tabs.currentWidget()
+    def remove_experiment(self, name: None | str = None) -> None:
+        """Remove experiment `name` (the selected one if None) from the draft."""
+        draft = self.current
+        name = name or self.context.experiment
 
-        if self.current is None or not isinstance(tab, ExperimentTab):
+        if draft is None or name is None or draft.experiment(name) is None:
             return
 
-        self.current.remove_experiment(tab.name)
-        self.tabs.removeTab(self.tabs.currentIndex())
+        draft.remove_experiment(name)
         self.context.announce_draft()
-        self._tab_changed(self.tabs.currentIndex())
-
-    def _tab_changed(self, index: int) -> None:
-        """The experiment tab in front is the experiment being worked on."""
-        tab = self.tabs.widget(index)
-
-        if self.current is not None and self.current is self.context.draft:
-            self.context.select_experiment(
-                tab.name if isinstance(tab, ExperimentTab) else None
-            )
-
-    def _follow_selection(self) -> None:
-        """Bring the experiment picked elsewhere (the recorder) to the front."""
-        if self.context.draft is not self.current:
-            return
-
-        for index in range(self.tabs.count()):
-            tab = self.tabs.widget(index)
-
-            if isinstance(tab, ExperimentTab) and tab.name == self.context.experiment:
-                if self.tabs.currentIndex() != index:
-                    self.tabs.blockSignals(True)
-                    self.tabs.setCurrentIndex(index)
-                    self.tabs.blockSignals(False)
-
-                return
-
-    def _vials_changed(self) -> None:
-        if self.current is not None:
-            self.current.set_vials(self.vial_list.checked())
 
     # ----------------------------------------------------------------- #
     # Check and submit
     # ----------------------------------------------------------------- #
 
-    def _check(self) -> None:
+    def check(self) -> None:
         draft = self.current
 
         if draft is None:
             return
 
-        self.report.setPlainText("Checking...")
+        self.reported.emit(f"Checking {draft.label}...")
         self.context.run(
             lambda db: check(db, draft),
-            lambda problems: self.report.setPlainText(
-                "\n".join(str(p) for p in problems) or "Nothing wrong: ready to submit."
+            lambda problems: self.reported.emit(
+                f"{draft.label}\n"
+                + (
+                    "\n".join(str(p) for p in problems)
+                    or "Nothing wrong: ready to submit."
+                )
             ),
             "check",
         )
 
-    def _submit(self) -> None:
+    def submit(self) -> None:
         draft = self.current
 
         if draft is None:
             return
 
-        self.report.setPlainText(
-            "Submitting... (reading the recordings can take a while)"
+        self.reported.emit(
+            f"Submitting {draft.label}... (reading the recordings can take a while)"
         )
         self.context.run(
-            lambda db: submit(db, draft), self._submitted, "submit", writes=True
+            lambda db: submit(db, draft),
+            lambda result: self._submitted(draft, result),
+            "submit",
+            writes=True,
         )
 
-    def _submitted(self, result) -> None:
+    def _submitted(self, draft: Draft, result) -> None:
         lines = [str(p) for p in result.problems]
 
         if result.written is None:
@@ -528,12 +599,9 @@ class SessionPane(QWidget):
                     f"Stopped: {result.error}. The draft is kept; submit again after fixing it."
                 )
 
-        self.report.setPlainText("\n".join(lines))
+        self.reported.emit(f"{draft.label}\n" + "\n".join(lines))
 
         if result.submitted:
             self.reload_drafts()
-
-        for index in range(self.tabs.count()):
-            tab = self.tabs.widget(index)
-            if isinstance(tab, ExperimentTab):
-                tab.refresh_status()
+        elif self.experiment_page.shown is not None:
+            self.experiment_page.shown.refresh_status()

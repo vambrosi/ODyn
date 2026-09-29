@@ -132,7 +132,7 @@ class RecorderPane(QWidget):
 
         where = QGroupBox("Where the file goes")
         where_form = QFormLayout(where)
-        self.session_label = QLabel("no session picked in the Session tab")
+        self.session_label = QLabel("no session selected in the right bar")
         self.experiment = QComboBox()
         self.experiment.currentTextChanged.connect(self._experiment_edited)
         self.target = QLabel("")
@@ -248,10 +248,9 @@ class RecorderPane(QWidget):
 
     def follow(self) -> None:
         """
-        Show the session and experiment every tab works on: the draft's
-        experiments to pick from, the one picked in front, and the next
-        experiments to pick from and the one picked in front: a recording
-        goes into an experiment the Session tab lists, never into a new name.
+        Show the selected session and its experiment opened last: the draft's
+        experiments to pick from, that one picked. A recording goes into an
+        experiment the session lists, never into a new name.
         """
         if self.recording is not None:
             return  # the names are frozen while a file is being written
@@ -262,7 +261,7 @@ class RecorderPane(QWidget):
         self.experiment.clear()
 
         if draft is None:
-            self.session_label.setText("no session picked in the Session tab")
+            self.session_label.setText("no session selected in the right bar")
         elif draft.mouse_id is None:
             self.session_label.setText(f"{draft.label}: pick its mouse first")
         else:
@@ -293,7 +292,7 @@ class RecorderPane(QWidget):
         name = self.experiment.currentText().strip()
 
         if not name:
-            self.target.setText("add an experiment in the Session tab")
+            self.target.setText("add an experiment to the session first")
             return
 
         if self.draft is None or self.draft.mouse_id is None:
@@ -322,14 +321,12 @@ class RecorderPane(QWidget):
         if draft is None or draft.mouse_id is None:
             self.context.report(
                 "Recorder",
-                "Pick a session with a mouse in the Session tab (or just test).",
+                "Select a session with a mouse in the right bar (or just test).",
             )
             return
 
         if not name or draft.experiment(name) is None:
-            self.context.report(
-                "Recorder", "Add an experiment to the session in the Session tab first."
-            )
+            self.context.report("Recorder", "Add an experiment to the session first.")
             return
 
         started = datetime.now()

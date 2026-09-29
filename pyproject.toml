@@ -32,4 +32,10 @@ packages = ["odyn", "odyn.app"]
 
 [tool.setuptools.package-data]
 odyn = ["*.sql"]
-"odyn.app" = ["icons/*.svg"]
+
+# The icon font (Apache 2.0, so its license travels with it)
+"odyn.app" = [
+    "icons/*.svg",
+    "assets/material-symbols/*.ttf",
+    "assets/material-symbols/LICENSE.txt",
+]
