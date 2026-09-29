@@ -253,6 +253,24 @@ class SessionPage(QWidget):
             self.draft.set_vials(self.vial_list.checked())
 
 
+class NoSessionPage(QWidget):
+    """What the middle shows when no session is selected."""
+
+    MESSAGE = "No session selected.\nPick one or add one using the right bar buttons."
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.message = QLabel(self.MESSAGE)
+        self.message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.message.setWordWrap(True)
+        font = self.message.font()
+        font.setPointSizeF(font.pointSizeF() * 1.3)
+        self.message.setFont(font)
+        self.message.setStyleSheet(text_style("computed"))
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.message)
+
+
 class ExperimentPage(QWidget):
     """One experiment of the selected draft, and the button to remove it."""
 
@@ -327,6 +345,7 @@ class Sessions(QObject):
 
         self.session_page = SessionPage(self)
         self.experiment_page = ExperimentPage(self)
+        self.no_session_page = NoSessionPage()
 
         context.changed.connect(self.reload_choices)
         context.selection_changed.connect(self._follow_selection)

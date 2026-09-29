@@ -131,6 +131,7 @@ class MainWindow(QMainWindow):
         self.sessions = Sessions(self.context)
         self.pages.addWidget(self.sessions.session_page)
         self.pages.addWidget(self.sessions.experiment_page)
+        self.pages.addWidget(self.sessions.no_session_page)
 
         # Left: registries and browsing, the recorder at the foot
         self.left = self._bar("Pages")
@@ -248,7 +249,7 @@ class MainWindow(QMainWindow):
         self.context.select(draft, keep)
         self.view = "session"
         self.selected = None if draft is None else "session"
-        self.pages.setCurrentWidget(self.sessions.session_page)
+        self._show_session_page()
         self._highlight()
 
     def open_experiment(self, draft: None | Draft, name: str) -> None:
@@ -335,9 +336,19 @@ class MainWindow(QMainWindow):
 
         if self.view == "experiment" and self.selected != "experiment":
             self.view = "session"
-            self.pages.setCurrentWidget(self.sessions.session_page)
+
+        if self.view == "session":
+            self._show_session_page()
 
         self._highlight()
+
+    def _show_session_page(self) -> None:
+        """The selected session's page (or a page with a prompt)."""
+        self.pages.setCurrentWidget(
+            self.sessions.session_page
+            if self.context.draft is not None
+            else self.sessions.no_session_page
+        )
 
     def _highlight(self) -> None:
         """Check the button of what the middle shows; name the selection."""

@@ -144,8 +144,8 @@ def test_users_pane_is_a_login_screen(window, tmp_path):
     assert users.buttons["ana"].isChecked() and not users.buttons["bo"].isChecked()
     assert "Ana Silva" in users.hint.text() and "ana" in window.user_label.text()
     # the day's work comes next: with no session yet, the page says where to add one
-    assert window.pages.currentWidget() is window.sessions.session_page
-    assert "add one" in window.sessions.session_page.identity.title()
+    assert window.pages.currentWidget() is window.sessions.no_session_page
+    assert "add one" in window.sessions.no_session_page.message.text()
 
     # the worker's database now signs calls as ana
     db.set_mouse(mouse_id=1)  # a reader opens fine beside the worker
@@ -610,6 +610,7 @@ def test_right_bar_lists_sessions_in_the_order_started(window, tmp_path):
     settle(window.context)
     assert [d is second for d in window.sessions.drafts] == [True]
     assert window.context.draft is None and window.group.checkedAction() is None
+    assert window.pages.currentWidget() is window.sessions.no_session_page
     assert not window.remove_action.isEnabled()
     assert not window.selection.isVisibleTo(window)
 
