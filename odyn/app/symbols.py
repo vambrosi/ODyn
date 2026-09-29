@@ -44,9 +44,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QApplication
 
 FONT_FILE = (
-    Path(__file__).parent
-    / "assets/material-symbols"
-    / "MaterialSymbolsRounded.ttf"
+    Path(__file__).parent / "assets/material-symbols" / "MaterialSymbolsRounded.ttf"
 )
 
 # Drawn at this size and scaled by Qt, so it only has to be big enough not to
@@ -86,12 +84,14 @@ BADGED_TOGETHER = 0.90
 GLYPHS = {
     "users": ("person", "", "u"),
     "mice": ("pest_control_rodent", "", "m"),
-    "odors": ("science", "", "o"),
-    "panels": ("labs", "", "p"),
+    "odors": ("labs", "", "o"),
+    "panels": ("lab_panel", "", "p"),
     "tables": ("table", "", "t"),
     "qc": ("fact_check", "", "q"),
     "add-session": ("calendar_today", "add_circle", "+s"),
-    "add-experiment": ("biotech", "add_circle", "+e"),
+    "add-experiment": ("experiment", "add_circle", "+e"),
+    "undo": ("undo", "", "<"),
+    "remove": ("delete", "", "x"),
     "check-session": ("checklist", "", "c"),
     "submit-session": ("upload", "", "u"),
     "recorder": ("radio_button_checked", "", "r"),

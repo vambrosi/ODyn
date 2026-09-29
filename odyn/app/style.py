@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 RADIUS = 6
 
@@ -147,6 +147,17 @@ def is_dark() -> bool:
     return app.palette().window().color().lightness() < 128
 
 
+def required_label(text: str, required: bool = True) -> QLabel:
+    """A form label. (Required fields use the error color.)"""
+    label = QLabel(text)
+
+    if required:
+        label.setStyleSheet(text_style("error"))
+        label.setToolTip("Required")
+
+    return label
+
+
 def text_style(kind: str) -> str:
     """A `color:` stylesheet for `computed`, `error` or `warning` text."""
     return f"color: {TEXT_COLORS['dark' if is_dark() else 'light'][kind]};"
@@ -243,6 +254,20 @@ QToolBar QToolButton:hover {{
 QToolBar QToolButton:checked {{
     background: palette(highlight);
     border-color: palette(highlight);
+}}
+QLabel#tip {{
+    border: 1px solid palette(highlight);
+    border-radius: {RADIUS}px;
+    padding: 2px 8px;
+    margin: 6px 0px 6px {STATUS_INSET_PX - 2}px;
+}}
+QLabel#selection {{
+    background: palette(highlight);
+    color: palette(highlighted-text);
+    border: 1px solid palette(highlight);
+    border-radius: {RADIUS}px;
+    padding: 2px 8px;
+    margin: 6px 0px;
 }}
 QWidget#bottomPanel {{
     background: palette(base);

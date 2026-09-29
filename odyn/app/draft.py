@@ -1,19 +1,22 @@
 """
 Work in progress for one session, held on disk until someone submits it.
 
-A draft is what the app writes while an experiment day is running, in place
-of the spreadsheet people used to leave open all day. Mice, odors, panels and
-users go straight to the database when they are added; what stays here is
-what only makes sense once the day is finished: the session's annotations,
-each experiment's annotations and settings, and which vials were loaded.
-Annotations are append-only, so half-typed values must not reach them, and
-an experiment's annotations need its `exp_id`, which only exists once its
-recordings have been copied and ingested at submit.
+A draft is what the app writes throughout an experiment day. This replaces the
+log spreadsheet that was created for each mice and day.
 
-One JSON file per session, named for the moment it was started
-(`20260914-113042.json`). Saving is atomic, so a crash costs at most the last
-edit rather than the whole day, and an unfinished draft is simply still there
-the next time the app opens.
+What goes here: the session's annotations, each experiment's annotations and
+settings, and which vials were loaded. What doesn't go here: Mice, odors,
+panels, and users (those are added directly to the database).
+
+More than buffers, these files serve as a temporary state where the data might
+not satisfy the database checks, or is otherwise inconsistent, and so it can't
+be submitted, but it still needs to be kept, in case the app is closed by
+mistake, for example. In the same vein, since annotations are append-only, the
+drafts help avoid half-typed values being added to the database.
+
+**FORMAT**
+One JSON file per session, named for the datetime it was started (e.g.
+`20260914-113042.json`). Default drafts folder is `~/.odyn/drafts` (local).
 
 **USAGE**
 ```python
@@ -24,11 +27,25 @@ draft.update_session(goal="10x pre/post ket/xyl", mouse_weight_g=25.1)
 draft.set_experiment("e1", exp_type="loop", objective=20, fov_depth_um=-55)
 draft.set_vials([1, 2, 3, 4])
 
-Draft.pending(drafts_folder())   # everything not yet submitted
+Draft.pending(drafts_folder())   # everything not yet submitted or removed
+
+removals = Removals(drafts_folder())
+draft.remove_experiment("e1")
+removals.push(draft, "e1")
+removals.undo()                  # e1 is back
 ```
 
-Submitting is elsewhere: this module knows nothing about the database, which is
-what lets it be read and written without one.
+**NOTES**
+Saving is atomic: so a crash costs at most the last edit rather than the whole
+day, and an unfinished draft is simply still there the next time the app opens.
+
+Nothing typed is ever deleted: removing a session or an experiment only marks
+it `removed` (hidden everywhere, kept on disk), and `Removals` is the stack
+that undoes the latest of those. Submitted drafts move to `~/.odyn/submitted`,
+outside the drafts folder, so the record survives clearing the drafts.
+
+This module is database-independent, so submitting is not part of it. This lets
+drafts be read and written even without a database.
 """
 
 from __future__ import annotations
@@ -41,31 +58,41 @@ from datetime import date as Date, datetime
 from pathlib import Path
 from typing import Any
 
-# Bumped when the stored shape changes in a way a reader must notice. A draft
-# written by a newer app is refused rather than half-read.
-DRAFT_VERSION = 2
+# Bumped when the stored shape changes in a way a reader must notice.
+# A draft written by a newer app is refused rather than half-read.
+DRAFT_VERSION = 3
 
 FOLDER_NAME = ".odyn"
 DRAFTS = "drafts"
+SUBMITTED = "submitted"
+
+# The undo stack of removals, in the drafts folder
+REMOVALS = "removed.json"
 
 # The keys of an experiment entry that are not annotations
-EXPERIMENT_SETTINGS = ("name", "exp_type", "objective", "submitted_exp_id")
+EXPERIMENT_SETTINGS = (
+    "name",
+    "exp_type",
+    "objective",
+    "submitted_exp_id",
+    "removed",
+)
 
 # What an experiment folder is called for each kind of recording
 EXPERIMENT_TYPES = ("loop", "grab", "zstack")
 
-# A draft is named for when it was started, not for what it is about: the mouse
-# is picked later and can be corrected, and two sessions can be open before
-# either has been identified.
+# A draft is named for when it was started because:
+# - the mouse is picked later and can be corrected;
+# - two sessions can be open before either has been identified.
 NAME_PATTERN = re.compile(r"\d{8}-\d{6}(-\d+)?\.json")
 
 
 def drafts_folder() -> Path:
     """
-    Where drafts live: `~/.odyn/drafts`.
+    Where drafts live (currently, `~/.odyn/drafts`).
 
-    Local to the machine on purpose. Drafts are half-written and belong to the
-    person typing them, so they do not go on the shared drive with the database.
+    These don't go in the shared drive because they are owned by the user
+    producing them, and they can be written even without the DB connection.
     """
     return Path.home() / FOLDER_NAME / DRAFTS
 
@@ -77,9 +104,10 @@ def _check_date(value: str) -> str:
 
     try:
         return datetime.strptime(str(value).strip(), "%Y-%m-%d").strftime("%Y-%m-%d")
+
     except ValueError:
         raise ValueError(
-            f"A session date is written 'YYYY-MM-DD', not {value!r}."
+            f"Session data format is 'YYYY-MM-DD', not {value!r}."
         ) from None
 
 
@@ -111,9 +139,9 @@ class Draft:
         """
         Begin a session, named for the moment it was started.
 
-        `mouse_id` is optional because a session is usually opened before anyone
-        picks the animal, and `date` defaults to today. Both can be set
-        afterwards with `identify`. `user` is who opened it.
+        `mouse_id` is optional to allow the user to write other entries
+        before the mouse is picked. `date` defaults to today. Both can be
+        set afterwards with `identify`.
         """
         folder = Path(folder)
         started = datetime.now()
@@ -135,6 +163,7 @@ class Draft:
         )
 
         # Two sessions started in the same second would otherwise share a name.
+        # (Not likely to happen, but just in case.)
         stem = draft.path.stem
         attempt = 0
 
@@ -154,7 +183,7 @@ class Draft:
         session_id: None | int = None,
     ) -> Draft:
         """
-        Say which animal and which day this session is.
+        Which animal and which day this session is about.
 
         Both are ordinary fields, so either can be corrected later without the
         draft changing its name or colliding with another. `session_id` is
@@ -194,19 +223,24 @@ class Draft:
     @classmethod
     def pending(cls, folder: Path | str) -> list[Draft]:
         """
-        Every unsubmitted draft that can be read, most recently saved first.
+        Every draft that was not submitted nor removed and can be read. Most
+        recently saved first.
 
-        One damaged file must not hide the rest, so anything unreadable is left
-        out here and listed by `unreadable` instead. Check both before telling
-        someone they have no unfinished work.
+        Damaged files should not hide the valid ones, so anything unreadable is
+        left out here and listed by `unreadable` instead. Should check both
+        before telling the user that they have no unfinished work.
         """
         drafts = []
 
         for path in _draft_files(folder):
             try:
-                drafts.append(cls.load(path))
+                draft = cls.load(path)
+
             except (ValueError, OSError, json.JSONDecodeError):
                 continue
+
+            if not draft.removed:
+                drafts.append(draft)
 
         return sorted(drafts, key=lambda draft: draft.saved_at or "", reverse=True)
 
@@ -215,8 +249,7 @@ class Draft:
         """
         The draft files that could not be read, and why.
 
-        Show these: a draft nobody can open is still a day someone spent, and
-        the file is right there to be recovered by hand.
+        Relevant in case they need to be recovered by hand.
         """
         broken = []
 
@@ -229,7 +262,7 @@ class Draft:
         return sorted(broken)
 
     # ----------------------------------------------------------------- #
-    # What it holds
+    # Draft fields
     # ----------------------------------------------------------------- #
 
     @property
@@ -260,25 +293,50 @@ class Draft:
 
     @property
     def session(self) -> dict[str, Any]:
-        """The fields that describe the day: goal, weight, headplate, notes."""
+        """The fields that describe a mouse experiment setup"""
         return self.data.setdefault("session", {})
 
     @property
+    def removed(self) -> bool:
+        """Whether the whole session was removed (and can still be restored)."""
+        return bool(self.data.get("removed"))
+
+    @property
     def experiments(self) -> list[dict[str, Any]]:
-        """One entry per experiment folder, each with a `name` like `'e1'`."""
+        """
+        One entry per experiment folder, each with a `name` like `'e1'`
+        (removed ones left out). This gives entries themselves, so changing one
+        changes the draft (then `save`).
+        """
+        return [e for e in self._entries if not e.get("removed")]
+
+    @property
+    def _entries(self) -> list[dict[str, Any]]:
+        """Every experiment entry, removed ones included."""
         return self.data.setdefault("experiments", [])
 
     @property
     def vial_ids(self) -> list[int]:
-        """The vials loaded in the olfactometer for the day's experiments."""
+        """The vials loaded in the olfactometer for that session."""
         return [int(v) for v in self.data.get("vial_ids", [])]
 
     @property
     def label(self) -> str:
-        """How the session reads on screen, before and after it is identified."""
+        """How the session appears on the screen."""
         who = "no mouse yet" if self.mouse_id is None else f"m{self.mouse_id}"
 
         return f"{who} {self.date}"
+
+    @property
+    def where(self) -> str:
+        """
+        How the app names the session everywhere: its folder, `20260929/m442`,
+        or `20260929/m?` before it has a mouse.
+        """
+        if self.mouse_id is None:
+            return f"{self.date.replace('-', '')}/m?"
+
+        return self.folder
 
     @property
     def folder(self) -> str:
@@ -290,15 +348,14 @@ class Draft:
 
     @property
     def is_empty(self) -> bool:
-        """Whether any of the session's fields hold a value: is there anything
-        here to submit?"""
+        """Whether any of the session's fields hold a value (used to see, for
+        example, if there anything to submit)."""
         return not (self.session or self.experiments or self.vial_ids)
 
     @property
     def is_untouched(self) -> bool:
         """
-        Whether the draft is still exactly as it was started: did anyone type
-        into it at all?
+        Whether the draft is still exactly as it was started.
 
         Weaker than `is_empty`, and the one to ask before throwing a draft
         away. The animal's number and the date are set through `identify`
@@ -313,15 +370,23 @@ class Draft:
         return self.is_empty and self.mouse_id is None and self.date == started
 
     def experiment(self, name: str) -> None | dict[str, Any]:
-        """One experiment's entry, or `None` if it has not been started."""
+        """One experiment's entry, or `None` if it was not started (or removed)."""
         for entry in self.experiments:
             if entry.get("name") == name:
                 return entry
 
         return None
 
+    def is_removed(self, name: str) -> bool:
+        """Whether experiment `name` was removed (its name stays taken)."""
+        return any(e.get("name") == name and e.get("removed") for e in self._entries)
+
+    def names_taken(self) -> list[str]:
+        """Every experiment name in the draft, removed ones included."""
+        return [str(e.get("name")) for e in self._entries]
+
     # ----------------------------------------------------------------- #
-    # Changing it
+    # Changing the draft
     # ----------------------------------------------------------------- #
 
     def update_session(self, **fields: Any) -> Draft:
@@ -340,26 +405,63 @@ class Draft:
 
         `name` is the folder under the session (`e1`, `grabs`, `zstacks`);
         `exp_type` and `objective` are settings, everything else is an
-        annotation.
+        annotation. Raises `ValueError` for the name of a removed experiment:
+        restore it instead, so it comes back as it was.
         """
+        if self.is_removed(name):
+            raise ValueError(
+                f"'{name}' was removed: undo that to bring it back, "
+                "or pick another name."
+            )
+
         entry = self.experiment(name)
 
         if entry is None:
             entry = {"name": name, "exp_type": _default_type(name)}
-            self.experiments.append(entry)
-            self.experiments.sort(key=_experiment_order)
+            self._entries.append(entry)
+            self._entries.sort(key=_experiment_order)
 
         _merge(entry, fields)
 
         return self.save()
 
     def remove_experiment(self, name: str) -> Draft:
-        """Drop an experiment entry that was added by mistake."""
-        self.data["experiments"] = [
-            entry for entry in self.experiments if entry.get("name") != name
-        ]
+        """Hide an experiment, keeping what was typed into it."""
+        entry = self.experiment(name)
+
+        if entry is not None:
+            entry["removed"] = True
 
         return self.save()
+
+    def restore_experiment(self, name: str) -> bool:
+        """
+        Bring a removed experiment back and returns whether there was
+        actually something to bring back.
+        """
+        for entry in self._entries:
+            if entry.get("name") == name and entry.get("removed"):
+                entry.pop("removed")
+                self.save()
+                return True
+
+        return False
+
+    def remove(self) -> Draft:
+        """Hide the whole session, keeping its file and what was typed."""
+        self.data["removed"] = True
+
+        return self.save()
+
+    def restore(self) -> bool:
+        """Bring a removed session back (`False` if it was not removed)."""
+        if not self.removed:
+            return False
+
+        self.data.pop("removed")
+        self.save()
+
+        return True
 
     def set_vials(self, vial_ids: list[int]) -> Draft:
         """Record which vials were loaded for the day's experiments."""
@@ -389,35 +491,145 @@ class Draft:
 
     def archive(self) -> Path:
         """
-        Move a submitted draft aside, and return where it went.
+        Move a submitted draft to the `submitted` folder beside the drafts
+        folder, and return where it went.
 
         Kept rather than deleted: it is the only record of what was typed, as
-        opposed to what the database made of it, and it is small. The draft
-        keeps pointing at the moved file, so a later save cannot bring it
-        back among the pending ones.
+        opposed to what the database made of it, and it is small (so worth
+        keeping). The draft keeps pointing at the moved file, so a later
+        save cannot bring it back among the pending ones.
         """
-        destination = self.path.parent / "submitted" / self.path.name
+        destination = self.path.parent.parent / SUBMITTED / self.path.name
         destination.parent.mkdir(parents=True, exist_ok=True)
         os.replace(self.path, destination)
         self.path = destination
 
         return destination
 
-    def discard(self) -> None:
-        """Delete the draft. For one started by mistake, not for a submitted one."""
-        self.path.unlink(missing_ok=True)
-
     def __repr__(self) -> str:
         return f"<Draft {self.label} ({len(self.experiments)} exp)>"
+
+
+class Removals:
+    """
+    The undo stack of removed sessions and experiments, kept in
+    `removed.json` in the drafts folder so it outlives the app.
+
+    Each entry names a draft file and, for an experiment, its name. `undo`
+    restores the latest entry that still applies and drops the ones that do
+    not (the draft deleted by hand or submitted, or restored another way).
+
+    Read from disk on every call, so two windows on one machine share it.
+    """
+
+    def __init__(self, folder: Path | str):
+        self.folder = Path(folder)
+        self.path = self.folder / REMOVALS
+
+    def push(self, draft: Draft, experiment: None | str = None) -> None:
+        """Record that `draft` (or its `experiment`) was just removed."""
+        entries = self._read()
+        entries.append(
+            {
+                "draft": draft.path.name,
+                "experiment": experiment,
+                "removed_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
+            }
+        )
+        self._write(entries)
+
+    def next(self) -> None | tuple[Draft, None | str]:
+        """
+        What `undo` would restore: `(draft, experiment or None)`. Entries
+        that no longer apply are dropped on the way.
+        """
+        entries = self._read()
+        dropped = False
+        found = None
+
+        while entries and found is None:
+            found = self._applies(entries[-1])
+
+            if found is None:
+                entries.pop()
+                dropped = True
+
+        if dropped:
+            self._write(entries)
+
+        return found
+
+    def undo(self, known: list[Draft] = ()) -> None | tuple[Draft, None | str]:
+        """
+        Restore the latest removal that still applies, and say what it was.
+
+        A draft in `known` with the same file is restored in place of a fresh
+        copy, so a caller holding that draft sees the change.
+        """
+        found = self.next()
+
+        if found is None:
+            return None
+
+        draft, experiment = found
+        draft = next((d for d in known if d.path == draft.path), draft)
+
+        if experiment is None:
+            draft.restore()
+        else:
+            draft.restore_experiment(experiment)
+
+        self._write(self._read()[:-1])
+
+        return draft, experiment
+
+    def _applies(self, entry: dict[str, Any]) -> None | tuple[Draft, None | str]:
+        path = self.folder / str(entry.get("draft", ""))
+        experiment = entry.get("experiment")
+
+        if not NAME_PATTERN.fullmatch(path.name) or not path.is_file():
+            return None
+
+        try:
+            draft = Draft.load(path)
+        except (ValueError, OSError, json.JSONDecodeError):
+            return None
+
+        if experiment is None:
+            return (draft, None) if draft.removed else None
+
+        # The session must be there too, or the experiment would come back
+        # somewhere nobody can see it
+        if draft.removed or not draft.is_removed(str(experiment)):
+            return None
+
+        return draft, str(experiment)
+
+    def _read(self) -> list[dict[str, Any]]:
+        try:
+            entries = json.loads(self.path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return []
+
+        return (
+            [e for e in entries if isinstance(e, dict)]
+            if isinstance(entries, list)
+            else []
+        )
+
+    def _write(self, entries: list[dict[str, Any]]) -> None:
+        self.folder.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".json.writing")
+        temporary.write_text(json.dumps(entries, indent=2))
+        os.replace(temporary, self.path)
 
 
 def _draft_files(folder: Path | str) -> list[Path]:
     """
     The draft files in a folder, ignoring anything else that lives there.
 
-    Only the top level, so archived drafts under `submitted/` are not offered
-    again, and only names of the expected shape, so a half-written `.writing`
-    file is never mistaken for one.
+    Only names of the expected shape, so a half-written `.writing` file or
+    the `removed.json` stack is never mistaken for one.
     """
     folder = Path(folder)
 

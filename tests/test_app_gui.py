@@ -115,9 +115,14 @@ def test_window_opens_on_users_with_every_page_in_the_left_bar(window):
     assert [a.toolTip() for a in window.right.actions() if a.toolTip()] == [
         "Add session",
         "Add experiment",
+        "Nothing to undo",
+        "Nothing selected to remove",
         "Check session",
         "Submit session",
     ]
+    assert not window.undo_action.isEnabled()
+    assert not window.remove_action.isEnabled()
+    assert not window.selection.isVisibleTo(window)
 
 
 def test_users_pane_is_a_login_screen(window, tmp_path):
@@ -475,7 +480,8 @@ def test_session_and_recorder_share_one_selection(window, tmp_path):
     sessions.session_page.mouse.setCurrentText("m5")
     assert draft.mouse_id == 5
     assert draft.folder in recorder.session_label.text()
-    assert window.today[(id(draft), None)].toolTip() == draft.label
+    assert window.today[(id(draft), None)].toolTip() == draft.where
+    assert window.selection.text() == draft.where
 
     # nothing to record into until the session lists an experiment
     assert recorder.experiment.count() == 0
@@ -554,6 +560,10 @@ def test_experiment_page_has_the_objective_in_its_form(window, tmp_path):
 
     tab = sessions.experiment_page.shown
     assert list(tab.form.rows)[0] == "objective"
+
+    # a required field is marked by its label's color, not a star
+    label = tab.form.layout().labelForField(tab.form.rows["objective"])
+    assert label.text() == "Objective" and "color" in label.styleSheet()
     assert not hasattr(tab, "exp_type")
 
     tab.form.rows["objective"].editor.setCurrentText("20")
@@ -583,17 +593,25 @@ def test_right_bar_lists_sessions_in_the_order_started(window, tmp_path):
     ]
     assert window.sessions.label(first) == "m442"
     assert window.sessions.label(second) == "s2"
-    assert window.today[(id(first), "e1")].toolTip() == f"{first.label} / e1"
+    assert window.today[(id(first), "e1")].toolTip() == f"{first.where}/e1"
+    assert second.where.endswith("/m?")
     assert window.group.checkedAction() is window.today[(id(second), None)]
 
-    # the day's actions act on the session selected last
-    window.today[(id(first), None)].trigger()
-    assert window.context.draft is first and window.view == "session"
-    window.sessions.discard()
+    # Remove acts on what is selected, named on the bottom bar
+    window.open_experiment(first, "e1")
+    assert window.selection.text() == f"{first.where}/e1"
+    assert window.remove_action.statusTip() == f"Remove experiment {first.where}/e1"
+    window.remove_action.trigger()
+
+    # its session is selected next, so a second click removes one thing only
+    assert window.view == "session" and window.selection.text() == first.where
+    assert list(window.today)[:2] == [(id(first), None), (id(second), None)]
+    window.remove_action.trigger()
     settle(window.context)
     assert [d is second for d in window.sessions.drafts] == [True]
-    assert window.context.draft is second
-    assert window.group.checkedAction() is window.today[(id(second), None)]
+    assert window.context.draft is None and window.group.checkedAction() is None
+    assert not window.remove_action.isEnabled()
+    assert not window.selection.isVisibleTo(window)
 
 
 def test_check_opens_the_panel_and_the_log_follows_the_database(window):
@@ -633,3 +651,47 @@ def test_bottom_bar_shows_what_is_hovered_and_what_the_app_says(window):
 
     window.context.status.emit("Saved 3 annotations")
     assert window.tip.text() == "Saved 3 annotations"
+
+
+def test_remove_marks_and_undo_brings_back(window, tmp_path):
+    db = Database(tmp_path / "data", user="tester")
+    db.set_mouse(mouse_id=442)
+    window.context.changed.emit()
+    settle(window.context)
+    sessions, undo = window.sessions, window.undo_action
+
+    window._add_session()
+    draft = sessions.current
+    date = draft.date.replace("-", "")
+    sessions.session_page.mouse.setCurrentText("m442")
+    sessions.add_experiment("e1")
+    draft.set_experiment("e1", goal="typed by hand")
+    sessions.add_experiment("e2")
+    assert not undo.isEnabled()
+
+    # removing only hides; the button says what would come back
+    window.open_experiment(draft, "e1")
+    sessions.remove_experiment()
+    assert list(window.today) == [(id(draft), None), (id(draft), "e2")]
+    assert undo.isEnabled()
+    assert undo.statusTip() == f"Undo remove: experiment {date}/m442/e1"
+
+    # the removed name stays taken
+    sessions.add_experiment("e1")
+    assert "was removed" in window.context.last_report[1]
+
+    sessions.remove()
+    assert sessions.drafts == [] and window.today == {}
+    assert undo.statusTip() == f"Undo remove: session {date}/m442"
+
+    # undo in reverse order, each shown as it comes back
+    undo.trigger()
+    assert window.view == "session" and window.context.draft.path == draft.path
+    draft = sessions.current
+    assert list(window.today) == [(id(draft), None), (id(draft), "e2")]
+
+    undo.trigger()
+    assert window.view == "experiment" and window.context.experiment == "e1"
+    assert draft.experiment("e1")["goal"] == "typed by hand"
+    assert (id(draft), "e1") in window.today
+    assert not undo.isEnabled()

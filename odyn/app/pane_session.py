@@ -20,18 +20,17 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
-    QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from .context import Context
-from .draft import EXPERIMENT_SETTINGS, Draft
+from .draft import EXPERIMENT_SETTINGS, Draft, Removals
 from .fields import Field, form_fields
 from .forms import Form, PanelPicker, TimingForm
 from .pane_registry import current_vials
-from .style import PAGE_MAX_PX, text_style
+from .style import PAGE_MAX_PX, required_label, text_style
 from .submit import check, submit
 
 TIMING_KEYS = (
@@ -61,21 +60,6 @@ def centered(inner: QWidget) -> QScrollArea:
     area.setWidget(holder)
 
     return area
-
-
-def end_row(usual: list[QPushButton], rare: list[QPushButton]) -> QHBoxLayout:
-    """The buttons at the end of a page: the usual ones left, the rare right."""
-    row = QHBoxLayout()
-
-    for button in usual:
-        row.addWidget(button)
-
-    row.addStretch(1)
-
-    for button in rare:
-        row.addWidget(button)
-
-    return row
 
 
 def session_label(draft: Draft, position: int) -> str:
@@ -159,11 +143,11 @@ class SessionPage(QWidget):
         self.folder.setStyleSheet(text_style("computed"))
 
         for label, widget in (
-            ("Mouse *", self.mouse),
-            ("Date *", self.date),
-            ("Folder", self.folder),
+            (required_label("Mouse"), self.mouse),
+            (required_label("Date"), self.date),
+            (QLabel("Folder"), self.folder),
         ):
-            row.addWidget(QLabel(label))
+            row.addWidget(label)
             row.addWidget(widget)
             row.addSpacing(18)
 
@@ -181,26 +165,6 @@ class SessionPage(QWidget):
         vials_layout.addWidget(self.vial_list)
         layout.addWidget(vials)
 
-        buttons = {}
-
-        for text, action in (
-            ("Add experiment", sessions.add_experiment),
-            ("Check session", sessions.check),
-            ("Submit session", sessions.submit),
-            ("Remove session", sessions.discard),
-        ):
-            buttons[text] = QPushButton(text)
-            buttons[text].clicked.connect(lambda _=False, a=action: a())
-
-        layout.addLayout(
-            end_row(
-                [
-                    buttons[t]
-                    for t in ("Add experiment", "Check session", "Submit session")
-                ],
-                [buttons["Remove session"]],
-            )
-        )
         layout.addStretch(1)
 
         outer = QVBoxLayout(self)
@@ -246,13 +210,13 @@ class SessionPage(QWidget):
         draft = self.draft
 
         if draft is None:
-            self.identity.setTitle("No session: add one from the right bar")
+            self.identity.setTitle("No session selected: pick or add one on the right")
             self.folder.setText("")
         elif draft.mouse_id is None:
-            self.identity.setTitle(f"Session {draft.label}")
+            self.identity.setTitle(f"Session {draft.where}")
             self.folder.setText("pick a mouse")
         else:
-            self.identity.setTitle(f"Session {draft.label}")
+            self.identity.setTitle(f"Session {draft.where}")
             self.folder.setText(draft.folder)
 
     def _mouse_changed(self, text: str) -> None:
@@ -305,9 +269,6 @@ class ExperimentPage(QWidget):
         self.box_layout = QVBoxLayout(self.box)
         layout.addWidget(self.box)
 
-        remove = QPushButton("Remove experiment")
-        remove.clicked.connect(lambda: sessions.remove_experiment(self.name))
-        layout.addLayout(end_row([], [remove]))
         layout.addStretch(1)
 
         outer = QVBoxLayout(self)
@@ -327,7 +288,7 @@ class ExperimentPage(QWidget):
             self.box.setTitle("Experiment")
             return
 
-        self.box.setTitle(f"Experiment {name}  ({draft.label})")
+        self.box.setTitle(f"Experiment {draft.where}/{name}")
         self.shown = ExperimentForm(draft, name, self.sessions.experiment_fields)
         self.box_layout.addWidget(self.shown)
 
@@ -337,16 +298,19 @@ class Sessions(QObject):
     The drafts in progress and what can be done to them.
 
     `drafts` is in the order the sessions were started. The pages and the
-    window's right bar call `new`, `discard`, `add_experiment`,
-    `remove_experiment`, `check` and `submit`; each acts on the selected
-    draft (`Context.draft`).
+    window's right bar call `new`, `remove`, `add_experiment`,
+    `remove_experiment`, `undo`, `check` and `submit`; each acts on the
+    selected draft (`Context.draft`). Removing only marks the draft or the
+    experiment removed and pushes it on `removals`, the undo stack.
 
     - `listed` fires when drafts come or go (the right bar rebuilds);
+    - `removals_changed` fires when the undo stack may have changed;
     - `reported(text)` carries what Check or Submit found;
     - `experiment_added(name)` fires once a new experiment is selected.
     """
 
     listed = Signal()
+    removals_changed = Signal()
     reported = Signal(str)
     experiment_added = Signal(str)
 
@@ -354,6 +318,7 @@ class Sessions(QObject):
         super().__init__(parent)
         self.context = context
         self.drafts: list[Draft] = []
+        self.removals = Removals(context.drafts)
         self.session_fields: list[Field] = []
         self.experiment_fields: list[Field] = []
         self.mice: list[int] = []
@@ -454,7 +419,7 @@ class Sessions(QObject):
         if draft is not None and page.name != self.context.experiment:
             page.show_experiment(draft, self.context.experiment)
         elif draft is not None and page.shown is not None:
-            page.box.setTitle(f"Experiment {page.name}  ({draft.label})")
+            page.box.setTitle(f"Experiment {draft.where}/{page.name}")
 
     # ----------------------------------------------------------------- #
     # Actions
@@ -469,21 +434,63 @@ class Sessions(QObject):
 
         return draft
 
-    def discard(self) -> None:
-        """Delete the selected draft and select its neighbor."""
+    def remove(self) -> None:
+        """
+        Remove the selected draft (can be undone). Nothing is selected
+        afterwards, so a second click cannot remove another session.
+        """
         draft = self.current
 
         if draft is None:
             return
 
-        # The next session takes its place, else the one before
-        position = self.position(draft)
-        draft.discard()
-        self.drafts.pop(position)
+        draft.remove()
+        self.removals.push(draft)
+        self.drafts.pop(self.position(draft))
         self.listed.emit()
-        neighbors = self.drafts[position : position + 1] or self.drafts[-1:]
-        self.context.select(neighbors[0] if neighbors else None)
+        self.context.select(None)
         self.refresh_current()
+        self.removals_changed.emit()
+
+    def undo(self) -> None | tuple[Draft, None | str]:
+        """
+        Bring back the latest removed session or experiment and select it;
+        returns `(draft, experiment or None)`, None if nothing was left.
+        """
+        restored = self.removals.undo(self.drafts)
+        self.removals_changed.emit()
+
+        if restored is None:
+            return None
+
+        draft, experiment = restored
+
+        if experiment is None:
+            self.drafts.append(draft)
+            self.drafts.sort(key=lambda d: d.path.name)
+            self.listed.emit()
+            self.context.select(draft)
+        else:
+            self.context.select(draft, experiment)
+            self.context.announce_draft()
+
+        self.refresh_current()
+
+        return restored
+
+    def next_undo(self) -> None | str:
+        """What undo would bring back, as the bottom bar says it; None if nothing."""
+        found = self.removals.next()
+
+        if found is None:
+            return None
+
+        draft, experiment = found
+
+        if experiment is None:
+            return f"Undo remove: session {draft.where}"
+
+        return f"Undo remove: experiment {draft.where}/{experiment}"
 
     def add_experiment(self, name: None | str = None, exp_type: str = "loop") -> None:
         """
@@ -497,10 +504,11 @@ class Sessions(QObject):
             return
 
         if name is None:
+            # Removed experiments still hold their names
             numbers = [
-                int(e["name"][1:])
-                for e in draft.experiments
-                if str(e["name"]).startswith("e") and str(e["name"])[1:].isdigit()
+                int(taken[1:])
+                for taken in draft.names_taken()
+                if taken.startswith("e") and taken[1:].isdigit()
             ]
             name, ok = QInputDialog.getText(
                 self.context.window,
@@ -521,6 +529,13 @@ class Sessions(QObject):
             self.context.report("Experiment", f"'{name}' is already listed.")
             return
 
+        if draft.is_removed(name):
+            self.context.report(
+                "Experiment",
+                f"'{name}' was removed. Pick another name.",
+            )
+            return
+
         draft.set_experiment(name, exp_type=exp_type)
         self.context.announce_draft()
         self.context.select(draft, name)
@@ -535,7 +550,9 @@ class Sessions(QObject):
             return
 
         draft.remove_experiment(name)
+        self.removals.push(draft, name)
         self.context.announce_draft()
+        self.removals_changed.emit()
 
     # ----------------------------------------------------------------- #
     # Check and submit

@@ -2,14 +2,11 @@
 The main window: two bars of buttons around the page being shown, a panel of
 text under it, a bottom bar, and the worker thread that owns the database.
 
-- **Left bar**: the registries and browsing (Users | Mice, Odors, Panels,
-  Tables | QC), the Recorder at its foot.
-- **Right bar**: the day's sessions, one block each (the session, then its
-  experiments), and at its foot Add session, Add experiment, Check session
-  and Submit session, which act on the session selected last.
+- **Left bar**: DB views and insertions at the top, the Recorder at the bottom.
+- **Right bar**: session and experiments lists at the top, and what you can do
+  to them at the bottom (add, remove, undo, check, and submit).
 - **Bottom panel**: what Check and Submit found, and the `odyn` log.
-- **Bottom bar**: what the hovered button does on the left, the user on the
-  right.
+- **Bottom bar**: what is being hovered or was selected, and the user.
 """
 
 from __future__ import annotations
@@ -97,6 +94,10 @@ class MainWindow(QMainWindow):
         self.resize(1300, 850)
         self.view = "page"
 
+        # What Remove would remove as written in the bottom bar.
+        # Holds the last thing opened on right bar (None once it is removed).
+        self.selected: None | str = None
+
         # The middle: the pages over the bottom panel
         self.pages = QStackedWidget()
         middle = QSplitter(Qt.Orientation.Vertical)
@@ -168,29 +169,38 @@ class MainWindow(QMainWindow):
         for key, tip, action in (
             ("add-session", "Add session", self._add_session),
             ("add-experiment", "Add experiment", self.sessions.add_experiment),
+            ("undo", "Nothing to undo", self._undo),
+            ("remove", "Nothing selected to remove", self._remove),
             ("check-session", "Check session", self.sessions.check),
             ("submit-session", "Submit session", self.sessions.submit),
         ):
-            self._command(self.right, icon(key), tip).triggered.connect(
-                lambda _=False, a=action: a()
-            )
+            command = self._command(self.right, icon(key), tip)
+            command.triggered.connect(lambda _=False, a=action: a())
+
+            if key == "undo":
+                self.undo_action = command
+            elif key == "remove":
+                self.remove_action = command
 
         # Bottom: what is hovered or said on the left, the user on the right,
-        # both the same distance from their edge. The left text is a label
-        # (see `event`) because Qt's own status message sits closer to the
-        # edge than anything else can; the bar leaves 2 px before its first
-        # item already.
+        # both the same distance from their edge (the boxes' margins are in
+        # `style`). The left text is a label (see `event`) because Qt's own
+        # status message would sit too close to the edge.
         bar = self.statusBar()
         bar.setSizeGripEnabled(False)
         self.tip = QLabel()
-        self.tip.setContentsMargins(style.STATUS_INSET_PX - 2, 4, 0, 6)
-        bar.addWidget(self.tip, 1)
+        self.tip.setObjectName("tip")
+        bar.addWidget(self.tip)
+        self.tip.hide()
+        self.selection = QLabel()
+        self.selection.setObjectName("selection")
+        bar.addPermanentWidget(self.selection)
         self.user_label = QLabel()
-        self.user_label.setContentsMargins(0, 4, style.STATUS_INSET_PX, 6)
+        self.user_label.setContentsMargins(16, 0, style.STATUS_INSET_PX, 0)
         bar.addPermanentWidget(self.user_label)
         self._tip_timer = QTimer(self)
         self._tip_timer.setSingleShot(True)
-        self._tip_timer.timeout.connect(lambda: self.tip.setText(""))
+        self._tip_timer.timeout.connect(lambda: self._set_tip(""))
 
         # The odyn log goes to the panel's Log tab
         self.log_handler = PanelLogHandler()
@@ -205,6 +215,10 @@ class MainWindow(QMainWindow):
         self.context.selection_changed.connect(self._follow)
         self.context.draft_changed.connect(self._rebuild_today)
         self.sessions.listed.connect(self._rebuild_today)
+
+        # (a submit can leave the stack pointing at a draft that moved away)
+        self.sessions.removals_changed.connect(self._refresh_undo)
+        self.sessions.listed.connect(self._refresh_undo)
         self.sessions.reported.connect(lambda text: self.panel.show_text("Check", text))
         self.sessions.experiment_added.connect(
             lambda name: self.open_experiment(self.context.draft, name)
@@ -215,10 +229,11 @@ class MainWindow(QMainWindow):
 
         self._show_user(self.context.user)
         self._rebuild_today()
+        self._refresh_undo()
         self.show_page(self.users)
 
     # ----------------------------------------------------------------- #
-    # What the middle shows
+    # What the middle section shows
     # ----------------------------------------------------------------- #
 
     def show_page(self, pane: QWidget) -> None:
@@ -232,6 +247,7 @@ class MainWindow(QMainWindow):
         keep = self.context.experiment if draft is self.context.draft else None
         self.context.select(draft, keep)
         self.view = "session"
+        self.selected = None if draft is None else "session"
         self.pages.setCurrentWidget(self.sessions.session_page)
         self._highlight()
 
@@ -239,11 +255,69 @@ class MainWindow(QMainWindow):
         """Select experiment `name` of `draft` and show its page."""
         self.context.select(draft, name)
         self.view = "experiment"
+        self.selected = "experiment"
         self.pages.setCurrentWidget(self.sessions.experiment_page)
         self._highlight()
 
     def _add_session(self) -> None:
         self.open_session(self.sessions.new())
+
+    def _undo(self) -> None:
+        """Bring back the latest removal and show it."""
+        restored = self.sessions.undo()
+
+        if restored is None:
+            return
+
+        draft, experiment = restored
+
+        if experiment is None:
+            self.open_session(draft)
+        else:
+            self.open_experiment(draft, experiment)
+
+    def _remove(self) -> None:
+        """
+        Remove the selected experiment (its session is shown next) or session
+        (nothing is selected next), so a double click removes only one.
+        """
+        draft = self.context.draft
+
+        if self.selected == "experiment":
+            self.sessions.remove_experiment(self.context.experiment)
+            self.open_session(draft)
+        elif self.selected == "session":
+            self.sessions.remove()
+            self.open_session(None)
+
+    def _show_selection(self) -> None:
+        """The selected session or experiment on the bottom bar and on Remove."""
+        draft, experiment = self.context.draft, self.context.experiment
+
+        if self.selected is None or draft is None:
+            name = None
+        elif self.selected == "experiment" and experiment is not None:
+            name = f"{draft.where}/{experiment}"
+        else:
+            name = draft.where
+
+        self.selection.setText(name or "")
+        self.selection.setVisible(name is not None)
+        tip = (
+            "Nothing selected to remove"
+            if name is None
+            else f"Remove {self.selected} {name}"
+        )
+        self.remove_action.setEnabled(name is not None)
+        self.remove_action.setToolTip(tip)
+        self.remove_action.setStatusTip(tip)
+
+    def _refresh_undo(self) -> None:
+        """Gray the Undo button out when nothing can be undone."""
+        tip = self.sessions.next_undo()
+        self.undo_action.setEnabled(tip is not None)
+        self.undo_action.setToolTip(tip or "Nothing to undo")
+        self.undo_action.setStatusTip(tip or "Nothing to undo")
 
     def _after_login(self) -> None:
         # With no session yet, the empty page says where to add one
@@ -254,14 +328,21 @@ class MainWindow(QMainWindow):
         The selection moved (the recorder picked another experiment, one was
         removed): an experiment page follows it, or falls back to its session.
         """
-        if self.view == "experiment" and self.context.experiment is None:
+        if self.context.draft is None:
+            self.selected = None
+        elif self.selected == "experiment" and self.context.experiment is None:
+            self.selected = "session"
+
+        if self.view == "experiment" and self.selected != "experiment":
             self.view = "session"
             self.pages.setCurrentWidget(self.sessions.session_page)
 
         self._highlight()
 
     def _highlight(self) -> None:
-        """Check the button of what the middle shows."""
+        """Check the button of what the middle shows; name the selection."""
+        self._show_selection()
+
         if self.view == "page":
             return
 
@@ -301,7 +382,7 @@ class MainWindow(QMainWindow):
 
             session = self._today_action(
                 self.sessions.label(draft),
-                draft.label,
+                draft.where,
                 lambda _=False, d=draft: self.open_session(d),
             )
             self.today[(id(draft), None)] = session
@@ -310,7 +391,7 @@ class MainWindow(QMainWindow):
                 name = str(entry["name"])
                 self.today[(id(draft), name)] = self._today_action(
                     name,
-                    f"{draft.label} / {name}",
+                    f"{draft.where}/{name}",
                     lambda _=False, d=draft, n=name: self.open_experiment(d, n),
                 )
 
@@ -390,14 +471,19 @@ class MainWindow(QMainWindow):
 
     def say(self, text: str) -> None:
         """A message from the app, on the bottom bar for a few seconds."""
-        self.tip.setText(text)
+        self._set_tip(text)
         self._tip_timer.start(STATUS_MS)
+
+    def _set_tip(self, text: str) -> None:
+        """The bottom bar's left box, hidden when there is nothing to say."""
+        self.tip.setText(text)
+        self.tip.setVisible(bool(text))
 
     def event(self, event: QEvent) -> bool:
         """What a hovered button does goes to the bottom bar's left label."""
         if event.type() == QEvent.Type.StatusTip:
             self._tip_timer.stop()
-            self.tip.setText(event.tip())
+            self._set_tip(event.tip())
             return True
 
         return super().event(event)

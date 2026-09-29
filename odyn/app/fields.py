@@ -151,20 +151,21 @@ COLUMN_FIELDS = {
             "mouse_id",
             "Mouse ID",
             INTEGER,
-            "The animal's SID. 'm442' and '442' are the same one.",
+            "e.g. 'm442' or '442' (considered the same)",
             required=True,
             prefix="m",
         ),
         Field("sex", "Sex", ENUM, "M or F.", options=("M", "F")),
-        Field("dob", "Date of birth", DATE, "When the animal was born."),
-        Field("sensor", "Sensor", TEXT, "What the animal expresses, e.g. GCaMP8s."),
+        Field("dob", "Date of birth", DATE, "e.g. 2026-01-01"),
+        Field("sensor", "Sensor", TEXT, "e.g. GCaMP8s"),
     ),
+
     "session": (
         Field(
             "mouse_id",
             "Mouse ID",
             INTEGER,
-            "Which animal, as a number. 'm442' and '442' are the same one.",
+            "e.g. 'm442' or '442' (considered the same)",
             required=True,
             prefix="m",
         ),
@@ -172,7 +173,7 @@ COLUMN_FIELDS = {
             "session_date",
             "Date",
             DATE,
-            "The day the session was run.",
+            "e.g. 2026-01-01",
             required=True,
         ),
     ),
@@ -181,8 +182,7 @@ COLUMN_FIELDS = {
             "objective",
             "Objective",
             INTEGER,
-            "Magnification the experiment was imaged through. The "
-            "micron-per-pixel scale depends on it.",
+            "10 or 20 (preview scalebar uses it)",
             required=True,
             options=OBJECTIVES,
         ),
@@ -306,6 +306,7 @@ def _yes_or_no(text: str, field: Field) -> bool:
 def _date(text: str, field: Field) -> str:
     try:
         return datetime.strptime(text, "%Y-%m-%d").strftime("%Y-%m-%d")
+
     except ValueError:
         raise ValueError(
             f"{field.label} is a date written 'YYYY-MM-DD', not {text!r}."

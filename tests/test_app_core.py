@@ -10,7 +10,7 @@ from datetime import datetime
 import pytest
 
 from odyn import Database
-from odyn.app.draft import Draft
+from odyn.app.draft import Draft, Removals
 from odyn.app.fields import Field, form_fields, missing_required
 from odyn.app.submit import check, submit
 from generate_data import generate
@@ -130,24 +130,26 @@ def test_a_draft_is_saved_on_every_change(tmp_path):
 
 
 def test_pending_skips_the_unreadable_and_the_archived(tmp_path):
-    good = Draft.start(tmp_path)
-    (tmp_path / "20260101-000000.json").write_text("{not json")
-    (tmp_path / "20260102-000000.json").write_text(json.dumps({"version": 99}))
-    (tmp_path / "notes.json").write_text("{}")
+    folder = tmp_path / "drafts"
+    good = Draft.start(folder)
+    (folder / "20260101-000000.json").write_text("{not json")
+    (folder / "20260102-000000.json").write_text(json.dumps({"version": 99}))
+    (folder / "notes.json").write_text("{}")
 
-    assert [d.path for d in Draft.pending(tmp_path)] == [good.path]
-    assert [p.name for p, _ in Draft.unreadable(tmp_path)] == [
+    assert [d.path for d in Draft.pending(folder)] == [good.path]
+    assert [p.name for p, _ in Draft.unreadable(folder)] == [
         "20260101-000000.json",
         "20260102-000000.json",
     ]
 
+    # Beside the drafts folder, so clearing the drafts keeps the record
     moved = good.archive()
-    assert moved.parent.name == "submitted" and good.path == moved
-    assert Draft.pending(tmp_path) == []
+    assert moved.parent == tmp_path / "submitted" and good.path == moved
+    assert Draft.pending(folder) == []
 
     # A save after archiving stays archived
     good.update_session(goal="late")
-    assert Draft.pending(tmp_path) == []
+    assert Draft.pending(folder) == []
 
 
 def test_two_drafts_in_one_second_get_different_names(tmp_path):
@@ -243,7 +245,7 @@ def test_submit_does_the_whole_day(share):
     assert result.written.decode_failed == {}
 
     assert draft.path.parent.name == "submitted"
-    assert Draft.pending(draft.path.parent.parent) == []
+    assert Draft.pending(draft.path.parent.parent / "drafts") == []
 
 
 def test_a_blocked_submit_writes_nothing(share):
@@ -276,3 +278,75 @@ def test_a_second_submit_does_not_ingest_twice(share):
     assert len(db.experiments) == 1
     assert db.annotations_for("experiment").iloc[0]["treatment"] == "updated"
     assert db.latest_calls("add_experiment").shape[0] == 1
+
+
+def test_a_removed_experiment_is_hidden_and_keeps_its_name(tmp_path):
+    draft = Draft.start(tmp_path, mouse_id=442, date="2026-09-29")
+    draft.set_experiment("e1", fov_depth_um=70).set_experiment("e2")
+    draft.remove_experiment("e1")
+
+    again = Draft.load(draft.path)
+    assert [e["name"] for e in again.experiments] == ["e2"]
+    assert again.experiment("e1") is None and again.is_removed("e1")
+    assert again.names_taken() == ["e1", "e2"]
+
+    # Cannot use the same name, even after removal
+    with pytest.raises(ValueError, match="was removed"):
+        again.set_experiment("e1")
+
+    assert again.restore_experiment("e1")
+    assert again.experiment("e1")["fov_depth_um"] == 70
+    assert "removed" not in again.experiment("e1")
+    assert not again.restore_experiment("e1")  # nothing left to restore
+
+
+def test_undo_restores_the_latest_removal_that_still_applies(tmp_path):
+    folder = tmp_path / "drafts"
+    removals = Removals(folder)
+    assert removals.next() is None and removals.undo() is None
+
+    kept = Draft.start(folder, mouse_id=1)
+    kept.set_experiment("e1")
+    gone = Draft.start(folder, mouse_id=2)
+    other = Draft.start(folder, mouse_id=3)
+    submitted = Draft.start(folder, mouse_id=4)
+
+    kept.remove_experiment("e1")
+    removals.push(kept, "e1")
+    gone.remove()
+    removals.push(gone)
+    other.remove()
+    removals.push(other)
+    submitted.remove()
+    removals.push(submitted)
+    assert [d.path for d in Draft.pending(folder)] == [kept.path]
+
+    # the latest ones no longer apply: moved away, restored another way,
+    # deleted by hand; each is dropped on the way to the one that does
+    submitted.restore()
+    submitted.archive()
+    other.restore()
+    gone.path.unlink()
+
+    draft, experiment = removals.next()
+    assert draft.path == kept.path and experiment == "e1"
+    assert len(json.loads(removals.path.read_text())) == 1  # the rest dropped
+
+    # restored on the caller's own copy of the draft, which sees it
+    assert removals.undo([kept]) == (kept, "e1")
+    assert kept.experiment("e1") is not None
+    assert Draft.load(kept.path).experiment("e1") is not None
+    assert removals.next() is None and removals.undo() is None
+
+
+def test_an_undone_session_is_pending_again(tmp_path):
+    removals = Removals(tmp_path)
+    draft = Draft.start(tmp_path, mouse_id=7).update_session(goal="keep me")
+    draft.remove()
+    removals.push(draft)
+    assert Draft.pending(tmp_path) == []
+    assert Draft.unreadable(tmp_path) == []  # the stack is not a draft
+
+    restored, experiment = removals.undo()
+    assert experiment is None and restored.session == {"goal": "keep me"}
+    assert [d.path for d in Draft.pending(tmp_path)] == [draft.path]

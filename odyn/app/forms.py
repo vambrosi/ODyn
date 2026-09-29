@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .style import text_style
+from .style import required_label, text_style
 from ..recipes import block_timing, camera_frames, solvent_volume_ml, vial_recipe
 from .fields import BOOLEAN, ENUM, LONG_TEXT, Field
 
@@ -113,11 +113,9 @@ class FieldRow(QWidget):
         layout.addWidget(self.editor)
         layout.addWidget(self.note)
 
-    @property
-    def prompt(self) -> str:
-        star = " *" if self.field.required else ""
-
-        return f"{self.field.prompt}{star}"
+    def label(self) -> QLabel:
+        """The row's label: in the error color when the field is required."""
+        return required_label(self.field.prompt, self.field.required)
 
     def value(self) -> Any:
         """The typed value, or `None` when blank or unreadable."""
@@ -169,7 +167,7 @@ class Form(QWidget):
             row = FieldRow(field)
             row.changed.connect(self.changed)
             self.rows[field.key] = row
-            layout.addRow(row.prompt, row)
+            layout.addRow(row.label(), row)
 
     def values(self) -> dict[str, Any]:
         return {
