@@ -244,6 +244,7 @@ def test_ingestion_and_reads_run_under_the_lock(tmp_path):
         "experiment_vials",
         "experiments",
         "group_experiments",
+        "lines",
         "mcor_files",
         "method_calls",
         "mice",

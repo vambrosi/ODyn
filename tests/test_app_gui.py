@@ -99,7 +99,7 @@ def window(app, tmp_path):
 def test_window_opens_on_users_with_every_page_in_the_left_bar(window):
     tips = [a.toolTip() for a in window.left.actions() if not a.isSeparator()]
 
-    assert tips[:6] == ["Users", "Mice", "Odors", "Panels", "Tables", "QC"]
+    assert tips[:6] == ["Users", "Mice", "Odors", "Panels", "Tables", "Quality Control"]
     assert tips[-1] == "Recorder"
     assert window.pages.currentWidget() is window.users
     assert window.page_actions[window.users].isChecked()
@@ -163,6 +163,63 @@ def test_mice_pane_registers_a_mouse(window, tmp_path):
     settle(window.context)
 
     assert 7 in Database(tmp_path / "data").mice.index
+
+
+def test_mice_pane_lists_lines_as_rows(window, tmp_path):
+    # (the lines are seeded when the database is made)
+
+    mice = window.mice
+    mice.form.set_values({"mouse_id": "m7"})
+    mice._add_line_row()
+    mice._add_line_row()
+    mice.line_rows[0].set_value("TH-Cre", "het")
+    assert mice.line_rows[1].value()[1] == "na"  # a new row starts not genotyped
+
+    mice.line_rows[1].set_value("Thy1-GCaMP", "na")
+    assert mice.lines() == {"TH-Cre": "het", "Thy1-GCaMP": "na"}
+
+    mice._save()
+    settle(window.context)
+
+    stored = Database(tmp_path / "data").mouse_lines.loc[[7]]
+    assert dict(zip(stored["line_name"], stored["genotype"])) == {
+        "TH-Cre": "het",
+        "Thy1-GCaMP": "na",
+    }
+
+    # picking the mouse brings its rows back; the table shows them as text
+    frame = window.mice.table.model().frame
+    assert frame.loc[7, "lines"] == "TH-Cre (het), Thy1-GCaMP (na)"
+    row = list(frame.index).index(7)
+    mice._pick(mice.table.model().index(row, 0))
+    assert mice.lines() == {"TH-Cre": "het", "Thy1-GCaMP": "na"}
+
+    # wild type has nothing to genotype: its choice is fixed to na
+    row = mice.line_rows[0]
+    row.line.setCurrentText("Wild Type")
+    assert row.value() == ("Wild Type", "na") and not row.genotype.isEnabled()
+    row.line.setCurrentText("TH-Cre")
+    assert row.genotype.isEnabled()
+
+    # "Lines" is a row of the form, its label in the same column as the rest
+    layout = mice.form.layout()
+    assert layout.labelForField(mice.lines_box).text() == "Lines"
+
+    # a number typed without picking leaves its stored lines alone
+    mice._clear_line_rows()
+    mice.lines_of, mice.lines_edited = None, False
+    mice.form.set_values({"mouse_id": "m7", "sex": "M"})
+    mice._save()
+    settle(window.context)
+    assert len(Database(tmp_path / "data").mouse_lines.loc[[7]]) == 2
+
+    # a column is never narrower than its name
+    header = window.mice.table.horizontalHeader()
+    for column in range(header.count()):
+        name = str(window.mice.table.model().headerData(column, 1))
+        assert header.sectionSize(column) >= header.fontMetrics().horizontalAdvance(
+            name
+        )
 
 
 def test_tables_pane_reads_filters_and_shows_a_row(window):
@@ -708,7 +765,15 @@ def test_guide_points_at_every_bar_button_with_no_session(window):
 
     pointers = guide.pointers()
     texts = [p.text for p in pointers]
-    assert texts[:7] == ["Users", "Mice", "Odors", "Panels", "Tables", "QC", "Recorder"]
+    assert texts[:7] == [
+        "Users",
+        "Mice",
+        "Odors",
+        "Panels",
+        "Tables",
+        "Quality Control",
+        "Recorder",
+    ]
     assert "Add session" in texts and "Undo the last remove" in texts
 
     # each arrow ends right beside its own button, and no two labels overlap
@@ -718,7 +783,10 @@ def test_guide_points_at_every_bar_button_with_no_session(window):
     }
     users = buttons["Users"]
     corner = users.mapTo(window.centralWidget(), users.rect().topLeft())
-    assert abs(pointers[0].end.x() - (corner.x() + users.width())) <= 5
+
+    from odyn.app.guide import TIP_GAP_PX
+
+    assert abs(pointers[0].end.x() - (corner.x() + users.width())) <= TIP_GAP_PX + 1
     assert corner.y() <= pointers[0].end.y() <= corner.y() + users.height()
     labels = [p.label for p in pointers]
     assert not any(

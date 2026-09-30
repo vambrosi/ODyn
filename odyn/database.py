@@ -35,6 +35,7 @@ from .utils import (
     INFO_FOLDER,
     MCOR_FILES,
     METHOD_CALLS,
+    LINES,
     MICE,
     MOUSE_LINES,
     ODORS,
@@ -382,6 +383,11 @@ class Database(CallRecorder):
     def mice(self) -> pd.DataFrame:
         """`DataFrame` with one row per mouse"""
         return self._table(MICE)
+
+    @property
+    def lines(self) -> pd.DataFrame:
+        """`DataFrame` with one row per mouse line, indexed by its name"""
+        return self._table(LINES)
 
     @property
     def mouse_lines(self) -> pd.DataFrame:
@@ -975,14 +981,39 @@ class Database(CallRecorder):
         logger.info(f"{was} user '{user_name}'. {CHECK}")
 
     @record_call
+    def add_line(self, *, line_name: str, jax_strain_number: None | str = None) -> str:
+        """
+        Add a mouse line to the ones a mouse can be recorded as carrying.
+
+        **USAGE**
+        ```python
+        db.add_line(line_name="TH-Cre", jax_strain_number="008601")
+        ```
+
+        `jax_strain_number` is kept as text (JAX numbers have leading zeros).
+        Returns the name as stored.
+        """
+        name = str(line_name).strip()
+        number = None if jax_strain_number is None else str(jax_strain_number).strip()
+
+        if not name:
+            raise ValueError("A line needs a name.")
+
+        with self._writing() as cur:
+            _db_insert(cur, "lines", {"line_name": name, "jax_strain_number": number})
+
+        logger.info(f"Added line '{name}'. {CHECK}")
+
+        return name
+
+    @record_call
     def set_mouse(
         self,
         *,
         mouse_id: int | str,
         sex: None | str = None,
         dob: None | Value = None,
-        lines: None | dict[str, None | str] = None,
-        sensor: None | str = None,
+        lines: None | dict[str, str] = None,
     ) -> int:
         """
         Record what is known about an animal, creating its row if it is new.
@@ -993,19 +1024,17 @@ class Database(CallRecorder):
             mouse_id="m442",
             sex="F",
             dob="2026-01-22",
-            lines={"DAT-Cre": "het", "TIGRE": "het"},
-            sensor="GCaMP8s",
+            lines={"DAT-Cre": "het", "TIGRE2": "het"},
         )
         ```
 
         **PARAMETERS**
-        - `mouse_id` is the number (the SID), or a name like `'m442'` to take
-        it from
-        - `sex` is `'M'` or `'F'`, in either case
+        - `mouse_id` is the SID or a name like `'m442'`
+        - `sex` is `'M'` or `'F'`
         - `dob` is the date of birth, `YYYY-MM-DD`
-        - `lines` maps each mutation the animal carries to `'wt'`, `'het'`,
-        `'hom'`, or `None` when the line is known but the genotyping is not
-        - `sensor` is what the animal expresses
+        - `lines` maps each line the animal carries (a name from `db.lines`)
+        to `'wt'`, `'het'`, `'hom'`, or `'na'` when it was not genotyped
+        (always `'na'` for `'Wild Type'`)
 
         Returns the `mouse_id`. Anything left out keeps the value already
         stored, so this can be called repeatedly as details arrive. Passing
@@ -1018,21 +1047,20 @@ class Database(CallRecorder):
             raise ValueError(f"Sex must be 'M' or 'F', not {sex!r}.")
 
         born = None if dob is None else _date_string(dob)
-        carried = None if lines is None else _mouse_lines(lines)
+        carried = None if lines is None else _known_lines(self.lines, lines)
 
         with self._writing() as cur:
             # COALESCE so that a field left out of this call does not erase what
             # an earlier one wrote: the details arrive from different people.
             cur.execute(
                 """
-                INSERT INTO mice (mouse_id, mouse_sex, mouse_dob, sensor)
-                    VALUES (:mouse_id, :sex, :dob, :sensor)
+                INSERT INTO mice (mouse_id, mouse_sex, mouse_dob)
+                    VALUES (:mouse_id, :sex, :dob)
                 ON CONFLICT(mouse_id) DO UPDATE SET
                       mouse_sex = COALESCE(:sex, mouse_sex)
-                    , mouse_dob = COALESCE(:dob, mouse_dob)
-                    , sensor    = COALESCE(:sensor, sensor);
+                    , mouse_dob = COALESCE(:dob, mouse_dob);
                 """,
-                {"mouse_id": number, "sex": stored_sex, "dob": born, "sensor": sensor},
+                {"mouse_id": number, "sex": stored_sex, "dob": born},
             )
 
             if carried is not None:
@@ -1044,7 +1072,7 @@ class Database(CallRecorder):
                     _db_insert(
                         cur,
                         "mouse_lines",
-                        {"mouse_id": number, "line": line, "genotype": genotype},
+                        {"mouse_id": number, "line_name": line, "genotype": genotype},
                     )
 
         cross = "unknown line" if not carried else " x ".join(carried)
@@ -2359,7 +2387,14 @@ def _mouse_number(name: int | str) -> int:
     return int(match.group(1))
 
 
+# The wild-type line (C57BL/6) has no mutation to track so its genotype is
+# always recorded as 'na'. (And the dropdown menu reflects that.)
+WILD_TYPE = "Wild Type"
+
 GENOTYPES = {
+    "na": "na",
+    "n/a": "na",
+    "not genotyped": "na",
     "wt": "wt",
     "wildtype": "wt",
     "wild type": "wt",
@@ -2373,32 +2408,28 @@ GENOTYPES = {
 }
 
 
-def _mouse_lines(lines: dict[str, None | str]) -> dict[str, None | str]:
+def _mouse_lines(lines: dict[str, str]) -> dict[str, str]:
     """
     Clean a line-to-genotype mapping for storage.
 
     Line names keep the spelling they were given, minus surrounding spaces.
     The genotype is matched case-insensitively against the spellings people
-    write and stored as `'wt'`, `'het'` or `'hom'`; `None` stays `None`, meaning
-    the mouse carries the mutation but was not genotyped for it.
+    write and stored as `'na'` (which means not genotyped), `'wt'`, `'het'` or
+    `'hom'`. One of the options must be given, there is no default.
 
     **EXAMPLE**
     ```python
-    _mouse_lines({"TH-Cre ": "Het", "TIGRE": None})
-    # {"TH-Cre": "het", "TIGRE": None}
+    _mouse_lines({"TH-Cre ": "Het", "TIGRE2": "na"})
+    # {"TH-Cre": "het", "TIGRE2": "na"}
     ```
     """
-    cleaned: dict[str, None | str] = {}
+    cleaned: dict[str, str] = {}
 
     for line, genotype in lines.items():
         name = str(line).strip()
 
         if not name:
             raise ValueError("A line needs a name.")
-
-        if genotype is None:
-            cleaned[name] = None
-            continue
 
         known = GENOTYPES.get(str(genotype).strip().lower())
 
@@ -2411,6 +2442,31 @@ def _mouse_lines(lines: dict[str, None | str]) -> dict[str, None | str]:
         cleaned[name] = known
 
     return cleaned
+
+
+def _known_lines(registry: pd.DataFrame, lines: dict[str, str]) -> dict[str, str]:
+    """
+    `_mouse_lines`, each name matched to one in `registry` and stored as
+    spelled there. Raises `ValueError` naming an unknown line.
+    """
+    spelled = {str(name).lower(): str(name) for name in registry.index}
+    known: dict[str, str] = {}
+
+    for name, genotype in _mouse_lines(lines).items():
+        if name.lower() not in spelled:
+            raise ValueError(
+                f"Unknown line {name!r}. Add it with `add_line`, or use one of: "
+                f"{sorted(spelled.values())}."
+            )
+
+        name = spelled[name.lower()]
+
+        if name == WILD_TYPE and genotype != "na":
+            raise ValueError(f"'{WILD_TYPE}' has no genotype: give it 'na'.")
+
+        known[name] = genotype
+
+    return known
 
 
 def _date_string(value: Value) -> str:

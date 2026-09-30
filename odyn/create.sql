@@ -49,17 +49,27 @@ CREATE TABLE IF NOT EXISTS mice
     ( mouse_id          INTEGER PRIMARY KEY
     , mouse_sex         TEXT CHECK(mouse_sex IS NULL OR mouse_sex IN ('M', 'F'))
     , mouse_dob         TEXT CHECK(mouse_dob IS NULL OR date(mouse_dob) IS NOT NULL)
-    , sensor            TEXT
     , added_to_db_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     ) STRICT;
 
--- One entry for each line/genotype of a mouse
+-- The mouse lines a mouse can carry, keyed by the name people use for them.
+-- `jax_strain_number` is TEXT because JAX numbers keep their leading zeros
+-- (`'005628'`); NULL for a line that has none.
+CREATE TABLE IF NOT EXISTS lines
+    ( line_name         TEXT PRIMARY KEY
+    , jax_strain_number TEXT
+    ) STRICT;
+
+-- One entry for each line/genotype of a mouse. `'na'` says the mouse carries
+-- the line but was not genotyped for it: always stated, never a default.
 CREATE TABLE IF NOT EXISTS mouse_lines
     ( mouse_id      INTEGER NOT NULL
-    , line          TEXT NOT NULL
-    , genotype      TEXT CHECK(genotype IS NULL OR genotype IN ('wt', 'het', 'hom'))
-    , PRIMARY KEY (mouse_id, line)
+    , line_name     TEXT NOT NULL
+    , genotype      TEXT NOT NULL CHECK(genotype IN ('na', 'wt', 'het', 'hom'))
+
+    , PRIMARY KEY (mouse_id, line_name)
     , FOREIGN KEY (mouse_id) REFERENCES mice(mouse_id) ON DELETE CASCADE
+    , FOREIGN KEY (line_name) REFERENCES lines(line_name) ON UPDATE CASCADE
     ) STRICT;
 
 -- Session exist only to add annotations about a mice and experiment setup
@@ -571,6 +581,19 @@ INSERT OR IGNORE INTO odor_components (odor_id, component_id) VALUES
     (42, 21), (42,  4),
     (43, 36), (43,  5),
     (44, 36), (44,  5);
+
+-- The mouse lines, with their JAX strain numbers (NULL when there is none).
+INSERT OR IGNORE INTO lines
+    (line_name,     jax_strain_number) VALUES
+    ('Wild Type',   '000664'         ),
+    ('DAT-Cre',     '006660'         ),
+    ('OMP-Cre',     '006668'         ),
+    ('PV-Cre',      '008069'         ),
+    ('TH-Cre',      '008601'         ),
+    ('Thy1-GCaMP',  '024339'         ),
+    ('ReaChR',      '026294'         ),
+    ('TIGRE2',      '037719'         ),
+    ('Ai233',       '041026'         );
 
 -- Annotations taken from the log files (other keys can be added later)..
 INSERT OR IGNORE INTO annotation_keys

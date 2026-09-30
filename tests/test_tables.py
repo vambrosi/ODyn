@@ -33,10 +33,12 @@ def test_every_spec_reads_from_a_fresh_database(db):
 def test_null_text_reads_as_none_on_every_pandas(db):
     db.set_mouse(mouse_id=1)
     db.add_odor(odor_id=99, odor_name="x")
+    db.add_line(line_name="Line-A")
 
     # Columns nobody filled: object of None, never str of NaN
-    assert db.mice["sensor"].dtype == object
-    assert db.mice.loc[1, "sensor"] is None
+    assert db.mice["mouse_sex"].dtype == object
+    assert db.mice.loc[1, "mouse_sex"] is None
+    assert db.lines.loc["Line-A", "jax_strain_number"] is None
     assert db.odors.loc[99, "vapor_pressure_source"] is None
 
     # Numbers keep NaN, so arithmetic and `.notna()` keep working

@@ -157,7 +157,6 @@ COLUMN_FIELDS = {
         ),
         Field("sex", "Sex", ENUM, "M or F.", options=("M", "F")),
         Field("dob", "Date of birth", DATE, "e.g. 2026-01-01"),
-        Field("sensor", "Sensor", TEXT, "e.g. GCaMP8s"),
     ),
 
     "session": (

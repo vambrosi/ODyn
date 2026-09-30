@@ -211,6 +211,7 @@ def _simple(name: str, index: str, dates=(), json=(), via: None | str = None):
 
 USERS = _simple("users", "user_id")
 MICE = _simple("mice", "mouse_id", dates=["added_to_db_at"])
+LINES = TableSpec("lines", "line_name", "SELECT * FROM lines;")
 MOUSE_LINES = TableSpec("mouse_lines", "mouse_id", "SELECT * FROM mouse_lines;")
 SESSIONS = _simple(
     "sessions",

@@ -45,24 +45,52 @@ def test_the_database_user_authors_every_call(db):
 
 
 def test_mouse_details_accumulate_across_calls(db):
+    db.add_line(line_name="Line-A", jax_strain_number="000001")
+    assert db.lines.loc["Line-A", "jax_strain_number"] == "000001"
+
     assert db.set_mouse(mouse_id="m442", sex="f") == 442
+
+    # a line is matched in any case, and stored as the registry spells it
     db.set_mouse(
-        mouse_id=442, dob="2026-01-22", lines={"DAT-Cre": "Het", "TIGRE": None}
+        mouse_id=442, dob="2026-01-22", lines={"dat-cre": "Het", "TIGRE2": "na"}
     )
-    db.set_mouse(mouse_id="m442", sensor="GCaMP8s")
+    db.set_mouse(mouse_id="m442", lines=None)
 
     mouse = db.mice.loc[442]
     assert mouse["mouse_sex"] == "F"
     assert mouse["mouse_dob"] == "2026-01-22"
-    assert mouse["sensor"] == "GCaMP8s"
 
-    lines = db.mouse_lines.loc[[442]].set_index("line")["genotype"]
-    assert lines.to_dict() == {"DAT-Cre": "het", "TIGRE": None}
+    lines = db.mouse_lines.loc[[442]].set_index("line_name")["genotype"]
+    assert lines.to_dict() == {"DAT-Cre": "het", "TIGRE2": "na"}
 
     # `lines={}` clears, `lines=None` leaves alone
     db.set_mouse(mouse_id=442, lines={})
     assert 442 not in db.mouse_lines.index
-    assert db.mice.loc[442, "sensor"] == "GCaMP8s"
+
+
+def test_a_mouse_carries_only_registered_lines(db):
+    # the lines are seeded when the database is made
+    assert {"Wild Type", "TH-Cre", "Thy1-GCaMP"} <= set(db.lines.index)
+
+    with pytest.raises(ValueError, match="Unknown line 'Th-Cre-2'"):
+        db.set_mouse(mouse_id=1, lines={"Th-Cre-2": "het"})
+
+    with pytest.raises(ValueError, match="needs a name"):
+        db.add_line(line_name=" ")
+
+
+def test_a_genotype_is_always_stated(db):
+    # not genotyped is 'na', never a blank
+    with pytest.raises(ValueError, match="Cannot tell what None means"):
+        db.set_mouse(mouse_id=1, lines={"TH-Cre": None})
+
+    # a wild-type mouse has nothing to genotype
+    with pytest.raises(ValueError, match="has no genotype"):
+        db.set_mouse(mouse_id=1, lines={"Wild Type": "het"})
+
+    db.set_mouse(mouse_id=1, lines={"wild type": "na", "TH-Cre": "N/A"})
+    stored = db.mouse_lines.loc[[1]].set_index("line_name")["genotype"]
+    assert stored.to_dict() == {"TH-Cre": "na", "Wild Type": "na"}
 
 
 @pytest.mark.parametrize("bad", ["m0", "mouse", "", "x-1"])

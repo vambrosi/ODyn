@@ -88,21 +88,30 @@ class FrameModel(QAbstractTableModel):
 # otherwise push everything else off the screen
 MAX_COLUMN_PX = 360
 
+# Room around a column's name in its header
+HEADER_PADDING_PX = 24
+
 
 def fit_columns(view, max_px: int = MAX_COLUMN_PX) -> None:
     """
     Keep a view's columns as wide as their contents, as a double-click on
     every header would, capped at `max_px` so a long text column stays a
-    column: sized once a frame is set, and again on every reset.
+    column, and never narrower than their name: sized once a frame is set,
+    and again on every reset.
     """
 
     def fit():
         view.resizeColumnsToContents()
         header = view.horizontalHeader()
+        model = view.model()
 
         for column in range(header.count()):
-            if header.sectionSize(column) > max_px:
-                header.resizeSection(column, max_px)
+            # The name read from the header's own font: some styles (macOS)
+            # leave it out of the size they report for the section
+            name = str(model.headerData(column, Qt.Orientation.Horizontal) or "")
+            named = header.fontMetrics().horizontalAdvance(name) + HEADER_PADDING_PX
+            width = min(header.sectionSize(column), max_px)
+            header.resizeSection(column, max(width, named))
 
     view.model().modelReset.connect(fit)
     fit()
