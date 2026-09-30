@@ -72,6 +72,21 @@ CREATE TABLE IF NOT EXISTS mouse_lines
     , FOREIGN KEY (line_name) REFERENCES lines(line_name) ON UPDATE CASCADE
     ) STRICT;
 
+-- The viruses a mouse can be injected with, keyed by their full name.
+CREATE TABLE IF NOT EXISTS viruses
+    ( virus_name    TEXT PRIMARY KEY
+    ) STRICT;
+
+-- One entry for each virus a mouse was injected with.
+CREATE TABLE IF NOT EXISTS mouse_viruses
+    ( mouse_id      INTEGER NOT NULL
+    , virus_name    TEXT NOT NULL
+
+    , PRIMARY KEY (mouse_id, virus_name)
+    , FOREIGN KEY (mouse_id) REFERENCES mice(mouse_id) ON DELETE CASCADE
+    , FOREIGN KEY (virus_name) REFERENCES viruses(virus_name) ON UPDATE CASCADE
+    ) STRICT;
+
 -- Session exist only to add annotations about a mice and experiment setup
 -- in a particular day. Panels, streams, and others belong to an experiment.
 CREATE TABLE IF NOT EXISTS sessions
@@ -594,6 +609,30 @@ INSERT OR IGNORE INTO lines
     ('ReaChR',      '026294'         ),
     ('TIGRE2',      '037719'         ),
     ('Ai233',       '041026'         );
+
+-- The viruses a mouse can be injected with.
+INSERT OR IGNORE INTO viruses (virus_name) VALUES
+    ('AAV9-hSyn-GRAB-gDA3h'),
+    ('pAAV(DJ8)-Syn-ChrimsonR-TdTomato'),
+    ('pAAV1-CAG-DIO-dLight3.6'),
+    ('pAAV1-CAG-DIO-dLight3.8'),
+    ('pAAV1-CAG-dLight3.6'),
+    ('pAAV1-CAG-dLight3.8'),
+    ('pAAV1-EF1a-DIO-JEDI-2P-WPRE'),
+    ('pAAV1-hSyn-GRAB-gDA3m'),
+    ('pAAV1-Syn-ChrimsonR-TdTomato'),
+    ('pAAV1-Syn-dLight3.8'),
+    ('pAAV5-Syn-FLEX-rc[ChrimsonR-tdTomato]'),
+    ('pAAV8-nEF-Con/Fon DREADD Gi-mCherry'),
+    ('pAAV9-CAG-dLight1.3b'),
+    ('pAAV9-CAG-RdLight1'),
+    ('pAAV9-Ef1a-DIO-C1V1(t/t)-TS-mCherry'),
+    ('pAAV9-hSyn-DIO-hM3D(Gq)-mCherry'),
+    ('pAAV9-hSyn-DIO-hM4D(Gi)-mCherry'),
+    ('pAAV9-hsyn-GRAB_DA2m'),
+    ('pAAVDJ-CMV-EGFP'),
+    ('pAAVrg-EF1a-Flpo'),
+    ('rAAV(DJ8)-EF1a-DIO-iChloC-2A-dsRed');
 
 -- Annotations taken from the log files (other keys can be added later)..
 INSERT OR IGNORE INTO annotation_keys

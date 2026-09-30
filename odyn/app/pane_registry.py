@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from ..database import WILD_TYPE
 from .context import Context
 from .fields import COLUMN_FIELDS
-from .forms import Form, RecipeForm
+from .forms import Form, RecipeForm, shown_value
 from .style import text_style
 from .models import FrameModel, fit_columns
 
@@ -145,51 +145,173 @@ class UsersPane(QWidget):
         self.picked.emit(user_name)
 
 
-# Line's genotype options (as shown for the user). Blank = not yet genotyped.
+# Line's genotype options (as shown for the user). "na" = not genotyped.
 GENOTYPE_CHOICES = ("na", "het", "hom", "wt")
 
 
-class LineRow(QWidget):
-    """Mouse line: its name, its genotype, and a remove button."""
+class PickRow(QWidget):
+    """
+    One registered name a mouse has (a line or a virus), picked from a
+    dropdown, with a genotype dropdown for a line, and a remove button.
+    """
 
-    def __init__(self, names: list[str], parent=None):
+    def __init__(self, names: list[str], genotyped: bool, parent=None):
         super().__init__(parent)
-        self.line = QComboBox()
-        self.line.addItems(names)
+        self.name = QComboBox()
+        self.name.addItems(names)
 
         # The open list is as wide as the longest name, whatever the box's width
-        self.line.view().setMinimumWidth(self.line.view().sizeHintForColumn(0) + 24)
-        self.line.currentTextChanged.connect(self._line_picked)
-        self.genotype = QComboBox()
-        self.genotype.addItems(GENOTYPE_CHOICES)
-        self.genotype.setToolTip("na: not genotyped")
+        self.name.view().setMinimumWidth(self.name.view().sizeHintForColumn(0) + 24)
+        self.genotype: None | QComboBox = None
         self.remove = QPushButton("remove")
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(self.line, 1)
-        row.addWidget(self.genotype)
-        row.addWidget(self.remove)
-        self._line_picked(self.line.currentText())
+        row.addWidget(self.name, 1)
 
-    def _line_picked(self, line: str) -> None:
+        if genotyped:
+            self.genotype = QComboBox()
+            self.genotype.addItems(GENOTYPE_CHOICES)
+            self.genotype.setToolTip("na: not genotyped")
+            self.name.currentTextChanged.connect(self._name_picked)
+            row.addWidget(self.genotype)
+            self._name_picked(self.name.currentText())
+
+        row.addWidget(self.remove)
+
+        # As tall as the fields: the button as tall as the dropdowns, and all
+        # laid out by their own size (macOS otherwise pads each by the room
+        # its native look would need around it)
+        self.remove.setFixedHeight(self.name.sizeHint().height())
+
+        for widget in (self.name, self.genotype, self.remove):
+            if widget is not None:
+                widget.setAttribute(Qt.WidgetAttribute.WA_LayoutUsesWidgetRect)
+
+    def _name_picked(self, name: str) -> None:
         """Wild type has nothing to genotype: its choice is fixed to 'na'."""
-        wild = line == WILD_TYPE
+        wild = name == WILD_TYPE
 
         if wild:
             self.genotype.setCurrentText("na")
 
         self.genotype.setEnabled(not wild)
 
-    def set_value(self, line: str, genotype: str) -> None:
-        if self.line.findText(line) < 0:
-            self.line.addItem(line)  # a line no longer listed still shows
+    def set_value(self, name: str, genotype: str = "na") -> None:
+        if self.name.findText(name) < 0:
+            self.name.addItem(name)  # a name no longer listed still shows
 
-        self.line.setCurrentText(line)
-        self.genotype.setCurrentText(genotype)
+        self.name.setCurrentText(name)
 
-    def value(self) -> tuple[str, str]:
-        return self.line.currentText(), self.genotype.currentText()
+        if self.genotype is not None:
+            self.genotype.setCurrentText(genotype)
+
+    def value(self) -> str | tuple[str, str]:
+        """The name, or `(name, genotype)` for a line."""
+        if self.genotype is None:
+            return self.name.currentText()
+
+        return self.name.currentText(), self.genotype.currentText()
+
+
+class PickList:
+    """
+    The rows of one list on the Mice page (its lines, or its viruses).
+
+    Each is a row of `form`, so it is spaced and its label placed like any
+    other field's: `title` labels the first, the rest have an empty label.
+    With no rows, a "none" row holds the list's place.
+
+    The rows speak for a mouse only once they were loaded for it or edited
+    (`speaks_for`): otherwise saving leaves what is stored alone, so typing a
+    number to fix a mouse's sex does not wipe its lines.
+    """
+
+    def __init__(
+        self,
+        context: Context,
+        what: str,
+        genotyped: bool,
+        form: QFormLayout,
+        title: str,
+    ):
+        self.context = context
+        self.what = what
+        self.genotyped = genotyped
+        self.form = form
+        self.title = title
+        self.names: list[str] = []
+        self.rows: list[PickRow] = []
+        self.none = shown_value(kind=None)
+        self.none.setPlaceholderText("none")
+        form.addRow(title, self.none)
+        self.loaded_for: None | int = None
+        self.edited = False
+
+    def add(self, name: None | str = None, genotype: str = "na") -> None:
+        """A row: blank for a new entry, or showing `name` (and its genotype)."""
+        if name is None and not self.names:
+            self.context.report(
+                self.what.capitalize(),
+                f"No {self.what} are listed yet: they are added to the database.",
+            )
+            return
+
+        row = PickRow(self.names, self.genotyped)
+
+        if name is not None:
+            row.set_value(name, genotype)
+
+        row.remove.clicked.connect(lambda: self.remove(row, edited=True))
+
+        # Below the list's last row (or its "none" row)
+        last = self.rows[-1] if self.rows else self.none
+        at = self.form.getWidgetPosition(last)[0] + 1
+        self.form.insertRow(at, QLabel(), row)  # (text "" would give no label)
+        self.rows.append(row)
+        self._relabel()
+        self.edited = self.edited or name is None
+
+    def remove(self, row: PickRow, edited: bool = False) -> None:
+        self.edited = self.edited or edited
+        self.rows.remove(row)
+
+        # Taken out, not removed: the row is still running its button's click
+        taken = self.form.takeRow(self.form.getWidgetPosition(row)[0])
+
+        for item in (taken.labelItem, taken.fieldItem):
+            item.widget().hide()
+            item.widget().deleteLater()
+
+        self._relabel()
+
+    def _relabel(self) -> None:
+        """The title on the first row; "none" shown only when there is none."""
+        self.form.setRowVisible(self.none, not self.rows)
+
+        for i, row in enumerate(self.rows):
+            self.form.labelForField(row).setText(self.title if i == 0 else "")
+
+    def load(self, mouse_id: int, entries) -> None:
+        """Show what `mouse_id` has: names, or `(name, genotype)` pairs."""
+        for row in list(self.rows):
+            self.remove(row)
+
+        for entry in entries:
+            self.add(*entry) if isinstance(entry, tuple) else self.add(entry)
+
+        self.loaded_for, self.edited = mouse_id, False
+
+    def speaks_for(self, mouse_id: int) -> bool:
+        return self.edited or self.loaded_for == mouse_id
+
+    def values(self) -> list:
+        return [row.value() for row in self.rows]
+
+    def repeated(self) -> bool:
+        names = [row.name.currentText() for row in self.rows]
+
+        return len(set(names)) < len(names)
 
 
 class MicePane(QWidget):
@@ -198,14 +320,8 @@ class MicePane(QWidget):
     def __init__(self, context: Context, parent=None):
         super().__init__(parent)
         self.context = context
-        self.line_names: list[str] = []
         self.carried: dict[int, dict[str, str]] = {}
-        self.line_rows: list[LineRow] = []
-
-        # The rows speak for a mouse's lines only once they were loaded for
-        # it or edited: otherwise saving leaves the stored ones alone
-        self.lines_of: None | int = None
-        self.lines_edited = False
+        self.injected: dict[int, list[str]] = {}
 
         layout = QHBoxLayout(self)
         self.table = _table()
@@ -217,17 +333,23 @@ class MicePane(QWidget):
         self.form = Form(list(COLUMN_FIELDS["mouse"]))
         box_layout.addWidget(self.form)
 
-        # Mouse's lines as one of the form's rows
-        # This makes"Lines" line up with the labels above it
-        self.lines_box = QVBoxLayout()
-        add_line = QPushButton("Add line")
-        add_line.clicked.connect(lambda: self._add_line_row())
-        self.form.layout().addRow("Lines", self.lines_box)
-        self.form.layout().addRow("", add_line)
+        # The lists' rows are the form's own, below its fields
+        form = self.form.layout()
+        self.line_list = PickList(context, "lines", True, form, "Lines")
+        self.virus_list = PickList(context, "viruses", False, form, "Viruses")
 
-        button = QPushButton("Save mouse")
-        button.clicked.connect(self._save)
-        box_layout.addWidget(button)
+        buttons = QHBoxLayout()
+
+        for text, action in (
+            ("Add line", lambda: self.line_list.add()),
+            ("Add virus", lambda: self.virus_list.add()),
+            ("Save mouse", self._save),
+        ):
+            button = QPushButton(text)
+            button.clicked.connect(action)
+            buttons.addWidget(button)
+
+        box_layout.addLayout(buttons)
 
         side.addWidget(box)
         side.addStretch(1)
@@ -240,13 +362,14 @@ class MicePane(QWidget):
     def reload(self) -> None:
         def load(db):
             mice = db.mice.copy()
-            lines = db.mouse_lines
-
             carried = {
                 int(mouse_id): dict(zip(rows["line_name"], rows["genotype"]))
-                for mouse_id, rows in lines.groupby(level=0)
+                for mouse_id, rows in db.mouse_lines.groupby(level=0)
             }
-
+            injected = {
+                int(mouse_id): list(rows["virus_name"])
+                for mouse_id, rows in db.mouse_viruses.groupby(level=0)
+            }
             mice["lines"] = [
                 ", ".join(
                     f"{line} ({genotype})"
@@ -255,45 +378,28 @@ class MicePane(QWidget):
                 or None
                 for m in mice.index
             ]
+            mice["viruses"] = [
+                ", ".join(injected.get(int(m), [])) or None for m in mice.index
+            ]
 
-            return mice, carried, [str(name) for name in db.lines.index]
+            return (
+                mice,
+                carried,
+                injected,
+                [str(name) for name in db.lines.index],
+                [str(name) for name in db.viruses.index],
+            )
 
         self.context.run(load, self._loaded, "mice")
 
     def _loaded(self, loaded) -> None:
-        mice, self.carried, self.line_names = loaded
+        mice, self.carried, self.injected, lines, viruses = loaded
+        self.line_list.names, self.virus_list.names = lines, viruses
         _model(self.table).set_frame(mice)
-
-    def _add_line_row(self, line: None | str = None, genotype: str = "na") -> None:
-        if line is None and not self.line_names:
-            self.context.report(
-                "Lines",
-                "No lines are listed yet: they are added to the database.",
-            )
-            return
-
-        row = LineRow(self.line_names)
-
-        if line is not None:
-            row.set_value(line, genotype)
-
-        row.remove.clicked.connect(lambda: self._remove_line_row(row, edited=True))
-        self.line_rows.append(row)
-        self.lines_box.addWidget(row)
-        self.lines_edited = self.lines_edited or line is None
-
-    def _remove_line_row(self, row: LineRow, edited: bool = False) -> None:
-        self.lines_edited = self.lines_edited or edited
-        self.line_rows.remove(row)
-        row.setParent(None)
-        row.deleteLater()
-
-    def _clear_line_rows(self) -> None:
-        for row in list(self.line_rows):
-            self._remove_line_row(row)
 
     def _pick(self, index) -> None:
         row = _model(self.table).row_values(index.row())
+        mouse_id = int(row["mouse_id"])
         self.form.set_values(
             {
                 "mouse_id": row.get("mouse_id"),
@@ -301,16 +407,8 @@ class MicePane(QWidget):
                 "dob": row.get("mouse_dob"),
             }
         )
-        self._clear_line_rows()
-
-        for line, genotype in self.carried.get(int(row["mouse_id"]), {}).items():
-            self._add_line_row(line, genotype)
-
-        self.lines_of, self.lines_edited = int(row["mouse_id"]), False
-
-    def lines(self) -> dict[str, str]:
-        """The rows as `set_mouse` takes them: line name -> genotype."""
-        return dict(row.value() for row in self.line_rows)
+        self.line_list.load(mouse_id, list(self.carried.get(mouse_id, {}).items()))
+        self.virus_list.load(mouse_id, self.injected.get(mouse_id, []))
 
     def _save(self) -> None:
         values = self.form.values()
@@ -319,23 +417,33 @@ class MicePane(QWidget):
             self.context.report("Mouse", "A mouse needs its number.")
             return
 
-        names = [row.value()[0] for row in self.line_rows]
+        for listed in (self.line_list, self.virus_list):
+            if listed.repeated():
+                self.context.report(
+                    "Mouse", f"One of the {listed.what} is listed twice."
+                )
+                return
 
-        if len(set(names)) < len(names):
-            self.context.report("Lines", "A line is listed twice.")
-            return
-
-        # The rows are the mouse's lines, all of them (none left means none),
-        # once they were loaded for it or edited; else its lines stay as stored
-        speak = self.lines_edited or self.lines_of == values["mouse_id"]
-        lines = self.lines() if speak else None
+        # The rows are all the mouse's lines (none left means none) once they
+        # were loaded for it or edited; else what is stored stays. Same for
+        # the viruses.
+        mouse_id = values["mouse_id"]
+        lines = (
+            dict(self.line_list.values())
+            if self.line_list.speaks_for(mouse_id)
+            else None
+        )
+        viruses = (
+            self.virus_list.values() if self.virus_list.speaks_for(mouse_id) else None
+        )
 
         self.context.run(
             lambda db: db.set_mouse(
-                mouse_id=values["mouse_id"],
+                mouse_id=mouse_id,
                 sex=values.get("sex"),
                 dob=values.get("dob"),
                 lines=lines,
+                viruses=viruses,
             ),
             None,
             "set_mouse",

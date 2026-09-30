@@ -79,6 +79,34 @@ def test_a_mouse_carries_only_registered_lines(db):
         db.add_line(line_name=" ")
 
 
+def test_viruses_are_a_registry_too(db):
+    # seeded when the database is made, in alphabetical order
+    assert "pAAV9-CAG-dLight1.3b" in db.viruses.index
+    assert len(db.viruses) == 21
+
+    # matched in any case, stored as registered, replaced as a whole
+    db.set_mouse(mouse_id=5, viruses=["paav9-cag-dlight1.3b", "pAAVrg-EF1a-Flpo"])
+    assert sorted(db.mouse_viruses.loc[[5], "virus_name"]) == [
+        "pAAV9-CAG-dLight1.3b",
+        "pAAVrg-EF1a-Flpo",
+    ]
+    db.set_mouse(mouse_id=5, sex="M")  # `viruses=None` leaves them alone
+    assert len(db.mouse_viruses.loc[[5]]) == 2
+
+    db.set_mouse(mouse_id=5, viruses=[])
+    assert 5 not in db.mouse_viruses.index
+
+    with pytest.raises(ValueError, match="Unknown virus 'AAV-nothing'"):
+        db.set_mouse(mouse_id=5, viruses=["AAV-nothing"])
+
+    with pytest.raises(ValueError, match="listed twice"):
+        db.set_mouse(mouse_id=5, viruses=["pAAVrg-EF1a-Flpo", "paavrg-ef1a-flpo"])
+
+    db.add_virus(virus_name="AAV-new")
+    db.set_mouse(mouse_id=5, viruses=["AAV-new"])
+    assert list(db.mouse_viruses.loc[[5], "virus_name"]) == ["AAV-new"]
+
+
 def test_a_genotype_is_always_stated(db):
     # not genotyped is 'na', never a blank
     with pytest.raises(ValueError, match="Cannot tell what None means"):

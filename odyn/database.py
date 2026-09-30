@@ -38,6 +38,7 @@ from .utils import (
     LINES,
     MICE,
     MOUSE_LINES,
+    MOUSE_VIRUSES,
     ODORS,
     ODOR_COMPONENTS,
     OUTPUTS,
@@ -52,6 +53,7 @@ from .utils import (
     USERS,
     VIAL_ODORS,
     VIALS,
+    VIRUSES,
     CallFrame,
     CallRecorder,
     Object,
@@ -388,6 +390,16 @@ class Database(CallRecorder):
     def lines(self) -> pd.DataFrame:
         """`DataFrame` with one row per mouse line, indexed by its name"""
         return self._table(LINES)
+
+    @property
+    def viruses(self) -> pd.DataFrame:
+        """`DataFrame` with one row per virus, indexed by its name"""
+        return self._table(VIRUSES)
+
+    @property
+    def mouse_viruses(self) -> pd.DataFrame:
+        """`DataFrame` with one row per mouse and virus it was injected with"""
+        return self._table(MOUSE_VIRUSES)
 
     @property
     def mouse_lines(self) -> pd.DataFrame:
@@ -1007,6 +1019,30 @@ class Database(CallRecorder):
         return name
 
     @record_call
+    def add_virus(self, *, virus_name: str) -> str:
+        """
+        Add a virus to the list of viruses a mouse can be injected with.
+
+        **USAGE**
+        ```python
+        db.add_virus(virus_name="pAAV9-CAG-dLight1.3b")
+        ```
+
+        Returns the name as stored.
+        """
+        name = str(virus_name).strip()
+
+        if not name:
+            raise ValueError("A virus needs a name.")
+
+        with self._writing() as cur:
+            _db_insert(cur, "viruses", {"virus_name": name})
+
+        logger.info(f"Added virus '{name}'. {CHECK}")
+
+        return name
+
+    @record_call
     def set_mouse(
         self,
         *,
@@ -1014,6 +1050,7 @@ class Database(CallRecorder):
         sex: None | str = None,
         dob: None | Value = None,
         lines: None | dict[str, str] = None,
+        viruses: None | list[str] = None,
     ) -> int:
         """
         Record what is known about an animal, creating its row if it is new.
@@ -1025,6 +1062,7 @@ class Database(CallRecorder):
             sex="F",
             dob="2026-01-22",
             lines={"DAT-Cre": "het", "TIGRE2": "het"},
+            viruses=["pAAV9-CAG-dLight1.3b"],
         )
         ```
 
@@ -1035,10 +1073,12 @@ class Database(CallRecorder):
         - `lines` maps each line the animal carries (a name from `db.lines`)
         to `'wt'`, `'het'`, `'hom'`, or `'na'` when it was not genotyped
         (always `'na'` for `'Wild Type'`)
+        - `viruses` lists the viruses the animal was injected with (names
+        from `db.viruses`)
 
         Returns the `mouse_id`. Anything left out keeps the value already
         stored, so this can be called repeatedly as details arrive. Passing
-        `lines={}` clears the line; `lines=None` leaves it alone.
+        `lines={}` (or `viruses=[]`) clears them; `None` leaves them alone.
         """
         number = _mouse_number(mouse_id)
         stored_sex = None if sex is None else str(sex).strip().upper()
@@ -1048,6 +1088,14 @@ class Database(CallRecorder):
 
         born = None if dob is None else _date_string(dob)
         carried = None if lines is None else _known_lines(self.lines, lines)
+        injected = (
+            None
+            if viruses is None
+            else [_registered(self.viruses, "virus", v) for v in viruses]
+        )
+
+        if injected is not None and len(set(injected)) < len(injected):
+            raise ValueError("A virus is listed twice.")
 
         with self._writing() as cur:
             # COALESCE so that a field left out of this call does not erase what
@@ -1073,6 +1121,15 @@ class Database(CallRecorder):
                         cur,
                         "mouse_lines",
                         {"mouse_id": number, "line_name": line, "genotype": genotype},
+                    )
+
+            if injected is not None:
+                # Replaced as a whole, like the lines
+                cur.execute("DELETE FROM mouse_viruses WHERE mouse_id = ?;", [number])
+
+                for virus in injected:
+                    _db_insert(
+                        cur, "mouse_viruses", {"mouse_id": number, "virus_name": virus}
                     )
 
         cross = "unknown line" if not carried else " x ".join(carried)
@@ -2444,22 +2501,31 @@ def _mouse_lines(lines: dict[str, str]) -> dict[str, str]:
     return cleaned
 
 
+def _registered(registry: pd.DataFrame, what: str, name: str) -> str:
+    """
+    `name` as `registry` (indexed by name) spells it, matched in any case.
+    Raises `ValueError` naming it when it is not there.
+    """
+    spelled = {str(known).lower(): str(known) for known in registry.index}
+    found = spelled.get(str(name).strip().lower())
+
+    if found is None:
+        raise ValueError(
+            f"Unknown {what} {str(name).strip()!r}. Add it with `add_{what}`."
+        )
+
+    return found
+
+
 def _known_lines(registry: pd.DataFrame, lines: dict[str, str]) -> dict[str, str]:
     """
     `_mouse_lines`, each name matched to one in `registry` and stored as
     spelled there. Raises `ValueError` naming an unknown line.
     """
-    spelled = {str(name).lower(): str(name) for name in registry.index}
     known: dict[str, str] = {}
 
     for name, genotype in _mouse_lines(lines).items():
-        if name.lower() not in spelled:
-            raise ValueError(
-                f"Unknown line {name!r}. Add it with `add_line`, or use one of: "
-                f"{sorted(spelled.values())}."
-            )
-
-        name = spelled[name.lower()]
+        name = _registered(registry, "line", name)
 
         if name == WILD_TYPE and genotype != "na":
             raise ValueError(f"'{WILD_TYPE}' has no genotype: give it 'na'.")

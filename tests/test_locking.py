@@ -249,6 +249,7 @@ def test_ingestion_and_reads_run_under_the_lock(tmp_path):
         "method_calls",
         "mice",
         "mouse_lines",
+        "mouse_viruses",
         "odors",
         "outputs",
         "panels",
@@ -260,6 +261,7 @@ def test_ingestion_and_reads_run_under_the_lock(tmp_path):
         "users",
         "vial_odors",
         "vials",
+        "viruses",
     ):
         getattr(db, table)
 

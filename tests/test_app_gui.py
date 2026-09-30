@@ -18,7 +18,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # on a bare machine.
 try:
     from PySide6.QtCore import QEventLoop
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QFormLayout, QWidget
 
 except ImportError as error:  # a missing shared library is not a missing module
     pytest.skip(f"Qt cannot load here: {error}", allow_module_level=True)
@@ -165,61 +165,110 @@ def test_mice_pane_registers_a_mouse(window, tmp_path):
     assert 7 in Database(tmp_path / "data").mice.index
 
 
-def test_mice_pane_lists_lines_as_rows(window, tmp_path):
-    # (the lines are seeded when the database is made)
-
+def test_mice_pane_lists_lines_and_viruses_as_rows(window, tmp_path):
+    # (the lines and viruses are seeded when the database is made)
     mice = window.mice
+    lines, viruses = mice.line_list, mice.virus_list
     mice.form.set_values({"mouse_id": "m7"})
-    mice._add_line_row()
-    mice._add_line_row()
-    mice.line_rows[0].set_value("TH-Cre", "het")
-    assert mice.line_rows[1].value()[1] == "na"  # a new row starts not genotyped
-
-    mice.line_rows[1].set_value("Thy1-GCaMP", "na")
-    assert mice.lines() == {"TH-Cre": "het", "Thy1-GCaMP": "na"}
+    lines.add()
+    lines.add()
+    lines.rows[0].set_value("TH-Cre", "het")
+    assert lines.rows[1].value()[1] == "na"  # a new row starts not genotyped
+    lines.rows[1].set_value("Thy1-GCaMP", "na")
+    viruses.add()
+    viruses.rows[0].set_value("pAAVrg-EF1a-Flpo")
+    assert lines.rows[0].genotype is not None and viruses.rows[0].genotype is None
+    assert dict(lines.values()) == {"TH-Cre": "het", "Thy1-GCaMP": "na"}
+    assert viruses.values() == ["pAAVrg-EF1a-Flpo"]
 
     mice._save()
     settle(window.context)
 
-    stored = Database(tmp_path / "data").mouse_lines.loc[[7]]
+    db = Database(tmp_path / "data")
+    stored = db.mouse_lines.loc[[7]]
     assert dict(zip(stored["line_name"], stored["genotype"])) == {
         "TH-Cre": "het",
         "Thy1-GCaMP": "na",
     }
+    assert list(db.mouse_viruses.loc[[7], "virus_name"]) == ["pAAVrg-EF1a-Flpo"]
 
     # picking the mouse brings its rows back; the table shows them as text
-    frame = window.mice.table.model().frame
+    frame = mice.table.model().frame
     assert frame.loc[7, "lines"] == "TH-Cre (het), Thy1-GCaMP (na)"
+    assert frame.loc[7, "viruses"] == "pAAVrg-EF1a-Flpo"
+
     row = list(frame.index).index(7)
     mice._pick(mice.table.model().index(row, 0))
-    assert mice.lines() == {"TH-Cre": "het", "Thy1-GCaMP": "na"}
+    assert dict(lines.values()) == {"TH-Cre": "het", "Thy1-GCaMP": "na"}
+    assert viruses.values() == ["pAAVrg-EF1a-Flpo"]
 
     # wild type has nothing to genotype: its choice is fixed to na
-    row = mice.line_rows[0]
-    row.line.setCurrentText("Wild Type")
+    row = lines.rows[0]
+    row.name.setCurrentText("Wild Type")
     assert row.value() == ("Wild Type", "na") and not row.genotype.isEnabled()
-    row.line.setCurrentText("TH-Cre")
+    row.name.setCurrentText("TH-Cre")
     assert row.genotype.isEnabled()
 
-    # "Lines" is a row of the form, its label in the same column as the rest
+    # each entry is a row of the form: the list's title labels its first
     layout = mice.form.layout()
-    assert layout.labelForField(mice.lines_box).text() == "Lines"
+    assert [layout.labelForField(r).text() for r in lines.rows] == ["Lines", ""]
+    assert layout.labelForField(viruses.rows[0]).text() == "Viruses"
 
-    # a number typed without picking leaves its stored lines alone
-    mice._clear_line_rows()
-    mice.lines_of, mice.lines_edited = None, False
+    # a number typed without picking leaves its stored lines and viruses alone
+    for listed in (lines, viruses):
+        listed.load(None, [])
+
     mice.form.set_values({"mouse_id": "m7", "sex": "M"})
     mice._save()
     settle(window.context)
-    assert len(Database(tmp_path / "data").mouse_lines.loc[[7]]) == 2
+    db = Database(tmp_path / "data")
+    assert len(db.mouse_lines.loc[[7]]) == 2 and len(db.mouse_viruses.loc[[7]]) == 1
 
     # a column is never narrower than its name
-    header = window.mice.table.horizontalHeader()
+    header = mice.table.horizontalHeader()
     for column in range(header.count()):
-        name = str(window.mice.table.model().headerData(column, 1))
+        name = str(mice.table.model().headerData(column, 1))
         assert header.sectionSize(column) >= header.fontMetrics().horizontalAdvance(
             name
         )
+
+
+def test_mice_form_rows_keep_one_spacing(window, app):
+    # empty or filled, the lists' rows are spaced like the fields above them
+    window.show_page(window.mice)
+    mice = window.mice
+    form = mice.form.layout()
+
+    def shown() -> list[tuple[QWidget, QWidget]]:
+        """(label, field) of each row on screen, top to bottom."""
+        app.processEvents()
+        pairs = [
+            (
+                form.itemAt(r, QFormLayout.ItemRole.LabelRole).widget(),
+                form.itemAt(r, QFormLayout.ItemRole.FieldRole).widget(),
+            )
+            for r in range(form.rowCount())
+        ]
+        return [(label, field) for label, field in pairs if field.isVisible()]
+
+    def check(count: int) -> None:
+        pairs = shown()
+        tops = [field.geometry().top() for _, field in pairs]
+        assert len(pairs) == count
+        assert len({b - a for a, b in zip(tops, tops[1:])}) == 1  # one step
+        # every label sits the same way against its field
+        assert len({f.geometry().top() - l.geometry().top() for l, f in pairs}) == 1
+
+    check(5)
+    mice.line_list.add()
+    mice.line_list.add()
+    mice.virus_list.add()
+    check(6)
+    mice.line_list.remove(mice.line_list.rows[0])
+    mice.virus_list.remove(mice.virus_list.rows[0])
+    check(5)
+    assert mice.virus_list.none.isVisible()
+    assert form.labelForField(mice.line_list.rows[0]).text() == "Lines"
 
 
 def test_tables_pane_reads_filters_and_shows_a_row(window):
@@ -591,6 +640,10 @@ def test_quick_maths_warns_when_imaging_outlasts_the_trial(app):
     assert not form.overrun.isVisibleTo(form)
     assert form.outputs["frames"].text() == "258"
     assert form.outputs["camera_rate"].text() == "12.86 Hz"
+
+    # a shown value is as tall as the boxes it follows from
+    heights = {line.minimumHeight() for line in form.outputs.values()}
+    assert heights == {form.frame_rate.sizeHint().height()}
 
     form.inputs["block_iti_s"].setValue(4)  # 5 + 4 = 9 s after the odor, wants 11
     assert form.overrun.isVisibleTo(form)

@@ -25,6 +25,10 @@ STATUS_INSET_PX = 14
 BAR_ICON_PX = 28
 BAR_MARGINS = (6, 8, 6, 14)
 
+# The gap between a form's rows, set rather than left to the platform's style
+# so rows built from several widgets (a mouse's lines) are the same size
+ROW_SPACING_PX = 8
+
 # The session and experiment pages stop growing at this width and are
 # centered in what is left
 PAGE_MAX_PX = 800
@@ -70,6 +74,10 @@ QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus,
 QSpinBox:focus, QDoubleSpinBox:focus {{
     border-color: palette(highlight);
+}}
+QLineEdit#shown {{
+    background: transparent;
+    border-color: transparent;
 }}
 QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{
     color: palette(mid);

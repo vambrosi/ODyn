@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .style import required_label, text_style
+from .style import ROW_SPACING_PX, required_label, text_style
 from ..recipes import block_timing, camera_frames, solvent_volume_ml, vial_recipe
 from .fields import BOOLEAN, ENUM, LONG_TEXT, Field
 
@@ -162,6 +162,7 @@ class Form(QWidget):
 
         layout = QFormLayout(self)
         layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        layout.setVerticalSpacing(ROW_SPACING_PX)
 
         for field in fields:
             row = FieldRow(field)
@@ -419,12 +420,21 @@ def _heading(form: QFormLayout, text: str) -> None:
     form.addRow(label, QWidget())
 
 
-def _computed_label() -> QLabel:
-    label = QLabel("")
-    label.setStyleSheet(text_style("computed"))
-    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+def shown_value(text: str = "", kind: None | str = "computed") -> QLineEdit:
+    """
+    A value that is shown, not typed: a read-only line without its frame, so
+    it is exactly as tall as the editors around it and its text starts where
+    theirs does. `kind` colors it (see `text_style`); it can still be copied.
+    """
+    line = QLineEdit(text)
+    line.setObjectName("shown")
+    line.setReadOnly(True)
+    line.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
-    return label
+    if kind is not None:
+        line.setStyleSheet(text_style(kind))
+
+    return line
 
 
 class TimingForm(QGroupBox):
@@ -475,9 +485,10 @@ class TimingForm(QGroupBox):
     def __init__(self, parent=None):
         super().__init__("Quick maths", parent)
         form = QFormLayout(self)
+        form.setVerticalSpacing(ROW_SPACING_PX)
 
         self.inputs: dict[str, QDoubleSpinBox] = {}
-        self.outputs: dict[str, QLabel] = {}
+        self.outputs: dict[str, QLineEdit] = {}
 
         def spin_row(key: str, label: str, default: float) -> None:
             box = _spin(0, 3600, default, 2)
@@ -485,9 +496,13 @@ class TimingForm(QGroupBox):
             self.inputs[key] = box
             form.addRow(label, box)
 
+        # A box with arrows stands taller than a line: shown values match it
+        row_px = _spin(0, 1, 0).sizeHint().height()
+
         def output_rows(items) -> None:
             for key, label in items:
-                self.outputs[key] = _computed_label()
+                self.outputs[key] = shown_value()
+                self.outputs[key].setMinimumHeight(row_px)
                 form.addRow(label, self.outputs[key])
 
         _heading(form, "Olfactometer")
@@ -556,11 +571,16 @@ class TimingForm(QGroupBox):
             )
 
         except ValueError as error:
-            for label in self.outputs.values():
-                label.setText("")
+            for line in self.outputs.values():
+                line.setText("")
 
+            # Read from its start, and whole when hovered if it does not fit
             self.outputs["frames"].setText(str(error))
+            self.outputs["frames"].setCursorPosition(0)
+            self.outputs["frames"].setToolTip(str(error))
             return
+
+        self.outputs["frames"].setToolTip("")
 
         shown = {
             "frames": f"{timing.frames}",

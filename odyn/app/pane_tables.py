@@ -55,6 +55,8 @@ TABLES: tuple[str, ...] = (
     "experiment_vials",
     "lines",
     "mouse_lines",
+    "viruses",
+    "mouse_viruses",
     "users",
     "annotation_keys",
     "annotations",
