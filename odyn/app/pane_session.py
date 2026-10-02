@@ -209,6 +209,19 @@ class SessionPage(QWidget):
     def _refresh_identity(self) -> None:
         draft = self.draft
 
+        # A recording is named and placed for the mouse and the day
+        locked = draft is not None and draft.recorded
+        why = (
+            "Fixed once a recording was made: remove the session and add a new "
+            "one to change it"
+            if locked
+            else ""
+        )
+
+        for widget in (self.mouse, self.date):
+            widget.setEnabled(not locked)
+            widget.setToolTip(why)
+
         if draft is None:
             self.identity.setTitle("No session selected: pick or add one on the right")
             self.folder.setText("")
@@ -231,7 +244,12 @@ class SessionPage(QWidget):
             return
 
         if mouse_id is not None:
-            self.draft.identify(mouse_id=mouse_id)
+            try:
+                self.draft.identify(mouse_id=mouse_id)
+            except ValueError as error:
+                self.context.report("Mouse", str(error))
+                return
+
             self._refresh_identity()
             self.context.announce_draft()
 
@@ -431,9 +449,12 @@ class Sessions(QObject):
             page.show_experiment(draft, self.context.experiment)
 
     def _follow_draft(self) -> None:
-        """The selected draft changed (mouse, date, experiments)."""
+        """The selected draft changed (mouse, date, experiments, recordings)."""
         draft = self.current
         page = self.experiment_page
+
+        if self.session_page.draft is draft:
+            self.session_page._refresh_identity()
 
         if draft is not None and page.name != self.context.experiment:
             page.show_experiment(draft, self.context.experiment)
@@ -605,8 +626,10 @@ class Sessions(QObject):
         self.reported.emit(
             f"Submitting {draft.label}... (reading the recordings can take a while)"
         )
+        busy = {self.context.recording_now} - {None}
+
         self.context.run(
-            lambda db: submit(db, draft),
+            lambda db: submit(db, draft, busy=busy),
             lambda result: self._submitted(draft, result),
             "submit",
             writes=True,

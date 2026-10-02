@@ -1259,7 +1259,6 @@ class Database(CallRecorder):
         self,
         *,
         odor_id: int,
-        odor_name: None | str = None,
         vapor_pressure_mmhg: None | float = None,
         vapor_pressure_source: None | str = None,
         retired: None | bool = None,
@@ -1267,11 +1266,12 @@ class Database(CallRecorder):
         """
         Correct what is recorded about an odor. Only what is passed changes.
 
-        The number is not changeable: it is the olfactometer's, and the trials
-        already refer to it. `retired=True` takes the odor out of the pickers.
+        The number, the name and what a mix is made of never change. The
+        number is the olfactometer's, and the trials, vials and experiment
+        ingestion go by the number and name together. A wrong one is a new
+        odor. `retired=True` takes the odor out of the dropdown menus.
         """
         changes = {
-            "odor_name": None if odor_name is None else str(odor_name).strip(),
             "vapor_pressure_mmhg": _optional_real(vapor_pressure_mmhg),
             "vapor_pressure_source": vapor_pressure_source,
             "retired": None if retired is None else bool(retired),

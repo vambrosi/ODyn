@@ -178,7 +178,10 @@ def test_odors_are_added_and_corrected(db):
     assert bool(db.odors.loc[45, "retired"])
 
     with pytest.raises(ValueError, match="No odor"):
-        db.update_odor(odor_id=999, odor_name="x")
+        db.update_odor(odor_id=999, vapor_pressure_mmhg=1.0)
+
+    with pytest.raises(TypeError):  # a stored odor's name never changes
+        db.update_odor(odor_id=45, odor_name="x")
 
     with pytest.raises(ValueError, match="Nothing to change"):
         db.update_odor(odor_id=45)

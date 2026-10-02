@@ -24,6 +24,7 @@ comes back.
 
 from __future__ import annotations
 
+from collections.abc import Container
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from ..database import SYNC_FOLDER
 from ..utils import logger
 from .draft import EXPERIMENT_SETTINGS, EXPERIMENT_TYPES, Draft
 from .fields import form_fields, missing_required
+from .recordings import pending, sync_pending
 
 RAW_FOLDER = "raw"
 EVENTS_PATTERN = "*Events.csv"
@@ -111,6 +113,7 @@ def check(db, draft: Draft) -> list[Problem]:
     )
 
     folder = Path(db.main_folder) / draft.folder
+    local_only = pending(draft)
 
     if not draft.experiments:
         problems.append(Problem("session", "No experiments listed.", blocking=False))
@@ -145,8 +148,20 @@ def check(db, draft: Draft) -> list[Problem]:
         if entry.get("submitted_exp_id") is not None:
             continue  # already in the database; the files were checked then
 
+        if name in local_only:
+            problems.append(
+                Problem(
+                    where,
+                    f"Sync file {local_only[name]['file']} is only on this computer "
+                    "so far. Submit copies it to the share first.",
+                    blocking=False,
+                )
+            )
+
         if folder.is_dir():
-            problems += _folder_problems(where, folder / name, entry.get("exp_type"))
+            problems += _folder_problems(
+                where, folder / name, entry.get("exp_type"), name in local_only
+            )
 
     if draft.vial_ids:
         known = set(db.vials.index)
@@ -192,8 +207,10 @@ def _field_problems(where: str, fields, values: dict) -> list[Problem]:
     return problems
 
 
-def _folder_problems(where: str, folder: Path, exp_type) -> list[Problem]:
-    """What an experiment folder is missing."""
+def _folder_problems(
+    where: str, folder: Path, exp_type, sync_pending: bool = False
+) -> list[Problem]:
+    """What an experiment folder is missing (its sync file may be on its way)."""
     problems = []
 
     if not folder.is_dir():
@@ -214,7 +231,7 @@ def _folder_problems(where: str, folder: Path, exp_type) -> list[Problem]:
             p for p in (folder / SYNC_FOLDER).glob("*.h5") if not p.name.startswith(".")
         ]
 
-        if not syncs:
+        if not syncs and not sync_pending:
             problems.append(
                 Problem(
                     where,
@@ -239,17 +256,34 @@ def _folder_problems(where: str, folder: Path, exp_type) -> list[Problem]:
 # --------------------------------------------------------------------------- #
 
 
-def submit(db, draft: Draft, *, force: bool = False) -> SubmitResult:
+def submit(
+    db, draft: Draft, *, force: bool = False, busy: Container[str] = ()
+) -> SubmitResult:
     """
     Put a finished draft in the database.
 
-    Refuses while `check` finds a blocking problem, unless `force`. Otherwise
-    creates (or finds) the session, writes its annotations, and for each
-    experiment folder ingests it, annotates it, records its vials and decodes
-    its sync file. Steps already done by an earlier attempt are skipped, so
-    the call is safe to repeat after fixing what stopped it.
+    First copies to the share the sync recordings that are only on this
+    computer (any in `busy` are still being written, and are left); one that
+    cannot be copied blocks. Then refuses while `check` finds a blocking
+    problem, unless `force`. Otherwise creates (or finds) the session, writes
+    its annotations, and for each experiment folder ingests it, annotates it,
+    records its vials and decodes its sync file. Steps already done by an
+    earlier attempt are skipped, so the call is safe to repeat after fixing
+    what stopped it.
     """
-    result = SubmitResult(draft.label, check(db, draft))
+    recording = [
+        name for name, record in pending(draft).items() if record["local"] in busy
+    ]
+    not_copied = sync_pending(Path(db.main_folder), draft, busy)
+    result = SubmitResult(
+        draft.label,
+        [Problem(name, "Still recording: stop it first.") for name in recording]
+        + [
+            Problem(name, f"Could not copy the sync file to the share: {why}")
+            for name, why in not_copied.items()
+        ]
+        + check(db, draft),
+    )
 
     if result.blocked and not force:
         return result

@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
-    QSpinBox,
     QSplitter,
     QTableView,
     QVBoxLayout,
@@ -28,9 +27,9 @@ from PySide6.QtWidgets import (
 
 from ..database import WILD_TYPE
 from .context import Context
-from .fields import COLUMN_FIELDS
+from .fields import COLUMN_FIELDS, ODOR_FIELDS
 from .forms import Form, RecipeForm, shown_value
-from .style import text_style
+from .style import COMBO_EXTRA_PX, text_style
 from .models import FrameModel, fit_columns
 
 
@@ -151,8 +150,8 @@ GENOTYPE_CHOICES = ("na", "het", "hom", "wt")
 
 class PickRow(QWidget):
     """
-    One registered name a mouse has (a line or a virus), picked from a
-    dropdown, with a genotype dropdown for a line, and a remove button.
+    One registered name picked from a dropdown (a mouse's line or virus, a
+    mix's component), with a genotype dropdown for a line, and a remove button.
     """
 
     def __init__(self, names: list[str], genotyped: bool, parent=None):
@@ -173,6 +172,11 @@ class PickRow(QWidget):
             self.genotype = QComboBox()
             self.genotype.addItems(GENOTYPE_CHOICES)
             self.genotype.setToolTip("na: not genotyped")
+
+            # Fits its longest choice, and is the same on every row
+            metrics = self.genotype.fontMetrics()
+            widest = max(metrics.horizontalAdvance(c) for c in GENOTYPE_CHOICES)
+            self.genotype.setFixedWidth(widest + COMBO_EXTRA_PX)
             self.name.currentTextChanged.connect(self._name_picked)
             row.addWidget(self.genotype)
             self._name_picked(self.name.currentText())
@@ -216,11 +220,11 @@ class PickRow(QWidget):
 
 class PickList:
     """
-    The rows of one list on the Mice page (its lines, or its viruses).
+    The rows of one list: a mouse's lines or viruses, a mix's components.
 
     Each is a row of `form`, so it is spaced and its label placed like any
     other field's: `title` labels the first, the rest have an empty label.
-    With no rows, a "none" row holds the list's place.
+    With no rows, a row saying `none_text` holds the list's place.
 
     The rows speak for a mouse only once they were loaded for it or edited
     (`speaks_for`): otherwise saving leaves what is stored alone, so typing a
@@ -234,6 +238,7 @@ class PickList:
         genotyped: bool,
         form: QFormLayout,
         title: str,
+        none_text: str = "none",
     ):
         self.context = context
         self.what = what
@@ -243,10 +248,11 @@ class PickList:
         self.names: list[str] = []
         self.rows: list[PickRow] = []
         self.none = shown_value(kind=None)
-        self.none.setPlaceholderText("none")
+        self.none.setPlaceholderText(none_text)
         form.addRow(title, self.none)
         self.loaded_for: None | int = None
         self.edited = False
+        self.locked = False
 
     def add(self, name: None | str = None, genotype: str = "na") -> None:
         """A row: blank for a new entry, or showing `name` (and its genotype)."""
@@ -258,6 +264,7 @@ class PickList:
             return
 
         row = PickRow(self.names, self.genotyped)
+        row.setEnabled(not self.locked)
 
         if name is not None:
             row.set_value(name, genotype)
@@ -292,18 +299,25 @@ class PickList:
         for i, row in enumerate(self.rows):
             self.form.labelForField(row).setText(self.title if i == 0 else "")
 
-    def load(self, mouse_id: int, entries) -> None:
-        """Show what `mouse_id` has: names, or `(name, genotype)` pairs."""
+    def load(self, owner: None | int, entries) -> None:
+        """Show what `owner` has: names, or `(name, genotype)` pairs."""
         for row in list(self.rows):
             self.remove(row)
 
         for entry in entries:
             self.add(*entry) if isinstance(entry, tuple) else self.add(entry)
 
-        self.loaded_for, self.edited = mouse_id, False
+        self.loaded_for, self.edited = owner, False
 
-    def speaks_for(self, mouse_id: int) -> bool:
-        return self.edited or self.loaded_for == mouse_id
+    def speaks_for(self, owner: int) -> bool:
+        return self.edited or self.loaded_for == owner
+
+    def set_locked(self, locked: bool) -> None:
+        """Shown but not editable (what a stored odor is made of)."""
+        self.locked = locked
+
+        for row in self.rows:
+            row.setEnabled(not locked)
 
     def values(self) -> list:
         return [row.value() for row in self.rows]
@@ -314,12 +328,44 @@ class PickList:
         return len(set(names)) < len(names)
 
 
+def _exists_note(what: str) -> str:
+    return f"{what} ID already exists, saving will overwrite data."
+
+
+def _stored(frame, key: int) -> dict:
+    """One stored row as `{column: value}`, a missing value as `None`."""
+    return {
+        column: None if value is None or value != value else value  # NaN
+        for column, value in frame.loc[key].items()
+    }
+
+
+def _buttons(actions) -> tuple[QHBoxLayout, list[QPushButton]]:
+    """A row of buttons, `(text, action)` each, sharing its width."""
+    row, buttons = QHBoxLayout(), []
+
+    for text, action in actions:
+        button = QPushButton(text)
+        button.clicked.connect(action)
+        row.addWidget(button)
+        buttons.append(button)
+
+    return row, buttons
+
+
 class MicePane(QWidget):
-    """The mice, and a form to register or update one."""
+    """
+    The mice, and a form to register one or change what is stored about it.
+
+    Typing the number of a stored mouse (or clicking it in the table) loads
+    it into the form, with a note that saving overwrites it; saving over a
+    stored mouse asks first.
+    """
 
     def __init__(self, context: Context, parent=None):
         super().__init__(parent)
         self.context = context
+        self.mice = None  # the table's frame, indexed by mouse_id
         self.carried: dict[int, dict[str, str]] = {}
         self.injected: dict[int, list[str]] = {}
 
@@ -338,24 +384,21 @@ class MicePane(QWidget):
         self.line_list = PickList(context, "lines", True, form, "Lines")
         self.virus_list = PickList(context, "viruses", False, form, "Viruses")
 
-        buttons = QHBoxLayout()
-
-        for text, action in (
-            ("Add line", lambda: self.line_list.add()),
-            ("Add virus", lambda: self.virus_list.add()),
-            ("Save mouse", self._save),
-        ):
-            button = QPushButton(text)
-            button.clicked.connect(action)
-            buttons.addWidget(button)
-
+        buttons, _ = _buttons(
+            (
+                ("Add line", lambda: self.line_list.add()),
+                ("Add virus", lambda: self.virus_list.add()),
+                ("Save mouse", self._save),
+            )
+        )
         box_layout.addLayout(buttons)
 
         side.addWidget(box)
         side.addStretch(1)
         layout.addLayout(side, 2)
 
-        self.table.doubleClicked.connect(self._pick)
+        self.table.clicked.connect(self._pick)
+        self.form.changed.connect(self._typed)
         context.changed.connect(self.reload)
         self.reload()
 
@@ -393,24 +436,39 @@ class MicePane(QWidget):
         self.context.run(load, self._loaded, "mice")
 
     def _loaded(self, loaded) -> None:
-        mice, self.carried, self.injected, lines, viruses = loaded
+        self.mice, self.carried, self.injected, lines, viruses = loaded
         self.line_list.names, self.virus_list.names = lines, viruses
-        _model(self.table).set_frame(mice)
+        _model(self.table).set_frame(self.mice)
+
+    def stored(self, mouse_id) -> bool:
+        return self.mice is not None and mouse_id in self.mice.index
+
+    def _typed(self, key: str, value) -> None:
+        """A stored mouse's number was typed: show what is stored."""
+        if key == "mouse_id" and self.stored(value):
+            self.load(value)
 
     def _pick(self, index) -> None:
         row = _model(self.table).row_values(index.row())
-        mouse_id = int(row["mouse_id"])
+        self.load(int(row["mouse_id"]))
+
+    def load(self, mouse_id: int) -> None:
+        """Fill the form with what is stored about `mouse_id`."""
+        row = _stored(self.mice, mouse_id)
         self.form.set_values(
-            {
-                "mouse_id": row.get("mouse_id"),
-                "sex": row.get("mouse_sex"),
-                "dob": row.get("mouse_dob"),
-            }
+            {"mouse_id": mouse_id, "sex": row["mouse_sex"], "dob": row["mouse_dob"]}
         )
         self.line_list.load(mouse_id, list(self.carried.get(mouse_id, {}).items()))
         self.virus_list.load(mouse_id, self.injected.get(mouse_id, []))
+        self.form.rows["mouse_id"].show_note(_exists_note("Mouse"), "warning")
 
     def _save(self) -> None:
+        self.form.commit()
+
+        if problems := self.form.problems():
+            self.context.report("Mouse", " ".join(problems))
+            return
+
         values = self.form.values()
 
         if "mouse_id" not in values:
@@ -424,25 +482,28 @@ class MicePane(QWidget):
                 )
                 return
 
-        # The rows are all the mouse's lines (none left means none) once they
-        # were loaded for it or edited; else what is stored stays. Same for
-        # the viruses.
         mouse_id = values["mouse_id"]
-        lines = (
-            dict(self.line_list.values())
-            if self.line_list.speaks_for(mouse_id)
-            else None
-        )
-        viruses = (
-            self.virus_list.values() if self.virus_list.speaks_for(mouse_id) else None
-        )
+        stored = self.stored(mouse_id)
+
+        if stored and not self.context.confirm(
+            "Mouse", _exists_note("Mouse"), "Overwrite"
+        ):
+            return
+
+        # The rows are all the mouse's lines (none left means none) when they
+        # were loaded for it, edited, or the mouse is new; else (its number
+        # typed and saved at once) what is stored stays. Same for the viruses.
+        def listed(pick: PickList):
+            return pick.values() if pick.speaks_for(mouse_id) or not stored else None
+
+        lines, viruses = listed(self.line_list), listed(self.virus_list)
 
         self.context.run(
             lambda db: db.set_mouse(
                 mouse_id=mouse_id,
                 sex=values.get("sex"),
                 dob=values.get("dob"),
-                lines=lines,
+                lines=None if lines is None else dict(lines),
                 viruses=viruses,
             ),
             None,
@@ -452,182 +513,203 @@ class MicePane(QWidget):
 
 
 class OdorsPane(QWidget):
-    """The odor registry, and a form to add one or correct its facts."""
+    """
+    The odor registry, and a form to add an odor or fill in its facts.
+
+    Like the Mice page: a stored odor's number (or a click on it) loads it,
+    and saving over it asks first. Its name and what it is made of never
+    change (the trials and vials refer to them), so they are shown locked;
+    only the vapor pressure and its source can be overwritten.
+    """
 
     def __init__(self, context: Context, parent=None):
         super().__init__(parent)
         self.context = context
-        self.chemicals: list[tuple[int, str]] = []
+        self.odors = None  # the table's frame, indexed by odor_id
+        self.added: None | int = None  # loaded once the table has it
+        self.made_of: dict[int, list[int]] = {}
+        self.chemicals: dict[str, int] = {}  # "4 - ethyl butyrate": 4
 
         layout = QHBoxLayout(self)
         self.table = _table()
-        layout.addWidget(self.table, 2)
-
-        box = QGroupBox("Add or update an odor")
-        form = QFormLayout(box)
-        self.odor_id = QSpinBox()
-        self.odor_id.setRange(0, 9999)
-        self.name = QLineEdit()
-        self.pressure = QLineEdit()
-        self.pressure.setPlaceholderText("e.g 10 (empty for mixes)")
-        self.source = QLineEdit()
-        self.source.setPlaceholderText("e.g. PubChem")
-
-        form.addRow("Odor ID", self.odor_id)
-        form.addRow("Name", self.name)
-        form.addRow("Vapor pressure (mmHg)", self.pressure)
-        form.addRow("VP source", self.source)
-
-        # A mix is what it is made of: two or more chemicals, fixed once added
-        self.components_box = QVBoxLayout()
-        self.components: list[QComboBox] = []
-        self.kind = QLabel("")
-        self.kind.setStyleSheet(text_style("computed"))
-        add_component = QPushButton("Add a component")
-        add_component.clicked.connect(self._add_component)
-        form.addRow("Composition", self.kind)
-        form.addRow(self.components_box)
-        form.addRow(add_component)
-
-        add = QPushButton("Add odor")
-        add.clicked.connect(self._add)
-        update = QPushButton("Update the odor with this #")
-        update.clicked.connect(self._update)
-        form.addRow(add)
-        form.addRow(update)
+        layout.addWidget(self.table, 3)
 
         side = QVBoxLayout()
+        box = QGroupBox("Register or update an odor")
+        box_layout = QVBoxLayout(box)
+        self.form = Form(list(ODOR_FIELDS))
+        box_layout.addWidget(self.form)
+
+        # A mix is what it is made of: two or more chemicals, fixed once added
+        self.composition = PickList(
+            context,
+            "chemicals",
+            False,
+            self.form.layout(),
+            "Composition",
+            none_text="Not a mix of odors",
+        )
+        buttons, (self.add_component, _) = _buttons(
+            (
+                ("Add component", lambda: self.composition.add()),
+                ("Save odor", self._save),
+            )
+        )
+        box_layout.addLayout(buttons)
+
         side.addWidget(box)
         side.addStretch(1)
-        layout.addLayout(side, 1)
+        layout.addLayout(side, 2)
 
-        self.table.doubleClicked.connect(self._pick)
+        self.table.clicked.connect(self._pick)
+        self.form.changed.connect(self._typed)
         context.changed.connect(self.reload)
-        self._refresh_kind()
         self.reload()
 
     def reload(self) -> None:
         def load(db):
             odors = db.odors.copy()
             names = odors["odor_name"]
-            parts = db.odor_components["component_id"].map(
-                lambda i: f"{i} {names.get(i, '?')}"
+            components = db.odor_components["component_id"]
+            parts = components.map(lambda i: f"{i} {names.get(i, '?')}")
+            odors["components"] = (
+                parts.groupby(level=0)
+                .agg(" + ".join)
+                .reindex(odors.index)
+                .where(odors["mix"].astype(bool), "")
             )
-            made_of = parts.groupby(level=0).agg(" + ".join)
-            odors["components"] = made_of.reindex(odors.index).where(
-                odors["mix"].astype(bool), ""
-            )
-            chemicals = [
-                (int(i), str(n))
+            made_of = {
+                int(odor_id): [int(c) for c in rows]
+                for odor_id, rows in components.groupby(level=0)
+            }
+            chemicals = {
+                f"{i} - {n}": int(i)
                 for i, n in names[~odors["mix"].astype(bool)].items()
                 if i != 0  # the solvent is not mixed in
-            ]
+            }
 
-            return odors, chemicals
+            return odors, made_of, chemicals
 
-        def show(loaded):
-            odors, self.chemicals = loaded
-            _model(self.table).set_frame(odors)
+        self.context.run(load, self._loaded, "odors")
 
-        self.context.run(load, show, "odors")
+    def _loaded(self, loaded) -> None:
+        self.odors, self.made_of, self.chemicals = loaded
+        self.composition.names = list(self.chemicals)
+        _model(self.table).set_frame(self.odors)
+
+        if self.added is not None and self.stored(self.added):
+            self.load(self.added)
+            self.added = None
+
+    def stored(self, odor_id) -> bool:
+        return self.odors is not None and odor_id in self.odors.index
+
+    def _typed(self, key: str, value) -> None:
+        """A stored odor's number loads it; a new one unlocks the form."""
+        if key != "odor_id":
+            return
+
+        if self.stored(value):
+            self.load(value)
+
+        elif self.composition.locked:
+            # What was shown belongs to another odor, whose name is taken
+            self.form.rows["odor_name"].set_value(None)
+            self.composition.load(None, [])
+            self._lock(False)
 
     def _pick(self, index) -> None:
         row = _model(self.table).row_values(index.row())
-        self.odor_id.setValue(int(row["odor_id"]))
-        self.name.setText(str(row.get("odor_name") or ""))
-        pressure = row.get("vapor_pressure_mmhg")
-        self.pressure.setText(
-            "" if pressure is None or pressure != pressure else f"{pressure:g}"
+        self.load(int(row["odor_id"]))
+
+    def load(self, odor_id: int) -> None:
+        """Fill the form with what is stored about `odor_id`, name locked."""
+        row = _stored(self.odors, odor_id)
+        self.form.set_values({"odor_id": odor_id, **row})
+        self.composition.load(odor_id, [self._label(i) for i in self._parts(odor_id)])
+        self._lock(True)
+        self.form.rows["odor_id"].show_note(_exists_note("Odor"), "warning")
+
+    def _lock(self, locked: bool) -> None:
+        # Shown like a value read from elsewhere, not like a placeholder
+        name = self.form.rows["odor_name"].editor
+        name.setEnabled(not locked)
+        name.setStyleSheet(text_style("computed") if locked else "")
+        name.setToolTip(
+            "A stored odor's name never changes"
+            if locked
+            else self.form.rows["odor_name"].field.description
         )
-        self.source.setText(str(row.get("vapor_pressure_source") or ""))
-        self._clear_components()
+        self.composition.set_locked(locked)
+        self.add_component.setEnabled(not locked)
 
-    def _add_component(self) -> None:
-        picker = QComboBox()
+    def _parts(self, odor_id: int) -> list[int]:
+        return self.made_of.get(odor_id, [])
 
-        for odor_id, name in self.chemicals:
-            picker.addItem(f"{odor_id} - {name}", odor_id)
+    def _label(self, odor_id: int) -> str:
+        """A chemical as its dropdown shows it."""
+        for label, number in self.chemicals.items():
+            if number == odor_id:
+                return label
 
-        remove = QPushButton("remove")
-        holder = QWidget()
-        row = QHBoxLayout(holder)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(picker, 1)
-        row.addWidget(remove)
-        remove.clicked.connect(lambda: self._remove_component(picker, holder))
-        self.components.append(picker)
-        self.components_box.addWidget(holder)
-        self._refresh_kind()
+        return f"{odor_id} - ?"
 
-    def _remove_component(self, picker: QComboBox, holder: QWidget) -> None:
-        self.components.remove(picker)
-        holder.setParent(None)
-        holder.deleteLater()
-        self._refresh_kind()
+    def _save(self) -> None:
+        self.form.commit()
 
-    def _clear_components(self) -> None:
-        while self.components_box.count():
-            item = self.components_box.takeAt(0)
-            widget = item.widget()
+        if problems := self.form.problems():
+            self.context.report("Odor", " ".join(problems))
+            return
 
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+        values = self.form.values()
 
-        self.components = []
-        self._refresh_kind()
+        if "odor_id" not in values or "odor_name" not in values:
+            self.context.report("Odor", "An odor needs its number and a name.")
+            return
 
-    def _refresh_kind(self) -> None:
-        n = len(self.components)
-        self.kind.setText("1 odor (just itself)" if n == 0 else f"a mix of {n} odors")
+        if self.composition.repeated():
+            self.context.report("Odor", "A component is listed twice.")
+            return
 
-    def _component_ids(self) -> list[int]:
-        return [int(picker.currentData()) for picker in self.components]
-
-    def _fields(self) -> dict:
-        pressure = self.pressure.text().strip()
-
-        return {
-            "odor_id": self.odor_id.value(),
-            "odor_name": self.name.text().strip() or None,
-            "vapor_pressure_mmhg": float(pressure) if pressure else None,
-            "vapor_pressure_source": self.source.text().strip() or None,
+        odor_id = values["odor_id"]
+        components = [self.chemicals.get(label) for label in self.composition.values()]
+        facts = {
+            "vapor_pressure_mmhg": values.get("vapor_pressure_mmhg"),
+            "vapor_pressure_source": values.get("vapor_pressure_source"),
         }
 
-    def _add(self) -> None:
-        try:
-            fields = self._fields()
-        except ValueError:
-            self.context.report("Odor", "The vapor pressure is a number.")
-            return
-
-        if not fields["odor_name"]:
-            self.context.report("Odor", "An odor needs a name.")
-            return
-
-        components = self._component_ids()
-        self.context.run(
-            lambda db: db.add_odor(components=components or None, **fields),
-            lambda _: self._clear_components(),
-            "add_odor",
-            writes=True,
-        )
-
-    def _update(self) -> None:
-        try:
-            fields = self._fields()
-        except ValueError:
-            self.context.report("Odor", "The vapor pressure is a number.")
-            return
-
-        if self.components:
-            self.context.report(
-                "Odor", "What a mix is made of does not change; add a new odor."
+        if not self.stored(odor_id):
+            self.context.run(
+                lambda db: db.add_odor(
+                    odor_id=odor_id,
+                    odor_name=values["odor_name"],
+                    components=components or None,
+                    **facts,
+                ),
+                lambda _: setattr(self, "added", odor_id),
+                "add_odor",
+                writes=True,
             )
             return
 
+        stored_name = str(self.odors.loc[odor_id, "odor_name"])
+
+        if values["odor_name"] != stored_name or sorted(components) != sorted(
+            self._parts(odor_id)
+        ):
+            self.context.report(
+                "Odor", "Cannot change the name and composition of an odor."
+            )
+            return
+
+        if not self.context.confirm("Odor", _exists_note("Odor"), "Overwrite"):
+            return
+
         self.context.run(
-            lambda db: db.update_odor(**fields), None, "update_odor", writes=True
+            lambda db: db.update_odor(odor_id=odor_id, **facts),
+            None,
+            "update_odor",
+            writes=True,
         )
 
 

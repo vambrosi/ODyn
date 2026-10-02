@@ -76,6 +76,7 @@ EXPERIMENT_SETTINGS = (
     "objective",
     "submitted_exp_id",
     "removed",
+    "recordings",
 )
 
 # What an experiment folder is called for each kind of recording
@@ -186,9 +187,22 @@ class Draft:
         Which animal and which day this session is about.
 
         Both are ordinary fields, so either can be corrected later without the
-        draft changing its name or colliding with another. `session_id` is
-        remembered once the session row exists, so a resubmit finds it.
+        draft changing its name or colliding with another, until a recording
+        was made: its file is named and placed for that mouse and day, so a
+        change then raises `ValueError` (remove the session and start again).
+        `session_id` is remembered once the session row exists, so a resubmit
+        finds it.
         """
+        changes = (mouse_id is not None and int(mouse_id) != self.mouse_id) or (
+            date is not None and _check_date(date) != self.date
+        )
+
+        if changes and self.recorded:
+            raise ValueError(
+                "A recording was made for this session, so its mouse and date "
+                "are fixed. Remove the session and start a new one to change them."
+            )
+
         if mouse_id is not None:
             self.data["mouse_id"] = int(mouse_id)
 
@@ -377,6 +391,26 @@ class Draft:
 
         return None
 
+    @property
+    def recorded(self) -> bool:
+        """Whether any experiment (removed ones too) has a sync recording."""
+        return any(e.get("recordings") for e in self._entries)
+
+    @staticmethod
+    def latest(entry: dict[str, Any]) -> None | dict[str, Any]:
+        """An experiment entry's recording in use: the last not replaced."""
+        kept = [r for r in entry.get("recordings", []) if not r.get("replaced")]
+
+        return kept[-1] if kept else None
+
+    def recordings(self, name: str) -> list[dict[str, Any]]:
+        """Every recording of experiment `name` (removed or not), oldest first."""
+        for entry in self._entries:
+            if entry.get("name") == name:
+                return entry.get("recordings", [])
+
+        return []
+
     def is_removed(self, name: str) -> bool:
         """Whether experiment `name` was removed (its name stays taken)."""
         return any(e.get("name") == name and e.get("removed") for e in self._entries)
@@ -424,6 +458,40 @@ class Draft:
         _merge(entry, fields)
 
         return self.save()
+
+    def add_recording(self, name: str, record: dict[str, Any]) -> Draft:
+        """
+        Note a sync recording of experiment `name`, which replaces any earlier
+        one (those are kept, marked `replaced`). `record` holds at least the
+        `file` name, its `local` path and its `share` path (relative to the
+        main folder); `stopped` and `copied` are added as they happen.
+        """
+        entry = self.experiment(name)
+
+        if entry is None:
+            raise ValueError(f"There is no experiment '{name}' to record into.")
+
+        recordings = entry.setdefault("recordings", [])
+
+        for earlier in recordings:
+            earlier["replaced"] = True
+
+        recordings.append(dict(record))
+
+        return self.save()
+
+    def update_recording(self, name: str, file: str, **fields: Any) -> Draft:
+        """Set fields on one recording of experiment `name` (removed or not)."""
+        for entry in self._entries:
+            if entry.get("name") != name:
+                continue
+
+            for record in entry.get("recordings", []):
+                if record.get("file") == file:
+                    _merge(record, fields)
+                    return self.save()
+
+        raise ValueError(f"No recording '{file}' in experiment '{name}'.")
 
     def remove_experiment(self, name: str) -> Draft:
         """Hide an experiment, keeping what was typed into it."""

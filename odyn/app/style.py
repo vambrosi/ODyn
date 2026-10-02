@@ -33,6 +33,10 @@ ROW_SPACING_PX = 8
 # centered in what is left
 PAGE_MAX_PX = 800
 
+# What a dropdown needs besides its text: the padding on both sides, the
+# drop-down arrow's width, the border, and a little air (see STYLESHEET)
+COMBO_EXTRA_PX = 2 * 8 + 24 + 2 + 12
+
 # Styling a control's frame makes Qt drop the native arrows, so they are
 # drawn from these (a mid gray that reads on light and dark backgrounds)
 ICONS = Path(__file__).parent / "icons"

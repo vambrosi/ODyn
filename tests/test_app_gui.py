@@ -8,6 +8,8 @@ file where `submit` will look for it.
 import os
 import time
 
+from pathlib import Path
+
 import h5py
 import pytest
 
@@ -99,8 +101,7 @@ def window(app, tmp_path):
 def test_window_opens_on_users_with_every_page_in_the_left_bar(window):
     tips = [a.toolTip() for a in window.left.actions() if not a.isSeparator()]
 
-    assert tips[:6] == ["Users", "Mice", "Odors", "Panels", "Tables", "Quality Control"]
-    assert tips[-1] == "Recorder"
+    assert tips == ["Users", "Mice", "Odors", "Panels", "Tables", "Quality Control"]
     assert window.pages.currentWidget() is window.users
     assert window.page_actions[window.users].isChecked()
     assert "tester" in window.user_label.text()
@@ -115,6 +116,7 @@ def test_window_opens_on_users_with_every_page_in_the_left_bar(window):
     assert [a.toolTip() for a in window.right.actions() if a.toolTip()] == [
         "Add session",
         "Add experiment",
+        "Record the selected experiment",
         "Nothing to undo",
         "Nothing selected to remove",
         "Check session",
@@ -123,6 +125,12 @@ def test_window_opens_on_users_with_every_page_in_the_left_bar(window):
     assert not window.undo_action.isEnabled()
     assert not window.remove_action.isEnabled()
     assert not window.selection.isVisibleTo(window)
+
+    # the recorder sits right after Add experiment, a line between it and Undo
+    actions = window.right.actions()
+    at = actions.index(window.page_actions[window.recorder])
+    assert actions[at - 1].toolTip() == "Add experiment"
+    assert actions[at + 1].isSeparator() and actions[at + 2] is window.undo_action
 
 
 def test_users_pane_is_a_login_screen(window, tmp_path):
@@ -165,7 +173,57 @@ def test_mice_pane_registers_a_mouse(window, tmp_path):
     assert 7 in Database(tmp_path / "data").mice.index
 
 
-def test_mice_pane_lists_lines_and_viruses_as_rows(window, tmp_path):
+def test_mice_pane_loads_a_stored_mouse_and_asks_before_overwriting(
+    window, tmp_path, monkeypatch
+):
+    mice = window.mice
+    mice.form.set_values({"mouse_id": "m7", "sex": "F"})
+    mice._save()
+    settle(window.context)
+
+    asked = []
+    monkeypatch.setattr(
+        window.context, "confirm", lambda *args: asked.append(args) or False
+    )
+
+    # typing a stored number loads the mouse, with a note that it is stored
+    mice.form.clear()
+    number = mice.form.rows["mouse_id"]
+    number.editor.setText("m7")
+    number.editor.editingFinished.emit()
+    assert mice.form.values() == {"mouse_id": 7, "sex": "F"}
+    assert number.note.text() == "Mouse ID already exists, saving will overwrite data."
+
+    # saving over it asks, and Cancel writes nothing
+    mice.form.rows["sex"].set_value("M")
+    mice._save()
+    settle(window.context)
+    assert asked[-1][1:] == (number.note.text(), "Overwrite")
+    assert Database(tmp_path / "data").mice.loc[7, "mouse_sex"] == "F"
+
+    monkeypatch.setattr(window.context, "confirm", lambda *args: True)
+    mice._save()
+    settle(window.context)
+    assert Database(tmp_path / "data").mice.loc[7, "mouse_sex"] == "M"
+
+    # a number typed and saved at once (no focus change) is read, and asks too
+    monkeypatch.setattr(
+        window.context, "confirm", lambda *args: asked.append(args) or False
+    )
+    asked.clear()
+    mice.form.clear()
+    number.editor.setText("7")
+    mice._save()
+    assert len(asked) == 1
+
+    # clicking a mouse in the table loads it
+    mice.form.clear()
+    row = list(mice.table.model().frame.index).index(7)
+    mice.table.clicked.emit(mice.table.model().index(row, 0))
+    assert mice.form.values() == {"mouse_id": 7, "sex": "M"}
+
+
+def test_mice_pane_lists_lines_and_viruses_as_rows(window, tmp_path, monkeypatch):
     # (the lines and viruses are seeded when the database is made)
     mice = window.mice
     lines, viruses = mice.line_list, mice.virus_list
@@ -209,6 +267,12 @@ def test_mice_pane_lists_lines_and_viruses_as_rows(window, tmp_path):
     row.name.setCurrentText("TH-Cre")
     assert row.genotype.isEnabled()
 
+    # the genotype box is as wide on every row, and shows its choices whole
+    widths = {r.genotype.width() for r in lines.rows}
+    assert len(widths) == 1
+    advance = row.genotype.fontMetrics().horizontalAdvance
+    assert widths.pop() > max(advance(c) for c in ("na", "het", "hom", "wt")) + 40
+
     # each entry is a row of the form: the list's title labels its first
     layout = mice.form.layout()
     assert [layout.labelForField(r).text() for r in lines.rows] == ["Lines", ""]
@@ -217,6 +281,8 @@ def test_mice_pane_lists_lines_and_viruses_as_rows(window, tmp_path):
     # a number typed without picking leaves its stored lines and viruses alone
     for listed in (lines, viruses):
         listed.load(None, [])
+
+    monkeypatch.setattr(window.context, "confirm", lambda *args: True)
 
     mice.form.set_values({"mouse_id": "m7", "sex": "M"})
     mice._save()
@@ -353,20 +419,53 @@ def test_recorder_records_into_the_session_folder(window, tmp_path):
     assert window.recorder.draft is draft or window.recorder.draft.path == draft.path
 
     draft = window.sessions.current  # the window's own copy, loaded from disk
-    draft.set_experiment("e1")
+    draft.set_experiment("e1").set_experiment("e2")
     window.context.announce_draft()
     recorder: RecorderPane = window.recorder
-    assert recorder.experiment.currentText() == "e1"
+
+    # only an experiment selected in the right bar is recorded
+    window.open_session(draft)
+    assert recorder.picked is None
+    recorder.start()
+    assert recorder.recording is None
+    assert "Select the experiment" in window.context.last_report[1]
+
+    window.open_experiment(draft, "e2")
+    assert recorder.picked == "e2"
+    window.open_experiment(draft, "e1")
+    window.page_actions[window.recorder].trigger()
+    assert recorder.experiment.text() == "e1"
     recorder.start()
     wait_until(
         lambda: recorder.recording is not None and recorder.recording.total > 100
     )
+
+    # written on this computer, beside the drafts, in the share's layout
+    record = draft.recordings("e1")[0]
+    local = Path(record["local"])
+    assert local == tmp_path / "sync" / "20260922" / "m7" / "e1" / record["file"]
+    assert local.is_file() and window.context.recording_now == str(local)
+    assert record["share"] == f"20260922/m7/e1/sync/{record['file']}"
+
+    # the file is named for the mouse and day, so those are fixed now
+    assert not window.sessions.session_page.mouse.isEnabled()
+    with pytest.raises(ValueError, match="fixed"):
+        draft.identify(mouse_id=8)
+
+    # selecting another experiment meanwhile does not move the recording
+    window.open_experiment(draft, "e2")
+    assert recorder.experiment.text() == "e1"
+
     recorder.stop()
+    wait_until(lambda: not recorder.copier.running)  # copied in the background
+    assert recorder.experiment.text() == "e2"  # and then it follows again
 
     experiment = tmp_path / "data" / "20260922" / "m7" / "e1"
     assert (experiment / "raw").is_dir() and (experiment / "processed").is_dir()
-    files = list((experiment / "sync").glob("m7_e1_*.h5"))
-    assert len(files) == 1
+    files = list((experiment / "sync").glob("*"))
+    assert [f.name for f in files] == [record["file"]]  # no partial left
+    assert local.is_file()  # and the local copy is kept
+    assert record["stopped"] and record["copied"]
 
     with h5py.File(files[0]) as h5:
         assert h5.attrs["mouse"] == "m7" and h5.attrs["experiment_folder"] == "e1"
@@ -376,16 +475,156 @@ def test_recorder_records_into_the_session_folder(window, tmp_path):
     # the draft now lists the experiment the recorder made
     shown = window.sessions.current
     assert shown is not None and shown.experiment("e1") is not None
-    assert list(window.today) == [(id(shown), None), (id(shown), "e1")]
+    assert list(window.today) == [
+        (id(shown), None),
+        (id(shown), "e1"),
+        (id(shown), "e2"),
+    ]
+
+
+def test_a_failed_read_stops_the_recording_once(window):
+    class Broken(SimulatedSource):
+        def read(self):
+            raise RuntimeError("buffer overflow")
+
+    recorder: RecorderPane = window.recorder
+    recorder.source = Broken()
+    recorder.test()
+    recorder._tick()  # used to stop, read again, fail again... to RecursionError
+
+    assert recorder.recording is None and recorder.start_button.isEnabled()
+    assert window.context.last_report == (
+        "Recorder",
+        "Recording stopped: buffer overflow",
+    )
+
+
+def test_without_a_board_nothing_records(window, monkeypatch):
+    def no_board():
+        raise RuntimeError("no device Dev1")
+
+    recorder: RecorderPane = window.recorder
+    monkeypatch.setattr(recorder, "source", None)
+    monkeypatch.setattr("odyn.app.pane_recorder.DaqSource", no_board)
+    recorder.test()
+
+    assert recorder.recording is None  # no made-up traces
+    assert "no device Dev1" in window.context.last_report[1]
+
+
+def test_the_daq_gets_a_new_task_for_every_start(monkeypatch):
+    import sys
+    import types
+
+    from odyn.app.recorder import DaqSource
+
+    made = []
+
+    class Task:
+        def __init__(self):
+            self.state = "made"
+            self.ai_channels = types.SimpleNamespace(
+                add_ai_voltage_chan=lambda *a, **k: None
+            )
+            self.timing = types.SimpleNamespace(
+                cfg_samp_clk_timing=lambda *a, **k: None
+            )
+            made.append(self)
+
+        def start(self):
+            assert self.state == "made", "a closed task cannot start again"
+            self.state = "running"
+
+        def stop(self):
+            pass
+
+        def close(self):
+            self.state = "closed"
+
+    nidaqmx = types.ModuleType("nidaqmx")
+    nidaqmx.Task = Task
+    constants = types.ModuleType("nidaqmx.constants")
+    constants.AcquisitionType = types.SimpleNamespace(CONTINUOUS=1)
+    constants.TerminalConfiguration = types.SimpleNamespace(RSE=1)
+    monkeypatch.setitem(sys.modules, "nidaqmx", nidaqmx)
+    monkeypatch.setitem(sys.modules, "nidaqmx.constants", constants)
+
+    source = DaqSource()  # a Test, then a recording
+    source.start()
+    source.stop()
+    source.start()
+
+    assert [task.state for task in made] == ["closed", "running"]
+
+
+def test_recording_again_asks_and_hides_the_earlier_copy(window, tmp_path, monkeypatch):
+    Draft.start(tmp_path / "drafts", user="tester").identify(
+        mouse_id=7, date="2026-09-22"
+    )
+    window.sessions.reload_drafts()
+    draft = window.sessions.current
+    draft.set_experiment("e1")
+    window.open_experiment(draft, "e1")
+    recorder: RecorderPane = window.recorder
+
+    def record():
+        recorder.start()
+        wait_until(lambda: recorder.recording is not None)
+        time.sleep(1.1)  # file names are by the second
+        recorder.stop()
+        wait_until(lambda: not recorder.copier.running)
+
+    record()
+    asked = []
+    monkeypatch.setattr(
+        window.context, "confirm", lambda *args: asked.append(args) or False
+    )
+    recorder.start()  # declined: nothing starts
+    assert asked and recorder.recording is None
+
+    monkeypatch.setattr(window.context, "confirm", lambda *args: True)
+    record()
+    first, second = draft.recordings("e1")
+    assert first["replaced"] and first["hidden"] and not second.get("replaced")
+
+    # only the new one is in the decoder's sight; the old one is kept, hidden
+    sync = tmp_path / "data" / "20260922" / "m7" / "e1" / "sync"
+    assert [p.name for p in sync.glob("[!.]*.h5")] == [second["file"]]
+    assert (sync / f".replaced-{first['file']}").is_file()
+
+
+def test_a_recording_stays_local_when_the_share_is_away(window, tmp_path):
+    Draft.start(tmp_path / "drafts", user="tester").identify(
+        mouse_id=7, date="2026-09-22"
+    )
+    window.sessions.reload_drafts()
+    draft = window.sessions.current
+    draft.set_experiment("e1")
+    window.open_experiment(draft, "e1")
+
+    # the session folder is a file: nothing can be made or copied under it
+    (tmp_path / "data" / "20260922").mkdir(parents=True)
+    (tmp_path / "data" / "20260922" / "m7").write_text("in the way")
+
+    recorder: RecorderPane = window.recorder
+    recorder.start()
+    wait_until(lambda: recorder.recording is not None)
+    recorder.stop()
+    wait_until(lambda: not recorder.copier.running)
+
+    record = draft.recordings("e1")[0]
+    assert Path(record["local"]).is_file() and not record.get("copied")
+    assert "Submit copies it" in recorder.status.text()
 
 
 def test_recording_path_layout(tmp_path):
     draft = Draft.start(tmp_path, user="x").identify(mouse_id=12, date="2026-03-04")
-    path, mouse = recording_path(tmp_path / "main", draft, "e2")
+    local, share, mouse = recording_path(tmp_path / "sync", draft, "e2")
 
     assert mouse == "m12"
-    assert path.parent == tmp_path / "main" / "20260304" / "m12" / "e2" / "sync"
-    assert path.name.startswith("m12_e2_")
+    assert local.parent == tmp_path / "sync" / "20260304" / "m12" / "e2"
+    assert share == f"20260304/m12/e2/sync/{local.name}"
+    assert local.name.startswith("m12_e2_")
 
 
 def test_qc_pane_lists_nothing_for_a_new_user(window):
@@ -464,24 +703,68 @@ def test_recipe_components_follow_the_odor(window):
 
 def test_odors_pane_adds_a_mix_from_its_components(window, tmp_path):
     odors = window.odors
-    odors.odor_id.setValue(45)
-    odors.name.setText("sigma")
-    odors._add_component()
-    odors._add_component()
-    odors.components[0].setCurrentIndex(odors.components[0].findData(4))
-    odors.components[1].setCurrentIndex(odors.components[1].findData(10))
-    assert "mix of 2" in odors.kind.text()
-    odors._add()
+    composition = odors.composition
+    assert composition.none.placeholderText() == "Not a mix of odors"
+
+    labels = {number: label for label, number in odors.chemicals.items()}
+    odors.form.set_values({"odor_id": 45, "odor_name": "sigma"})
+    composition.add()
+    composition.add()
+    composition.rows[0].set_value(labels[4])
+    composition.rows[1].set_value(labels[10])
+    odors._save()
     settle(window.context)
 
     db = Database(tmp_path / "data")
     assert db.odors.loc[45, "mix"]
     assert sorted(db.odor_components.loc[45, "component_id"]) == [4, 10]
-    assert odors.components == []  # cleared once saved
 
     shown = odors.table.model().frame
     assert shown.loc[45, "components"] == "4 1-butanol + 10 (-) alpha pinene"
     assert shown.loc[1, "components"] == ""
+
+    # once saved it is loaded: its name and what it is made of are locked
+    assert not odors.form.rows["odor_name"].editor.isEnabled()
+    assert not any(row.isEnabled() for row in composition.rows)
+    assert not odors.add_component.isEnabled()
+
+
+def test_odors_pane_never_renames_a_stored_odor(window, tmp_path, monkeypatch):
+    odors = window.odors
+    monkeypatch.setattr(window.context, "confirm", lambda *args: True)
+    stored = Database(tmp_path / "data").odors.loc[1, "odor_name"]
+
+    # typing a stored number loads it, name locked, with a note
+    number = odors.form.rows["odor_id"]
+    number.editor.setText("1")
+    number.editor.editingFinished.emit()
+    assert odors.form.values()["odor_name"] == stored
+    assert not odors.form.rows["odor_name"].editor.isEnabled()
+    assert number.note.text() == "Odor ID already exists, saving will overwrite data."
+
+    # its vapor pressure can be overwritten
+    odors.form.rows["vapor_pressure_mmhg"].set_value(12.5)
+    odors._save()
+    settle(window.context)
+    db = Database(tmp_path / "data")
+    assert db.odors.loc[1, "vapor_pressure_mmhg"] == pytest.approx(12.5)
+    assert db.odors.loc[1, "odor_name"] == stored
+
+    # a new number unlocks the form, without the other odor's name
+    number.editor.setText("46")
+    number.editor.editingFinished.emit()
+    assert odors.form.rows["odor_name"].editor.isEnabled()
+    assert "odor_name" not in odors.form.values()
+
+    # a stored number with another name, saved at once, is refused
+    odors.form.set_values({"odor_id": 1, "odor_name": "renamed"})
+    odors._save()
+    settle(window.context)
+    assert window.context.last_report == (
+        "Odor",
+        "Cannot change the name and composition of an odor.",
+    )
+    assert Database(tmp_path / "data").odors.loc[1, "odor_name"] == stored
 
 
 def test_tables_pane_lists_every_method_called(window):
@@ -499,7 +782,7 @@ def test_tables_pane_lists_every_method_called(window):
     tables.list.setCurrentRow(names.index("method_calls:Database.set_mouse"))
     settle(window.context)
     frame = tables.view.model().frame
-    assert list(frame["input_mouse_id"]) == ["m3"]
+    assert list(frame["input_mouse_id"]) == [3]  # read as typed: 'm3' is 3
 
     # the row detail lays the JSON out and wraps
     tables._row_clicked(tables.view.model().index(0, 0))
@@ -589,46 +872,42 @@ def test_session_and_recorder_share_one_selection(window, tmp_path):
     assert window.today[(id(draft), None)].toolTip() == draft.where
     assert window.selection.text() == draft.where
 
-    # nothing to record into until the session lists an experiment
-    assert recorder.experiment.count() == 0
+    # nothing to record into until an experiment is selected
+    assert recorder.experiment.text() == ""
     recorder.start()
     assert recorder.recording is None
-    assert "Add an experiment" in context.last_report[1]
+    assert "Select the experiment" in context.last_report[1]
 
-    # experiments added to the session are the recorder's only choices, the
-    # one added last is the one picked
+    # an experiment added is selected, and is what the recorder records
     sessions.add_experiment("e1")
     sessions.add_experiment("e2")
-    assert [
-        recorder.experiment.itemText(i) for i in range(recorder.experiment.count())
-    ] == ["e1", "e2"]
-    assert context.experiment == "e2" and recorder.experiment.currentText() == "e2"
+    assert context.experiment == "e2" and recorder.experiment.text() == "e2"
 
     assert window.view == "experiment"
     assert window.group.checkedAction() is window.today[(id(draft), "e2")]
 
-    # opening another experiment moves the recorder; and back
+    # opening another experiment moves the recorder; and back (the session
+    # page alone selects no experiment to record)
+    window.open_session(draft)
+    assert recorder.experiment.text() == ""
     window.open_experiment(draft, "e1")
-    assert context.experiment == "e1" and recorder.experiment.currentText() == "e1"
-    recorder.experiment.setCurrentText("e2")
-    assert context.experiment == "e2"
+    assert context.experiment == "e1" and recorder.experiment.text() == "e1"
+    window.open_experiment(draft, "e2")
+    assert recorder.experiment.text() == "e2"
     assert window.group.checkedAction() is window.today[(id(draft), "e2")]
     assert sessions.experiment_page.name == "e2"
 
     # removing the experiment shown drops it everywhere, no phantom name
     sessions.remove_experiment()
     assert [str(e["name"]) for e in draft.experiments] == ["e1"]
-    assert context.experiment == "e1"
-    assert [
-        recorder.experiment.itemText(i) for i in range(recorder.experiment.count())
-    ] == ["e1"]
-    assert recorder.experiment.currentText() == "e1"
+    assert context.experiment == "e1" and recorder.experiment.text() == "e1"
     assert list(window.today) == [(id(draft), None), (id(draft), "e1")]
     assert sessions.experiment_page.name == "e1"
 
     # and removing the last one falls back to the session page
     sessions.remove_experiment()
     assert window.view == "session" and context.experiment is None
+    assert recorder.experiment.text() == ""
     assert window.pages.currentWidget() is sessions.session_page
     assert window.group.checkedAction() is window.today[(id(draft), None)]
 
@@ -818,16 +1097,16 @@ def test_guide_points_at_every_bar_button_with_no_session(window):
 
     pointers = guide.pointers()
     texts = [p.text for p in pointers]
-    assert texts[:7] == [
+    assert texts[:6] == [
         "Users",
         "Mice",
         "Odors",
         "Panels",
         "Tables",
         "Quality Control",
-        "Recorder",
     ]
     assert "Add session" in texts and "Undo the last remove" in texts
+    assert "Record the selected experiment" in texts
 
     # each arrow ends right beside its own button, and no two labels overlap
     buttons = {

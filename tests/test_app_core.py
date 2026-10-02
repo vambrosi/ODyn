@@ -280,6 +280,51 @@ def test_a_second_submit_does_not_ingest_twice(share):
     assert db.latest_calls("add_experiment").shape[0] == 1
 
 
+def test_submit_copies_a_recording_kept_on_this_computer(share, tmp_path):
+    db, draft = share
+
+    # the recorder wrote it locally and the share was away: it never got there
+    on_share = tmp_path / "20260101/m1/e1/sync/m1_e1.h5"
+    local = tmp_path / "local" / "20260101/m1/e1/m1_e1.h5"
+    local.parent.mkdir(parents=True)
+    on_share.rename(local)
+    draft.add_recording(
+        "e1",
+        {
+            "file": "m1_e1.h5",
+            "local": str(local),
+            "share": "20260101/m1/e1/sync/m1_e1.h5",
+        },
+    )
+
+    messages = [str(p) for p in check(db, draft)]
+    assert any("m1_e1.h5 is only on this computer" in m for m in messages)
+    assert not any("No sync file" in m for m in messages)
+
+    # one still being written is left alone, and blocks the submit
+    early = submit(db, draft, busy={str(local)})
+    assert early.written is None and not on_share.exists()
+    assert "e1: Still recording: stop it first." in [str(p) for p in early.problems]
+
+    result = submit(db, draft)
+    assert result.submitted, result.error
+    assert result.written.decoded == ["e1"]
+    assert on_share.is_file() and local.is_file()
+    assert draft.recordings("e1")[0]["copied"]
+
+
+def test_a_recorded_session_keeps_its_mouse_and_date(tmp_path):
+    draft = Draft.start(tmp_path, mouse_id=442, date="2026-09-29")
+    draft.set_experiment("e1").identify(mouse_id=443)  # not recorded yet: fine
+    draft.add_recording("e1", {"file": "f.h5", "local": "x", "share": "y"})
+
+    with pytest.raises(ValueError, match="fixed"):
+        draft.identify(date="2026-09-30")
+
+    draft.identify(mouse_id=443, session_id=5)  # the same, and the row: fine
+    assert draft.recorded and draft.session_id == 5
+
+
 def test_a_removed_experiment_is_hidden_and_keeps_its_name(tmp_path):
     draft = Draft.start(tmp_path, mouse_id=442, date="2026-09-29")
     draft.set_experiment("e1", fov_depth_um=70).set_experiment("e2")

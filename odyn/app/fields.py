@@ -176,6 +176,7 @@ COLUMN_FIELDS = {
             required=True,
         ),
     ),
+
     "experiment": (
         Field(
             "objective",
@@ -187,6 +188,26 @@ COLUMN_FIELDS = {
         ),
     ),
 }
+
+# The odor registry's form (`odors`' own columns; not a submit target)
+ODOR_FIELDS = (
+    Field(
+        "odor_id",
+        "Odor ID",
+        INTEGER,
+        "The number the olfactometer knows it by",
+        required=True,
+    ),
+    Field("odor_name", "Name", TEXT, "e.g. 2-hexanone", required=True),
+    Field(
+        "vapor_pressure_mmhg",
+        "Vapor pressure",
+        REAL,
+        "e.g. 10 (empty for mixes)",
+        unit="mmHg",
+    ),
+    Field("vapor_pressure_source", "VP source", TEXT, "e.g. PubChem"),
+)
 
 
 def form_fields(db, applies_to: str) -> list[Field]:

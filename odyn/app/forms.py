@@ -48,6 +48,7 @@ class FieldRow(QWidget):
         super().__init__(parent)
         self.field = field
         self._value: Any = None
+        self._wrong = False  # what was typed does not read as the field's type
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -126,24 +127,46 @@ class FieldRow(QWidget):
         if self.field.value_type == BOOLEAN:
             value = bool(value)  # a box is never blank
 
-        self._value = value
+        self._value, self._wrong = value, False
         self.editor.blockSignals(True)
         self._write(self.field.show(value))
         self.editor.blockSignals(False)
         self.note.setVisible(False)
 
+    def show_note(self, text: str, kind: str = "error") -> None:
+        """A line under the editor, in `kind`'s color (see `text_style`)."""
+        self.note.setStyleSheet(text_style(kind))
+        self.note.setText(text)
+        self.note.setVisible(True)
+
+    def problem(self) -> None | str:
+        """What is wrong with what was typed, if anything."""
+        return self.note.text() if self._wrong else None
+
+    def commit(self) -> None:
+        """
+        Read what is typed now, without announcing it: a line is otherwise
+        read when it loses focus, which clicking a button on macOS does not do.
+        """
+        self._read_text(self._read())
+
     def _edited(self, text: str) -> None:
+        if self._read_text(text):
+            self.changed.emit(self.field.key, self._value)
+
+    def _read_text(self, text: str) -> bool:
         try:
             self._value = self.field.parse(text)
 
         except ValueError as error:
-            self.note.setText(str(error))
-            self.note.setVisible(True)
-            self._value = None
-            return
+            self.show_note(str(error))
+            self._value, self._wrong = None, True
+            return False
 
         self.note.setVisible(False)
-        self.changed.emit(self.field.key, self._value)
+        self._wrong = False
+
+        return True
 
 
 class Form(QWidget):
@@ -183,6 +206,15 @@ class Form(QWidget):
 
     def clear(self) -> None:
         self.set_values({})
+
+    def commit(self) -> None:
+        """Read every field as typed now (see `FieldRow.commit`)."""
+        for row in self.rows.values():
+            row.commit()
+
+    def problems(self) -> list[str]:
+        """What is wrong with what was typed, one line per field."""
+        return [p for row in self.rows.values() if (p := row.problem()) is not None]
 
 
 # --------------------------------------------------------------------------- #

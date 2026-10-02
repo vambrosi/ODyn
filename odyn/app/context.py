@@ -12,6 +12,7 @@ from typing import Any
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QMessageBox, QWidget
 
+from .recordings import LOCAL_FOLDER
 from .worker import DatabaseWorker, Job
 
 
@@ -46,7 +47,27 @@ class Context(QObject):
         self.window: None | QWidget = None
         self.draft: Any = None  # a `Draft`, or None
         self.experiment: None | str = None
+
+        # What the right bar has selected: "session", "experiment" or None
+        self.focus: None | str = None
         self.last_report: None | tuple[str, str] = None
+
+        # The local file a recording is being written into, if one is
+        self.recording_now: None | str = None
+
+        # The draft object the window holds for a draft file (the window sets
+        # this to look through its sessions): edits must go to that object,
+        # since it is the one that saves
+        self.live_draft: Callable[[Path], Any] = lambda path: (
+            self.draft
+            if self.draft is not None and Path(self.draft.path) == Path(path)
+            else None
+        )
+
+    @property
+    def recordings(self) -> Path:
+        """Where sync recordings are written first: beside the drafts folder."""
+        return self.drafts.parent / LOCAL_FOLDER
 
     @property
     def user(self) -> None | str:
@@ -67,6 +88,11 @@ class Context(QObject):
 
         self.draft, self.experiment = draft, experiment
         self.selection_changed.emit()
+
+    @property
+    def selected_experiment(self) -> None | str:
+        """The experiment, when it (not only its session) is what is selected."""
+        return self.experiment if self.focus == "experiment" else None
 
     def select_experiment(self, experiment: None | str) -> None:
         """Switch to another experiment of the same draft."""
@@ -127,3 +153,16 @@ class Context(QObject):
         box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         box.open()
         self.last_report = (title, message)
+
+    def confirm(self, title: str, message: str, action: str) -> bool:
+        """
+        Ask before doing something that cannot be taken back: `action` names
+        the button that goes ahead, the other cancels (and is the default).
+        """
+        box = QMessageBox(QMessageBox.Icon.Warning, title, message, parent=self.window)
+        go = box.addButton(action, QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel)
+        box.exec()
+
+        return box.clickedButton() is go

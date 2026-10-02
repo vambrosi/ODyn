@@ -1,26 +1,3 @@
-# --------------------------------------------------------------------------- #
-#
-# TODO:
-#   - TEST PLAY MOVIE!
-#   - Change save directory default?
-#   - Make list of files in play_movie optional?
-#   - Add movies to outputs
-#   - Add support for files (outputs) not in server (computer prefix?)
-#   - Integrate docstrings with default values, to avoid copy-paste.
-#   - Remove added stuff in docstrings
-#   - Use validated defaults on docstrings?
-#   - Add help for expected file name and folder structure?
-#   - Add delete_temp_files reminder in run_motion_correction
-#   - Update raw_mmap_pairs when did final mcor?
-#
-# MAYBE TODO:
-#   - Add pipeline function/classes to facilitate data analysis:
-#       - Convolution layers (moving weighted averages)
-#       - Thresholding (entrywise biased Heaviside or ReLU functions)
-#       - All the steps in the MATLAB segmentation GUI?
-#
-# --------------------------------------------------------------------------- #
-
 from __future__ import annotations
 
 import json

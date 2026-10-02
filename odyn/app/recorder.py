@@ -35,8 +35,6 @@ from typing import Any, Protocol
 import h5py
 import numpy as np
 
-from ..utils import logger
-
 WRITER_VERSION = "odyn.app.recorder 1"
 
 DEVICE = "Dev1"
@@ -44,6 +42,12 @@ PHYS_CHANS = "Dev1/ai0,Dev1/ai1,Dev1/ai2,Dev1/ai4,Dev1/ai6,Dev1/ai7"
 RAW_NAMES = ["CamStrobe", "EncoderA", "EncoderB", "FrameClock", "Resp", "OdorPulse"]
 TERMINALS = ["T2", "T5", "T8", "T3", "T9", "T12"]
 RATE = 5000  # samples/s per channel
+
+# How much the board holds between reads, and how often the file is flushed:
+# a slow share or a busy window can pause the reads for a moment, and the
+# board's buffer must outlast that (it overflows, and the recording stops)
+BUFFER_S = 10
+FLUSH_EVERY_S = 1.0
 
 # indices into the 6 raw channels
 CAM, ENC_A, ENC_B, FRAME, RESP, ODOR = 0, 1, 2, 3, 4, 5
@@ -103,25 +107,47 @@ class Source(Protocol):
 
 
 class DaqSource:
-    """The National Instruments board, through `nidaqmx`."""
+    """
+    The National Instruments board, through `nidaqmx`.
+
+    A closed task cannot be started again, so each `start` makes a new one
+    (a Test followed by a recording, or two recordings, each get their own).
+    The first is made here, so a missing driver or board fails right away.
+    """
 
     def __init__(self):
+        self.task = self._new_task()
+
+    @staticmethod
+    def _new_task():
         import nidaqmx
         from nidaqmx.constants import AcquisitionType, TerminalConfiguration
 
-        self._nidaqmx = nidaqmx
-        self.task = nidaqmx.Task()
-        self.task.ai_channels.add_ai_voltage_chan(
-            PHYS_CHANS,
-            terminal_config=TerminalConfiguration.RSE,
-            min_val=-10.0,
-            max_val=10.0,
-        )
-        self.task.timing.cfg_samp_clk_timing(
-            RATE, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=2 * RATE
-        )
+        task = nidaqmx.Task()
+
+        try:
+            task.ai_channels.add_ai_voltage_chan(
+                PHYS_CHANS,
+                terminal_config=TerminalConfiguration.RSE,
+                min_val=-10.0,
+                max_val=10.0,
+            )
+            task.timing.cfg_samp_clk_timing(
+                RATE,
+                sample_mode=AcquisitionType.CONTINUOUS,
+                samps_per_chan=BUFFER_S * RATE,
+            )
+
+        except Exception:
+            task.close()
+            raise
+
+        return task
 
     def start(self) -> None:
+        if self.task is None:
+            self.task = self._new_task()
+
         self.task.start()
 
     def read(self) -> np.ndarray:
@@ -136,9 +162,14 @@ class DaqSource:
         return arr.T
 
     def stop(self) -> None:
+        task, self.task = self.task, None
+
+        if task is None:
+            return
+
         try:
-            self.task.stop()
-            self.task.close()
+            task.stop()
+            task.close()
         except Exception:
             pass
 
@@ -187,17 +218,6 @@ class SimulatedSource:
         pass
 
 
-def available_source() -> Source:
-    """The board if `nidaqmx` and a device are there, otherwise the stand-in."""
-    try:
-        return DaqSource()
-
-    except Exception as error:  # no nidaqmx, or no device
-        logger.warning(f"No DAQ available ({error}); the recorder is simulated.")
-
-        return SimulatedSource()
-
-
 # --------------------------------------------------------------------------- #
 # The recording
 # --------------------------------------------------------------------------- #
@@ -244,6 +264,7 @@ class Recording:
 
         self.h5: None | h5py.File = None
         self.total = 0
+        self.flushed = 0  # samples in the file at its last flush
         self.filt_log: list[tuple[int, float, float]] = []
         self.recording = False
 
@@ -258,7 +279,7 @@ class Recording:
     def start(self) -> None:
         """Open the file (none in a test: the traces show, nothing is kept)."""
         self.filt_log = [(0, self.hp_hz, self.lp_hz)]
-        self.total = 0
+        self.total = self.flushed = 0
         self.zi = None
         self._reset_stream_state()
 
@@ -413,7 +434,10 @@ class Recording:
                 dset.resize(n + k, axis=0)
                 dset[n : n + k] = columns
 
-            self.h5.flush()
+            # On disk every second, not every read: a crash loses at most that
+            if n + k - self.flushed >= FLUSH_EVERY_S * RATE:
+                self.h5.flush()
+                self.flushed = n + k
 
         self.total += k
 

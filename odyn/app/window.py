@@ -12,6 +12,7 @@ text under it, a bottom bar, and the worker thread that owns the database.
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer
@@ -95,10 +96,6 @@ class MainWindow(QMainWindow):
         self.resize(1300, 850)
         self.view = "page"
 
-        # What Remove would remove as written in the bottom bar.
-        # Holds the last thing opened on right bar (None once it is removed).
-        self.selected: None | str = None
-
         # The middle: the pages over the bottom panel
         self.pages = QStackedWidget()
         middle = QSplitter(Qt.Orientation.Vertical)
@@ -130,11 +127,14 @@ class MainWindow(QMainWindow):
         self.qc = QcPane(self.context)
         self.recorder = RecorderPane(self.context, source=recorder_source)
         self.sessions = Sessions(self.context)
+        self.context.live_draft = lambda path: next(
+            (d for d in self.sessions.drafts if d.path == Path(path)), None
+        )
         self.pages.addWidget(self.sessions.session_page)
         self.pages.addWidget(self.sessions.experiment_page)
         self.pages.addWidget(self.sessions.no_session_page)
 
-        # Left: registries and browsing, the recorder at the foot
+        # Left: registries and browsing
         self.left = self._bar("Pages")
         self.row.addWidget(line(vertical=True))
         self.row.addWidget(middle, 1)
@@ -150,16 +150,12 @@ class MainWindow(QMainWindow):
             ("tables", "Tables", self.tables),
             None,
             ("qc", "Quality Control", self.qc),
-            "foot",
-            ("recorder", "Recorder", self.recorder),
         ):
             if entry is None:
                 self.left.addSeparator()
-            elif entry == "foot":
-                self._foot(self.left)
             else:
                 key, title, pane = entry
-                self._page_action(key, title, pane)
+                self._page_action(self.left, key, title, pane)
 
         # Right: the day's sessions (rebuilt as they change), the day's
         # actions at the foot
@@ -170,14 +166,26 @@ class MainWindow(QMainWindow):
 
         self.commands: list[QAction] = []
 
-        for key, tip, action in (
+        for entry in (
             ("add-session", "Add session", self._add_session),
             ("add-experiment", "Add experiment", self.sessions.add_experiment),
+            ("recorder", "Record the selected experiment", self.recorder),
+            None,
             ("undo", "Nothing to undo", self._undo),
             ("remove", "Nothing selected to remove", self._remove),
             ("check-session", "Check session", self.sessions.check),
             ("submit-session", "Submit session", self.sessions.submit),
         ):
+            if entry is None:
+                self.right.addSeparator()
+                continue
+
+            key, tip, action = entry
+
+            if isinstance(action, QWidget):  # a page, like the left bar's
+                self.commands.append(self._page_action(self.right, key, tip, action))
+                continue
+
             command = self._command(self.right, icon(key), tip)
             command.triggered.connect(lambda _=False, a=action: a())
             self.commands.append(command)
@@ -237,7 +245,11 @@ class MainWindow(QMainWindow):
         self.guide = Guide(
             central,
             lambda: [
-                (self.left, list(self.page_actions.values()), {}),
+                (
+                    self.left,
+                    [a for p, a in self.page_actions.items() if p is not self.recorder],
+                    {},
+                ),
                 (
                     self.right,
                     self.commands,
@@ -269,6 +281,20 @@ class MainWindow(QMainWindow):
         self.view = "page"
         self.pages.setCurrentWidget(pane)
         self.page_actions[pane].setChecked(True)
+
+    @property
+    def selected(self) -> None | str:
+        """
+        What Remove would remove, as written in the bottom bar: the last thing
+        opened on the right bar (None once it is removed). Kept in the context,
+        since the recorder records the experiment only when it is this.
+        """
+        return self.context.focus
+
+    @selected.setter
+    def selected(self, value: None | str) -> None:
+        self.context.focus = value
+        self.recorder.follow()
 
     def open_session(self, draft: None | Draft) -> None:
         """Select `draft` and show its session page."""
@@ -353,8 +379,8 @@ class MainWindow(QMainWindow):
 
     def _follow(self) -> None:
         """
-        The selection moved (the recorder picked another experiment, one was
-        removed): an experiment page follows it, or falls back to its session.
+        The selection moved (an experiment was removed, say): an experiment
+        page follows it, or falls back to its session.
         """
         if self.context.draft is None:
             self.selected = None
@@ -475,7 +501,9 @@ class MainWindow(QMainWindow):
 
         return foot
 
-    def _page_action(self, key: str, title: str, pane: QWidget) -> None:
+    def _page_action(
+        self, bar: QToolBar, key: str, title: str, pane: QWidget
+    ) -> QAction:
         self.pages.addWidget(pane)
         action = QAction(icon(key), "", self)
         action.setToolTip(title)
@@ -483,9 +511,11 @@ class MainWindow(QMainWindow):
         action.setCheckable(True)
         action.triggered.connect(lambda: self.show_page(pane))
         self.group.addAction(action)
-        self.left.addAction(action)
-        self._shape(self.left, action)
+        bar.addAction(action)
+        self._shape(bar, action)
         self.page_actions[pane] = action
+
+        return action
 
     def _command(self, bar: QToolBar, symbol: QIcon, tip: str) -> QAction:
         """A plain (not checkable) bar button."""
@@ -543,6 +573,19 @@ class MainWindow(QMainWindow):
 
             self.recorder.close_down()
 
+        if self.recorder.copier.running:
+            answer = QMessageBox.question(
+                self,
+                "Copying",
+                "A recording is still being copied to the share. Closing stops "
+                "the copy (the file stays on this computer, and Submit copies it "
+                "again). Close anyway?",
+            )
+
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+
         logger.removeHandler(self.log_handler)
         self.worker.stop()
         event.accept()
@@ -563,6 +606,7 @@ def open_window(
     put in when it appears (empty until then), so a caller can wait on it.
     """
     app = QApplication.instance() or QApplication([])
+    _set_app_icon(app)
     worker = DatabaseWorker(main_folder, project, user=user, can_create=can_create)
     windows: list[MainWindow] = []
 
@@ -580,3 +624,21 @@ def open_window(
     worker.start()
 
     return app, worker, windows
+
+
+APP_ICON = Path(__file__).parent / "assets" / "odyn.png"
+
+
+def _set_app_icon(app: QApplication) -> None:
+    """The app's own icon on its windows (and, on Windows, its taskbar button)."""
+    if APP_ICON.exists():
+        app.setWindowIcon(QIcon(str(APP_ICON)))
+
+    if sys.platform == "win32":
+        # Otherwise Windows groups the window under python.exe's icon
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("odyn.app")
+        except (AttributeError, OSError):
+            pass

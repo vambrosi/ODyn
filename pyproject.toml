@@ -38,4 +38,5 @@ odyn = ["*.sql"]
     "icons/*.svg",
     "assets/material-symbols/*.ttf",
     "assets/material-symbols/LICENSE.txt",
+    "assets/odyn.png",
 ]
