@@ -20,17 +20,19 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from .context import Context
 from .draft import EXPERIMENT_SETTINGS, Draft, Removals
-from .fields import Field, form_fields
-from .forms import Form, PanelPicker, TimingForm
+from .fields import Field, annotation_fields, form_fields
+from .forms import Form, FormRows, PanelPicker, TimingForm, fit_row
 from .pane_registry import current_vials
-from .style import PAGE_MAX_PX, required_label, text_style
+from .style import COMBO_EXTRA_PX, PAGE_MAX_PX, required_label, text_style
 from .submit import check, submit
 
 TIMING_KEYS = (
@@ -67,13 +69,171 @@ def session_label(draft: Draft, position: int) -> str:
     return f"s{position + 1}" if draft.mouse_id is None else f"m{draft.mouse_id}"
 
 
-class ExperimentForm(QWidget):
-    """One experiment folder of a session: its settings and annotations."""
+# The highest acquisition (TIFF) number a condition can name
+MAX_ACQUISITION = 99999
 
-    def __init__(self, draft: Draft, name: str, fields: list[Field], parent=None):
+
+def _column_widths(choices: list[str]) -> tuple[int, int, int]:
+    """
+    Fixed widths for a condition row's columns, so the header's names sit
+    over them: a number box fits five digits, the dropdown its longest
+    choice, the last column a remove button.
+    """
+    metrics = QLabel().fontMetrics()
+    number = metrics.horizontalAdvance("99999") + COMBO_EXTRA_PX
+    widest = max([metrics.horizontalAdvance(c) for c in choices] or [0])
+    condition = max(widest, metrics.horizontalAdvance("Condition")) + COMBO_EXTRA_PX
+
+    return number, condition, QPushButton("remove").sizeHint().width()
+
+
+def _condition_columns(widgets, widths: tuple[int, int, int]) -> QHBoxLayout:
+    """A condition row's columns (or their header's names), in one layout."""
+    number, condition, last = widths
+    row = QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+
+    for widget, width in zip(widgets, (number, number, condition, last)):
+        widget.setFixedWidth(width)
+        row.addWidget(widget)
+
+    row.addStretch(1)
+
+    return row
+
+
+class ConditionHeader(QWidget):
+    """The names over the condition rows' columns."""
+
+    def __init__(self, choices: list[str], parent=None):
+        super().__init__(parent)
+        names = [QLabel(text) for text in ("Starts at", "Ends at", "Condition")]
+
+        for name in names:
+            name.setStyleSheet(text_style("computed"))
+
+        self.setLayout(_condition_columns([*names, QWidget()], _column_widths(choices)))
+
+
+class ConditionRow(QWidget):
+    """
+    One range of acquisitions, by the number ScanImage ends their TIFF
+    names with (both ends included), and the condition the animal was in.
+    """
+
+    changed = Signal()
+
+    def __init__(self, choices: list[str], parent=None):
+        super().__init__(parent)
+        self.start = QSpinBox()
+        self.end = QSpinBox()
+
+        for box in (self.start, self.end):
+            box.setRange(1, MAX_ACQUISITION)
+            box.valueChanged.connect(lambda _: self.changed.emit())
+
+        self.condition = QComboBox()
+        self.condition.addItems(choices)
+        self.condition.currentTextChanged.connect(lambda _: self.changed.emit())
+        self.remove = QPushButton("remove")
+        widgets = (self.start, self.end, self.condition, self.remove)
+        self.setLayout(_condition_columns(widgets, _column_widths(choices)))
+
+        height = max(w.sizeHint().height() for w in (self.start, self.condition))
+
+        for widget in (self.start, self.end, self.condition):
+            widget.setFixedHeight(height)
+
+        fit_row(widgets, height)
+
+    def set_value(self, value: dict) -> None:
+        for widget in (self.start, self.end, self.condition):
+            widget.blockSignals(True)
+
+        self.start.setValue(int(value.get("start", 1)))
+        self.end.setValue(int(value.get("end", 1)))
+        condition = str(value.get("condition", ""))
+
+        if condition and self.condition.findText(condition) < 0:
+            self.condition.addItem(condition)  # no longer offered: still shown
+
+        self.condition.setCurrentText(condition)
+
+        for widget in (self.start, self.end, self.condition):
+            widget.blockSignals(False)
+
+    def value(self) -> dict:
+        return {
+            "start": self.start.value(),
+            "end": self.end.value(),
+            "condition": self.condition.currentText(),
+        }
+
+
+class ConditionList(FormRows):
+    """
+    An experiment's conditions: which acquisitions were recorded at baseline
+    and which under anesthesia, saved to the draft as they are typed.
+    """
+
+    def __init__(self, form, choices: list[str], saved, on_change):
+        super().__init__(form, "Conditions", "none noted", ConditionHeader(choices))
+        self.choices = choices
+        self.on_change = on_change
+
+        for value in saved:
+            self.add(value, announce=False)
+
+    def add(self, value: None | dict = None, announce: bool = True) -> None:
+        """A row: `value`, or the range after the last one, next condition."""
+        if value is None:
+            last = self.rows[-1].value() if self.rows else None
+            start = 1 if last is None else min(last["end"] + 1, MAX_ACQUISITION)
+            following = (
+                0
+                if last is None or last["condition"] not in self.choices
+                else (self.choices.index(last["condition"]) + 1) % len(self.choices)
+            )
+            value = {"start": start, "end": start, "condition": self.choices[following]}
+
+        row = ConditionRow(self.choices)
+        row.set_value(value)
+        row.changed.connect(self._changed)
+        row.remove.clicked.connect(lambda: self.remove(row))
+        self.insert(row)
+
+        if announce:
+            self._changed()
+
+    def remove(self, row: ConditionRow) -> None:
+        self.take(row)
+        self._changed()
+
+    def values(self) -> list[dict]:
+        return [row.value() for row in self.rows]
+
+    def _changed(self) -> None:
+        self.on_change(self.values())
+
+
+class ExperimentForm(QWidget):
+    """
+    One experiment folder of a session: its settings and annotations, and
+    for a loop its conditions.
+    """
+
+    def __init__(
+        self,
+        draft: Draft,
+        name: str,
+        fields: list[Field],
+        conditions: tuple[str, ...] = (),
+        parent=None,
+    ):
         super().__init__(parent)
         self.draft = draft
         self.name = name
+        self.conditions: None | ConditionList = None
 
         entry = draft.experiment(name) or {}
 
@@ -90,13 +250,29 @@ class ExperimentForm(QWidget):
         )
         self.form.changed.connect(lambda key, value: self._set(**{key: value}))
 
+        left = QVBoxLayout()
+        left.addWidget(self.form)
+
+        # Conditions are per acquisition, which only loops have one of each
+        if entry.get("exp_type", "loop") == "loop" and conditions:
+            self.conditions = ConditionList(
+                self.form.layout(),
+                list(conditions),
+                entry.get("conditions", []),
+                lambda values: self._set(conditions=values or None),
+            )
+            add = QPushButton("Add condition")
+            add.clicked.connect(lambda: self.conditions.add())
+            left.addWidget(add)
+
         self.timing = TimingForm()
         self.timing.set_values(entry)
         self.timing.changed.connect(lambda: self._set(**self.timing.values()))
 
         row = QHBoxLayout()
-        row.addWidget(self.form, 1, Qt.AlignmentFlag.AlignTop)
+        row.addLayout(left, 1)
         row.addWidget(self.timing, 0, Qt.AlignmentFlag.AlignTop)
+        left.addStretch(1)
         layout.addLayout(row)
 
         self.submitted = QLabel()
@@ -325,7 +501,12 @@ class ExperimentPage(QWidget):
             return
 
         self.box.setTitle(f"Experiment {draft.where}/{name}")
-        self.shown = ExperimentForm(draft, name, self.sessions.experiment_fields)
+        self.shown = ExperimentForm(
+            draft,
+            name,
+            self.sessions.experiment_fields,
+            self.sessions.condition_choices,
+        )
         self.box_layout.addWidget(self.shown)
 
 
@@ -357,6 +538,7 @@ class Sessions(QObject):
         self.removals = Removals(context.drafts)
         self.session_fields: list[Field] = []
         self.experiment_fields: list[Field] = []
+        self.condition_choices: tuple[str, ...] = ()
         self.mice: list[int] = []
         self.panels: list[tuple[int, str]] = []
         self.vials = None
@@ -396,9 +578,18 @@ class Sessions(QObject):
             vials = vials.join(db.odors["odor_name"], on="odor_id")
             panels = [(int(i), str(n)) for i, n in db.panels["panel_name"].items()]
 
+            conditions = next(
+                (
+                    f.options
+                    for f in annotation_fields(db, "acquisition")
+                    if f.key == "condition"
+                ),
+                (),
+            )
+
             return (
                 form_fields(db, "session"),
-                form_fields(db, "experiment"),
+                (form_fields(db, "experiment"), conditions),
                 [int(m) for m in db.mice.index],
                 (panels, current_vials(vials)),
             )
@@ -406,7 +597,8 @@ class Sessions(QObject):
         self.context.run(load, self._choices_loaded, "session choices")
 
     def _choices_loaded(self, loaded) -> None:
-        session_fields, experiment_fields, mice, (panels, vials) = loaded
+        session_fields, (experiment_fields, conditions), mice, (panels, vials) = loaded
+        self.condition_choices = tuple(conditions)
         self.session_fields = [
             f for f in session_fields if f.key not in ("mouse_id", "session_date")
         ]

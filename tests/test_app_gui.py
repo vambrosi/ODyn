@@ -912,6 +912,43 @@ def test_session_and_recorder_share_one_selection(window, tmp_path):
     assert window.group.checkedAction() is window.today[(id(draft), None)]
 
 
+def test_experiment_page_notes_conditions_by_acquisition(window):
+    window._add_session()
+    draft = window.sessions.current
+    window.sessions.add_experiment("e1")
+    shown = window.sessions.experiment_page.shown
+    conditions = shown.conditions
+    assert conditions.choices == ["baseline", "ket/xyl"]
+    assert conditions.none.placeholderText() == "none noted"
+
+    # each one follows the last: the next acquisitions, the next condition
+    conditions.add()
+    conditions.add()
+    conditions.rows[1].end.setValue(12)
+    assert draft.experiment("e1")["conditions"] == [
+        {"start": 1, "end": 1, "condition": "baseline"},
+        {"start": 2, "end": 12, "condition": "ket/xyl"},
+    ]
+
+    # rows of the experiment's form, below its fields, under one titled
+    # header naming the columns
+    layout = shown.form.layout()
+    assert layout.labelForField(conditions.header).text() == "Conditions"
+    assert [layout.labelForField(r).text() for r in conditions.rows] == ["", ""]
+    assert conditions.header.isVisibleTo(shown)
+
+    conditions.remove(conditions.rows[0])
+    assert draft.experiment("e1")["conditions"] == [
+        {"start": 2, "end": 12, "condition": "ket/xyl"}
+    ]
+    conditions.remove(conditions.rows[0])
+    assert "conditions" not in draft.experiment("e1")
+
+    # a folder of grabs has no conditions to note
+    window.sessions.add_experiment("grabs", exp_type="grab")
+    assert window.sessions.experiment_page.shown.conditions is None
+
+
 def test_quick_maths_warns_when_imaging_outlasts_the_trial(app):
     from odyn.app.forms import TimingForm
 

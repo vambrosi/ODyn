@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
+    QPushButton,
     QSizePolicy,
     QSpinBox,
     QVBoxLayout,
@@ -215,6 +216,87 @@ class Form(QWidget):
     def problems(self) -> list[str]:
         """What is wrong with what was typed, one line per field."""
         return [p for row in self.rows.values() if (p := row.problem()) is not None]
+
+
+class FormRows:
+    """
+    A list whose entries are rows of a form (a mouse's lines, a mix's
+    components, an experiment's conditions).
+
+    Each entry is a row of `form`, so it is spaced and its label placed like
+    any other field's: `title` labels the first, the rest have an empty
+    label. With no entries, a row saying `none_text` holds the list's place.
+    A `header` (column names, say) goes above the entries, titled instead of
+    the first, and shows only when there are entries.
+    """
+
+    def __init__(
+        self,
+        form: QFormLayout,
+        title: str,
+        none_text: str = "none",
+        header: None | QWidget = None,
+    ):
+        self.form = form
+        self.title = title
+        self.header = header
+        self.rows: list[QWidget] = []
+        self.none = shown_value(kind=None)
+        self.none.setPlaceholderText(none_text)
+        form.addRow(title, self.none)
+
+        if header is not None:
+            form.addRow(QLabel(title), header)
+            form.setRowVisible(header, False)
+
+    def insert(self, row: QWidget) -> None:
+        """A row below the list's last one (or its header, or "none" row)."""
+        last = self.rows[-1] if self.rows else (self.header or self.none)
+        at = self.form.getWidgetPosition(last)[0] + 1
+        self.form.insertRow(at, QLabel(), row)  # (text "" would give no label)
+        self.rows.append(row)
+        self._relabel()
+
+    def take(self, row: QWidget) -> None:
+        """
+        Take a row out. Taken, not removed: it may still be running its own
+        remove button's click, so it is deleted later.
+        """
+        self.rows.remove(row)
+        taken = self.form.takeRow(self.form.getWidgetPosition(row)[0])
+
+        for item in (taken.labelItem, taken.fieldItem):
+            item.widget().hide()
+            item.widget().deleteLater()
+
+        self._relabel()
+
+    def _relabel(self) -> None:
+        """The title on the first row; "none" shown only when there is none."""
+        self.form.setRowVisible(self.none, not self.rows)
+
+        if self.header is not None:
+            self.form.setRowVisible(self.header, bool(self.rows))
+
+        for i, row in enumerate(self.rows):
+            first = i == 0 and self.header is None
+            self.form.labelForField(row).setText(self.title if first else "")
+
+
+def fit_row(widgets, height: int) -> None:
+    """
+    Widgets side by side in a form row, as tall as one field: buttons set to
+    `height`, and every one laid out by its own size (macOS otherwise pads
+    each by the room its native look would need around it).
+    """
+    for widget in widgets:
+        if widget is None:
+            continue
+
+        if isinstance(widget, QPushButton):
+            widget.setFixedHeight(height)
+
+        widget.setAttribute(Qt.WidgetAttribute.WA_LayoutUsesWidgetRect)
 
 
 # --------------------------------------------------------------------------- #

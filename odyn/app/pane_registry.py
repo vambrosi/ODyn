@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 from ..database import WILD_TYPE
 from .context import Context
 from .fields import COLUMN_FIELDS, ODOR_FIELDS
-from .forms import Form, RecipeForm, shown_value
+from .forms import Form, FormRows, RecipeForm, fit_row
 from .style import COMBO_EXTRA_PX, text_style
 from .models import FrameModel, fit_columns
 
@@ -182,15 +182,7 @@ class PickRow(QWidget):
             self._name_picked(self.name.currentText())
 
         row.addWidget(self.remove)
-
-        # As tall as the fields: the button as tall as the dropdowns, and all
-        # laid out by their own size (macOS otherwise pads each by the room
-        # its native look would need around it)
-        self.remove.setFixedHeight(self.name.sizeHint().height())
-
-        for widget in (self.name, self.genotype, self.remove):
-            if widget is not None:
-                widget.setAttribute(Qt.WidgetAttribute.WA_LayoutUsesWidgetRect)
+        fit_row((self.name, self.genotype, self.remove), self.name.sizeHint().height())
 
     def _name_picked(self, name: str) -> None:
         """Wild type has nothing to genotype: its choice is fixed to 'na'."""
@@ -218,13 +210,10 @@ class PickRow(QWidget):
         return self.name.currentText(), self.genotype.currentText()
 
 
-class PickList:
+class PickList(FormRows):
     """
-    The rows of one list: a mouse's lines or viruses, a mix's components.
-
-    Each is a row of `form`, so it is spaced and its label placed like any
-    other field's: `title` labels the first, the rest have an empty label.
-    With no rows, a row saying `none_text` holds the list's place.
+    The rows of one list of registered names: a mouse's lines or viruses, a
+    mix's components (see `FormRows`).
 
     The rows speak for a mouse only once they were loaded for it or edited
     (`speaks_for`): otherwise saving leaves what is stored alone, so typing a
@@ -240,16 +229,11 @@ class PickList:
         title: str,
         none_text: str = "none",
     ):
+        super().__init__(form, title, none_text)
         self.context = context
         self.what = what
         self.genotyped = genotyped
-        self.form = form
-        self.title = title
         self.names: list[str] = []
-        self.rows: list[PickRow] = []
-        self.none = shown_value(kind=None)
-        self.none.setPlaceholderText(none_text)
-        form.addRow(title, self.none)
         self.loaded_for: None | int = None
         self.edited = False
         self.locked = False
@@ -270,34 +254,12 @@ class PickList:
             row.set_value(name, genotype)
 
         row.remove.clicked.connect(lambda: self.remove(row, edited=True))
-
-        # Below the list's last row (or its "none" row)
-        last = self.rows[-1] if self.rows else self.none
-        at = self.form.getWidgetPosition(last)[0] + 1
-        self.form.insertRow(at, QLabel(), row)  # (text "" would give no label)
-        self.rows.append(row)
-        self._relabel()
+        self.insert(row)
         self.edited = self.edited or name is None
 
     def remove(self, row: PickRow, edited: bool = False) -> None:
         self.edited = self.edited or edited
-        self.rows.remove(row)
-
-        # Taken out, not removed: the row is still running its button's click
-        taken = self.form.takeRow(self.form.getWidgetPosition(row)[0])
-
-        for item in (taken.labelItem, taken.fieldItem):
-            item.widget().hide()
-            item.widget().deleteLater()
-
-        self._relabel()
-
-    def _relabel(self) -> None:
-        """The title on the first row; "none" shown only when there is none."""
-        self.form.setRowVisible(self.none, not self.rows)
-
-        for i, row in enumerate(self.rows):
-            self.form.labelForField(row).setText(self.title if i == 0 else "")
+        self.take(row)
 
     def load(self, owner: None | int, entries) -> None:
         """Show what `owner` has: names, or `(name, genotype)` pairs."""

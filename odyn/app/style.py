@@ -31,7 +31,7 @@ ROW_SPACING_PX = 8
 
 # The session and experiment pages stop growing at this width and are
 # centered in what is left
-PAGE_MAX_PX = 800
+PAGE_MAX_PX = 1000
 
 # What a dropdown needs besides its text: the padding on both sides, the
 # drop-down arrow's width, the border, and a little air (see STYLESHEET)

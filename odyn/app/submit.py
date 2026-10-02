@@ -24,6 +24,8 @@ comes back.
 
 from __future__ import annotations
 
+import re
+
 from collections.abc import Container
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -144,6 +146,9 @@ def check(db, draft: Draft) -> list[Problem]:
             problems.append(Problem(where, "No objective set."))
 
         problems += _field_problems(where, experiment_fields, entry)
+        problems += _condition_problems(
+            where, entry, _tiff_numbers(folder / name / RAW_FOLDER)
+        )
 
         if entry.get("submitted_exp_id") is not None:
             continue  # already in the database; the files were checked then
@@ -205,6 +210,89 @@ def _field_problems(where: str, fields, values: dict) -> list[Problem]:
         )
 
     return problems
+
+
+def acquisition_number(path: str | Path) -> None | int:
+    """
+    The number ScanImage ends a TIFF's name with (`..._00003.tif` is 3), which
+    is how the rig counts acquisitions.
+    """
+    match = re.search(r"_(\d+)$", Path(path).stem)
+
+    return None if match is None else int(match.group(1))
+
+
+def _tiff_numbers(raw: Path) -> None | set[int]:
+    """The acquisition numbers in a raw folder, or None while it has none."""
+    numbers = {acquisition_number(p) for p in raw.glob("[!.]?*.tif")} - {None}
+
+    return numbers or None
+
+
+def _condition_problems(where: str, entry: dict, numbers: None | set[int]):
+    """
+    Conditions that cannot be written: an end before its start, ranges that
+    overlap (an acquisition has one condition), and, once the TIFFs are
+    there, numbers that no TIFF has.
+    """
+    conditions = entry.get("conditions") or []
+
+    if not conditions:
+        return []
+
+    if entry.get("exp_type", "loop") != "loop":
+        return [Problem(where, "Conditions are only noted for loop experiments.")]
+
+    problems = []
+    taken: dict[int, str] = {}
+
+    for condition in conditions:
+        start, end = int(condition["start"]), int(condition["end"])
+        span = f"{condition['condition']} {start} to {end}"
+
+        if end < start:
+            problems.append(Problem(where, f"Condition {span} ends before it starts."))
+            continue
+
+        overlap = sorted(set(range(start, end + 1)) & set(taken))
+
+        if overlap:
+            problems.append(
+                Problem(
+                    where,
+                    f"Condition {span} overlaps {taken[overlap[0]]} at "
+                    f"acquisition {overlap[0]}: each acquisition has one condition.",
+                )
+            )
+
+        taken.update({n: span for n in range(start, end + 1)})
+
+        if numbers is not None:
+            missing = sorted(set(range(start, end + 1)) - numbers)
+
+            if missing:
+                problems.append(
+                    Problem(
+                        where,
+                        f"Condition {span} names acquisitions with no TIFF: "
+                        f"{_spans(missing)}.",
+                    )
+                )
+
+    return problems
+
+
+def _spans(numbers: list[int]) -> str:
+    """`[3, 4, 5, 9]` as `'3-5, 9'`."""
+    spans: list[list[int]] = []
+
+    for n in numbers:
+        if spans and n == spans[-1][1] + 1:
+            spans[-1][1] = n
+        else:
+            spans.append([n, n])
+
+    return ", ".join(f"{a}-{b}" if a != b else f"{a}" for a, b in spans)
 
 
 def _folder_problems(
@@ -348,6 +436,8 @@ def _submit(db, draft: Draft, written: Written) -> None:
             )
             written.annotations += len(values)
 
+        written.annotations += _write_conditions(db, draft, name, exp_id, entry)
+
         if draft.vial_ids:
             db.set_experiment_vials(exp_id=exp_id, vial_ids=draft.vial_ids)
 
@@ -396,6 +486,41 @@ def _ingest(db, session_id: int, exp_path: str, entry: dict) -> None | int:
     )
 
     return None if rows.empty else int(rows["exp_id"].iloc[0])
+
+
+def _write_conditions(db, draft: Draft, name: str, exp_id: int, entry: dict) -> int:
+    """
+    Each acquisition in a condition's range gets it as an annotation. Only
+    when the conditions changed since the last submit, so a resubmit does
+    not write them all again. Returns how many were written.
+    """
+    conditions = entry.get("conditions") or []
+
+    if not conditions or conditions == entry.get("conditions_submitted"):
+        return 0
+
+    rows = db.from_query(
+        "SELECT acq_id, raw_path FROM acquisitions WHERE exp_id = ?;", [int(exp_id)]
+    )
+    acq_ids = {
+        acquisition_number(path): int(acq_id)
+        for acq_id, path in zip(rows["acq_id"], rows["raw_path"])
+    }
+    written = 0
+
+    for condition in conditions:
+        for number in range(int(condition["start"]), int(condition["end"]) + 1):
+            if number in acq_ids:  # (check refuses numbers with no TIFF)
+                db.add_annotations(
+                    target_type="acquisition",
+                    target_id=acq_ids[number],
+                    values={"condition": condition["condition"]},
+                )
+                written += 1
+
+    draft.set_experiment(name, conditions_submitted=[dict(c) for c in conditions])
+
+    return written
 
 
 def _annotation_values(db, applies_to: str, values: dict) -> dict:

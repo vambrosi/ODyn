@@ -25,6 +25,10 @@ draft.identify(mouse_id=442)                # once someone picks it
 
 draft.update_session(goal="10x pre/post ket/xyl", mouse_weight_g=25.1)
 draft.set_experiment("e1", exp_type="loop", objective=20, fov_depth_um=-55)
+draft.set_experiment("e1", conditions=[
+    {"start": 3, "end": 40, "condition": "baseline"},     # acquisitions by
+    {"start": 41, "end": 80, "condition": "ket/xyl"},     # their TIFF number
+])
 draft.set_vials([1, 2, 3, 4])
 
 Draft.pending(drafts_folder())   # everything not yet submitted or removed
@@ -77,6 +81,8 @@ EXPERIMENT_SETTINGS = (
     "submitted_exp_id",
     "removed",
     "recordings",
+    "conditions",
+    "conditions_submitted",
 )
 
 # What an experiment folder is called for each kind of recording

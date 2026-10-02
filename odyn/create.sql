@@ -881,6 +881,13 @@ INSERT OR IGNORE INTO annotation_keys
     , 'user', FALSE
     ),
 
+    ( 'acquisition'
+    , 'condition', 'Condition'
+    , 'enum', '["baseline", "ket/xyl"]', NULL
+    , 'Before or after anesthesia.'
+    , 'user', FALSE
+    ),
+
 -- group
     ( 'group'
     , 'name', 'Name'

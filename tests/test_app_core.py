@@ -280,6 +280,57 @@ def test_a_second_submit_does_not_ingest_twice(share):
     assert db.latest_calls("add_experiment").shape[0] == 1
 
 
+def test_conditions_are_checked_and_written_per_acquisition(share):
+    db, draft = share  # e1 has three TIFFs, numbered 1 to 3
+
+    def messages(conditions):
+        draft.set_experiment("e1", conditions=conditions)
+        return [str(p) for p in check(db, draft) if "Condition" in str(p)]
+
+    assert messages([{"start": 2, "end": 1, "condition": "baseline"}]) == [
+        "e1: Condition baseline 2 to 1 ends before it starts."
+    ]
+    assert messages(
+        [
+            {"start": 1, "end": 2, "condition": "baseline"},
+            {"start": 2, "end": 3, "condition": "ket/xyl"},
+        ]
+    ) == [
+        "e1: Condition ket/xyl 2 to 3 overlaps baseline 1 to 2 at acquisition 2: "
+        "each acquisition has one condition."
+    ]
+    assert messages([{"start": 2, "end": 5, "condition": "ket/xyl"}]) == [
+        "e1: Condition ket/xyl 2 to 5 names acquisitions with no TIFF: 4-5."
+    ]
+
+    draft.set_experiment(
+        "e1",
+        conditions=[
+            {"start": 1, "end": 1, "condition": "baseline"},
+            {"start": 2, "end": 3, "condition": "ket/xyl"},
+        ],
+    )
+    result = submit(db, draft)
+    assert result.submitted, result.error
+
+    acquisitions = db.acquisitions.sort_values("acq_start")
+    conditions = db.annotations_for("acquisition")["condition"]
+    assert [conditions[a] for a in acquisitions.index] == [
+        "baseline",
+        "ket/xyl",
+        "ket/xyl",
+    ]
+
+    # a resubmit with the same conditions does not write them again
+    def written():
+        query = "SELECT COUNT(*) AS n FROM annotations WHERE target_type = ?;"
+        return int(db.from_query(query, ["acquisition"])["n"].iloc[0])
+
+    assert written() == 3
+    submit(db, draft, force=True)
+    assert written() == 3
+
+
 def test_submit_copies_a_recording_kept_on_this_computer(share, tmp_path):
     db, draft = share
 
