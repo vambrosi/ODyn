@@ -223,6 +223,44 @@ def test_mice_pane_loads_a_stored_mouse_and_asks_before_overwriting(
     assert mice.form.values() == {"mouse_id": 7, "sex": "M"}
 
 
+def test_registry_forms_hide_and_come_back(window):
+    from odyn.app.pane_registry import TableAndForm
+    from odyn.app.style import FORM_PX
+
+    window.show_page(window.mice)
+    split = window.mice.split
+    QApplication.processEvents()
+    assert split.is_open() and split.form.width() >= FORM_PX
+
+    split.toggle.click()  # the table takes the whole width
+    QApplication.processEvents()
+    assert not split.is_open()
+    assert split.table.width() > split.width() - 3 * split.toggle.width()
+
+    # dragged wider, the width is kept for when it opens again
+    split.toggle.click()
+    total = sum(split.splitter.sizes())
+    split.splitter.setSizes([total - FORM_PX - 80, FORM_PX + 80])
+    split._moved()
+    assert TableAndForm.form_px == FORM_PX + 80
+
+    # and showing the page opens it, whatever it was left as
+    split.set_open(False)
+    window.show_page(window.odors)
+    window.show_page(window.mice)
+    QApplication.processEvents()
+    assert split.is_open() and split.splitter.sizes()[1] == FORM_PX + 80
+
+    # the other registry pages are built the same way, and share the width
+    for page in (window.odors, window.panels):
+        window.show_page(page)
+        QApplication.processEvents()
+        assert page.split.is_open()
+        assert page.split.splitter.sizes()[1] == FORM_PX + 80
+
+    TableAndForm.form_px = FORM_PX
+
+
 def test_mice_pane_lists_lines_and_viruses_as_rows(window, tmp_path, monkeypatch):
     # (the lines and viruses are seeded when the database is made)
     mice = window.mice

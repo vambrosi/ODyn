@@ -25,6 +25,10 @@ STATUS_INSET_PX = 14
 BAR_ICON_PX = 28
 BAR_MARGINS = (6, 8, 6, 14)
 
+# How wide a registry page's form (Mice, Odors, Panels) opens, and the least
+# it can be dragged to: wide enough for each page's widest row
+FORM_PX = 520
+
 # The gap between a form's rows, set rather than left to the platform's style
 # so rows built from several widgets (a mouse's lines) are the same size
 ROW_SPACING_PX = 8
@@ -243,6 +247,13 @@ QSplitter#middle::handle:vertical {{
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 {c['line']}, stop:0.2 {c['line']},
         stop:0.21 palette(base), stop:1 palette(base));
+}}
+QSplitter#tableAndForm::handle:horizontal {{
+    /* one line in the middle of a 5 px handle, so it is easy to grab */
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 palette(window), stop:0.4 palette(window),
+        stop:0.41 {c['line']}, stop:0.6 {c['line']},
+        stop:0.61 palette(window), stop:1 palette(window));
 }}
 QToolBar {{
     background: palette(window);

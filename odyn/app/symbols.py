@@ -97,6 +97,8 @@ GLYPHS = {
     "recorder": ("radio_button_checked", "", "r"),
     "panel-open": ("keyboard_arrow_up", "", "^"),
     "panel-close": ("keyboard_arrow_down", "", "v"),
+    "form-open": ("right_panel_open", "", "<"),
+    "form-close": ("right_panel_close", "", ">"),
 }
 
 

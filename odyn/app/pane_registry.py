@@ -8,7 +8,7 @@ is a fact on its own and does not wait for the end of the day.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QTableView,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -29,8 +30,10 @@ from ..database import WILD_TYPE
 from .context import Context
 from .fields import COLUMN_FIELDS, ODOR_FIELDS
 from .forms import Form, FormRows, RecipeForm, fit_row
-from .style import COMBO_EXTRA_PX, text_style
+from .style import COMBO_EXTRA_PX, FORM_PX, text_style
+from .symbols import icon
 from .models import FrameModel, fit_columns
+from .panel import UNLIMITED_PX
 
 
 def _table() -> QTableView:
@@ -43,6 +46,102 @@ def _table() -> QTableView:
     fit_columns(view)
 
     return view
+
+
+class TableAndForm(QWidget):
+    """
+    A registry page: its table on the left, its form on the right.
+
+    Like the bottom panel: the arrow at the form's edge hides the form down
+    to that edge (the table takes the rest) and brings it back, and dragging
+    the line between table and form widens the form. Every page shares one
+    form width, so switching pages does not move it, and the form opens again
+    whenever its page is shown, so it is never forgotten behind the arrow.
+    """
+
+    # Shared by every page; dragging any page's form changes it for all
+    form_px = FORM_PX
+
+    def __init__(self, table: QWidget, form: QWidget, parent=None):
+        super().__init__(parent)
+        self.table = table
+
+        self.toggle = QToolButton()
+        self.toggle.setObjectName("panelToggle")
+        self.toggle.setIconSize(QSize(20, 20))
+        self.toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.toggle.clicked.connect(lambda: self.set_open(not self.is_open()))
+
+        strip = QVBoxLayout()
+        strip.setContentsMargins(2, 0, 2, 0)
+        strip.addWidget(self.toggle)
+        strip.addStretch(1)
+
+        # The form scrolls rather than squeezing when the window is short
+        self.form = QScrollArea()
+        self.form.setWidget(form)
+        self.form.setWidgetResizable(True)
+        self.form.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.form.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.form.setMinimumWidth(FORM_PX)
+
+        # The arrow's strip stays when the form is hidden
+        self.side = QWidget()
+        side_row = QHBoxLayout(self.side)
+        side_row.setContentsMargins(0, 0, 0, 0)
+        side_row.setSpacing(0)
+        side_row.addLayout(strip)
+        side_row.addWidget(self.form, 1)
+
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setObjectName("tableAndForm")
+        self.splitter.setHandleWidth(5)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.addWidget(table)
+        self.splitter.addWidget(self.side)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        self.splitter.splitterMoved.connect(self._moved)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.splitter)
+        self.set_open(True)
+
+    def is_open(self) -> bool:
+        return not self.form.isHidden()
+
+    def set_open(self, opened: bool) -> None:
+        self.form.setHidden(not opened)
+        self.toggle.setIcon(icon("form-close" if opened else "form-open"))
+        tip = "Hide the form" if opened else "Show the form"
+        self.toggle.setToolTip(tip)
+        self.toggle.setStatusTip(tip)
+
+        # Closed, the side is only as wide as its arrow, and cannot be dragged
+        strip_px = self.side.minimumSizeHint().width()
+        self.side.setMaximumWidth(UNLIMITED_PX if opened else strip_px)
+
+        if opened:
+            self._apply_width()
+        elif total := sum(self.splitter.sizes()):
+            self.splitter.setSizes([total - strip_px, strip_px])
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt's name)
+        self.set_open(True)
+        super().showEvent(event)
+
+    def _apply_width(self) -> None:
+        total = sum(self.splitter.sizes())
+
+        if total:
+            least = self.side.minimumSizeHint().width()
+            own = max(min(TableAndForm.form_px, total - 100), least)
+            self.splitter.setSizes([total - own, own])
+
+    def _moved(self, *_) -> None:
+        if self.is_open():
+            TableAndForm.form_px = self.splitter.sizes()[1]
 
 
 def _model(view: QTableView) -> FrameModel:
@@ -331,11 +430,10 @@ class MicePane(QWidget):
         self.carried: dict[int, dict[str, str]] = {}
         self.injected: dict[int, list[str]] = {}
 
-        layout = QHBoxLayout(self)
         self.table = _table()
-        layout.addWidget(self.table, 3)
-
-        side = QVBoxLayout()
+        holder = QWidget()
+        side = QVBoxLayout(holder)
+        side.setContentsMargins(0, 0, 0, 0)
         box = QGroupBox("Register or update a mouse")
         box_layout = QVBoxLayout(box)
         self.form = Form(list(COLUMN_FIELDS["mouse"]))
@@ -357,7 +455,8 @@ class MicePane(QWidget):
 
         side.addWidget(box)
         side.addStretch(1)
-        layout.addLayout(side, 2)
+        self.split = TableAndForm(self.table, holder)
+        QHBoxLayout(self).addWidget(self.split)
 
         self.table.clicked.connect(self._pick)
         self.form.changed.connect(self._typed)
@@ -492,11 +591,10 @@ class OdorsPane(QWidget):
         self.made_of: dict[int, list[int]] = {}
         self.chemicals: dict[str, int] = {}  # "4 - ethyl butyrate": 4
 
-        layout = QHBoxLayout(self)
         self.table = _table()
-        layout.addWidget(self.table, 3)
-
-        side = QVBoxLayout()
+        holder = QWidget()
+        side = QVBoxLayout(holder)
+        side.setContentsMargins(0, 0, 0, 0)
         box = QGroupBox("Register or update an odor")
         box_layout = QVBoxLayout(box)
         self.form = Form(list(ODOR_FIELDS))
@@ -521,7 +619,8 @@ class OdorsPane(QWidget):
 
         side.addWidget(box)
         side.addStretch(1)
-        layout.addLayout(side, 2)
+        self.split = TableAndForm(self.table, holder)
+        QHBoxLayout(self).addWidget(self.split)
 
         self.table.clicked.connect(self._pick)
         self.form.changed.connect(self._typed)
@@ -706,12 +805,9 @@ class PanelsPane(QWidget):
         self._vial_odors = None
         self._all_vials = None
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout = QVBoxLayout(self)
-        layout.addWidget(splitter)
-
         left = QWidget()
         left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(
             QLabel(
                 "Vials in the olfactometer: the latest made for each panel and position"
@@ -728,10 +824,10 @@ class PanelsPane(QWidget):
         new_panel.addWidget(self.panel_name, 1)
         new_panel.addWidget(add_panel)
         left_layout.addLayout(new_panel)
-        splitter.addWidget(left)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
 
         head = QFormLayout()
         self.panel = QComboBox()
@@ -762,10 +858,8 @@ class PanelsPane(QWidget):
         buttons.addWidget(save)
         right_layout.addLayout(buttons)
 
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([800, 400])
+        self.split = TableAndForm(left, right)
+        QHBoxLayout(self).addWidget(self.split)
 
         self.forms: list[RecipeForm] = []
 
