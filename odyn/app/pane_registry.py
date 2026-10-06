@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -28,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from ..database import WILD_TYPE
 from .context import Context
-from .fields import COLUMN_FIELDS, ODOR_FIELDS
+from .fields import COLUMN_FIELDS, ODOR_FIELDS, PANEL_FIELDS
 from .forms import Form, FormRows, RecipeForm, fit_row
 from .style import COMBO_EXTRA_PX, FORM_PX, text_style
 from .symbols import icon
@@ -400,14 +399,14 @@ def _stored(frame, key: int) -> dict:
         for column, value in frame.loc[key].items()
     }
 
-def _watch_id(form: Form, key: str, what: str, stored) -> None:
+
+def _watch_id(form: Form, key: str, note: str, stored) -> None:
     """
-    Say "already exists" under the ID while it is typed, so a stored entry
-    is noticed before the field is left (which is when it loads: loading on
-    every keystroke would load 4 on the way to typing 45).
+    Show `note` ("already exists") under the ID while it is typed, so a
+    stored entry is noticed before the field is left (which is when it loads:
+    loading on every keystroke would load 4 on the way to typing 45).
     """
     row = form.rows[key]
-    note = _exists_note(what)
 
     def typed(text: str) -> None:
         try:
@@ -483,7 +482,7 @@ class MicePane(QWidget):
 
         self.table.clicked.connect(self._pick)
         self.form.changed.connect(self._typed)
-        _watch_id(self.form, "mouse_id", "Mouse", self.stored)
+        _watch_id(self.form, "mouse_id", _exists_note("Mouse"), self.stored)
         context.changed.connect(self.reload)
         self.reload()
 
@@ -656,7 +655,7 @@ class OdorsPane(QWidget):
 
         self.table.clicked.connect(self._pick)
         self.form.changed.connect(self._typed)
-        _watch_id(self.form, "odor_id", "Odor", self.stored)
+        _watch_id(self.form, "odor_id", _exists_note("Odor"), self.stored)
         context.changed.connect(self.reload)
         self.reload()
 
@@ -832,8 +831,20 @@ def current_vials(vials):
     return latest.set_index("vial_id")
 
 
+PANEL_NOTE = "Panel already exists, saving adds a new batch of its vials."
+
+
 class PanelsPane(QWidget):
-    """Panels and their vials, with the recipe calculator for new ones."""
+    """
+    The odor panels: the vials in the olfactometer now, and a form to add a
+    panel or record a new batch of its vials.
+
+    Like the Mice and Odors pages: a stored panel's name (or a click on one
+    of its vials) loads it. Its positions and odors never change, so they are
+    shown locked, one box per vial, prefilled with the last recipe and
+    checked; unchecking a box leaves that vial out of the batch (it was not
+    remade). A new name sets up a new panel, whose vials are added freely.
+    """
 
     def __init__(self, context: Context, parent=None):
         super().__init__(parent)
@@ -842,70 +853,44 @@ class PanelsPane(QWidget):
         self.chemicals: dict[int, tuple[str, None | float]] = {}
         self.made_of: dict[int, list[int]] = {}
         self._panels = None
+        self._positions = None
+        self._vials = None
         self._vial_odors = None
-        self._all_vials = None
+        self.added: None | str = None  # loaded once the table has it
+        self.cards: list[RecipeForm] = []
 
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(
-            QLabel(
-                "Vials in the olfactometer: the latest made for each panel and position"
+        self.table = _table()
+        holder = QWidget()
+        side = QVBoxLayout(holder)
+        side.setContentsMargins(0, 0, 0, 0)
+        box = QGroupBox("Add a panel or a batch of its vials")
+        box_layout = QVBoxLayout(box)
+        self.form = Form(list(PANEL_FIELDS))
+        box_layout.addWidget(self.form)
+
+        self.vials_title = QLabel("Vials")
+        self.vials_title.setStyleSheet("font-weight: bold;")
+        box_layout.addWidget(self.vials_title)
+        self.cards_box = QVBoxLayout()
+        box_layout.addLayout(self.cards_box)
+
+        buttons, (self.add_vial, *_) = _buttons(
+            (
+                ("Add vial", lambda: self.add_card()),
+                ("Clear", self.clear),
+                ("Save panel", self._save),
             )
         )
-        self.table = _table()
-        left_layout.addWidget(self.table, 1)
+        box_layout.addLayout(buttons)
 
-        new_panel = QHBoxLayout()
-        self.panel_name = QLineEdit()
-        self.panel_name.setPlaceholderText("new panel name, e.g. print_v3")
-        add_panel = QPushButton("Add panel")
-        add_panel.clicked.connect(self._add_panel)
-        new_panel.addWidget(self.panel_name, 1)
-        new_panel.addWidget(add_panel)
-        left_layout.addLayout(new_panel)
-
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-
-        head = QFormLayout()
-        self.panel = QComboBox()
-        self.made_on = QLineEdit()
-        self.made_on.setPlaceholderText("YYYY-MM-DD, blank for today")
-        head.addRow("Panel", self.panel)
-        head.addRow("Made on", self.made_on)
-        right_layout.addLayout(head)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        self.recipes_widget = QWidget()
-        self.recipes = QVBoxLayout(self.recipes_widget)
-        self.recipes.addStretch(1)
-        scroll.setWidget(self.recipes_widget)
-        right_layout.addWidget(scroll, 1)
-
-        buttons = QHBoxLayout()
-        add_vial = QPushButton("Add a vial to the list")
-        add_vial.clicked.connect(self._add_recipe)
-        copy_last = QPushButton("Copy the panel's last rack")
-        copy_last.clicked.connect(self._copy_last)
-        clear = QPushButton("Clear")
-        clear.clicked.connect(self.clear)
-        save = QPushButton("Save these vials")
-        save.clicked.connect(self._save)
-        buttons.addWidget(add_vial)
-        buttons.addWidget(copy_last)
-        buttons.addStretch(1)
-        buttons.addWidget(clear)
-        buttons.addWidget(save)
-        right_layout.addLayout(buttons)
-
-        self.split = TableAndForm(left, right)
+        side.addWidget(box)
+        side.addStretch(1)
+        self.split = TableAndForm(self.table, holder)
         QHBoxLayout(self).addWidget(self.split)
 
-        self.forms: list[RecipeForm] = []
-
+        self.table.clicked.connect(self._pick)
+        self.form.changed.connect(self._typed)
+        _watch_id(self.form, "panel_name", PANEL_NOTE, self.stored)
         context.changed.connect(self.reload)
         self.reload()
 
@@ -942,121 +927,215 @@ class PanelsPane(QWidget):
                 made_of.setdefault(int(odor_id), []).append(int(component_id))
 
             return (
-                current_vials(vials)[columns],
-                db.panels,
+                current_vials(vials)[columns] if not vials.empty else vials,
+                (db.panels, db.panel_positions, db.vials, db.vial_odors),
                 odors,
                 (chemicals, made_of),
-                db.vial_odors,
-                db.vials,
             )
 
-        self.context.run(load, self._show, "vials")
+        self.context.run(load, self._loaded, "vials")
 
-    def _show(self, loaded) -> None:
-        vials, panels, odors, (chemicals, made_of), vial_odors, all_vials = loaded
-        _model(self.table).set_frame(vials)
+    def _loaded(self, loaded) -> None:
+        shown, stored, odors, (chemicals, made_of) = loaded
+        self._panels, self._positions, self._vials, self._vial_odors = stored
         self.odors, self.chemicals, self.made_of = odors, chemicals, made_of
-        self._panels, self._vial_odors, self._all_vials = panels, vial_odors, all_vials
+        _model(self.table).set_frame(shown)
 
-        current = self.panel.currentText()
-        self.panel.blockSignals(True)
-        self.panel.clear()
-        self.panel.addItems([str(name) for name in panels["panel_name"]])
-        if current:
-            self.panel.setCurrentText(current)
-        self.panel.blockSignals(False)
+        if self.added is not None and self.stored(self.added):
+            self.load(self.added)
+            self.added = None
 
-    def _add_panel(self) -> None:
-        name = self.panel_name.text().strip()
+    # ----------------------------------------------------------------- #
+    # Loading a panel
+    # ----------------------------------------------------------------- #
 
-        if not name:
+    def stored(self, name) -> bool:
+        return self._panel_id(name) is not None
+
+    def _panel_id(self, name) -> None | int:
+        if self._panels is None or name is None:
+            return None
+
+        found = self._panels.index[self._panels["panel_name"] == str(name).strip()]
+
+        return int(found[0]) if len(found) else None
+
+    @property
+    def locked(self) -> bool:
+        return not self.add_vial.isEnabled()
+
+    def _typed(self, key: str, value) -> None:
+        """A stored panel's name loads it; a new one unlocks the form."""
+        if key != "panel_name":
             return
 
-        self.context.run(
-            lambda db: db.add_panel(panel_name=name),
-            lambda _: self.panel_name.clear(),
-            "add_panel",
-            writes=True,
+        if self.stored(value):
+            self.load(value)
+
+        elif self.locked:
+            # The vials shown belong to another panel
+            self._clear_cards()
+            self._lock(False)
+
+    def _pick(self, index) -> None:
+        self.load(str(_model(self.table).row_values(index.row())["panel_name"]))
+
+    def load(self, name: str) -> None:
+        """
+        Fill the form with a stored panel: one locked, checked box per
+        position, holding the last recipe made for it.
+        """
+        panel_id = self._panel_id(name)
+        description = self._panels.loc[panel_id, "description"]
+        self.form.set_values(
+            {
+                "panel_name": name,
+                "description": None if description != description else description,
+            }
         )
+        self._clear_cards()
+        positions = self._positions[self._positions.index == panel_id]
+        mine = self._vials[self._vials["panel_id"] == panel_id]
 
-    def _add_recipe(self) -> RecipeForm:
-        form = RecipeForm(self.odors, self.chemicals, self.made_of)
-        form.position.setValue(len(self.forms) + 1)
-        self.forms.append(form)
-        self.recipes.insertWidget(self.recipes.count() - 1, form)
+        for _, row in positions.sort_values("vial_position").iterrows():
+            position = int(row["vial_position"])
+            card = self.add_card()
+            card.fix(position, int(row["odor_id"]))
+            made = mine[mine["vial_position"] == position]
 
-        return form
+            if made.empty:
+                continue  # nothing made for it yet: the defaults stand
 
-    def _copy_last(self) -> None:
-        """Fill the list with the panel's most recent rack, ready to re-date."""
-        panel = self.panel.currentText()
-        panel_ids = self._panels.index[self._panels["panel_name"] == panel]
+            # The newest vial in the position is the one made last
+            vial_id = int(made.index.max())
+            targets = {}
 
-        if not len(panel_ids) or not len(self._all_vials):
-            return
-
-        mine = self._all_vials[self._all_vials["panel_id"] == panel_ids[0]]
-
-        # The newest vial per position: rows are inserted in order, so the
-        # highest id in a position is the last one made
-        latest = (
-            mine.reset_index()
-            .sort_values("vial_id")
-            .drop_duplicates("vial_position", keep="last")
-        )
-
-        self._clear_forms()
-
-        for _, row in latest.iterrows():
-            form = self._add_recipe()
-            form.position.setValue(int(row["vial_position"]))
-            form.delivered.setCurrentIndex(
-                max(form.delivered.findData(int(row["odor_id"])), 0)
-            )
-            form.vial_sccm.setValue(float(row["vial_sccm"]))
-            form.total_sccm.setValue(float(row["total_sccm"]))
-            form.total_volume.setValue(float(row["total_volume_ml"]))
-
-            if row["vial_id"] not in self._vial_odors.index:
-                continue
-
-            pipetted = self._vial_odors.loc[[row["vial_id"]]]
-            form.set_targets(
-                {
+            if vial_id in self._vial_odors.index:
+                pipetted = self._vial_odors.loc[[vial_id]]
+                targets = {
                     int(c["odor_id"]): float(c["target_ppm"])
                     for _, c in pipetted.iterrows()
                 }
-            )
+
+            card.set_recipe(made.loc[vial_id], targets)
+
+        self._lock(True)
+        self.form.rows["panel_name"].show_note(PANEL_NOTE, "warning")
+
+    def _lock(self, locked: bool) -> None:
+        """A stored panel's description and set of vials are its own."""
+        description = self.form.rows["description"].editor
+        description.setEnabled(not locked)
+        description.setStyleSheet(text_style("computed") if locked else "")
+        self.add_vial.setEnabled(not locked)
+
+    # ----------------------------------------------------------------- #
+    # The vials
+    # ----------------------------------------------------------------- #
+
+    def add_card(self) -> RecipeForm:
+        """A vial box, in the next free position."""
+        card = RecipeForm(self.odors, self.chemicals, self.made_of)
+        taken = [c.position.value() for c in self.cards]
+        card.position.setValue(max(taken, default=0) + 1)
+        card.remove.clicked.connect(lambda: self._remove_card(card))
+        self.cards.append(card)
+        self.cards_box.addWidget(card)
+
+        return card
+
+    def _remove_card(self, card: RecipeForm) -> None:
+        self.cards.remove(card)
+        card.hide()
+        card.deleteLater()
+
+    def _clear_cards(self) -> None:
+        for card in list(self.cards):
+            self._remove_card(card)
 
     def clear(self) -> None:
-        """Empty the list of vials and the date, for another batch."""
-        self._clear_forms()
-        self.made_on.clear()
+        """Empty the form and unlock it, for a new panel."""
+        self.form.clear()
+        self._clear_cards()
+        self._lock(False)
+        self.table.clearSelection()
 
-    def _clear_forms(self) -> None:
-        for form in self.forms:
-            form.setParent(None)
-            form.deleteLater()
-
-        self.forms = []
+    # ----------------------------------------------------------------- #
+    # Saving
+    # ----------------------------------------------------------------- #
 
     def _save(self) -> None:
-        panel = self.panel.currentText()
+        self.form.commit()
 
-        if not panel:
-            self.context.report("Vials", "Pick a panel, or add one first.")
+        if problems := self.form.problems():
+            self.context.report("Panel", " ".join(problems))
             return
 
-        if not self.forms:
-            self.context.report("Vials", "Nothing to save: add a vial to the list.")
+        values = self.form.values()
+        name = values.get("panel_name")
+        made_on = values.get("made_on")
+
+        if not name:
+            self.context.report("Panel", "A panel needs a name.")
             return
 
-        vials = [form.vial() for form in self.forms]
-        made_on = self.made_on.text().strip() or None
+        if not self.stored(name):
+            self._save_new(name, values.get("description"), made_on)
+            return
+
+        if not self.locked:
+            # Typed and saved at once: the panel was never loaded
+            self.context.report(
+                "Panel",
+                f"{name} already exists: pick it (or leave the name field) to "
+                "load its vials, then save the batch.",
+            )
+            return
+
+        batch = [card.vial() for card in self.cards if card.included]
+
+        if not batch:
+            self.context.report("Panel", "Check at least one vial to remake.")
+            return
+
+        day = made_on or "today"
+
+        if not self.context.confirm(
+            "Panel",
+            f"This saves a new batch for {name}: {len(batch)} of its "
+            f"{len(self.cards)} vials, made on {day}.",
+            "Save batch",
+        ):
+            return
 
         self.context.run(
-            lambda db: db.add_vials(panel_name=panel, vials=vials, made_on=made_on),
-            lambda _: self._clear_forms(),
+            lambda db: db.add_vials(panel_name=name, vials=batch, made_on=made_on),
+            lambda _: setattr(self, "added", name),
             "add_vials",
             writes=True,
+        )
+
+    def _save_new(self, name: str, description, made_on) -> None:
+        """A new panel: its positions, then its first batch of vials."""
+        vials = [card.vial() for card in self.cards]
+        positions = [v["vial_position"] for v in vials]
+
+        if not vials:
+            self.context.report("Panel", "Add the panel's vials first.")
+            return
+
+        if len(set(positions)) < len(positions):
+            self.context.report("Panel", "Two vials are in the same position.")
+            return
+
+        def add(db):
+            db.add_panel(
+                panel_name=name,
+                positions={v["vial_position"]: v["odor_id"] for v in vials},
+                description=description,
+            )
+            db.add_vials(panel_name=name, vials=vials, made_on=made_on)
+
+        self.context.run(
+            add, lambda _: setattr(self, "added", name), "add_panel", writes=True
         )

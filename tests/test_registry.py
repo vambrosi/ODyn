@@ -211,6 +211,9 @@ def test_a_mix_is_its_components(db):
 # Panels and vials
 # --------------------------------------------------------------------------- #
 
+# What the test panels hold: position -> odor
+POSITIONS = {1: 1, 3: 0, 4: 17}
+
 RACK = [
     {
         "vial_position": 1,
@@ -245,8 +248,35 @@ RACK = [
 ]
 
 
+def test_a_panel_fixes_which_odor_each_position_holds(db):
+    db.add_panel(panel_name="print_v3", positions=POSITIONS)
+    positions = db.panel_positions.loc[[1]].set_index("vial_position")["odor_id"]
+    assert positions.to_dict() == POSITIONS
+
+    # a vial's odor comes from its position, and can only be that one
+    ids = db.add_vials(
+        panel_name="print_v3",
+        vials=[{k: v for k, v in RACK[1].items() if k != "odor_id"}],
+    )
+    assert db.vials.loc[ids[0], "odor_id"] == 0
+
+    with pytest.raises(ValueError, match="holds odor 1, not 2"):
+        db.add_vials(panel_name="print_v3", vials=[{**RACK[0], "odor_id": 2}])
+
+    with pytest.raises(ValueError, match="no position 2"):
+        db.add_vials(panel_name="print_v3", vials=[{**RACK[0], "vial_position": 2}])
+
+    with pytest.raises(ValueError, match="same position"):
+        db.add_vials(panel_name="print_v3", vials=[RACK[0], RACK[0]])
+
+    with pytest.raises(ValueError, match="No odors with ids"):
+        db.add_panel(panel_name="ghost", positions={1: 999})
+
+    assert len(db.vials) == 1 and "ghost" not in set(db.panels["panel_name"])
+
+
 def test_vials_record_the_rack_as_made(db):
-    db.add_panel(panel_name="print_v3", description="16 odors")
+    db.add_panel(panel_name="print_v3", positions=POSITIONS, description="16 odors")
     ids = db.add_vials(panel_name="print_v3", vials=RACK, made_on="2026-07-06")
 
     vials = db.vials.loc[ids]
@@ -285,12 +315,12 @@ def test_vials_record_the_rack_as_made(db):
             {**RACK[2], "components": [{"odor_id": 18, "target_ppm": 1}]},
             "not a single chemical",
         ),
-        ({**RACK[0], "odor_id": 999}, "No odor"),
+        ({**RACK[0], "odor_id": 999}, "holds odor 1, not 999"),
         ({"vial_position": 1, "odor_id": 1}, "A vial needs"),
     ],
 )
 def test_a_recipe_that_makes_no_sense_is_refused(db, vial, message):
-    db.add_panel(panel_name="p")
+    db.add_panel(panel_name="p", positions=POSITIONS)
 
     with pytest.raises(ValueError, match=message):
         db.add_vials(panel_name="p", vials=[vial])
@@ -304,8 +334,8 @@ def test_vials_need_a_panel(db):
 
 
 def test_an_experiment_runs_one_rack(db, tmp_path):
-    db.add_panel(panel_name="a")
-    db.add_panel(panel_name="b")
+    db.add_panel(panel_name="a", positions=POSITIONS)
+    db.add_panel(panel_name="b", positions=POSITIONS)
     rack_a = db.add_vials(panel_name="a", vials=RACK)
     rack_b = db.add_vials(panel_name="b", vials=RACK[:1])
     remade = db.add_vials(panel_name="a", vials=RACK[:1])

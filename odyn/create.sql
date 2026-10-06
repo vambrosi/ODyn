@@ -324,7 +324,9 @@ CREATE TABLE IF NOT EXISTS odor_components
     , FOREIGN KEY (component_id) REFERENCES odors(odor_id)
     ) STRICT;
 
--- Panels are named set of vials (as displayed in the olfactometer)
+-- Panels are named sets of vials (as displayed in the olfactometer). What a
+-- panel is, which odor sits in which position, is fixed in `panel_positions`
+-- when it is added; a different set of odors or positions is a new panel.
 CREATE TABLE IF NOT EXISTS panels
     ( panel_id          INTEGER PRIMARY KEY
     , panel_name        TEXT NOT NULL UNIQUE
@@ -332,8 +334,21 @@ CREATE TABLE IF NOT EXISTS panels
     , added_to_db_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     ) STRICT;
 
+-- The odor each position of a panel holds, one row per position.
+CREATE TABLE IF NOT EXISTS panel_positions
+    ( panel_id          INTEGER NOT NULL
+    , vial_position     INTEGER NOT NULL CHECK(vial_position > 0)
+    , odor_id           INTEGER NOT NULL
+
+    , PRIMARY KEY (panel_id, vial_position)
+    , FOREIGN KEY (panel_id) REFERENCES panels(panel_id)
+    , FOREIGN KEY (odor_id)  REFERENCES odors(odor_id)
+    ) STRICT;
+
 -- Vials are literal physical vials together with their odor delivery
--- configurations. Remaking them with the same properties inserts a new row.
+-- configurations, each made for one position of a panel (which says what odor
+-- it holds). Remaking a vial, with the same recipe or a changed one, inserts a
+-- new row; a batch can remake only some of a panel's positions.
 --
 -- NOTES:
 -- - `vial_sccm` is the flow drawn through the vial, `total_sccm` the flow
@@ -347,8 +362,7 @@ CREATE TABLE IF NOT EXISTS panels
 CREATE TABLE IF NOT EXISTS vials
     ( vial_id           INTEGER PRIMARY KEY
     , panel_id          INTEGER NOT NULL
-    , vial_position     INTEGER NOT NULL CHECK(vial_position > 0)
-    , odor_id           INTEGER NOT NULL
+    , vial_position     INTEGER NOT NULL
     , vial_sccm         REAL NOT NULL CHECK(vial_sccm > 0)
     , total_sccm        REAL NOT NULL CHECK(total_sccm > 0)
     , total_volume_ml   REAL NOT NULL CHECK(total_volume_ml > 0)
@@ -356,8 +370,8 @@ CREATE TABLE IF NOT EXISTS vials
     , made_on           TEXT CHECK(made_on IS NULL OR date(made_on) IS NOT NULL)
     , added_to_db_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 
-    , FOREIGN KEY (panel_id) REFERENCES panels(panel_id)
-    , FOREIGN KEY (odor_id)  REFERENCES odors(odor_id)
+    , FOREIGN KEY (panel_id, vial_position)
+        REFERENCES panel_positions(panel_id, vial_position)
     ) STRICT;
 
 -- What was pipetted into a vial: one row per component, the mix's from

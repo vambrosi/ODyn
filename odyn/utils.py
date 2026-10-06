@@ -337,7 +337,18 @@ ODOR_COMPONENTS = TableSpec(
     "odor_components", "odor_id", "SELECT * FROM odor_components;"
 )
 PANELS = _simple("panels", "panel_id", dates=["added_to_db_at"])
-VIALS = _simple("vials", "vial_id", dates=["made_on", "added_to_db_at"])
+PANEL_POSITIONS = TableSpec(
+    "panel_positions", "panel_id", "SELECT * FROM panel_positions;"
+)
+
+# A vial's odor is its position's, joined back so a vial reads whole
+VIALS = TableSpec(
+    "vials",
+    "vial_id",
+    "SELECT v.*, p.odor_id FROM vials AS v "
+    "JOIN panel_positions AS p USING (panel_id, vial_position);",
+    dates=("made_on", "added_to_db_at"),
+)
 VIAL_ODORS = TableSpec("vial_odors", "vial_id", "SELECT * FROM vial_odors;")
 EXPERIMENT_VIALS = TableSpec(
     "experiment_vials",

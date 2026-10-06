@@ -252,6 +252,7 @@ def test_ingestion_and_reads_run_under_the_lock(tmp_path):
         "mouse_viruses",
         "odors",
         "outputs",
+        "panel_positions",
         "panels",
         "programs",
         "sessions",

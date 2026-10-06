@@ -27,7 +27,7 @@ BAR_MARGINS = (6, 8, 6, 14)
 
 # How wide a registry page's form (Mice, Odors, Panels) opens, and the least
 # it can be dragged to: wide enough for each page's widest row
-FORM_PX = 520
+FORM_PX = 580
 
 # The gap between a form's rows, set rather than left to the platform's style
 # so rows built from several widgets (a mouse's lines) are the same size

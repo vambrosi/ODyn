@@ -195,7 +195,7 @@ ODOR_FIELDS = (
         "odor_id",
         "Odor ID",
         INTEGER,
-        "The number the olfactometer knows it by",
+        "as in the olfactometer",
         required=True,
     ),
     Field("odor_name", "Name", TEXT, "e.g. 2-hexanone", required=True),
@@ -207,6 +207,13 @@ ODOR_FIELDS = (
         unit="mmHg",
     ),
     Field("vapor_pressure_source", "VP source", TEXT, "e.g. PubChem"),
+)
+
+# The odor panel's form (`panels`' own columns, and the batch's date)
+PANEL_FIELDS = (
+    Field("panel_name", "Name", TEXT, "e.g. 16 Odors", required=True),
+    Field("description", "Description", TEXT, "e.g. 'Print v1' in the odor spreadsheet"),
+    Field("made_on", "Made on", DATE, "Blank for today"),
 )
 
 

@@ -57,8 +57,9 @@ INSERT INTO sync_blocks
     ) VALUES (1, 0, 1, 100, 30, 0.0166, 1, 5, 1);
 
 INSERT INTO panels (panel_name) VALUES ('print_v3');
-INSERT INTO vials (panel_id, vial_position, odor_id, vial_sccm, total_sccm, total_volume_ml, made_on)
-    VALUES (1, 1, 1, 200, 1500, 5, '2025-01-30');
+INSERT INTO panel_positions (panel_id, vial_position, odor_id) VALUES (1, 1, 1);
+INSERT INTO vials (panel_id, vial_position, vial_sccm, total_sccm, total_volume_ml, made_on)
+    VALUES (1, 1, 200, 1500, 5, '2025-01-30');
 INSERT INTO vial_odors (vial_id, odor_id, target_ppm, liquid_ul, percent_vv)
     VALUES (1, 1, 0.3, 12.5, 0.25);
 INSERT INTO experiment_vials (exp_id, vial_id) VALUES (1, 1);

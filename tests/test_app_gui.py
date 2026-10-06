@@ -298,10 +298,10 @@ def test_clear_starts_a_new_entry_and_the_id_is_checked_as_typed(window):
 
     # and on the panels page it empties the list of vials
     panels = window.panels
-    panels._add_recipe()
-    panels.made_on.setText("2026-10-06")
+    panels.add_card()
+    panels.form.set_values({"made_on": "2026-10-06"})
     panels.clear()
-    assert panels.forms == [] and panels.made_on.text() == ""
+    assert panels.cards == [] and panels.form.values() == {}
 
 
 def test_mice_pane_lists_lines_and_viruses_as_rows(window, tmp_path, monkeypatch):
@@ -695,7 +695,7 @@ def test_a_recording_stays_local_when_the_share_is_away(window, tmp_path):
 
     record = draft.recordings("e1")[0]
     assert Path(record["local"]).is_file() and not record.get("copied")
-    assert "Submit copies it" in recorder.status.text()
+    assert "will try to copy it again" in recorder.status.text()
 
 
 def test_recording_path_layout(tmp_path):
@@ -762,7 +762,7 @@ def test_panels_table_shows_the_latest_vial_per_position():
 
 def test_recipe_components_follow_the_odor(window):
     panels = window.panels
-    form = panels._add_recipe()
+    form = panels.add_card()
 
     form.delivered.setCurrentIndex(form.delivered.findData(17))  # alpha
     assert [row.odor_id for row in form.components] == [4, 10]
@@ -780,6 +780,74 @@ def test_recipe_components_follow_the_odor(window):
 
     form.delivered.setCurrentIndex(form.delivered.findData(0))  # mineral oil
     assert form.components == [] and form.vial()["components"] == []
+
+
+def test_panels_pane_adds_a_panel_then_batches_of_its_vials(
+    window, tmp_path, monkeypatch
+):
+    panels = window.panels
+    asked = []
+    monkeypatch.setattr(
+        window.context, "confirm", lambda *args: asked.append(args) or True
+    )
+
+    # a new panel: its vials are set up freely, positions in order
+    panels.form.set_values({"panel_name": "3 Odors", "made_on": "2026-08-06"})
+    for odor_id in (1, 17, 0):
+        card = panels.add_card()
+        card.delivered.setCurrentIndex(card.delivered.findData(odor_id))
+    panels.cards[1].set_targets({4: 44.2, 10: 13.3})
+    assert [c.position.value() for c in panels.cards] == [1, 2, 3]
+    panels._save()
+    settle(window.context)
+
+    db = Database(tmp_path / "data")
+    positions = db.panel_positions.set_index("vial_position")["odor_id"]
+    assert positions.to_dict() == {1: 1, 2: 17, 3: 0}
+    first = db.vials
+    assert len(first) == 3 and not asked  # a new panel asks nothing
+
+    # once saved it is loaded: one locked, checked box per position, with the
+    # last recipe, and no adding or removing vials
+    assert [c.title() for c in panels.cards][1] == "Position 2: 17 - alpha"
+    assert all(c.isChecked() and not c.delivered.isEnabled() for c in panels.cards)
+    assert panels.cards[1].components[0].target.value() == pytest.approx(44.2)
+    assert not panels.add_vial.isEnabled()
+    assert "already exists" in panels.form.rows["panel_name"].note.text()
+
+    # a batch remakes only the checked vials
+    panels.cards[0].setChecked(False)
+    panels.form.rows["made_on"].set_value("2026-10-06")
+    panels._save()
+    settle(window.context)
+    assert "2 of its 3 vials, made on 2026-10-06" in asked[-1][1]
+    later = Database(tmp_path / "data").vials
+    assert len(later) == 5
+    assert sorted(later.loc[later.index.difference(first.index), "vial_position"]) == [
+        2,
+        3,
+    ]
+
+    # the table shows each position's newest vial
+    shown = panels.table.model().frame
+    assert list(shown["vial_position"]) == [1, 2, 3]
+    assert [str(d)[:10] for d in shown["made_on"]] == [
+        "2026-08-06",
+        "2026-10-06",
+        "2026-10-06",
+    ]
+
+    # Clear and a new name unlock it; a stored name typed and saved at once
+    # (never loaded) is refused rather than guessed at
+    panels.clear()
+    assert panels.add_vial.isEnabled() and panels.cards == []
+    panels.form.set_values({"panel_name": "3 Odors"})
+    panels._save()
+    assert "already exists" in window.context.last_report[1]
+
+    # clicking a vial in the table loads its panel
+    panels.table.clicked.emit(panels.table.model().index(0, 0))
+    assert len(panels.cards) == 3 and panels.locked
 
 
 def test_odors_pane_adds_a_mix_from_its_components(window, tmp_path):
@@ -893,7 +961,7 @@ def test_a_boolean_field_is_a_box_that_starts_unchecked(app):
 
 def test_session_pane_picks_a_panel_and_its_installed_vials(window, tmp_path):
     db = Database(tmp_path / "data", user="tester")
-    db.add_panel(panel_name="rack A")
+    db.add_panel(panel_name="rack A", positions={1: 1, 2: 2, 3: 0})
     rack = [
         {
             "vial_position": p,

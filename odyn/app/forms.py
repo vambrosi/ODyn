@@ -316,7 +316,11 @@ def _spin(
 
 
 class ComponentRow(QWidget):
-    """One chemical in a vial: fixed by the odor, only its target is typed."""
+    """
+    One chemical in a vial: fixed by the odor, only its target is typed. The
+    row is the target and the computed volume; `label` names the chemical,
+    for the vial's form to show beside it.
+    """
 
     changed = Signal()
 
@@ -332,6 +336,7 @@ class ComponentRow(QWidget):
 
         note = "" if vapor_pressure else " (no vapor pressure)"
         self.label = QLabel(f"{odor_id} - {name}{note}")
+        self.label.setWordWrap(True)
 
         self.target = _spin(0, 1e6, 1.0, 3)
         self.target.setSuffix(" ppm")
@@ -339,9 +344,8 @@ class ComponentRow(QWidget):
         self.result = QLabel("")
         self.result.setStyleSheet(text_style("computed"))
 
-        layout.addWidget(self.label, 3)
         layout.addWidget(self.target, 1)
-        layout.addWidget(self.result, 2)
+        layout.addWidget(self.result, 1)
 
         self.target.valueChanged.connect(lambda _: self.changed.emit())
 
@@ -360,9 +364,7 @@ class ComponentRow(QWidget):
             total_sccm=total_sccm,
             total_volume_ml=total_volume_ml,
         )
-        self.result.setText(
-            f"{recipe.liquid_ul:.0f} µl  ({recipe.percent_vv:.3g} % v/v)"
-        )
+        self.result.setText(f"{recipe.liquid_ul:.0f} µl ({recipe.percent_vv:.3g} %)")
 
         return recipe
 
@@ -376,6 +378,10 @@ class RecipeForm(QGroupBox):
     What goes in the vial follows the odor picked: a mix's components are
     its `odor_components`, a single chemical is its own one component, and a
     chemical with no vapor pressure (mineral oil) has nothing to pipette.
+
+    A vial of a new panel can be set up freely and removed (`remove`). A vial
+    of a stored panel is `fix`ed: its position and odor are the panel's, and
+    its box's check says whether it is remade in this batch.
 
     `vial()` gives the dict `Database.add_vials` takes, computed values
     included.
@@ -392,8 +398,6 @@ class RecipeForm(QGroupBox):
         self.chemicals = chemicals
         self.made_of = made_of
 
-        form = QFormLayout()
-
         self.position = QSpinBox()
         self.position.setRange(1, 64)
 
@@ -405,23 +409,32 @@ class RecipeForm(QGroupBox):
         self.total_sccm = _spin(1, 100000, 1500, 0)
         self.total_volume = _spin(0.01, 1000, 5, 2)
 
-        form.addRow("Position", self.position)
-        form.addRow("Delivers", self.delivered)
-        form.addRow("Vial flow (sccm)", self.vial_sccm)
-        form.addRow("Total flow (sccm)", self.total_sccm)
-        form.addRow("Total volume (ml)", self.total_volume)
+        self.form = QFormLayout()
+        self.form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        self.form.setVerticalSpacing(ROW_SPACING_PX)
+        self.form.addRow("Position", self.position)
+        self.form.addRow("Delivers", self.delivered)
+        self.form.addRow("Vial flow (sccm)", self.vial_sccm)
+        self.form.addRow("Total flow (sccm)", self.total_sccm)
+        self.form.addRow("Total volume (ml)", self.total_volume)
 
-        self.components_box = QVBoxLayout()
+        # The components are rows of the same form, named on the left
         self.components: list[ComponentRow] = []
 
         self.oil = QLabel("")
         self.oil.setStyleSheet(text_style("computed"))
+        self.form.addRow("Mineral oil", self.oil)
+
+        self.remove = QPushButton("remove")
+        foot = QHBoxLayout()
+        foot.addStretch(1)
+        foot.addWidget(self.remove)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(QLabel("Pipetted in"))
-        layout.addLayout(self.components_box)
-        layout.addWidget(self.oil)
+        layout.addLayout(self.form)
+        layout.addLayout(foot)
 
         for box in (self.vial_sccm, self.total_sccm, self.total_volume):
             box.valueChanged.connect(lambda _: self.recompute())
@@ -429,20 +442,52 @@ class RecipeForm(QGroupBox):
         self.delivered.currentIndexChanged.connect(lambda _: self.set_components())
         self.set_components()
 
+    @property
+    def odor_id(self) -> None | int:
+        data = self.delivered.currentData()
+
+        return None if data is None else int(data)
+
+    @property
+    def included(self) -> bool:
+        """Whether the vial is part of the batch (always, for a new panel)."""
+        return not self.isCheckable() or self.isChecked()
+
+    def fix(self, position: int, odor_id: int) -> None:
+        """
+        A vial of a stored panel: its position and odor are the panel's, it
+        cannot be removed, and its check says whether it is remade now.
+        """
+        self.position.setValue(position)
+        self.delivered.setCurrentIndex(max(self.delivered.findData(odor_id), 0))
+        self.position.setEnabled(False)
+        self.delivered.setEnabled(False)
+        self.remove.hide()
+        self.setTitle(f"Position {position}: {self.delivered.currentText()}")
+        self.setCheckable(True)
+        self.setChecked(True)
+        self.setToolTip("Unchecked, this vial is not remade in this batch")
+
+    def set_recipe(self, vial, targets: dict[int, float]) -> None:
+        """Fill in a stored vial's flows, volume and targets (to remake it)."""
+        self.vial_sccm.setValue(float(vial["vial_sccm"]))
+        self.total_sccm.setValue(float(vial["total_sccm"]))
+        self.total_volume.setValue(float(vial["total_volume_ml"]))
+        self.set_targets(targets)
+
     def set_components(self) -> None:
         """Rebuild the component rows for the odor now picked."""
         for row in self.components:
-            row.setParent(None)
-            row.deleteLater()
+            self.form.removeRow(row)  # (deletes it and its label)
 
         self.components = []
-        odor_id = self.delivered.currentData()
+        odor_id = self.odor_id
 
         if odor_id is None:
             return
 
-        odor_id = int(odor_id)
         ids = self.made_of.get(odor_id, [odor_id] if odor_id in self.chemicals else [])
+        at = self.form.getWidgetPosition(self.oil)[0]
 
         for component_id in ids:
             name, pressure = self.chemicals.get(component_id, (str(component_id), None))
@@ -453,7 +498,8 @@ class RecipeForm(QGroupBox):
             row = ComponentRow(component_id, name, pressure)
             row.changed.connect(self.recompute)
             self.components.append(row)
-            self.components_box.addWidget(row)
+            self.form.insertRow(at, row.label, row)
+            at += 1
 
         self.recompute()
 
@@ -477,7 +523,7 @@ class RecipeForm(QGroupBox):
 
         try:
             oil = solvent_volume_ml(self.total_volume.value(), volumes)
-            self.oil.setText(f"Mineral oil: {oil:.3f} ml")
+            self.oil.setText(f"{oil:.3f} ml")
 
         except ValueError as error:
             self.oil.setText(str(error))
@@ -507,7 +553,7 @@ class RecipeForm(QGroupBox):
 
         vial: dict[str, Any] = {
             "vial_position": self.position.value(),
-            "odor_id": int(self.delivered.currentData()),
+            "odor_id": self.odor_id,
             "vial_sccm": self.vial_sccm.value(),
             "total_sccm": self.total_sccm.value(),
             "total_volume_ml": self.total_volume.value(),

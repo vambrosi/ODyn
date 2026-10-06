@@ -173,7 +173,7 @@ def share(tmp_path):
 
     db = Database(tmp_path, can_create=True, user="tester")
     db.set_mouse(mouse_id=1)
-    db.add_panel(panel_name="p")
+    db.add_panel(panel_name="p", positions={1: 0})
     vials = db.add_vials(
         panel_name="p",
         vials=[

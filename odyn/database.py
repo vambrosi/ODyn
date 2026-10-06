@@ -43,6 +43,7 @@ from .utils import (
     ODOR_COMPONENTS,
     OUTPUTS,
     OUTPUTS_FOLDER,
+    PANEL_POSITIONS,
     PANELS,
     PROGRAMS,
     PROJECTS_FOLDER,
@@ -490,8 +491,16 @@ class Database(CallRecorder):
         return self._table(PANELS)
 
     @property
+    def panel_positions(self) -> pd.DataFrame:
+        """`DataFrame` with the odor each position of each panel holds"""
+        return self._table(PANEL_POSITIONS)
+
+    @property
     def vials(self) -> pd.DataFrame:
-        """`DataFrame` with one row per physical vial as made up"""
+        """
+        `DataFrame` with one row per physical vial as made up, with the
+        `odor_id` of its panel position
+        """
         return self._table(VIALS)
 
     @property
@@ -1296,20 +1305,64 @@ class Database(CallRecorder):
         logger.info(f"Updated odor {odor_id}: {changes}. {CHECK}")
 
     @record_call
-    def add_panel(self, *, panel_name: str, description: None | str = None) -> int:
+    def add_panel(
+        self,
+        *,
+        panel_name: str,
+        positions: dict[int, int],
+        description: None | str = None,
+    ) -> int:
         """
-        Name a set of vials, e.g. `"print_v3"`. Returns the `panel_id`.
+        Add a panel, which is determined by its name and by which odors are in
+        which positions in the olfactometer. Returns the `panel_id`.
 
-        The panel is only a label; what is in it is what `add_vials` records.
+        **USAGE**
+        ```python
+        db.add_panel(
+            panel_name="16 Odors",
+            positions={1: 1, 2: 2, 3: 0, 4: 17},  # position: odor_id
+            description="3 mixes at 60:40 and 40:60 plus their components",
+        )
+        ```
+
+        The relationship between positions and odors can never change (add a
+        new panel for that), but vials mixes can be remade (see `add_vials`).
         """
+        if not positions:
+            raise ValueError("A panel needs at least one position.")
+
         with self._writing() as cur:
+            known = {
+                row["odor_id"] for row in cur.execute("SELECT odor_id FROM odors;")
+            }
+            unknown = sorted(set(int(o) for o in positions.values()) - known)
+
+            if unknown:
+                raise ValueError(f"No odors with ids {unknown}.")
+
             panel_id = _db_insert(
                 cur,
                 "panels",
                 {"panel_name": str(panel_name).strip(), "description": description},
             )
 
-        logger.info(f"Added panel '{panel_name}'. {CHECK}")
+            for position, odor_id in sorted(
+                (int(p), int(o)) for p, o in positions.items()
+            ):
+                if position < 1:
+                    raise ValueError(f"Positions start at 1, not {position}.")
+
+                _db_insert(
+                    cur,
+                    "panel_positions",
+                    {
+                        "panel_id": panel_id,
+                        "vial_position": position,
+                        "odor_id": odor_id,
+                    },
+                )
+
+        logger.info(f"Added panel '{panel_name}' ({len(positions)} vials). {CHECK}")
 
         return panel_id
 
@@ -1322,27 +1375,36 @@ class Database(CallRecorder):
         made_on: None | Value = None,
     ) -> list[int]:
         """
-        Record physical vials as made up, in a panel. Returns their `vial_id`s.
+        Record a new batch of vials for a panel. Returns their `vial_id`s.
 
         **USAGE**
         ```python
         db.add_vials(
-            panel_name="print_v3",
+            panel_name="16 Odors",
             made_on="2026-07-06",
             vials=[
                 {
-                    "vial_position": 4,
-                    "odor_id": 17,                # alpha, a mix
+                    "vial_position": 4,           # alpha, a mix
                     "vial_sccm": 200,
                     "total_sccm": 1500,
                     "total_volume_ml": 5,
                     "solvent_volume_ml": 4.9,
                     "components": [
-                        {"odor_id": 4, "target_ppm": 44.2, "liquid_ul": 60, "percent_vv": 1.2},
-                        {"odor_id": 10, "target_ppm": 13.3, "liquid_ul": 40, "percent_vv": 0.8},
+                        {
+                            "odor_id": 4,
+                            "target_ppm": 44.2,
+                            "liquid_ul": 60,
+                            "percent_vv": 1.2,
+                        },
+                        {
+                            "odor_id": 10,
+                            "target_ppm": 13.3,
+                            "liquid_ul": 40,
+                            "percent_vv": 0.8,
+                        },
                     ],
                 },
-                {"vial_position": 3, "odor_id": 0, "vial_sccm": 200,
+                {"vial_position": 3, "vial_sccm": 200,
                  "total_sccm": 1500, "total_volume_ml": 5},   # mineral oil
             ],
         )
@@ -1350,23 +1412,37 @@ class Database(CallRecorder):
 
         **PARAMETERS**
         - `panel_name` names a panel added with `add_panel`
-        - `vials` is one dict per vial: `vial_position`, `odor_id` (what the
-        olfactometer delivers), `vial_sccm`, `total_sccm`, `total_volume_ml`,
-        optionally `solvent_volume_ml`, `made_on` and `components`
+        - `vials` is one dict per vial: `vial_position` (as in the panel's)
+        `vial_sccm`, `total_sccm`, `total_volume_ml`, optionally
+        `solvent_volume_ml`, `made_on`, and `components`. An `odor_id` may be
+        given too, and must be the one associated with the position
         - `components` is one dict per chemical pipetted in, with `odor_id`,
         `target_ppm` and the computed `liquid_ul` and `percent_vv`. A mix
-        lists exactly its `odor_components`; a pure odor lists itself once;
+        lists exactly its `odor_components`, a pure odor lists itself once,
         mineral oil lists nothing
         - `made_on` is the date for every vial without one of its own; it
         defaults to today, since vials are usually recorded as they are made
 
-        Remaking a rack is a new call: a vial an experiment has run is never
-        edited, so what was in the olfactometer stays on record.
+        Remaking vials is a new call, for some of the panel's positions or all
+        of them. A vial an experiment has used is never edited, so what was in
+        the olfactometer stays on record.
         """
         day = _date_string(datetime.now() if made_on is None else made_on)
+        taken = [int(v["vial_position"]) for v in vials]  # type: ignore[arg-type]
+
+        if len(set(taken)) < len(taken):
+            raise ValueError("Two vials of the batch are for the same position.")
 
         with self._writing() as cur:
             panel_id = _panel_id(cur, panel_name)
+            holds = {
+                row["vial_position"]: row["odor_id"]
+                for row in cur.execute(
+                    "SELECT vial_position, odor_id FROM panel_positions "
+                    "WHERE panel_id = ?;",
+                    [panel_id],
+                )
+            }
             mixes = {
                 row["odor_id"]: bool(row["mix"])
                 for row in cur.execute("SELECT odor_id, mix FROM odors;")
@@ -1381,7 +1457,9 @@ class Database(CallRecorder):
             vial_ids = []
 
             for vial in vials:
-                vial_ids.append(_insert_vial(cur, panel_id, vial, day, mixes, made_of))
+                vial_ids.append(
+                    _insert_vial(cur, panel_id, holds, vial, day, mixes, made_of)
+                )
 
         logger.info(f"Added {len(vial_ids)} vials to panel '{panel_name}'. {CHECK}")
 
@@ -2583,21 +2661,37 @@ VIAL_COLUMNS = ("vial_sccm", "total_sccm", "total_volume_ml")
 def _insert_vial(
     cur: Cursor,
     panel_id: int,
+    holds: dict[int, int],
     vial: Object,
     day: str,
     mixes: dict[int, bool],
     made_of: dict[int, set[int]],
 ) -> int:
-    """Insert one vial with its components, checking the recipe makes sense."""
-    missing = [c for c in ("vial_position", "odor_id", *VIAL_COLUMNS) if c not in vial]
+    """
+    Insert one vial with its components, checking it is for one of the
+    panel's positions (`holds` maps each to its odor) and the recipe makes
+    sense for that odor.
+    """
+    missing = [c for c in ("vial_position", *VIAL_COLUMNS) if c not in vial]
 
     if missing:
         raise ValueError(f"A vial needs {missing} (got {sorted(vial)}).")
 
-    odor_id = int(vial["odor_id"])  # type: ignore[arg-type]
+    position = int(vial["vial_position"])  # type: ignore[arg-type]
 
-    if odor_id not in mixes:
-        raise ValueError(f"No odor with id {odor_id}.")
+    if position not in holds:
+        raise ValueError(
+            f"The panel has no position {position} (it has {sorted(holds)}); "
+            "a different set of positions is a new panel."
+        )
+
+    odor_id = holds[position]
+
+    if vial.get("odor_id") is not None and int(vial["odor_id"]) != odor_id:  # type: ignore[arg-type]
+        raise ValueError(
+            f"Position {position} holds odor {odor_id}, not {vial['odor_id']}; "
+            "a different odor in a position is a new panel."
+        )
 
     components = vial.get("components") or []
     assert isinstance(components, list)
@@ -2631,8 +2725,7 @@ def _insert_vial(
         "vials",
         {
             "panel_id": panel_id,
-            "vial_position": int(vial["vial_position"]),  # type: ignore[arg-type]
-            "odor_id": odor_id,
+            "vial_position": position,
             **{column: float(vial[column]) for column in VIAL_COLUMNS},  # type: ignore[arg-type]
             "solvent_volume_ml": _optional_real(vial.get("solvent_volume_ml")),
             "made_on": day if made_on is None else _date_string(made_on),
