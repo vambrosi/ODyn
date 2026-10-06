@@ -400,6 +400,28 @@ def _stored(frame, key: int) -> dict:
         for column, value in frame.loc[key].items()
     }
 
+def _watch_id(form: Form, key: str, what: str, stored) -> None:
+    """
+    Say "already exists" under the ID while it is typed, so a stored entry
+    is noticed before the field is left (which is when it loads: loading on
+    every keystroke would load 4 on the way to typing 45).
+    """
+    row = form.rows[key]
+    note = _exists_note(what)
+
+    def typed(text: str) -> None:
+        try:
+            value = row.field.parse(text)
+        except ValueError:
+            return  # said when the field is left
+
+        if value is not None and stored(value):
+            row.show_note(note, "warning")
+        elif not row.note.isHidden():
+            row.note.setVisible(False)
+
+    row.editor.textChanged.connect(typed)
+
 
 def _buttons(actions) -> tuple[QHBoxLayout, list[QPushButton]]:
     """A row of buttons, `(text, action)` each, sharing its width."""
@@ -448,6 +470,7 @@ class MicePane(QWidget):
             (
                 ("Add line", lambda: self.line_list.add()),
                 ("Add virus", lambda: self.virus_list.add()),
+                ("Clear", self.clear),
                 ("Save mouse", self._save),
             )
         )
@@ -460,8 +483,16 @@ class MicePane(QWidget):
 
         self.table.clicked.connect(self._pick)
         self.form.changed.connect(self._typed)
+        _watch_id(self.form, "mouse_id", "Mouse", self.stored)
         context.changed.connect(self.reload)
         self.reload()
+
+    def clear(self) -> None:
+        """Empty the form, for a new mouse."""
+        self.form.clear()
+        self.line_list.load(None, [])
+        self.virus_list.load(None, [])
+        self.table.clearSelection()
 
     def reload(self) -> None:
         def load(db):
@@ -609,9 +640,10 @@ class OdorsPane(QWidget):
             "Composition",
             none_text="Not a mix of odors",
         )
-        buttons, (self.add_component, _) = _buttons(
+        buttons, (self.add_component, *_) = _buttons(
             (
                 ("Add component", lambda: self.composition.add()),
+                ("Clear", self.clear),
                 ("Save odor", self._save),
             )
         )
@@ -624,8 +656,16 @@ class OdorsPane(QWidget):
 
         self.table.clicked.connect(self._pick)
         self.form.changed.connect(self._typed)
+        _watch_id(self.form, "odor_id", "Odor", self.stored)
         context.changed.connect(self.reload)
         self.reload()
+
+    def clear(self) -> None:
+        """Empty the form and unlock it, for a new odor."""
+        self.form.clear()
+        self.composition.load(None, [])
+        self._lock(False)
+        self.table.clearSelection()
 
     def reload(self) -> None:
         def load(db):
@@ -850,11 +890,14 @@ class PanelsPane(QWidget):
         add_vial.clicked.connect(self._add_recipe)
         copy_last = QPushButton("Copy the panel's last rack")
         copy_last.clicked.connect(self._copy_last)
+        clear = QPushButton("Clear")
+        clear.clicked.connect(self.clear)
         save = QPushButton("Save these vials")
         save.clicked.connect(self._save)
         buttons.addWidget(add_vial)
         buttons.addWidget(copy_last)
         buttons.addStretch(1)
+        buttons.addWidget(clear)
         buttons.addWidget(save)
         right_layout.addLayout(buttons)
 
@@ -984,6 +1027,11 @@ class PanelsPane(QWidget):
                     for _, c in pipetted.iterrows()
                 }
             )
+
+    def clear(self) -> None:
+        """Empty the list of vials and the date, for another batch."""
+        self._clear_forms()
+        self.made_on.clear()
 
     def _clear_forms(self) -> None:
         for form in self.forms:

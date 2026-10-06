@@ -261,6 +261,49 @@ def test_registry_forms_hide_and_come_back(window):
     TableAndForm.form_px = FORM_PX
 
 
+def test_clear_starts_a_new_entry_and_the_id_is_checked_as_typed(window):
+    mice = window.mice
+    mice.form.set_values({"mouse_id": "m7", "sex": "F"})
+    mice._save()
+    settle(window.context)
+
+    # a stored number says so while it is typed, before the field is left
+    number = mice.form.rows["mouse_id"]
+    number.editor.setText("m")
+    number.editor.setText("m7")
+    assert not number.note.isHidden() and "already exists" in number.note.text()
+    number.editor.setText("m71")
+    assert number.note.isHidden()
+
+    # Clear empties everything, lists included
+    number.editor.setText("m7")
+    number.editor.editingFinished.emit()
+    mice.line_list.add()
+    assert mice.form.values() == {"mouse_id": 7, "sex": "F"}
+    mice.clear()
+    assert mice.form.values() == {} and not mice.line_list.rows
+    assert number.note.isHidden()
+
+    # on the odors page it also unlocks what a stored odor fixes
+    odors = window.odors
+    odor_number = odors.form.rows["odor_id"]
+    odor_number.editor.setText("1")
+    assert "already exists" in odor_number.note.text()
+    odor_number.editor.editingFinished.emit()
+    assert not odors.form.rows["odor_name"].editor.isEnabled()
+    odors.clear()
+    assert odors.form.values() == {}
+    assert odors.form.rows["odor_name"].editor.isEnabled()
+    assert odors.add_component.isEnabled()
+
+    # and on the panels page it empties the list of vials
+    panels = window.panels
+    panels._add_recipe()
+    panels.made_on.setText("2026-10-06")
+    panels.clear()
+    assert panels.forms == [] and panels.made_on.text() == ""
+
+
 def test_mice_pane_lists_lines_and_viruses_as_rows(window, tmp_path, monkeypatch):
     # (the lines and viruses are seeded when the database is made)
     mice = window.mice
