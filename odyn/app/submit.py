@@ -4,12 +4,14 @@ Turning a draft into database rows: check first, then submit.
 `check` looks at a draft and the folders it points to and lists what is wrong,
 saying which problems block a submit and which are only worth knowing.
 `submit` runs the checks, then does the day's work in order: the session row,
-its annotations, each experiment folder (ingested, annotated, its vials
-recorded, its sync file decoded), and finally moves the draft aside.
+its annotations, each loop (ingested, annotated, its vials recorded, its sync
+file decoded), then the grabs and z-stacks (each TIFF ingested and annotated,
+the grabs' sync files decoded, each z-stack linked to its loop), and finally
+moves the draft aside.
 
-Every step that writes is a recorded `Database` call, and a step that has
-already been done is remembered in the draft (`submitted_exp_id`), so a
-submit that failed halfway can be run again without ingesting twice.
+Every step that writes is a recorded `Database` call, and ingesting skips what
+is already in, so a submit that failed halfway can be run again. What each
+part or file became is remembered in the draft (`submitted_id`).
 
 **USAGE**
 ```python
@@ -30,16 +32,15 @@ from collections.abc import Container
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..database import SYNC_FOLDER
+import pandas as pd
+
+from ..database import SYNC_FOLDER, read_tiff
 from ..utils import logger
-from .draft import EXPERIMENT_SETTINGS, EXPERIMENT_TYPES, Draft
-from .fields import form_fields, missing_required
+from .draft import FILE_SETTINGS, KINDS, PART_SETTINGS, Draft
+from .fields import annotation_fields, form_fields, missing_required
 from .recordings import pending, sync_pending
 
 RAW_FOLDER = "raw"
-
-# The annotation target of each kind of draft entry
-_TARGETS = {"loop": "loop", "grab": "grab", "zstack": "zstack"}
 EVENTS_PATTERN = "*Events.csv"
 
 
@@ -62,7 +63,9 @@ class Written:
     """What one submit put in the database."""
 
     session_id: None | int = None
-    experiments: dict[str, int] = field(default_factory=dict)
+    loops: dict[str, int] = field(default_factory=dict)  # by folder name
+    grabs: dict[str, int] = field(default_factory=dict)  # by TIFF name
+    zstacks: dict[str, int] = field(default_factory=dict)  # by TIFF name
     annotations: int = 0
     decoded: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
@@ -120,8 +123,10 @@ def check(db, draft: Draft) -> list[Problem]:
     folder = Path(db.main_folder) / draft.folder
     local_only = pending(draft)
 
-    if not draft.experiments:
-        problems.append(Problem("session", "No experiments listed.", blocking=False))
+    if not draft.parts:
+        problems.append(
+            Problem("session", "No loops, grabs or z-stacks listed.", blocking=False)
+        )
 
     elif not folder.is_dir():
         problems.append(
@@ -132,28 +137,34 @@ def check(db, draft: Draft) -> list[Problem]:
             )
         )
 
-    experiment_fields = form_fields(db, "loop")
+    loop_fields = form_fields(db, "loop")
+    loops = {str(e["name"]) for e in draft.parts if e.get("kind") == "loop"}
 
-    for entry in draft.experiments:
+    for entry in draft.parts:
         name = str(entry.get("name", ""))
-        where = name or "experiment"
+        kind = entry.get("kind")
+        where = name or "part"
 
         if not name:
-            problems.append(Problem("experiment", "An experiment has no name."))
+            problems.append(Problem("part", "A part has no name."))
             continue
 
-        if entry.get("exp_type") not in EXPERIMENT_TYPES:
-            problems.append(Problem(where, f"Type must be one of {EXPERIMENT_TYPES}."))
+        if kind not in KINDS:
+            problems.append(Problem(where, f"Kind must be one of {KINDS}."))
 
         if entry.get("objective") in (None, ""):
             problems.append(Problem(where, "No objective set."))
 
-        problems += _field_problems(where, experiment_fields, entry)
-        problems += _condition_problems(
-            where, entry, _tiff_numbers(folder / name / RAW_FOLDER)
-        )
+        if kind == "loop":
+            problems += _field_problems(where, loop_fields, entry)
+            problems += _condition_problems(
+                where, entry, _tiff_numbers(folder / name / RAW_FOLDER)
+            )
 
-        if entry.get("submitted_exp_id") is not None:
+        else:
+            problems += _file_problems(db, draft, entry, folder / name, loops)
+
+        if kind == "loop" and entry.get("submitted_id") is not None:
             continue  # already in the database; the files were checked then
 
         if name in local_only:
@@ -168,7 +179,7 @@ def check(db, draft: Draft) -> list[Problem]:
 
         if folder.is_dir():
             problems += _folder_problems(
-                where, folder / name, entry.get("exp_type"), name in local_only
+                where, folder / name, entry.get("kind"), name in local_only
             )
 
     if draft.vial_ids:
@@ -215,6 +226,93 @@ def _field_problems(where: str, fields, values: dict) -> list[Problem]:
     return problems
 
 
+def _file_problems(
+    db, draft: Draft, entry: dict, folder: Path, loops: set[str]
+) -> list[Problem]:
+    """
+    What is wrong with the notes on a grabs or z-stacks part's TIFFs: values
+    that do not read as their type, a z-stack's loop that is not in the
+    draft, and notes on a TIFF that is not on the share (advisory: it may
+    still be copying).
+    """
+    name, kind = str(entry["name"]), entry["kind"]
+    fields = annotation_fields(db, kind)
+    on_share = {p.name for p in (folder / RAW_FOLDER).glob("[!.]?*.tif")}
+    problems = []
+
+    for file, noted in entry.get("files", {}).items():
+        where = f"{name}/{file}"
+        problems += _field_problems(where, fields, noted)
+        loop = noted.get("loop")
+
+        if loop is not None and loop not in loops:
+            problems.append(Problem(where, f"Its loop, {loop}, is not listed."))
+
+        if folder.is_dir() and file not in on_share:
+            problems.append(
+                Problem(where, "Not in the folder on the share.", blocking=False)
+            )
+
+    return problems
+
+
+def list_tiffs(main_folder: Path, folder: str, kind: str) -> pd.DataFrame:
+    """
+    The TIFFs in a grabs or z-stacks folder's `raw/`, one row each with what
+    its header says: when it started, and its frames and z (a grab) or its
+    stack, frames per slice and powers (a z-stack). Empty when the folder is
+    not there.
+    """
+    columns = {
+        "grab": ["file", "started", "frames", "z_um"],
+        "zstack": [
+            "file",
+            "started",
+            "slices",
+            "frames_per_slice",
+            "z_start_um",
+            "z_end_um",
+            "power_start_pct",
+            "power_end_pct",
+        ],
+    }[kind]
+    raw = Path(main_folder) / folder / RAW_FOLDER
+    rows = []
+
+    try:
+        paths = sorted(raw.glob("[!.]?*.tif"))
+    except OSError:
+        paths = []
+
+    for path in paths:
+        row = {"file": path.name}
+
+        try:
+            read = read_tiff(path, Path(main_folder))
+        except Exception as error:  # a file still being copied, say
+            logger.warning(f"Could not read '{path.name}': {error}")
+            read = None
+
+        if read is not None:
+            recording, tiff = read
+            stack = recording["stack"] or {}
+            row.update(
+                started=tiff["acq_start"].strftime("%H:%M:%S"),
+                frames=recording["frames_per_slice"],
+                frames_per_slice=recording["frames_per_slice"],
+                z_um=recording["z_um"],
+                slices=stack.get("slice_count"),
+                z_start_um=stack.get("z_start_um"),
+                z_end_um=stack.get("z_end_um"),
+                power_start_pct=stack.get("power_start_pct"),
+                power_end_pct=stack.get("power_end_pct"),
+            )
+
+        rows.append(row)
+
+    return pd.DataFrame(rows, columns=columns)
+
+
 def acquisition_number(path: str | Path) -> None | int:
     """
     The number ScanImage ends a TIFF's name with (`..._00003.tif` is 3), which
@@ -243,8 +341,8 @@ def _condition_problems(where: str, entry: dict, numbers: None | set[int]):
     if not conditions:
         return []
 
-    if entry.get("exp_type", "loop") != "loop":
-        return [Problem(where, "Conditions are only noted for loop experiments.")]
+    if entry.get("kind", "loop") != "loop":
+        return [Problem(where, "Conditions are only noted for loops.")]
 
     problems = []
     taken: dict[int, str] = {}
@@ -299,9 +397,9 @@ def _spans(numbers: list[int]) -> str:
 
 
 def _folder_problems(
-    where: str, folder: Path, exp_type, sync_pending: bool = False
+    where: str, folder: Path, kind, sync_pending: bool = False
 ) -> list[Problem]:
-    """What an experiment folder is missing (its sync file may be on its way)."""
+    """What a part folder is missing (its sync file may be on its way)."""
     problems = []
 
     if not folder.is_dir():
@@ -312,7 +410,9 @@ def _folder_problems(
     if not tiffs:
         problems.append(Problem(where, f"No TIFFs in '{folder.name}/{RAW_FOLDER}'."))
 
-    if exp_type == "loop":
+    # A grab's sync recording is optional, and its files add up
+
+    if kind == "loop":
         if not any(folder.rglob(EVENTS_PATTERN)):
             problems.append(
                 Problem(where, "No olfactometer Events file found.", blocking=False)
@@ -357,10 +457,9 @@ def submit(
     computer (any in `busy` are still being written, and are left); one that
     cannot be copied blocks. Then refuses while `check` finds a blocking
     problem, unless `force`. Otherwise creates (or finds) the session, writes
-    its annotations, and for each experiment folder ingests it, annotates it,
-    records its vials and decodes its sync file. Steps already done by an
-    earlier attempt are skipped, so the call is safe to repeat after fixing
-    what stopped it.
+    its annotations, then each loop and the grabs and z-stacks (see the
+    module's description). Steps already done by an earlier attempt are
+    skipped, so the call is safe to repeat after fixing what stopped it.
     """
     recording = [
         name for name, record in pending(draft).items() if record["local"] in busy
@@ -416,87 +515,126 @@ def _submit(db, draft: Draft, written: Written) -> None:
         db.add_annotations(target_type="session", target_id=session_id, values=values)
         written.annotations += len(values)
 
-    for entry in draft.experiments:
-        name = str(entry["name"])
-        exp_path = f"{draft.folder}/{name}"
-        exp_id = entry.get("submitted_exp_id")
+    loops = [e for e in draft.parts if e.get("kind", "loop") == "loop"]
+    others = [e for e in draft.parts if e.get("kind") in ("grab", "zstack")]
 
-        if exp_id is None:
-            exp_id = _ingest(db, session_id, exp_path, entry)
+    for entry in loops:
+        _submit_loop(db, draft, entry, session_id, written)
 
-        if exp_id is None:
-            written.skipped.append(name)
-            continue
+    # After the loops, so a z-stack can be linked to the loop it was for
+    for entry in others:
+        _submit_files(db, draft, entry, session_id, written)
 
-        draft.set_experiment(name, submitted_exp_id=int(exp_id))
-        written.experiments[name] = int(exp_id)
 
-        target = _TARGETS[entry.get("exp_type", "loop")]
-        values = _annotation_values(db, target, entry)
+def _submit_loop(db, draft: Draft, entry: dict, session_id: int, written) -> None:
+    """Ingest one loop, annotate it, record its vials and decode its sync file."""
+    name = str(entry["name"])
+    loop_path = f"{draft.folder}/{name}"
+    loop_id = entry.get("submitted_id")
+
+    if loop_id is None:
+        loop_id = db.add_loop(
+            session_id=session_id,
+            loop_path=loop_path,
+            objective=int(entry["objective"]),
+        )
+
+    if loop_id is None:
+        # Already in the database (an earlier attempt, or someone else's)
+        rows = db.from_query(
+            "SELECT loop_id FROM loops WHERE session_id = ? AND loop_path = ?;",
+            [session_id, loop_path],
+        )
+        loop_id = None if rows.empty else int(rows["loop_id"].iloc[0])
+
+    if loop_id is None:
+        written.skipped.append(name)
+        return
+
+    draft.set_part(name, submitted_id=int(loop_id))
+    written.loops[name] = int(loop_id)
+
+    values = _annotation_values(db, "loop", entry)
+
+    if values:
+        db.add_annotations(target_type="loop", target_id=loop_id, values=values)
+        written.annotations += len(values)
+
+    written.annotations += _write_conditions(db, draft, name, loop_id, entry)
+
+    if draft.vial_ids:
+        db.set_loop_vials(loop_id=loop_id, vial_ids=draft.vial_ids)
+
+    if _has_sync(db, loop_path):
+        # The loop is in either way; a decode that refuses (a burst count
+        # that does not match, say) is reported and can be rerun once the
+        # file is sorted out.
+        try:
+            db.decode_sync(loop_id=loop_id)
+            written.decoded.append(name)
+
+        except Exception as error:
+            logger.exception(f"Decoding the sync file of {name} failed")
+            written.decode_failed[name] = f"{type(error).__name__}: {error}"
+
+
+def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> None:
+    """
+    Ingest every TIFF of the grabs or z-stacks folder (those already in are
+    skipped), annotate the ones with notes, link each z-stack to its loop,
+    and decode the grabs' sync files.
+    """
+    name, kind = str(entry["name"]), entry["kind"]
+    folder = f"{draft.folder}/{name}"
+    add = db.add_grabs if kind == "grab" else db.add_zstacks
+    add(session_id=session_id, folder=folder, objective=int(entry["objective"]))
+
+    rows = db.from_query(
+        f"SELECT {kind}_id AS id, raw_path FROM {kind}s WHERE session_id = ?;",
+        [session_id],
+    )
+    ids = {Path(path).name: int(i) for i, path in zip(rows["id"], rows["raw_path"])}
+    found = written.grabs if kind == "grab" else written.zstacks
+    found.update(ids)
+    notes = draft.files(name)
+
+    for file, noted in notes.items():
+        if file not in ids:
+            continue  # not on the share (check said so)
+
+        row_id = ids[file]
+        values = _annotation_values(db, kind, noted)
 
         if values:
-            db.add_annotations(target_type=target, target_id=exp_id, values=values)
+            db.add_annotations(target_type=kind, target_id=row_id, values=values)
             written.annotations += len(values)
 
-        written.annotations += _write_conditions(db, draft, name, exp_id, entry)
+        loop = noted.get("loop")
 
-        if entry.get("exp_type") != "loop":
+        if kind == "zstack" and loop is not None and loop in written.loops:
+            db.set_zstack_loop(zstack_id=row_id, loop_id=written.loops[loop])
+
+        draft.set_file(name, file, submitted_id=row_id)
+
+    if kind != "grab":
+        return
+
+    for record in entry.get("recordings", []):
+        if not record.get("copied") or record.get("replaced"):
             continue
 
-        if draft.vial_ids:
-            db.set_loop_vials(loop_id=exp_id, vial_ids=draft.vial_ids)
+        try:
+            db.decode_grabs_sync(session_id=session_id, sync_path=record["share"])
+            written.decoded.append(f"{name}/{record['file']}")
 
-        if _has_sync(db, exp_path):
-            # The experiment is in either way; a decode that refuses (a burst
-            # count that does not match, say) is reported and can be rerun
-            # once the file is sorted out.
-            try:
-                db.decode_sync(loop_id=exp_id)
-                written.decoded.append(name)
-
-            except Exception as error:
-                logger.exception(f"Decoding the sync file of {name} failed")
-                written.decode_failed[name] = f"{type(error).__name__}: {error}"
+        except Exception as error:
+            logger.exception(f"Decoding {record['file']} failed")
+            written.decode_failed[f"{name}/{record['file']}"] = (
+                f"{type(error).__name__}: {error}"
+            )
 
 
-def _ingest(db, session_id: int, exp_path: str, entry: dict) -> None | int:
-    """Add the folder's recordings, or find them if they are already in."""
-    objective = int(entry["objective"])
-    exp_type = entry.get("exp_type", "loop")
-
-    if exp_type == "loop":
-        exp_id = db.add_loop(
-            session_id=session_id, loop_path=exp_path, objective=objective
-        )
-
-    else:
-        add = db.add_grabs if exp_type == "grab" else db.add_zstacks
-        added = add(session_id=session_id, folder=exp_path, objective=objective)
-        # A grab folder holds several; the annotations go on the folder's
-        # first one, which is what the draft entry stands for
-        exp_id = added[0] if added else None
-
-    if exp_id is not None:
-        return exp_id
-
-    # Already in the database (an earlier attempt, or someone else's)
-    if exp_type == "loop":
-        rows = db.from_query(
-            "SELECT loop_id AS id FROM loops WHERE session_id = ? AND loop_path = ?;",
-            [session_id, exp_path],
-        )
-
-    else:
-        rows = db.from_query(
-            f"SELECT {exp_type}_id AS id FROM {exp_type}s WHERE session_id = ? "
-            f"AND raw_path LIKE ? ORDER BY {exp_type}_id;",
-            [session_id, f"{exp_path}/%"],
-        )
-
-    return None if rows.empty else int(rows["id"].iloc[0])
-
-
-def _write_conditions(db, draft: Draft, name: str, exp_id: int, entry: dict) -> int:
+def _write_conditions(db, draft: Draft, name: str, loop_id: int, entry: dict) -> int:
     """
     Each acquisition in a condition's range gets it as an annotation. Only
     when the conditions changed since the last submit, so a resubmit does
@@ -508,7 +646,7 @@ def _write_conditions(db, draft: Draft, name: str, exp_id: int, entry: dict) -> 
         return 0
 
     rows = db.from_query(
-        "SELECT acq_id, raw_path FROM acquisitions WHERE loop_id = ?;", [int(exp_id)]
+        "SELECT acq_id, raw_path FROM acquisitions WHERE loop_id = ?;", [int(loop_id)]
     )
     acq_ids = {
         acquisition_number(path): int(acq_id)
@@ -526,7 +664,7 @@ def _write_conditions(db, draft: Draft, name: str, exp_id: int, entry: dict) -> 
                 )
                 written += 1
 
-    draft.set_experiment(name, conditions_submitted=[dict(c) for c in conditions])
+    draft.set_part(name, conditions_submitted=[dict(c) for c in conditions])
 
     return written
 
@@ -536,7 +674,7 @@ def _annotation_values(db, applies_to: str, values: dict) -> dict:
     parsed = {}
 
     for field_ in form_fields(db, applies_to):
-        if field_.key in EXPERIMENT_SETTINGS or not field_.editable:
+        if field_.key in (*PART_SETTINGS, *FILE_SETTINGS) or not field_.editable:
             continue
 
         if field_.key in ("mouse_id", "session_date", "objective"):
@@ -548,8 +686,8 @@ def _annotation_values(db, applies_to: str, values: dict) -> dict:
     return parsed
 
 
-def _has_sync(db, exp_path: str) -> bool:
-    folder = Path(db.main_folder) / exp_path / SYNC_FOLDER
+def _has_sync(db, loop_path: str) -> bool:
+    folder = Path(db.main_folder) / loop_path / SYNC_FOLDER
 
     return folder.is_dir() and any(
         p for p in folder.glob("*.h5") if not p.name.startswith(".")

@@ -249,7 +249,7 @@ class Form(QWidget):
 class FormRows:
     """
     A list whose entries are rows of a form (a mouse's lines, a mix's
-    components, an experiment's conditions).
+    components, a loop's conditions).
 
     Each entry is a row of `form`, so it is spaced and its label placed like
     any other field's: `title` labels the first, the rest have an empty
@@ -808,7 +808,7 @@ class TimingForm(QGroupBox):
         self.changed.emit()
 
     def values(self) -> dict[str, Any]:
-        """The `block_*` annotation values for the experiment."""
+        """The `block_*` annotation values for the loop."""
         return {
             **{key: box.value() for key, box in self.inputs.items()},
             "block_n_odors": self.n_odors.value(),

@@ -1,12 +1,13 @@
 """
 Work in progress for one session, held on disk until someone submits it.
 
-A draft is what the app writes throughout an experiment day. This replaces the
+A draft is what the app writes throughout an imaging day. This replaces the
 log spreadsheet that was created for each mice and day.
 
-What goes here: the session's annotations, each experiment's annotations and
-settings, and which vials were loaded. What doesn't go here: Mice, odors,
-panels, and users (those are added directly to the database).
+What goes here: the session's annotations, its parts' (each loop folder `e1`,
+`e2`, ..., and the `grabs` and `zstacks` folders) annotations and settings,
+and which vials were loaded. What doesn't go here: Mice, odors, panels, and
+users (those are added directly to the database).
 
 More than buffers, these files serve as a temporary state where the data might
 not satisfy the database checks, or is otherwise inconsistent, and so it can't
@@ -24,17 +25,19 @@ draft = Draft.start(drafts_folder())        # today, animal not yet known
 draft.identify(mouse_id=442)                # once someone picks it
 
 draft.update_session(goal="10x pre/post ket/xyl", mouse_weight_g=25.1)
-draft.set_experiment("e1", exp_type="loop", objective=20, fov_depth_um=-55)
-draft.set_experiment("e1", conditions=[
+draft.set_part("e1", objective=20, z_landmark="surface of right bulb")
+draft.set_part("e1", conditions=[
     {"start": 3, "end": 40, "condition": "baseline"},     # acquisitions by
     {"start": 41, "end": 80, "condition": "ket/xyl"},     # their TIFF number
 ])
+draft.set_part("zstacks", objective=20)
+draft.set_file("zstacks", "20260914_m442_zstack_00001.tif", loop="e1")
 draft.set_vials([1, 2, 3, 4])
 
 Draft.pending(drafts_folder())   # everything not yet submitted or removed
 
 removals = Removals(drafts_folder())
-draft.remove_experiment("e1")
+draft.remove_part("e1")
 removals.push(draft, "e1")
 removals.undo()                  # e1 is back
 ```
@@ -43,7 +46,7 @@ removals.undo()                  # e1 is back
 Saving is atomic: so a crash costs at most the last edit rather than the whole
 day, and an unfinished draft is simply still there the next time the app opens.
 
-Nothing typed is ever deleted: removing a session or an experiment only marks
+Nothing typed is ever deleted: removing a session or a part only marks
 it `removed` (hidden everywhere, kept on disk), and `Removals` is the stack
 that undoes the latest of those. Submitted drafts move to `~/.odyn/submitted`,
 outside the drafts folder, so the record survives clearing the drafts.
@@ -63,8 +66,9 @@ from pathlib import Path
 from typing import Any
 
 # Bumped when the stored shape changes in a way a reader must notice.
-# A draft written by a newer app is refused rather than half-read.
-DRAFT_VERSION = 3
+# A draft written by a newer app is refused rather than half-read; an older
+# one is brought up to date as it is read (`_upgrade`).
+DRAFT_VERSION = 4
 
 FOLDER_NAME = ".odyn"
 DRAFTS = "drafts"
@@ -73,20 +77,30 @@ SUBMITTED = "submitted"
 # The undo stack of removals, in the drafts folder
 REMOVALS = "removed.json"
 
-# The keys of an experiment entry that are not annotations
-EXPERIMENT_SETTINGS = (
+# The keys of a part entry that are not annotations
+PART_SETTINGS = (
     "name",
-    "exp_type",
+    "kind",
     "objective",
-    "submitted_exp_id",
+    "submitted_id",
     "removed",
     "recordings",
     "conditions",
     "conditions_submitted",
+    "files",
+    "folder_made",
 )
 
-# What an experiment folder is called for each kind of recording
-EXPERIMENT_TYPES = ("loop", "grab", "zstack")
+# The keys of a file's entry (in a grabs or z-stacks part) that are not
+# annotations
+FILE_SETTINGS = ("loop", "submitted_id")
+
+# The kinds of part, and the folder of the two a session has one of
+KINDS = ("loop", "grab", "zstack")
+FOLDER_OF = {"grab": "grabs", "zstack": "zstacks"}
+
+# How the app names each kind of part in a sentence ("Remove loop ...")
+KIND_WORDS = {"loop": "loop", "grab": "grabs", "zstack": "z-stacks"}
 
 # A draft is named for when it was started because:
 # - the mouse is picked later and can be corrected;
@@ -122,7 +136,7 @@ class Draft:
     """
     One session being filled in. Every change is written to disk immediately.
 
-    Read the parts through `session`, `experiments` and `vial_ids`; change
+    Read the parts through `session`, `parts` and `vial_ids`; change
     them through the `update_*` and `set_*` methods, which save as they go.
     """
 
@@ -164,7 +178,7 @@ class Draft:
                 "saved_at": None,
                 "session_id": None,
                 "session": {},
-                "experiments": [],
+                "parts": [],
                 "vial_ids": [],
             },
         )
@@ -193,9 +207,10 @@ class Draft:
         Which animal and which day this session is about.
 
         Both are ordinary fields, so either can be corrected later without the
-        draft changing its name or colliding with another, until a recording
-        was made: its file is named and placed for that mouse and day, so a
-        change then raises `ValueError` (remove the session and start again).
+        draft changing its name or colliding with another, until a part's
+        folder or a recording was made (`fixed`): those are named and placed for
+        that mouse and day, so a change then raises `ValueError` (remove the
+        session and start again).
         `session_id` is remembered once the session row exists, so a resubmit
         finds it.
         """
@@ -203,10 +218,11 @@ class Draft:
             date is not None and _check_date(date) != self.date
         )
 
-        if changes and self.recorded:
+        if changes and self.fixed:
             raise ValueError(
-                "A recording was made for this session, so its mouse and date "
-                "are fixed. Remove the session and start a new one to change them."
+                "Folders or recordings were made for this session, so its mouse "
+                "and date are fixed. Remove the session and start a new one to "
+                "change them."
             )
 
         if mouse_id is not None:
@@ -226,7 +242,7 @@ class Draft:
         Read one draft file.
 
         Raises `ValueError` for a draft a newer version of the app wrote, rather
-        than reading the parts it recognizes and silently dropping the rest.
+        than reading what it recognizes and silently dropping the rest.
         """
         path = Path(path)
         data = json.loads(path.read_text())
@@ -238,7 +254,7 @@ class Draft:
                 f"(draft version {version}, this app reads {DRAFT_VERSION})."
             )
 
-        return cls(path, data)
+        return cls(path, _upgrade(data))
 
     @classmethod
     def pending(cls, folder: Path | str) -> list[Draft]:
@@ -313,7 +329,7 @@ class Draft:
 
     @property
     def session(self) -> dict[str, Any]:
-        """The fields that describe a mouse experiment setup"""
+        """The fields that describe the session (the mouse and the setup)"""
         return self.data.setdefault("session", {})
 
     @property
@@ -322,18 +338,19 @@ class Draft:
         return bool(self.data.get("removed"))
 
     @property
-    def experiments(self) -> list[dict[str, Any]]:
+    def parts(self) -> list[dict[str, Any]]:
         """
-        One entry per experiment folder, each with a `name` like `'e1'`
-        (removed ones left out). This gives entries themselves, so changing one
-        changes the draft (then `save`).
+        One entry per part of the session (removed ones left out): each loop
+        folder, named like `'e1'`, then `grabs` and `zstacks` if added. This
+        gives entries themselves, so changing one changes the draft (then
+        `save`).
         """
         return [e for e in self._entries if not e.get("removed")]
 
     @property
     def _entries(self) -> list[dict[str, Any]]:
-        """Every experiment entry, removed ones included."""
-        return self.data.setdefault("experiments", [])
+        """Every part entry, removed ones included."""
+        return self.data.setdefault("parts", [])
 
     @property
     def vial_ids(self) -> list[int]:
@@ -370,7 +387,7 @@ class Draft:
     def is_empty(self) -> bool:
         """Whether any of the session's fields hold a value (used to see, for
         example, if there anything to submit)."""
-        return not (self.session or self.experiments or self.vial_ids)
+        return not (self.session or self.parts or self.vial_ids)
 
     @property
     def is_untouched(self) -> bool:
@@ -389,28 +406,61 @@ class Draft:
 
         return self.is_empty and self.mouse_id is None and self.date == started
 
-    def experiment(self, name: str) -> None | dict[str, Any]:
-        """One experiment's entry, or `None` if it was not started (or removed)."""
-        for entry in self.experiments:
+    def part(self, name: str) -> None | dict[str, Any]:
+        """One part's entry, or `None` if it was not started (or removed)."""
+        for entry in self.parts:
             if entry.get("name") == name:
                 return entry
 
         return None
 
+    def describe(self, name: str) -> str:
+        """A part as the app says it: `loop 20260929/m442/e1`, `grabs ...`."""
+        entry = next((e for e in self._entries if e.get("name") == name), {})
+        kind = entry.get("kind", _default_type(name))
+
+        return f"{KIND_WORDS.get(kind, 'part')} {self.where}/{name}"
+
+    def files(self, name: str) -> dict[str, dict[str, Any]]:
+        """What was noted per TIFF of part `name` (grabs, z-stacks), by file name."""
+        entry = self.part(name)
+
+        return {} if entry is None else entry.get("files", {})
+
+    def next_loop(self, taken: tuple[int, ...] = ()) -> str:
+        """
+        The next loop folder's name, `e<n>`: one past every loop number in the
+        draft (removed ones too, they keep their names) and in `taken` (the
+        numbers already on the share, say).
+        """
+        numbers = [
+            int(name[1:]) for name in self.names_taken() if re.fullmatch(r"e\d+", name)
+        ]
+
+        return f"e{max([*numbers, *taken], default=0) + 1}"
+
+    @property
+    def fixed(self) -> bool:
+        """
+        Whether the mouse and date can no longer change: a part's folder was
+        made on the share, or a recording was (removed parts too).
+        """
+        return self.recorded or any(e.get("folder_made") for e in self._entries)
+
     @property
     def recorded(self) -> bool:
-        """Whether any experiment (removed ones too) has a sync recording."""
+        """Whether any part (removed ones too) has a sync recording."""
         return any(e.get("recordings") for e in self._entries)
 
     @staticmethod
     def latest(entry: dict[str, Any]) -> None | dict[str, Any]:
-        """An experiment entry's recording in use: the last not replaced."""
+        """A part entry's recording in use: the last not replaced."""
         kept = [r for r in entry.get("recordings", []) if not r.get("replaced")]
 
         return kept[-1] if kept else None
 
     def recordings(self, name: str) -> list[dict[str, Any]]:
-        """Every recording of experiment `name` (removed or not), oldest first."""
+        """Every recording of part `name` (removed or not), oldest first."""
         for entry in self._entries:
             if entry.get("name") == name:
                 return entry.get("recordings", [])
@@ -418,11 +468,11 @@ class Draft:
         return []
 
     def is_removed(self, name: str) -> bool:
-        """Whether experiment `name` was removed (its name stays taken)."""
+        """Whether part `name` was removed (its name stays taken)."""
         return any(e.get("name") == name and e.get("removed") for e in self._entries)
 
     def names_taken(self) -> list[str]:
-        """Every experiment name in the draft, removed ones included."""
+        """Every part name in the draft, removed ones included."""
         return [str(e.get("name")) for e in self._entries]
 
     # ----------------------------------------------------------------- #
@@ -439,13 +489,13 @@ class Draft:
 
         return self.save()
 
-    def set_experiment(self, name: str, **fields: Any) -> Draft:
+    def set_part(self, name: str, **fields: Any) -> Draft:
         """
-        Set fields on one experiment, creating its entry if it is new.
+        Set fields on one part, creating its entry if it is new.
 
-        `name` is the folder under the session (`e1`, `grabs`, `zstacks`);
-        `exp_type` and `objective` are settings, everything else is an
-        annotation. Raises `ValueError` for the name of a removed experiment:
+        `name` is the folder under the session (`e1`, `grabs`, `zstacks`), which
+        says its `kind`; `objective` is a setting, everything else is an
+        annotation. Raises `ValueError` for the name of a removed part:
         restore it instead, so it comes back as it was.
         """
         if self.is_removed(name):
@@ -454,40 +504,60 @@ class Draft:
                 "or pick another name."
             )
 
-        entry = self.experiment(name)
+        entry = self.part(name)
 
         if entry is None:
-            entry = {"name": name, "exp_type": _default_type(name)}
+            entry = {"name": name, "kind": _default_type(name)}
             self._entries.append(entry)
-            self._entries.sort(key=_experiment_order)
+            self._entries.sort(key=_part_order)
 
         _merge(entry, fields)
 
         return self.save()
 
+    def set_file(self, name: str, file: str, **fields: Any) -> Draft:
+        """
+        Set fields on one TIFF of part `name` (grabs, z-stacks): its
+        annotations, and for a z-stack the `loop` it was taken for.
+        """
+        entry = self.part(name)
+
+        if entry is None:
+            raise ValueError(f"There is no part '{name}'.")
+
+        noted = entry.setdefault("files", {}).setdefault(file, {})
+        _merge(noted, fields)
+
+        return self.save()
+
     def add_recording(self, name: str, record: dict[str, Any]) -> Draft:
         """
-        Note a sync recording of experiment `name`, which replaces any earlier
-        one (those are kept, marked `replaced`). `record` holds at least the
+        Note a sync recording of part `name`. A loop's replaces any earlier
+        one (those are kept, marked `replaced`); the grabs' add up, since each
+        covers the grabs taken while it ran. `record` holds at least the
         `file` name, its `local` path and its `share` path (relative to the
         main folder); `stopped` and `copied` are added as they happen.
         """
-        entry = self.experiment(name)
+        entry = self.part(name)
 
         if entry is None:
-            raise ValueError(f"There is no experiment '{name}' to record into.")
+            raise ValueError(f"There is no part '{name}' to record into.")
+
+        if entry.get("kind") == "zstack":
+            raise ValueError("Z-stacks are not recorded.")
 
         recordings = entry.setdefault("recordings", [])
 
-        for earlier in recordings:
-            earlier["replaced"] = True
+        if entry.get("kind", "loop") == "loop":
+            for earlier in recordings:
+                earlier["replaced"] = True
 
         recordings.append(dict(record))
 
         return self.save()
 
     def update_recording(self, name: str, file: str, **fields: Any) -> Draft:
-        """Set fields on one recording of experiment `name` (removed or not)."""
+        """Set fields on one recording of part `name` (removed or not)."""
         for entry in self._entries:
             if entry.get("name") != name:
                 continue
@@ -497,20 +567,20 @@ class Draft:
                     _merge(record, fields)
                     return self.save()
 
-        raise ValueError(f"No recording '{file}' in experiment '{name}'.")
+        raise ValueError(f"No recording '{file}' in part '{name}'.")
 
-    def remove_experiment(self, name: str) -> Draft:
-        """Hide an experiment, keeping what was typed into it."""
-        entry = self.experiment(name)
+    def remove_part(self, name: str) -> Draft:
+        """Hide a part, keeping what was typed into it."""
+        entry = self.part(name)
 
         if entry is not None:
             entry["removed"] = True
 
         return self.save()
 
-    def restore_experiment(self, name: str) -> bool:
+    def restore_part(self, name: str) -> bool:
         """
-        Bring a removed experiment back and returns whether there was
+        Bring a removed part back and returns whether there was
         actually something to bring back.
         """
         for entry in self._entries:
@@ -538,7 +608,7 @@ class Draft:
         return True
 
     def set_vials(self, vial_ids: list[int]) -> Draft:
-        """Record which vials were loaded for the day's experiments."""
+        """Record which vials were loaded for the day's parts."""
         self.data["vial_ids"] = sorted({int(v) for v in vial_ids})
 
         return self.save()
@@ -581,15 +651,15 @@ class Draft:
         return destination
 
     def __repr__(self) -> str:
-        return f"<Draft {self.label} ({len(self.experiments)} exp)>"
+        return f"<Draft {self.label} ({len(self.parts)} parts)>"
 
 
 class Removals:
     """
-    The undo stack of removed sessions and experiments, kept in
+    The undo stack of removed sessions and parts, kept in
     `removed.json` in the drafts folder so it outlives the app.
 
-    Each entry names a draft file and, for an experiment, its name. `undo`
+    Each entry names a draft file and, for a part, its name. `undo`
     restores the latest entry that still applies and drops the ones that do
     not (the draft deleted by hand or submitted, or restored another way).
 
@@ -600,13 +670,13 @@ class Removals:
         self.folder = Path(folder)
         self.path = self.folder / REMOVALS
 
-    def push(self, draft: Draft, experiment: None | str = None) -> None:
-        """Record that `draft` (or its `experiment`) was just removed."""
+    def push(self, draft: Draft, part: None | str = None) -> None:
+        """Record that `draft` (or its `part`) was just removed."""
         entries = self._read()
         entries.append(
             {
                 "draft": draft.path.name,
-                "experiment": experiment,
+                "part": part,
                 "removed_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
             }
         )
@@ -614,7 +684,7 @@ class Removals:
 
     def next(self) -> None | tuple[Draft, None | str]:
         """
-        What `undo` would restore: `(draft, experiment or None)`. Entries
+        What `undo` would restore: `(draft, part or None)`. Entries
         that no longer apply are dropped on the way.
         """
         entries = self._read()
@@ -645,21 +715,21 @@ class Removals:
         if found is None:
             return None
 
-        draft, experiment = found
+        draft, part = found
         draft = next((d for d in known if d.path == draft.path), draft)
 
-        if experiment is None:
+        if part is None:
             draft.restore()
         else:
-            draft.restore_experiment(experiment)
+            draft.restore_part(part)
 
         self._write(self._read()[:-1])
 
-        return draft, experiment
+        return draft, part
 
     def _applies(self, entry: dict[str, Any]) -> None | tuple[Draft, None | str]:
         path = self.folder / str(entry.get("draft", ""))
-        experiment = entry.get("experiment")
+        part = entry.get("part", entry.get("experiment"))  # version 3 called it that
 
         if not NAME_PATTERN.fullmatch(path.name) or not path.is_file():
             return None
@@ -669,15 +739,15 @@ class Removals:
         except (ValueError, OSError, json.JSONDecodeError):
             return None
 
-        if experiment is None:
+        if part is None:
             return (draft, None) if draft.removed else None
 
-        # The session must be there too, or the experiment would come back
+        # The session must be there too, or the part would come back
         # somewhere nobody can see it
-        if draft.removed or not draft.is_removed(str(experiment)):
+        if draft.removed or not draft.is_removed(str(part)):
             return None
 
-        return draft, str(experiment)
+        return draft, str(part)
 
     def _read(self) -> list[dict[str, Any]]:
         try:
@@ -723,7 +793,7 @@ def _merge(into: dict[str, Any], fields: dict[str, Any]) -> None:
 
 
 def _default_type(name: str) -> str:
-    """What a folder name says the recording is: `e1` a loop, `grabs` grabs."""
+    """What a folder name says the part is: `e1` a loop, `grabs` grabs."""
     if name.startswith("zstack"):
         return "zstack"
 
@@ -733,8 +803,33 @@ def _default_type(name: str) -> str:
     return "loop"
 
 
-def _experiment_order(entry: dict[str, Any]):
+def _part_order(entry: dict[str, Any]):
     """`e2` sorts after `e1` and before `e10`; anything unnumbered goes last."""
     match = re.fullmatch(r"e(\d+)", str(entry.get("name", "")))
 
     return (0, int(match.group(1))) if match else (1, str(entry.get("name", "")))
+
+
+def _upgrade(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    A draft from an older version of the app, in the current shape.
+
+    Version 3 called a session's parts experiments (`experiments`, with
+    `exp_type` and `submitted_exp_id`).
+    """
+    if data.get("version", DRAFT_VERSION) >= DRAFT_VERSION:
+        return data
+
+    parts = data.pop("experiments", [])
+
+    for entry in parts:
+        if "exp_type" in entry:
+            entry["kind"] = entry.pop("exp_type")
+
+        if "submitted_exp_id" in entry:
+            entry["submitted_id"] = entry.pop("submitted_exp_id")
+
+    data["parts"] = parts
+    data["version"] = DRAFT_VERSION
+
+    return data

@@ -29,6 +29,7 @@ from odyn import Database  # noqa: E402
 from odyn.app.draft import Draft  # noqa: E402
 from odyn.app.models import FrameModel  # noqa: E402
 from odyn.app.pane_recorder import RecorderPane, recording_path  # noqa: E402
+from odyn.app.pane_session import FilesForm, LoopForm  # noqa: E402
 from odyn.app.pane_tables import filter_frame  # noqa: E402
 from odyn.app.recorder import ReplaySource, SimulatedSource  # noqa: E402
 from odyn.app.window import MainWindow  # noqa: E402
@@ -115,8 +116,10 @@ def test_window_opens_on_users_with_every_page_in_the_left_bar(window):
     assert window.today == {}
     assert [a.toolTip() for a in window.right.actions() if a.toolTip()] == [
         "Add session",
-        "Add experiment",
-        "Record the selected experiment",
+        "Add loop",
+        "Add grabs",
+        "Add z-stacks",
+        "Record the selected loop or grabs",
         "Nothing to undo",
         "Nothing selected to remove",
         "Check session",
@@ -126,10 +129,10 @@ def test_window_opens_on_users_with_every_page_in_the_left_bar(window):
     assert not window.remove_action.isEnabled()
     assert not window.selection.isVisibleTo(window)
 
-    # the recorder sits right after Add experiment, a line between it and Undo
+    # the recorder sits right after the Add buttons, a line between it and Undo
     actions = window.right.actions()
     at = actions.index(window.page_actions[window.recorder])
-    assert actions[at - 1].toolTip() == "Add experiment"
+    assert actions[at - 1].toolTip() == "Add z-stacks"
     assert actions[at + 1].isSeparator() and actions[at + 2] is window.undo_action
 
 
@@ -500,22 +503,22 @@ def test_recorder_records_into_the_session_folder(window, tmp_path):
     assert window.recorder.draft is draft or window.recorder.draft.path == draft.path
 
     draft = window.sessions.current  # the window's own copy, loaded from disk
-    draft.set_experiment("e1").set_experiment("e2")
+    draft.set_part("e1").set_part("e2")
     window.context.announce_draft()
     recorder: RecorderPane = window.recorder
 
-    # only an experiment selected in the right bar is recorded
+    # only a part selected in the right bar is recorded
     window.open_session(draft)
     assert recorder.picked is None
     recorder.start()
     assert recorder.recording is None
-    assert "Select the experiment" in window.context.last_report[1]
+    assert "Select the part" in window.context.last_report[1]
 
-    window.open_experiment(draft, "e2")
+    window.open_part(draft, "e2")
     assert recorder.picked == "e2"
-    window.open_experiment(draft, "e1")
+    window.open_part(draft, "e1")
     window.page_actions[window.recorder].trigger()
-    assert recorder.experiment.text() == "e1"
+    assert recorder.part.text() == "e1"
     recorder.start()
     wait_until(
         lambda: recorder.recording is not None and recorder.recording.total > 100
@@ -533,17 +536,17 @@ def test_recorder_records_into_the_session_folder(window, tmp_path):
     with pytest.raises(ValueError, match="fixed"):
         draft.identify(mouse_id=8)
 
-    # selecting another experiment meanwhile does not move the recording
-    window.open_experiment(draft, "e2")
-    assert recorder.experiment.text() == "e1"
+    # selecting another part meanwhile does not move the recording
+    window.open_part(draft, "e2")
+    assert recorder.part.text() == "e1"
 
     recorder.stop()
     wait_until(lambda: not recorder.copier.running)  # copied in the background
-    assert recorder.experiment.text() == "e2"  # and then it follows again
+    assert recorder.part.text() == "e2"  # and then it follows again
 
-    experiment = tmp_path / "data" / "20260922" / "m7" / "e1"
-    assert (experiment / "raw").is_dir() and (experiment / "processed").is_dir()
-    files = list((experiment / "sync").glob("*"))
+    part = tmp_path / "data" / "20260922" / "m7" / "e1"
+    assert (part / "raw").is_dir() and (part / "processed").is_dir()
+    files = list((part / "sync").glob("*"))
     assert [f.name for f in files] == [record["file"]]  # no partial left
     assert local.is_file()  # and the local copy is kept
     assert record["stopped"] and record["copied"]
@@ -553,9 +556,9 @@ def test_recorder_records_into_the_session_folder(window, tmp_path):
         assert h5["2pFrameSync"].shape[0] > 100
         assert h5["filter_changes"].shape == (1, 3)
 
-    # the draft now lists the experiment the recorder made
+    # the draft now lists the part the recorder made
     shown = window.sessions.current
-    assert shown is not None and shown.experiment("e1") is not None
+    assert shown is not None and shown.part("e1") is not None
     assert list(window.today) == [
         (id(shown), None),
         (id(shown), "e1"),
@@ -577,9 +580,9 @@ def test_a_replay_records_its_file_and_stops_at_its_end(window, tmp_path, monkey
     )
     window.sessions.reload_drafts()
     draft = window.sessions.current
-    draft.set_experiment("e1")
+    draft.set_part("e1")
     window.context.announce_draft()
-    window.open_experiment(draft, "e1")
+    window.open_part(draft, "e1")
 
     recorder: RecorderPane = window.recorder
     recorder.source = ReplaySource(original, speed=50)
@@ -685,8 +688,8 @@ def test_recording_again_asks_and_hides_the_earlier_copy(window, tmp_path, monke
     )
     window.sessions.reload_drafts()
     draft = window.sessions.current
-    draft.set_experiment("e1")
-    window.open_experiment(draft, "e1")
+    draft.set_part("e1")
+    window.open_part(draft, "e1")
     recorder: RecorderPane = window.recorder
 
     def record():
@@ -721,8 +724,8 @@ def test_a_recording_stays_local_when_the_share_is_away(window, tmp_path):
     )
     window.sessions.reload_drafts()
     draft = window.sessions.current
-    draft.set_experiment("e1")
-    window.open_experiment(draft, "e1")
+    draft.set_part("e1")
+    window.open_part(draft, "e1")
 
     # the session folder is a file: nothing can be made or copied under it
     (tmp_path / "data" / "20260922").mkdir(parents=True)
@@ -1145,7 +1148,7 @@ def test_session_and_recorder_share_one_selection(window, tmp_path):
     window._add_session()
     settle(window.context)
     draft = sessions.current
-    assert context.draft is draft and context.experiment is None
+    assert context.draft is draft and context.part is None
     assert "no mouse yet" in recorder.session_label.text()
 
     # picking the mouse shows in the recorder at once, and on the right bar
@@ -1155,51 +1158,60 @@ def test_session_and_recorder_share_one_selection(window, tmp_path):
     assert window.today[(id(draft), None)].toolTip() == draft.where
     assert window.selection.text() == draft.where
 
-    # nothing to record into until an experiment is selected
-    assert recorder.experiment.text() == ""
+    # nothing to record into until a part is selected
+    assert recorder.part.text() == ""
     recorder.start()
     assert recorder.recording is None
-    assert "Select the experiment" in context.last_report[1]
+    assert "Select the part" in context.last_report[1]
 
-    # an experiment added is selected, and is what the recorder records
-    sessions.add_experiment("e1")
-    sessions.add_experiment("e2")
-    assert context.experiment == "e2" and recorder.experiment.text() == "e2"
+    # a part added is selected, and is what the recorder records
+    sessions.add_loop()
+    sessions.add_loop()
+    assert context.part == "e2" and recorder.part.text() == "e2"
 
-    assert window.view == "experiment"
+    assert window.view == "part"
     assert window.group.checkedAction() is window.today[(id(draft), "e2")]
 
-    # opening another experiment moves the recorder; and back (the session
-    # page alone selects no experiment to record)
+    # opening another part moves the recorder; and back (the session
+    # page alone selects no part to record)
     window.open_session(draft)
-    assert recorder.experiment.text() == ""
-    window.open_experiment(draft, "e1")
-    assert context.experiment == "e1" and recorder.experiment.text() == "e1"
-    window.open_experiment(draft, "e2")
-    assert recorder.experiment.text() == "e2"
+    assert recorder.part.text() == ""
+    window.open_part(draft, "e1")
+    assert context.part == "e1" and recorder.part.text() == "e1"
+    window.open_part(draft, "e2")
+    assert recorder.part.text() == "e2"
     assert window.group.checkedAction() is window.today[(id(draft), "e2")]
-    assert sessions.experiment_page.name == "e2"
+    assert sessions.part_page.name == "e2"
 
-    # removing the experiment shown drops it everywhere, no phantom name
-    sessions.remove_experiment()
-    assert [str(e["name"]) for e in draft.experiments] == ["e1"]
-    assert context.experiment == "e1" and recorder.experiment.text() == "e1"
+    # removing the part shown drops it everywhere, no phantom name
+    sessions.remove_part()
+    assert [str(e["name"]) for e in draft.parts] == ["e1"]
+    assert context.part == "e1" and recorder.part.text() == "e1"
     assert list(window.today) == [(id(draft), None), (id(draft), "e1")]
-    assert sessions.experiment_page.name == "e1"
+    assert sessions.part_page.name == "e1"
 
     # and removing the last one falls back to the session page
-    sessions.remove_experiment()
-    assert window.view == "session" and context.experiment is None
-    assert recorder.experiment.text() == ""
+    sessions.remove_part()
+    assert window.view == "session" and context.part is None
+    assert recorder.part.text() == ""
     assert window.pages.currentWidget() is sessions.session_page
     assert window.group.checkedAction() is window.today[(id(draft), None)]
 
 
-def test_experiment_page_notes_conditions_by_acquisition(window):
+def with_mouse(window, mouse: int = 7):
+    """A new session, its mouse picked (folders need it)."""
     window._add_session()
     draft = window.sessions.current
-    window.sessions.add_experiment("e1")
-    shown = window.sessions.experiment_page.shown
+    draft.identify(mouse_id=mouse)
+    window.context.announce_draft()
+
+    return draft
+
+
+def test_loop_page_notes_conditions_by_acquisition(window):
+    draft = with_mouse(window)
+    window.sessions.add_loop()
+    shown = window.sessions.part_page.shown
     conditions = shown.conditions
     assert conditions.choices == ["baseline", "ket/xyl"]
     assert conditions.none.placeholderText() == "none noted"
@@ -1208,12 +1220,12 @@ def test_experiment_page_notes_conditions_by_acquisition(window):
     conditions.add()
     conditions.add()
     conditions.rows[1].end.setValue(12)
-    assert draft.experiment("e1")["conditions"] == [
+    assert draft.part("e1")["conditions"] == [
         {"start": 1, "end": 1, "condition": "baseline"},
         {"start": 2, "end": 12, "condition": "ket/xyl"},
     ]
 
-    # rows of the experiment's form, below its fields, under one titled
+    # rows of the part's form, below its fields, under one titled
     # header naming the columns
     layout = shown.form.layout()
     assert layout.labelForField(conditions.header).text() == "Conditions"
@@ -1221,15 +1233,158 @@ def test_experiment_page_notes_conditions_by_acquisition(window):
     assert conditions.header.isVisibleTo(shown)
 
     conditions.remove(conditions.rows[0])
-    assert draft.experiment("e1")["conditions"] == [
+    assert draft.part("e1")["conditions"] == [
         {"start": 2, "end": 12, "condition": "ket/xyl"}
     ]
     conditions.remove(conditions.rows[0])
-    assert "conditions" not in draft.experiment("e1")
+    assert "conditions" not in draft.part("e1")
 
     # a folder of grabs has no conditions to note
-    window.sessions.add_experiment("grabs", exp_type="grab")
-    assert window.sessions.experiment_page.shown.conditions is None
+    window.sessions.add_grabs()
+    assert not isinstance(window.sessions.part_page.shown, LoopForm)
+
+
+def test_add_loop_numbers_and_makes_the_folders_in_one_click(window, tmp_path):
+    sessions, share = window.sessions, tmp_path / "data"
+
+    window._add_session()
+    sessions.add_loop()
+    assert "Pick the session's mouse first" in window.context.last_report[1]
+    assert window.sessions.current.parts == []
+
+    draft = window.sessions.current
+    draft.identify(mouse_id=7, date="2026-03-04")
+    window.context.announce_draft()
+    session = share / "20260304" / "m7"
+
+    sessions.add_loop()
+    assert window.context.part == "e1" and window.view == "part"
+    assert sorted(p.name for p in (session / "e1").iterdir()) == [
+        "processed",
+        "raw",
+        "sync",
+    ]
+
+    # a loop folder already on the share (an earlier session that day) is
+    # skipped, and so is a removed loop's name
+    (session / "e4").mkdir()
+    sessions.add_loop()
+    assert window.context.part == "e5"
+    sessions.remove_part("e5")
+    sessions.add_loop()
+    assert window.context.part == "e6"
+
+    # grabs and z-stacks: one folder each, shown with a picture
+    sessions.add_grabs()
+    sessions.add_zstacks()
+    assert sorted(p.name for p in (session / "grabs").iterdir()) == [
+        "processed",
+        "raw",
+        "sync",
+    ]
+    assert sorted(p.name for p in (session / "zstacks").iterdir()) == [
+        "processed",
+        "raw",
+    ]
+    assert [p["name"] for p in draft.parts] == ["e1", "e6", "grabs", "zstacks"]
+
+    sessions.add_grabs()  # again: selects them, adds nothing
+    assert window.context.part == "grabs" and len(draft.parts) == 4
+    assert isinstance(sessions.part_page.shown, FilesForm)
+    assert sessions.part_page.box.title() == f"Grabs {draft.where}/grabs"
+
+    # the folders are named for the mouse and the day, which are now fixed
+    assert not sessions.session_page.mouse.isEnabled()
+
+    with pytest.raises(ValueError, match="fixed"):
+        draft.identify(mouse_id=8)
+
+
+def test_the_grabs_page_lists_the_tiffs_and_keeps_notes_per_file(window, tmp_path):
+    from datetime import datetime
+
+    from generate_data import generate
+
+    share = tmp_path / "data"
+    size = dict(frames=56, height=32, width=40, start=datetime(2026, 3, 4, 9))
+    generate(share, acquisitions=2, exp="grabs", acq_state="grab", z_um=-80, **size)
+    stack = dict(slices=3, step_um=5, top_um=-10, power=30, length_um=-300)
+    generate(
+        share,
+        acquisitions=1,
+        exp="zstacks",
+        acq_state="grab",
+        zstack={**stack, "reference_um": -15},
+        **size,
+    )
+
+    sessions = window.sessions
+    window._add_session()
+    draft = sessions.current
+    draft.identify(mouse_id=1, date="2026-03-04")
+    window.context.announce_draft()
+    sessions.add_loop()
+    sessions.add_grabs()
+    settle(window.context)
+
+    form = sessions.part_page.shown
+    assert isinstance(form, FilesForm)
+    frame = form.model.frame
+    assert list(frame.index) == [
+        "20260304_m1_grabs_00001.tif",
+        "20260304_m1_grabs_00002.tif",
+    ]
+    assert list(frame["z_um"]) == [-80, -80] and list(frame["frames"]) == [56, 56]
+    assert "2 TIFFs in" in form.found.text()
+
+    # picking a file shows its notes; what is typed goes to the draft
+    form.table.selectRow(1)
+    assert form.notes.title() == "20260304_m1_grabs_00002.tif"
+    form.file_form.rows["goal"].editor.setText("reference")
+    form.file_form.rows["goal"].editor.editingFinished.emit()
+    assert draft.files("grabs") == {
+        "20260304_m1_grabs_00002.tif": {"goal": "reference"}
+    }
+    assert form.model.frame["notes"].tolist() == ["", "yes"]
+
+    form.form.rows["objective"].editor.setCurrentText("10")
+    assert draft.part("grabs")["objective"] == 10
+
+    # a z-stack also names its loop
+    sessions.add_zstacks()
+    settle(window.context)
+    form = sessions.part_page.shown
+    assert list(form.model.frame["slices"]) == [3]
+    assert list(form.model.frame["z_start_um"]) == [-10]
+    form.table.selectRow(0)
+    form.loop.setCurrentText("e1")
+    assert draft.files("zstacks") == {"20260304_m1_zstacks_00001.tif": {"loop": "e1"}}
+
+
+def test_the_grabs_recordings_add_up_and_zstacks_are_not_recorded(window):
+    sessions, recorder = window.sessions, window.recorder
+    draft = with_mouse(window)
+    sessions.add_grabs()
+    window.page_actions[window.recorder].trigger()
+    assert recorder.part.text() == "grabs"
+
+    for _ in range(2):  # no question the second time
+        recorder.start()
+        wait_until(
+            lambda: recorder.recording is not None and recorder.recording.total > 50
+        )
+        recorder.stop()
+        wait_until(lambda: not recorder.copier.running)
+
+    records = draft.recordings("grabs")
+    assert len(records) == 2 and not any(r.get("replaced") for r in records)
+    assert all(r["share"].startswith(f"{draft.folder}/grabs/sync/") for r in records)
+
+    sessions.add_zstacks()
+    window.open_part(draft, "zstacks")
+    recorder.start()
+    assert recorder.recording is None
+    assert "Z-stacks are not recorded" in window.context.last_report[1]
 
 
 def test_quick_maths_warns_when_imaging_outlasts_the_trial(app):
@@ -1259,25 +1414,24 @@ def test_quick_maths_warns_when_imaging_outlasts_the_trial(app):
     assert not form.overrun.isVisibleTo(form)
 
 
-def test_experiment_page_has_the_objective_in_its_form(window, tmp_path):
+def test_loop_page_has_the_objective_in_its_form(window, tmp_path):
     sessions = window.sessions
-    window._add_session()
+    draft = with_mouse(window)
     settle(window.context)
-    draft = sessions.current
-    sessions.add_experiment("e1")
-    assert window.pages.currentWidget() is sessions.experiment_page
+    sessions.add_loop()
+    assert window.pages.currentWidget() is sessions.part_page
 
-    tab = sessions.experiment_page.shown
+    tab = sessions.part_page.shown
     assert list(tab.form.rows)[0] == "objective"
 
     # a required field is marked by its label's color, not a star
     label = tab.form.layout().labelForField(tab.form.rows["objective"])
     assert label.text() == "Objective" and "color" in label.styleSheet()
-    assert not hasattr(tab, "exp_type")
+    assert not hasattr(tab, "kind")
 
     tab.form.rows["objective"].editor.setCurrentText("20")
-    assert draft.experiment("e1")["objective"] == 20
-    assert draft.experiment("e1")["exp_type"] == "loop"
+    assert draft.part("e1")["objective"] == 20
+    assert draft.part("e1")["kind"] == "loop"
 
 
 def test_right_bar_lists_sessions_in_the_order_started(window, tmp_path):
@@ -1289,7 +1443,7 @@ def test_right_bar_lists_sessions_in_the_order_started(window, tmp_path):
     window._add_session()
     first = window.sessions.current
     window.sessions.session_page.mouse.setCurrentText("m442")
-    window.sessions.add_experiment("e1")
+    window.sessions.add_loop()
     window._add_session()
     second = window.sessions.current
     settle(window.context)
@@ -1307,9 +1461,9 @@ def test_right_bar_lists_sessions_in_the_order_started(window, tmp_path):
     assert window.group.checkedAction() is window.today[(id(second), None)]
 
     # Remove acts on what is selected, named on the bottom bar
-    window.open_experiment(first, "e1")
+    window.open_part(first, "e1")
     assert window.selection.text() == f"{first.where}/e1"
-    assert window.remove_action.statusTip() == f"Remove experiment {first.where}/e1"
+    assert window.remove_action.statusTip() == f"Remove loop {first.where}/e1"
     window.remove_action.trigger()
 
     # its session is selected next, so a second click removes one thing only
@@ -1374,21 +1528,17 @@ def test_remove_marks_and_undo_brings_back(window, tmp_path):
     draft = sessions.current
     date = draft.date.replace("-", "")
     sessions.session_page.mouse.setCurrentText("m442")
-    sessions.add_experiment("e1")
-    draft.set_experiment("e1", goal="typed by hand")
-    sessions.add_experiment("e2")
+    sessions.add_loop()
+    draft.set_part("e1", goal="typed by hand")
+    sessions.add_loop()
     assert not undo.isEnabled()
 
     # removing only hides; the button says what would come back
-    window.open_experiment(draft, "e1")
-    sessions.remove_experiment()
+    window.open_part(draft, "e1")
+    sessions.remove_part()
     assert list(window.today) == [(id(draft), None), (id(draft), "e2")]
     assert undo.isEnabled()
-    assert undo.statusTip() == f"Undo remove: experiment {date}/m442/e1"
-
-    # the removed name stays taken
-    sessions.add_experiment("e1")
-    assert "was removed" in window.context.last_report[1]
+    assert undo.statusTip() == f"Undo remove: loop {date}/m442/e1"
 
     sessions.remove()
     assert sessions.drafts == [] and window.today == {}
@@ -1401,8 +1551,8 @@ def test_remove_marks_and_undo_brings_back(window, tmp_path):
     assert list(window.today) == [(id(draft), None), (id(draft), "e2")]
 
     undo.trigger()
-    assert window.view == "experiment" and window.context.experiment == "e1"
-    assert draft.experiment("e1")["goal"] == "typed by hand"
+    assert window.view == "part" and window.context.part == "e1"
+    assert draft.part("e1")["goal"] == "typed by hand"
     assert (id(draft), "e1") in window.today
     assert not undo.isEnabled()
 
@@ -1426,7 +1576,7 @@ def test_guide_points_at_every_bar_button_with_no_session(window):
         "Quality Control",
     ]
     assert "Add session" in texts and "Undo the last remove" in texts
-    assert "Record the selected experiment" in texts
+    assert "Record the selected loop or grabs" in texts
 
     # each arrow ends right beside its own button, and no two labels overlap
     buttons = {

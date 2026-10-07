@@ -2,7 +2,7 @@
 What a form shows, taken from the annotation registry.
 
 A form is not written out widget by widget. `annotation_keys` already says
-what may be recorded about a mouse, a session or an experiment, with a label,
+what may be recorded about a mouse, a session, a loop or a grab, with a label,
 a type, a unit, where the value comes from and whether it is required -- so
 the form is built from it. Registering a new key with
 `Database.add_annotation_key` makes it appear, and retiring one makes it
@@ -140,6 +140,16 @@ class Field:
         return str(value)
 
 
+# What every recording was imaged with (a column of loops, grabs, z-stacks)
+OBJECTIVE = Field(
+    "objective",
+    "Objective",
+    INTEGER,
+    "10 or 20 (preview scalebar uses it)",
+    required=True,
+    options=OBJECTIVES,
+)
+
 # Columns of the tables themselves that a person fills in, written as fields so
 # the form does not have to treat them apart from the registry's keys. Every
 # other column is read from the recordings or set by the database, and the ones
@@ -177,16 +187,11 @@ COLUMN_FIELDS = {
         ),
     ),
 
-    "loop": (
-        Field(
-            "objective",
-            "Objective",
-            INTEGER,
-            "10 or 20 (preview scalebar uses it)",
-            required=True,
-            options=OBJECTIVES,
-        ),
-    ),
+    "loop": (OBJECTIVE,),
+
+    # One objective for the session's grabs, one for its z-stacks
+    "grab": (OBJECTIVE,),
+    "zstack": (OBJECTIVE,),
 }
 
 # The odor registry's form (`odors`' own columns; not a submit target)

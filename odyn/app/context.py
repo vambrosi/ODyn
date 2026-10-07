@@ -25,10 +25,11 @@ class Context(QObject):
     - `changed` fires after anything was written, so every pane reloads what
       it shows;
     - `user` is who is using the app right now, as picked in the Users tab;
-    - `draft` and `experiment` are the session and experiment folder being
-      worked on, the one state every tab shows and follows:
+    - `draft` and `part` are the session and the part of it (a loop, its
+      grabs or its z-stacks) being worked on, the one state every tab shows
+      and follows:
       `selection_changed` fires when either is picked, `draft_changed` when
-      the picked draft's contents change (mouse, date, an experiment added
+      the picked draft's contents change (mouse, date, a part added
       or removed), so the Session and Recorder tabs never disagree.
     """
 
@@ -46,9 +47,9 @@ class Context(QObject):
         self._user = worker.user
         self.window: None | QWidget = None
         self.draft: Any = None  # a `Draft`, or None
-        self.experiment: None | str = None
+        self.part: None | str = None
 
-        # What the right bar has selected: "session", "experiment" or None
+        # What the right bar has selected: "session", "part" or None
         self.focus: None | str = None
         self.last_report: None | tuple[str, str] = None
 
@@ -73,43 +74,37 @@ class Context(QObject):
     def user(self) -> None | str:
         return self._user
 
-    def select(self, draft: Any, experiment: None | str = None) -> None:
-        """Make `draft` (and one of its experiments) what every tab works on."""
-        if experiment is not None and (
-            draft is None or draft.experiment(experiment) is None
-        ):
-            experiment = None
+    def select(self, draft: Any, part: None | str = None) -> None:
+        """Make `draft` (and one of its parts) what every tab works on."""
+        if part is not None and (draft is None or draft.part(part) is None):
+            part = None
 
-        if experiment is None and draft is not None and draft.experiments:
-            experiment = str(draft.experiments[-1]["name"])
+        if part is None and draft is not None and draft.parts:
+            part = str(draft.parts[-1]["name"])
 
-        if draft is self.draft and experiment == self.experiment:
+        if draft is self.draft and part == self.part:
             return
 
-        self.draft, self.experiment = draft, experiment
+        self.draft, self.part = draft, part
         self.selection_changed.emit()
 
     @property
-    def selected_experiment(self) -> None | str:
-        """The experiment, when it (not only its session) is what is selected."""
-        return self.experiment if self.focus == "experiment" else None
+    def selected_part(self) -> None | str:
+        """The part, when it (not only its session) is what is selected."""
+        return self.part if self.focus == "part" else None
 
-    def select_experiment(self, experiment: None | str) -> None:
-        """Switch to another experiment of the same draft."""
-        self.select(self.draft, experiment)
+    def select_part(self, part: None | str) -> None:
+        """Switch to another part of the same draft."""
+        self.select(self.draft, part)
 
     def announce_draft(self) -> None:
-        """The picked draft changed (mouse, date, experiments): tabs redraw."""
-        if self.draft is not None and self.experiment is not None:
-            if self.draft.experiment(self.experiment) is None:
-                self.experiment = None
+        """The picked draft changed (mouse, date, parts): tabs redraw."""
+        if self.draft is not None and self.part is not None:
+            if self.draft.part(self.part) is None:
+                self.part = None
 
-        if (
-            self.experiment is None
-            and self.draft is not None
-            and self.draft.experiments
-        ):
-            self.experiment = str(self.draft.experiments[-1]["name"])
+        if self.part is None and self.draft is not None and self.draft.parts:
+            self.part = str(self.draft.parts[-1]["name"])
 
         self.draft_changed.emit()
 

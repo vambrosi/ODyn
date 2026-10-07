@@ -1,17 +1,17 @@
 """
 The recorder tab: the live traces and the Start/Stop around a `Recording`.
 
-The file is written on this computer, `~/.odyn/sync/<session folder>/
-<experiment>/<mouse>_<experiment>_<started>.h5`, so a share that drops never
-stops a recording, and copied at Stop (in the background) to where `submit`
-looks for it: `<main folder>/<session folder>/<experiment>/sync/`, with the
-experiment's `raw/` and `processed/` folders made beside it so the ScanImage
-side has somewhere to save. A copy that fails is retried by Submit (see
-`recordings`).
+What is recorded is a part of the session picked in the right bar: a loop
+(`e1`) or the grabs (z-stacks are not recorded). The file is written on this
+computer, `~/.odyn/sync/<session folder>/<part>/<mouse>_<part>_<started>.h5`,
+so a share that drops never stops a recording, and copied at Stop (in the
+background) to where `submit` looks for it: `<main folder>/<session folder>/
+<part>/sync/`. A copy that fails is retried by Submit (see `recordings`).
 
 The draft notes every recording (`Draft.add_recording`) and from then on the
 session's mouse and date are fixed, since the file is named for them.
-Recording an experiment again asks first, and replaces the earlier file.
+Recording a loop again asks first, and replaces the earlier file; the grabs'
+recordings add up, each covering the grabs taken while it ran.
 
 "Test" runs the source and shows the traces without writing anything: it is
 what the rig runs to check the wiring.
@@ -61,7 +61,7 @@ from .recordings import (
     copy_to_share,
     hide_on_share,
     local_path,
-    make_experiment_folders,
+    make_part_folders,
     share_path,
 )
 
@@ -87,7 +87,7 @@ TRACES = (
 def recording_path(
     local_root: Path,
     draft: Draft,
-    experiment: str,
+    part: str,
     started: None | datetime = None,
 ) -> tuple[Path, str, str]:
     """
@@ -95,11 +95,11 @@ def recording_path(
     the main folder, the mouse name it is stamped with)`.
     """
     mouse = f"m{draft.mouse_id}"
-    name = sync_file_name(mouse, experiment, started or datetime.now())
+    name = sync_file_name(mouse, part, started or datetime.now())
 
     return (
-        local_path(local_root, draft.folder, experiment, name),
-        share_path(draft.folder, experiment, name),
+        local_path(local_root, draft.folder, part, name),
+        share_path(draft.folder, part, name),
         mouse,
     )
 
@@ -107,7 +107,7 @@ def recording_path(
 class Copier(QObject):
     """
     Copies a finished recording to the share on a thread of its own, so a
-    slow share never freezes the window. `done(draft path, experiment, file,
+    slow share never freezes the window. `done(draft path, part, file,
     error)` comes back on the GUI thread, `error` empty when it worked.
     """
 
@@ -117,7 +117,7 @@ class Copier(QObject):
         super().__init__(parent)
         self.running: set[str] = set()  # files being copied
 
-    def copy(self, draft: Draft, experiment: str, record: dict, main_folder: Path):
+    def copy(self, draft: Draft, part: str, record: dict, main_folder: Path):
         file = str(record["file"])
         self.running.add(file)
 
@@ -130,7 +130,7 @@ class Copier(QObject):
             except OSError as failure:
                 error = str(failure) or type(failure).__name__
 
-            self.done.emit(str(draft.path), experiment, file, error)
+            self.done.emit(str(draft.path), part, file, error)
 
         threading.Thread(target=run, name=f"copy {file}", daemon=True).start()
 
@@ -178,11 +178,11 @@ class RecorderPane(QWidget):
         where = QGroupBox("Where the file goes")
         where_form = QFormLayout(where)
         self.session_label = QLabel("no session selected in the right bar")
-        self.experiment = QLabel("")
+        self.part = QLabel("")
         self.target = QLabel("")
         self.target.setMinimumWidth(TARGET_WIDTH_PX)
         where_form.addRow("Session", self.session_label)
-        where_form.addRow("Experiment", self.experiment)
+        where_form.addRow("Folder", self.part)
         where_form.addRow("File", self.target)
         layout.addWidget(where)
 
@@ -295,14 +295,14 @@ class RecorderPane(QWidget):
 
     @property
     def picked(self) -> None | str:
-        """The experiment selected in the right bar: what Start records."""
-        name = self.context.selected_experiment
+        """The part selected in the right bar: what Start records."""
+        name = self.context.selected_part
         draft = self.draft
 
-        return name if draft is not None and draft.experiment(name or "") else None
+        return name if draft is not None and draft.part(name or "") else None
 
     def follow(self) -> None:
-        """Show the selected session and experiment (frozen while recording)."""
+        """Show the selected session and part (frozen while recording)."""
         if self.recording is not None:
             return  # the names are frozen while a file is being written
 
@@ -315,7 +315,7 @@ class RecorderPane(QWidget):
         else:
             self.session_label.setText(f"{draft.label} in {draft.folder}")
 
-        self.experiment.setText(self.picked or "")
+        self.part.setText(self.picked or "")
         self._refresh_target()
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt's name)
@@ -329,7 +329,7 @@ class RecorderPane(QWidget):
         name = self.picked
 
         if not name:
-            self.target.setText("select an experiment in the right bar")
+            self.target.setText("select a part in the right bar")
             return
 
         if self.draft is None or self.draft.mouse_id is None:
@@ -364,12 +364,23 @@ class RecorderPane(QWidget):
         if name is None:
             self.context.report(
                 "Recorder",
-                "Select the experiment to record in the right bar (add one first "
+                "Select the part to record in the right bar (add one first "
                 "if the session has none).",
             )
             return
 
-        earlier = Draft.latest(draft.experiment(name))
+        entry = draft.part(name) or {}
+        kind = entry.get("kind", "loop")
+
+        if kind == "zstack":
+            self.context.report(
+                "Recorder",
+                "Z-stacks are not recorded. Select a loop or the grabs in the "
+                "right bar.",
+            )
+            return
+
+        earlier = Draft.latest(entry) if kind == "loop" else None
 
         if earlier is not None and not self.context.confirm(
             "Recorder",
@@ -387,9 +398,9 @@ class RecorderPane(QWidget):
 
         # Where ScanImage saves, if the share is there; made again at the copy
         try:
-            make_experiment_folders(self.context.main_folder / draft.folder / name)
+            make_part_folders(self.context.main_folder / draft.folder / name, kind)
         except OSError as error:
-            logger.warning(f"Could not make the experiment folders yet: {error}")
+            logger.warning(f"Could not make the part folders yet: {error}")
 
         started_ok = self._begin(
             local,

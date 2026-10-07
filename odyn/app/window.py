@@ -3,8 +3,9 @@ The main window: two bars of buttons around the page being shown, a panel of
 text under it, a bottom bar, and the worker thread that owns the database.
 
 - **Left bar**: DB views and insertions at the top, the Recorder at the bottom.
-- **Right bar**: session and experiments lists at the top, and what you can do
-  to them at the bottom (add, remove, undo, check, and submit).
+- **Right bar**: the day's sessions, each followed by its parts (loops `e1`,
+  `e2`..., its grabs and z-stacks), at the top, and what you can do to them
+  at the bottom (add, remove, undo, check, and submit).
 - **Bottom panel**: what Check and Submit found, and the `odyn` log.
 - **Bottom bar**: what is being hovered or was selected, and the user.
 """
@@ -36,7 +37,7 @@ from PySide6.QtWidgets import (
 from ..utils import logger
 from . import style
 from .context import Context
-from .draft import Draft, drafts_folder
+from .draft import FOLDER_OF, Draft, drafts_folder
 from .forms import WheelGuard
 from .guide import Guide
 from .pane_qc import QcPane
@@ -75,8 +76,9 @@ class MainWindow(QMainWindow):
     temporary database.
 
     What the middle shows is `view`: `"page"` for a left-bar page, or
-    `"session"` / `"experiment"` for the selected draft (`context.draft`) and
-    experiment (`context.experiment`), which the right bar highlights.
+    `"session"` / `"part"` for the selected draft (`context.draft`) and
+    part (`context.part`: a loop, the grabs or the z-stacks), which the right
+    bar highlights.
     """
 
     def __init__(
@@ -136,7 +138,7 @@ class MainWindow(QMainWindow):
             (d for d in self.sessions.drafts if d.path == Path(path)), None
         )
         self.pages.addWidget(self.sessions.session_page)
-        self.pages.addWidget(self.sessions.experiment_page)
+        self.pages.addWidget(self.sessions.part_page)
         self.pages.addWidget(self.sessions.no_session_page)
 
         # Left: registries and browsing
@@ -173,8 +175,10 @@ class MainWindow(QMainWindow):
 
         for entry in (
             ("add-session", "Add session", self._add_session),
-            ("add-experiment", "Add experiment", self.sessions.add_experiment),
-            ("recorder", "Record the selected experiment", self.recorder),
+            ("add-loop", "Add loop", self.sessions.add_loop),
+            ("add-grabs", "Add grabs", self.sessions.add_grabs),
+            ("add-zstacks", "Add z-stacks", self.sessions.add_zstacks),
+            ("recorder", "Record the selected loop or grabs", self.recorder),
             None,
             ("undo", "Nothing to undo", self._undo),
             ("remove", "Nothing selected to remove", self._remove),
@@ -238,8 +242,8 @@ class MainWindow(QMainWindow):
         self.sessions.removals_changed.connect(self._refresh_undo)
         self.sessions.listed.connect(self._refresh_undo)
         self.sessions.reported.connect(lambda text: self.panel.show_text("Check", text))
-        self.sessions.experiment_added.connect(
-            lambda name: self.open_experiment(self.context.draft, name)
+        self.sessions.part_added.connect(
+            lambda name: self.open_part(self.context.draft, name)
         )
 
         # Picking a name is the first thing to do; the day's work comes next
@@ -260,7 +264,7 @@ class MainWindow(QMainWindow):
                     self.commands,
                     {
                         self.undo_action: "Undo the last remove",
-                        self.remove_action: "Remove the selected session/experiment",
+                        self.remove_action: "Remove the selected session, loop, grabs or z-stacks",
                     },
                 ),
             ],
@@ -292,7 +296,7 @@ class MainWindow(QMainWindow):
         """
         What Remove would remove, as written in the bottom bar: the last thing
         opened on the right bar (None once it is removed). Kept in the context,
-        since the recorder records the experiment only when it is this.
+        since the recorder records the part only when it is this.
         """
         return self.context.focus
 
@@ -303,19 +307,19 @@ class MainWindow(QMainWindow):
 
     def open_session(self, draft: None | Draft) -> None:
         """Select `draft` and show its session page."""
-        keep = self.context.experiment if draft is self.context.draft else None
+        keep = self.context.part if draft is self.context.draft else None
         self.context.select(draft, keep)
         self.view = "session"
         self.selected = None if draft is None else "session"
         self._show_session_page()
         self._highlight()
 
-    def open_experiment(self, draft: None | Draft, name: str) -> None:
-        """Select experiment `name` of `draft` and show its page."""
+    def open_part(self, draft: None | Draft, name: str) -> None:
+        """Select part `name` of `draft` and show its page."""
         self.context.select(draft, name)
-        self.view = "experiment"
-        self.selected = "experiment"
-        self.pages.setCurrentWidget(self.sessions.experiment_page)
+        self.view = "part"
+        self.selected = "part"
+        self.pages.setCurrentWidget(self.sessions.part_page)
         self._highlight()
 
     def _add_session(self) -> None:
@@ -328,45 +332,41 @@ class MainWindow(QMainWindow):
         if restored is None:
             return
 
-        draft, experiment = restored
+        draft, part = restored
 
-        if experiment is None:
+        if part is None:
             self.open_session(draft)
         else:
-            self.open_experiment(draft, experiment)
+            self.open_part(draft, part)
 
     def _remove(self) -> None:
         """
-        Remove the selected experiment (its session is shown next) or session
+        Remove the selected part (its session is shown next) or session
         (nothing is selected next), so a double click removes only one.
         """
         draft = self.context.draft
 
-        if self.selected == "experiment":
-            self.sessions.remove_experiment(self.context.experiment)
+        if self.selected == "part":
+            self.sessions.remove_part(self.context.part)
             self.open_session(draft)
         elif self.selected == "session":
             self.sessions.remove()
             self.open_session(None)
 
     def _show_selection(self) -> None:
-        """The selected session or experiment on the bottom bar and on Remove."""
-        draft, experiment = self.context.draft, self.context.experiment
+        """The selected session or part on the bottom bar and on Remove."""
+        draft, part = self.context.draft, self.context.part
 
         if self.selected is None or draft is None:
-            name = None
-        elif self.selected == "experiment" and experiment is not None:
-            name = f"{draft.where}/{experiment}"
+            name = what = None
+        elif self.selected == "part" and part is not None:
+            name, what = f"{draft.where}/{part}", draft.describe(part)
         else:
-            name = draft.where
+            name, what = draft.where, f"session {draft.where}"
 
         self.selection.setText(name or "")
         self.selection.setVisible(name is not None)
-        tip = (
-            "Nothing selected to remove"
-            if name is None
-            else f"Remove {self.selected} {name}"
-        )
+        tip = "Nothing selected to remove" if what is None else f"Remove {what}"
         self.remove_action.setEnabled(name is not None)
         self.remove_action.setToolTip(tip)
         self.remove_action.setStatusTip(tip)
@@ -384,15 +384,15 @@ class MainWindow(QMainWindow):
 
     def _follow(self) -> None:
         """
-        The selection moved (an experiment was removed, say): an experiment
+        The selection moved (a part was removed, say): a part's
         page follows it, or falls back to its session.
         """
         if self.context.draft is None:
             self.selected = None
-        elif self.selected == "experiment" and self.context.experiment is None:
+        elif self.selected == "part" and self.context.part is None:
             self.selected = "session"
 
-        if self.view == "experiment" and self.selected != "experiment":
+        if self.view == "part" and self.selected != "part":
             self.view = "session"
 
         if self.view == "session":
@@ -417,7 +417,7 @@ class MainWindow(QMainWindow):
 
         key = (
             id(self.context.draft),
-            self.context.experiment if self.view == "experiment" else None,
+            self.context.part if self.view == "part" else None,
         )
         wanted = self.today.get(key)
 
@@ -431,8 +431,8 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------------- #
 
     def _rebuild_today(self) -> None:
-        """One block per draft: the session, then its experiments."""
-        self._follow()  # an experiment removed: its page goes first
+        """One block per draft: the session, then its parts."""
+        self._follow()  # a part removed: its page goes first
 
         for action in [*self.today.values(), *self.today_extras]:
             self.right.removeAction(action)
@@ -450,24 +450,25 @@ class MainWindow(QMainWindow):
                 self.today_extras.append(separator)
 
             session = self._today_action(
-                self.sessions.label(draft),
+                label_icon(self.sessions.label(draft)),
                 draft.where,
                 lambda _=False, d=draft: self.open_session(d),
             )
             self.today[(id(draft), None)] = session
 
-            for entry in draft.experiments:
+            for entry in draft.parts:
                 name = str(entry["name"])
                 self.today[(id(draft), name)] = self._today_action(
-                    name,
+                    # Loops by their name; the grabs and z-stacks by a picture
+                    icon(name) if entry.get("kind") in FOLDER_OF else label_icon(name),
                     f"{draft.where}/{name}",
-                    lambda _=False, d=draft, n=name: self.open_experiment(d, n),
+                    lambda _=False, d=draft, n=name: self.open_part(d, n),
                 )
 
         self._highlight()
 
-    def _today_action(self, label: str, tip: str, opened) -> QAction:
-        action = QAction(label_icon(label), "", self)
+    def _today_action(self, symbol: QIcon, tip: str, opened) -> QAction:
+        action = QAction(symbol, "", self)
         action.setToolTip(tip)
         action.setStatusTip(tip)
         action.setCheckable(True)

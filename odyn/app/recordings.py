@@ -2,20 +2,20 @@
 Sync recordings kept on this computer, and their copies on the share.
 
 The recorder writes each file locally first, so a share that drops mid-session
-never stops an experiment, then copies it to where `submit` looks for it:
+never stops a recording, then copies it to where `submit` looks for it:
 
     ~/.odyn/sync/20261001/m442/e1/m442_e1_2026-10-01_13-02-11.h5     (local)
     <main folder>/20261001/m442/e1/sync/m442_e1_2026-10-01_13-02-11.h5
 
-The local folders mirror the share's, and the file keeps its final name, so
-either copy says what it is without the draft. The draft keeps the link (one
-entry per recording, see `Draft.add_recording`), and the local copy is never
-deleted here.
+The local folders mirror the share's (the grabs' go to `grabs/sync/`), and the
+file keeps its final name, so either copy says what it is without the draft.
+The draft keeps the link (one entry per recording, see `Draft.add_recording`),
+and the local copy is never deleted here.
 
 A copy is written under a hidden name (`.<name>.partial`) and renamed once its
 size matches, so a half-copied file never looks like a recording. A file on
 the share is never overwritten. A recording that was replaced by a newer one
-of the same experiment is hidden on the share (renamed with a leading dot,
+of the same part is hidden on the share (renamed with a leading dot,
 which `decode_sync` ignores) rather than deleted.
 
 No Qt in here: the recorder runs `copy_to_share` on a thread of its own, and
@@ -37,23 +37,29 @@ from .draft import Draft
 
 LOCAL_FOLDER = "sync"  # beside the drafts folder: ~/.odyn/sync
 
-# Folders every experiment gets, so ScanImage and the pipeline find their place
-EXPERIMENT_FOLDERS = ("raw", SYNC_FOLDER, "processed")
+# Folders each kind of part gets, so ScanImage and the pipeline find their
+# place. Z-stacks have no sync recording.
+PART_FOLDERS = {
+    "loop": ("raw", SYNC_FOLDER, "processed"),
+    "grab": ("raw", SYNC_FOLDER, "processed"),
+    "zstack": ("raw", "processed"),
+}
 
 
-def local_path(root: Path, folder: str, experiment: str, name: str) -> Path:
+def local_path(root: Path, folder: str, part: str, name: str) -> Path:
     """Where a recording is written on this computer."""
-    return Path(root) / folder / experiment / name
+    return Path(root) / folder / part / name
 
 
-def share_path(folder: str, experiment: str, name: str) -> str:
+def share_path(folder: str, part: str, name: str) -> str:
     """Where its copy goes, relative to the main folder."""
-    return f"{folder}/{experiment}/{SYNC_FOLDER}/{name}"
+    return f"{folder}/{part}/{SYNC_FOLDER}/{name}"
 
 
-def make_experiment_folders(experiment_folder: Path) -> None:
-    for name in EXPERIMENT_FOLDERS:
-        (experiment_folder / name).mkdir(parents=True, exist_ok=True)
+def make_part_folders(part_folder: Path, kind: str = "loop") -> None:
+    """A part's folder and the ones inside it, as its kind needs."""
+    for name in PART_FOLDERS[kind]:
+        (part_folder / name).mkdir(parents=True, exist_ok=True)
 
 
 def copy_to_share(local: Path, target: Path) -> None:
@@ -72,7 +78,7 @@ def copy_to_share(local: Path, target: Path) -> None:
 
         raise FileExistsError(f"A different file is already at '{target}'.")
 
-    make_experiment_folders(target.parent.parent)
+    make_part_folders(target.parent.parent)
     partial = target.with_name(f".{target.name}.partial")
     shutil.copyfile(local, partial)
 
@@ -95,14 +101,14 @@ def sync_pending(
 ) -> dict[str, str]:
     """
     Bring the share in line with the draft's recordings: copy each
-    experiment's latest one if it is not there yet, and hide the replaced
+    part's latest one if it is not there yet, and hide the replaced
     ones that were copied. Files in `busy` (still being written) are left.
 
-    Returns what could not be done, as `{experiment: why}`.
+    Returns what could not be done, as `{part: why}`.
     """
     failed: dict[str, str] = {}
 
-    for entry in draft.experiments:
+    for entry in draft.parts:
         name = str(entry["name"])
 
         for record in entry.get("recordings", []):
@@ -125,14 +131,22 @@ def sync_pending(
 
 
 def pending(draft: Draft) -> dict[str, dict[str, Any]]:
-    """Each experiment's latest recording that is not on the share yet."""
+    """
+    Each part's recording in use that is not on the share yet: a loop's
+    latest, the grabs' first not copied (they are all in use).
+    """
     found = {}
 
-    for entry in draft.experiments:
-        latest = Draft.latest(entry)
+    for entry in draft.parts:
+        if entry.get("kind", "loop") == "loop":
+            candidates = [Draft.latest(entry)]
+        else:
+            candidates = entry.get("recordings", [])
 
-        if latest is not None and not latest.get("copied"):
-            found[str(entry["name"])] = latest
+        waiting = [r for r in candidates if r is not None and not r.get("copied")]
+
+        if waiting:
+            found[str(entry["name"])] = waiting[0]
 
     return found
 

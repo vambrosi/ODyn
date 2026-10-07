@@ -5,7 +5,7 @@ check/submit against a database with a synthetic recording.
 
 import json
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -109,24 +109,24 @@ def test_a_draft_is_saved_on_every_change(tmp_path):
 
     draft.identify(mouse_id="442", date="2026-07-08")
     draft.update_session(goal="x", mouse_weight_g=24.0)
-    draft.set_experiment("e1", objective=20, pmt_gain=70)
-    draft.set_experiment("grabs")
+    draft.set_part("e1", objective=20, pmt_gain=70)
+    draft.set_part("grabs")
     draft.set_vials([3, 1, 1])
 
     again = Draft.load(draft.path)
     assert again.mouse_id == 442 and again.date == "2026-07-08"
     assert again.folder == "20260708/m442"
     assert again.session == {"goal": "x", "mouse_weight_g": 24.0}
-    assert [e["name"] for e in again.experiments] == ["e1", "grabs"]
-    assert again.experiment("e1")["exp_type"] == "loop"
-    assert again.experiment("grabs")["exp_type"] == "grab"
+    assert [e["name"] for e in again.parts] == ["e1", "grabs"]
+    assert again.part("e1")["kind"] == "loop"
+    assert again.part("grabs")["kind"] == "grab"
     assert again.vial_ids == [1, 3]
     assert again.user == "tester"
 
-    # `None` clears, and removing an experiment drops it
-    again.update_session(goal=None).remove_experiment("grabs")
+    # `None` clears, and removing a part drops it
+    again.update_session(goal=None).remove_part("grabs")
     assert Draft.load(draft.path).session == {"mouse_weight_g": 24.0}
-    assert len(Draft.load(draft.path).experiments) == 1
+    assert len(Draft.load(draft.path).parts) == 1
 
 
 def test_pending_skips_the_unreadable_and_the_archived(tmp_path):
@@ -189,7 +189,7 @@ def share(tmp_path):
 
     draft = Draft.start(tmp_path / "drafts", mouse_id=1, date="2026-01-01")
     draft.update_session(goal="test", mouse_weight_g=24)
-    draft.set_experiment("e1", objective=20, pmt_gain=70, treatment="fine")
+    draft.set_part("e1", objective=20, pmt_gain=70, treatment="fine")
     draft.set_vials(vials)
 
     return db, draft
@@ -203,7 +203,7 @@ def test_check_lists_what_is_wrong(share):
         "e1: No olfactometer Events file found. (can submit anyway)"
     ]
 
-    draft.set_experiment("e2", objective=None, pmt_gain="deep")
+    draft.set_part("e2", objective=None, pmt_gain="deep")
     draft.set_vials([99])
     messages = [str(p) for p in check(db, draft)]
 
@@ -215,7 +215,7 @@ def test_check_lists_what_is_wrong(share):
         "e1: No olfactometer Events file found. (can submit anyway)"
     ]
 
-    draft.remove_experiment("e2").set_vials([]).identify(mouse_id=7)
+    draft.remove_part("e2").set_vials([]).identify(mouse_id=7)
     messages = [str(p) for p in check(db, draft)]
     assert messages[0].startswith("session: Mouse 7 is not registered")
     assert any("Folder '20260101/m7' is not on the share" in m for m in messages)
@@ -231,11 +231,11 @@ def test_submit_does_the_whole_day(share):
 
     assert result.submitted, result.error
     assert result.written.session_id == db.session_for(1, "2026-01-01")
-    assert list(result.written.experiments) == ["e1"]
+    assert list(result.written.loops) == ["e1"]
     assert result.written.annotations == 4
     assert result.written.decoded == ["e1"]
 
-    exp_id = result.written.experiments["e1"]
+    exp_id = result.written.loops["e1"]
     assert db.annotations_for("loop").loc[exp_id, "pmt_gain"] == 70
     assert (
         db.annotations_for("session").loc[result.written.session_id, "goal"] == "test"
@@ -250,7 +250,7 @@ def test_submit_does_the_whole_day(share):
 
 def test_a_blocked_submit_writes_nothing(share):
     db, draft = share
-    draft.set_experiment("e2", objective=20)
+    draft.set_part("e2", objective=20)
 
     result = submit(db, draft)
 
@@ -270,11 +270,11 @@ def test_a_second_submit_does_not_ingest_twice(share):
     assert first.submitted
 
     # Something more to say about the same day
-    draft.set_experiment("e1", treatment="updated")
+    draft.set_part("e1", treatment="updated")
     second = submit(db, draft, force=True)
 
     assert second.submitted, second.error
-    assert second.written.experiments == first.written.experiments
+    assert second.written.loops == first.written.loops
     assert len(db.loops) == 1
     assert db.annotations_for("loop").iloc[0]["treatment"] == "updated"
     assert db.latest_calls("add_loop").shape[0] == 1
@@ -284,7 +284,7 @@ def test_conditions_are_checked_and_written_per_acquisition(share):
     db, draft = share  # e1 has three TIFFs, numbered 1 to 3
 
     def messages(conditions):
-        draft.set_experiment("e1", conditions=conditions)
+        draft.set_part("e1", conditions=conditions)
         return [str(p) for p in check(db, draft) if "Condition" in str(p)]
 
     assert messages([{"start": 2, "end": 1, "condition": "baseline"}]) == [
@@ -303,7 +303,7 @@ def test_conditions_are_checked_and_written_per_acquisition(share):
         "e1: Condition ket/xyl 2 to 5 names acquisitions with no TIFF: 4-5."
     ]
 
-    draft.set_experiment(
+    draft.set_part(
         "e1",
         conditions=[
             {"start": 1, "end": 1, "condition": "baseline"},
@@ -366,7 +366,7 @@ def test_submit_copies_a_recording_kept_on_this_computer(share, tmp_path):
 
 def test_a_recorded_session_keeps_its_mouse_and_date(tmp_path):
     draft = Draft.start(tmp_path, mouse_id=442, date="2026-09-29")
-    draft.set_experiment("e1").identify(mouse_id=443)  # not recorded yet: fine
+    draft.set_part("e1").identify(mouse_id=443)  # not recorded yet: fine
     draft.add_recording("e1", {"file": "f.h5", "local": "x", "share": "y"})
 
     with pytest.raises(ValueError, match="fixed"):
@@ -376,24 +376,24 @@ def test_a_recorded_session_keeps_its_mouse_and_date(tmp_path):
     assert draft.recorded and draft.session_id == 5
 
 
-def test_a_removed_experiment_is_hidden_and_keeps_its_name(tmp_path):
+def test_a_removed_part_is_hidden_and_keeps_its_name(tmp_path):
     draft = Draft.start(tmp_path, mouse_id=442, date="2026-09-29")
-    draft.set_experiment("e1", pmt_gain=70).set_experiment("e2")
-    draft.remove_experiment("e1")
+    draft.set_part("e1", pmt_gain=70).set_part("e2")
+    draft.remove_part("e1")
 
     again = Draft.load(draft.path)
-    assert [e["name"] for e in again.experiments] == ["e2"]
-    assert again.experiment("e1") is None and again.is_removed("e1")
+    assert [e["name"] for e in again.parts] == ["e2"]
+    assert again.part("e1") is None and again.is_removed("e1")
     assert again.names_taken() == ["e1", "e2"]
 
     # Cannot use the same name, even after removal
     with pytest.raises(ValueError, match="was removed"):
-        again.set_experiment("e1")
+        again.set_part("e1")
 
-    assert again.restore_experiment("e1")
-    assert again.experiment("e1")["pmt_gain"] == 70
-    assert "removed" not in again.experiment("e1")
-    assert not again.restore_experiment("e1")  # nothing left to restore
+    assert again.restore_part("e1")
+    assert again.part("e1")["pmt_gain"] == 70
+    assert "removed" not in again.part("e1")
+    assert not again.restore_part("e1")  # nothing left to restore
 
 
 def test_undo_restores_the_latest_removal_that_still_applies(tmp_path):
@@ -402,12 +402,12 @@ def test_undo_restores_the_latest_removal_that_still_applies(tmp_path):
     assert removals.next() is None and removals.undo() is None
 
     kept = Draft.start(folder, mouse_id=1)
-    kept.set_experiment("e1")
+    kept.set_part("e1")
     gone = Draft.start(folder, mouse_id=2)
     other = Draft.start(folder, mouse_id=3)
     submitted = Draft.start(folder, mouse_id=4)
 
-    kept.remove_experiment("e1")
+    kept.remove_part("e1")
     removals.push(kept, "e1")
     gone.remove()
     removals.push(gone)
@@ -424,14 +424,14 @@ def test_undo_restores_the_latest_removal_that_still_applies(tmp_path):
     other.restore()
     gone.path.unlink()
 
-    draft, experiment = removals.next()
-    assert draft.path == kept.path and experiment == "e1"
+    draft, part = removals.next()
+    assert draft.path == kept.path and part == "e1"
     assert len(json.loads(removals.path.read_text())) == 1  # the rest dropped
 
     # restored on the caller's own copy of the draft, which sees it
     assert removals.undo([kept]) == (kept, "e1")
-    assert kept.experiment("e1") is not None
-    assert Draft.load(kept.path).experiment("e1") is not None
+    assert kept.part("e1") is not None
+    assert Draft.load(kept.path).part("e1") is not None
     assert removals.next() is None and removals.undo() is None
 
 
@@ -443,8 +443,8 @@ def test_an_undone_session_is_pending_again(tmp_path):
     assert Draft.pending(tmp_path) == []
     assert Draft.unreadable(tmp_path) == []  # the stack is not a draft
 
-    restored, experiment = removals.undo()
-    assert experiment is None and restored.session == {"goal": "keep me"}
+    restored, part = removals.undo()
+    assert part is None and restored.session == {"goal": "keep me"}
     assert [d.path for d in Draft.pending(tmp_path)] == [draft.path]
 
 
@@ -512,3 +512,143 @@ def test_a_replay_needs_the_recorders_sample_rate(tmp_path):
 
     with pytest.raises(ValueError, match="above 0"):
         ReplaySource(tmp_path / "slow.h5", speed=0)
+
+
+def test_a_version_3_draft_is_read_with_parts(tmp_path):
+    path = tmp_path / "20261001-090000.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "mouse_id": 442,
+                "date": "2026-10-01",
+                "session": {},
+                "experiments": [
+                    {"name": "e1", "exp_type": "loop", "submitted_exp_id": 4},
+                    {"name": "e2", "exp_type": "loop", "removed": True},
+                ],
+                "vial_ids": [],
+            }
+        )
+    )
+    Removals(tmp_path).path.write_text(
+        json.dumps([{"draft": path.name, "experiment": "e2"}])
+    )
+
+    draft = Draft.load(path)
+    assert draft.part("e1") == {"name": "e1", "kind": "loop", "submitted_id": 4}
+    assert draft.is_removed("e2")
+
+    # its undo entry still applies
+    restored, part = Removals(tmp_path).undo()
+    assert part == "e2" and restored.part("e2") is not None
+    assert json.loads(path.read_text())["version"] == 4
+
+
+# The 2026-08-11 z-stack of m357, as its header has it
+STACK = dict(slices=21, step_um=5, top_um=-5.7, power=35, length_um=-300)
+STACK["reference_um"] = -55.7
+
+
+@pytest.fixture
+def a_day(tmp_path):
+    """
+    A loop, two grabs with a sync file running through them, and a z-stack
+    of m1 on 2026-03-04, and a draft for the day with each part added.
+    """
+    day = datetime(2026, 3, 4, 9, 0, 0)
+    size = dict(frames=56, height=32, width=40)
+    generate(tmp_path, acquisitions=2, start=day + timedelta(hours=1), **size)
+    generate(
+        tmp_path,
+        acquisitions=2,
+        exp="grabs",
+        acq_state="grab",
+        start=day,
+        z_um=-80,
+        **size,
+    )
+    generate(
+        tmp_path,
+        acquisitions=1,
+        exp="zstacks",
+        acq_state="grab",
+        start=day + timedelta(hours=2),
+        zstack=STACK,
+        **size,
+    )
+
+    # Grabs at 0 s and 10 s; the file's bursts at 0 s and 9 s
+    sync = "20260304/m1/grabs/sync/m1_grabs.h5"
+    generate_sync(
+        tmp_path / sync,
+        acquisitions=2,
+        frames=56,
+        start=day - timedelta(seconds=2),
+        missing_pulse_in=(0, 1),
+    )
+
+    db = Database(tmp_path, can_create=True, user="tester")
+    db.set_mouse(mouse_id=1)
+
+    draft = Draft.start(tmp_path / "drafts", mouse_id=1, date="2026-03-04")
+    draft.set_part("e1", objective=20)
+    draft.set_part("grabs", objective=10)
+    draft.add_recording(
+        "grabs",
+        {"file": "m1_grabs.h5", "local": "x", "share": sync, "copied": "yes"},
+    )
+    draft.set_part("zstacks", objective=20)
+
+    return db, draft
+
+
+def test_grabs_and_zstacks_notes_are_checked(a_day):
+    db, draft = a_day
+    draft.set_file("zstacks", "20260304_m1_zstacks_00001.tif", loop="e9")
+    draft.set_file("grabs", "late_00009.tif", pmt_gain="high")
+
+    messages = [str(p) for p in check(db, draft)]
+    assert "zstacks/20260304_m1_zstacks_00001.tif: Its loop, e9, is not listed." in (
+        messages
+    )
+    assert any("grabs/late_00009.tif: PMT gain is a number" in m for m in messages)
+    assert (
+        "grabs/late_00009.tif: Not in the folder on the share. (can submit anyway)"
+        in messages
+    )
+
+
+def test_submit_adds_the_grabs_and_zstacks_with_their_notes(a_day):
+    db, draft = a_day
+    grab, stack = "20260304_m1_grabs_00002.tif", "20260304_m1_zstacks_00001.tif"
+    draft.set_file("grabs", grab, goal="reference", condition="ket/xyl")
+    draft.set_file("zstacks", stack, loop="e1", z_landmark="surface of right bulb")
+
+    assert not any(p.blocking for p in check(db, draft))
+    result = submit(db, draft)
+    assert result.submitted, result.error
+
+    written = result.written
+    assert list(written.loops) == ["e1"]
+    assert sorted(written.grabs) == ["20260304_m1_grabs_00001.tif", grab]
+    assert list(written.zstacks) == [stack]
+
+    grab_id, stack_id = written.grabs[grab], written.zstacks[stack]
+    notes = db.annotations_for("grab").loc[grab_id]
+    assert (notes["goal"], notes["condition"]) == ("reference", "ket/xyl")
+    assert db.zstacks.loc[stack_id, "loop_id"] == written.loops["e1"]
+    assert (
+        db.annotations_for("zstack").loc[stack_id, "z_landmark"]
+        == "surface of right bulb"
+    )
+    assert draft.files("grabs")[grab]["submitted_id"] == grab_id
+
+    # the grabs' sync file, matched by time
+    assert written.decoded == ["grabs/m1_grabs.h5"]
+    assert db.grabs["sync_block"].tolist() == [0, 1]
+
+    # a second submit ingests nothing new
+    again = Draft.load(draft.path)
+    assert submit(db, again, force=True).submitted
+    assert len(db.grabs) == 2 and len(db.zstacks) == 1

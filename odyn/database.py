@@ -762,91 +762,7 @@ class Database(CallRecorder):
         )
 
     def _read_tiff(self, path: Path) -> None | tuple[Object, Object]:
-        """
-        What a ScanImage TIFF says about its recording and about itself, or
-        `None` when it is not a ScanImage file this can read.
-
-        The recording's part must be the same across a loop's TIFFs; `stack`
-        is `None` unless ScanImage took a z-stack.
-        """
-        tif = TiffFile(path)
-
-        if (
-            not tif.is_scanimage
-            or tif.scanimage_metadata is None
-            or tif.scanimage_metadata["FrameData"] is None
-            or not isinstance(tif.pages[0], TiffPage)
-        ):
-            return None
-
-        # Get file SI metadata
-        SI_metadata = tif.scanimage_metadata["FrameData"]
-        laser_powers = SI_metadata["SI.hBeams.powers"]
-
-        # Get the data that must be the same across a loop
-        file_stem_parts = path.stem.split("_")
-
-        recording: Object = {
-            "name": "_".join(file_stem_parts[:-1]),
-            "acq_state": SI_metadata["SI.acqState"],
-            "height_px": tif.pages[0].tags["ImageLength"].value,
-            "width_px": tif.pages[0].tags["ImageWidth"].value,
-            "frames_per_slice": _whole_number(
-                SI_metadata["SI.hStackManager.framesPerSlice"],
-                "Frames per slice",
-                path,
-            ),
-            "frame_rate": SI_metadata["SI.hRoiManager.scanFrameRate"],
-            "z_um": _sample_z(SI_metadata),
-            "laser_power_920": _whole_number(
-                laser_powers[0],
-                "Laser power at 920 nm",
-                path,
-            ),
-            "laser_power_1040": _whole_number(
-                laser_powers[1],
-                "Laser power at 1040 nm",
-                path,
-            ),
-            "loop_acq_interval_s": SI_metadata["SI.loopAcqInterval"],
-            "stack": _stack(SI_metadata),
-        }
-
-        # Assume unit is centimeters
-        # TODO: Check that units are centimeters
-        dx, nx = tif.pages[0].tags["XResolution"].value
-        dy, ny = tif.pages[0].tags["YResolution"].value
-
-        # um per pixels in each direction
-        factor_x = round(1e4 * nx / dx, 4)
-        factor_y = round(1e4 * ny / dy, 4)
-
-        # Size of image in um
-        recording["width_um"] = recording["width_px"] * factor_x
-        recording["height_um"] = recording["height_px"] * factor_y
-
-        # Parse ImageDescription
-        image_description = dict(
-            line.split(" = ")
-            for line in tif.pages[0].tags["ImageDescription"].value.splitlines()
-        )
-
-        # Parse ImageDescription epoch as a datetime
-        date_string = image_description["epoch"].strip("[]")
-        date_string = " ".join(date_string.split())
-        started = datetime.strptime(date_string, "%Y %m %d %H %M %S.%f")
-
-        recording["start"] = started
-
-        # Data specific to the TIFF: when its first frame was taken
-        delta_sec = float(image_description["frameTimestamps_sec"])
-
-        tiff: Object = {
-            "raw_path": path.relative_to(self.main_folder).as_posix(),
-            "acq_start": started + timedelta(seconds=delta_sec),
-        }
-
-        return recording, tiff
+        return read_tiff(path, self.main_folder)
 
     def _refresh_if_stale(self) -> None:
         """Reset caches if another connection has committed since the last check."""
@@ -2684,6 +2600,100 @@ def _has_database(path: Path) -> bool:
     # Connecting to a missing file creates it empty, so an empty file is what a
     # failed or interrupted creation leaves behind, not a database.
     return path.is_file() and path.stat().st_size > 0
+
+
+def read_tiff(path: Path, main_folder: Path) -> None | tuple[Object, Object]:
+    """
+    What a ScanImage TIFF says about its recording and about itself, or
+    `None` when it is not a ScanImage file this can read. Paths are given
+    relative to `main_folder`.
+
+    The first dict (about the recording) must be the same across a loop's
+    TIFFs; its `stack` is `None` unless ScanImage took a z-stack.
+    """
+    with TiffFile(path) as tif:
+        return _read_open_tiff(tif, Path(path), Path(main_folder))
+
+
+def _read_open_tiff(
+    tif: TiffFile, path: Path, main_folder: Path
+) -> None | tuple[Object, Object]:
+    if (
+        not tif.is_scanimage
+        or tif.scanimage_metadata is None
+        or tif.scanimage_metadata["FrameData"] is None
+        or not isinstance(tif.pages[0], TiffPage)
+    ):
+        return None
+
+    # Get file SI metadata
+    SI_metadata = tif.scanimage_metadata["FrameData"]
+    laser_powers = SI_metadata["SI.hBeams.powers"]
+
+    # Get the data that must be the same across a loop
+    file_stem_parts = path.stem.split("_")
+
+    recording: Object = {
+        "name": "_".join(file_stem_parts[:-1]),
+        "acq_state": SI_metadata["SI.acqState"],
+        "height_px": tif.pages[0].tags["ImageLength"].value,
+        "width_px": tif.pages[0].tags["ImageWidth"].value,
+        "frames_per_slice": _whole_number(
+            SI_metadata["SI.hStackManager.framesPerSlice"],
+            "Frames per slice",
+            path,
+        ),
+        "frame_rate": SI_metadata["SI.hRoiManager.scanFrameRate"],
+        "z_um": _sample_z(SI_metadata),
+        "laser_power_920": _whole_number(
+            laser_powers[0],
+            "Laser power at 920 nm",
+            path,
+        ),
+        "laser_power_1040": _whole_number(
+            laser_powers[1],
+            "Laser power at 1040 nm",
+            path,
+        ),
+        "loop_acq_interval_s": SI_metadata["SI.loopAcqInterval"],
+        "stack": _stack(SI_metadata),
+    }
+
+    # Assume unit is centimeters
+    # TODO: Check that units are centimeters
+    dx, nx = tif.pages[0].tags["XResolution"].value
+    dy, ny = tif.pages[0].tags["YResolution"].value
+
+    # um per pixels in each direction
+    factor_x = round(1e4 * nx / dx, 4)
+    factor_y = round(1e4 * ny / dy, 4)
+
+    # Size of image in um
+    recording["width_um"] = recording["width_px"] * factor_x
+    recording["height_um"] = recording["height_px"] * factor_y
+
+    # Parse ImageDescription
+    image_description = dict(
+        line.split(" = ")
+        for line in tif.pages[0].tags["ImageDescription"].value.splitlines()
+    )
+
+    # Parse ImageDescription epoch as a datetime
+    date_string = image_description["epoch"].strip("[]")
+    date_string = " ".join(date_string.split())
+    started = datetime.strptime(date_string, "%Y %m %d %H %M %S.%f")
+
+    recording["start"] = started
+
+    # Data specific to the TIFF: when its first frame was taken
+    delta_sec = float(image_description["frameTimestamps_sec"])
+
+    tiff: Object = {
+        "raw_path": path.relative_to(main_folder).as_posix(),
+        "acq_start": started + timedelta(seconds=delta_sec),
+    }
+
+    return recording, tiff
 
 
 def _dt_string(value: datetime) -> str:

@@ -1,39 +1,50 @@
 """
-The day's work: one draft per session, filled in as the experiment runs and
+The day's work: one draft per session, filled in as the part runs and
 submitted at the end.
 
 Two pages show the selected draft (`Context.draft`): the **session page**
-(mouse, date, folder, the session's annotations, the odor panel, and the
-session's actions) and the **experiment page** (one experiment folder's
-settings, annotations and trial block calculator). `Sessions` owns the drafts
-and the actions that both the pages and the window's right bar call; what
-Check and Submit find goes out through `Sessions.reported`.
+(mouse, date, folder, the session's annotations, the odor panel) and the
+**part page**, one part of the session: a loop (`e1`: its settings,
+annotations, conditions and trial block calculator), or its grabs or z-stacks
+(the objective, and each TIFF found in the folder with its header values and
+notes). `Sessions` owns the drafts and the actions that both the pages and the
+window's right bar call; what Check and Submit find goes out through
+`Sessions.reported`.
 """
 
 from __future__ import annotations
 
+import re
+
+import pandas as pd
+
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
 
 from .context import Context
-from .draft import EXPERIMENT_SETTINGS, Draft, Removals
+from .draft import FILE_SETTINGS, FOLDER_OF, PART_SETTINGS, Draft, Removals
 from .fields import Field, annotation_fields, form_fields
 from .forms import Form, FormRows, PanelPicker, TimingForm, fit_row
+from .models import FrameModel, fit_columns
 from .pane_registry import current_vials
+from .recordings import make_part_folders
 from .style import COMBO_EXTRA_PX, PAGE_MAX_PX, required_label, text_style
-from .submit import check, submit
+from .submit import check, list_tiffs, submit
 
 TIMING_KEYS = (
     "block_baseline_s",
@@ -172,7 +183,7 @@ class ConditionRow(QWidget):
 
 class ConditionList(FormRows):
     """
-    An experiment's conditions: which acquisitions were recorded at baseline
+    A loop's conditions: which acquisitions were recorded at baseline
     and which under anesthesia, saved to the draft as they are typed.
     """
 
@@ -216,10 +227,10 @@ class ConditionList(FormRows):
         self.on_change(self.values())
 
 
-class ExperimentForm(QWidget):
+class LoopForm(QWidget):
     """
-    One experiment folder of a session: its settings and annotations, and
-    for a loop its conditions.
+    One loop of a session: its settings, annotations and conditions, and the
+    trial block calculator.
     """
 
     def __init__(
@@ -235,7 +246,7 @@ class ExperimentForm(QWidget):
         self.name = name
         self.conditions: None | ConditionList = None
 
-        entry = draft.experiment(name) or {}
+        entry = draft.part(name) or {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -245,7 +256,7 @@ class ExperimentForm(QWidget):
         plain = [f for f in fields if f.key not in TIMING_KEYS]
         self.form = Form(plain)
         self.form.set_values(
-            {k: v for k, v in entry.items() if k not in EXPERIMENT_SETTINGS}
+            {k: v for k, v in entry.items() if k not in PART_SETTINGS}
             | {"objective": entry.get("objective")}
         )
         self.form.changed.connect(lambda key, value: self._set(**{key: value}))
@@ -254,7 +265,7 @@ class ExperimentForm(QWidget):
         left.addWidget(self.form)
 
         # Conditions are per acquisition, which only loops have one of each
-        if entry.get("exp_type", "loop") == "loop" and conditions:
+        if entry.get("kind", "loop") == "loop" and conditions:
             self.conditions = ConditionList(
                 self.form.layout(),
                 list(conditions),
@@ -281,14 +292,196 @@ class ExperimentForm(QWidget):
         self.refresh_status()
 
     def refresh_status(self) -> None:
-        entry = self.draft.experiment(self.name) or {}
-        exp_id = entry.get("submitted_exp_id")
+        entry = self.draft.part(self.name) or {}
+        loop_id = entry.get("submitted_id")
         self.submitted.setText(
-            "" if exp_id is None else f"In the database as exp_id {exp_id}."
+            "" if loop_id is None else f"In the database as loop_id {loop_id}."
         )
 
     def _set(self, **fields) -> None:
-        self.draft.set_experiment(self.name, **fields)
+        self.draft.set_part(self.name, **fields)
+
+
+# The rows a TIFF table shows before it scrolls
+TIFF_ROWS = 8
+
+
+class FilesForm(QWidget):
+    """
+    A session's grabs or z-stacks: the objective they were recorded with, and
+    each TIFF found in the folder on the share, with what its header says and
+    what is noted about it (a z-stack also names the loop it was associated
+    with). Notes are kept per file name, so a file noted before it reached the
+    share shows up once it does.
+    """
+
+    def __init__(
+        self,
+        context: Context,
+        draft: Draft,
+        name: str,
+        fields: list[Field],
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.context = context
+        self.draft = draft
+        self.name = name
+        self.kind = (draft.part(name) or {}).get("kind", "grab")
+        self.file: None | str = None
+        self.file_form: None | Form = None
+        self.loop: None | QComboBox = None
+
+        objective = [f for f in fields if f.key == "objective"]
+        self.file_fields = [f for f in fields if f.key != "objective"]
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.form = Form(objective)
+        self.form.set_values({"objective": (draft.part(name) or {}).get("objective")})
+        self.form.changed.connect(
+            lambda key, value: self.draft.set_part(self.name, **{key: value})
+        )
+        layout.addWidget(self.form)
+
+        top = QHBoxLayout()
+        self.found = QLabel()
+        self.found.setStyleSheet(text_style("computed"))
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.refresh)
+        top.addWidget(self.found, 1)
+        top.addWidget(refresh)
+        layout.addLayout(top)
+
+        self.table = QTableView()
+        self.table.setModel(FrameModel())
+        self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Interactive
+        )
+        fit_columns(self.table)
+        rows = self.table.verticalHeader().defaultSectionSize()
+        self.table.setFixedHeight(
+            rows * TIFF_ROWS + self.table.horizontalHeader().sizeHint().height() + 2
+        )
+        self.table.selectionModel().currentRowChanged.connect(
+            lambda current, _: self._pick(current.row())
+        )
+        layout.addWidget(self.table)
+
+        self.notes = QGroupBox("Pick a file above to note something about it")
+        self.notes_layout = QVBoxLayout(self.notes)
+        layout.addWidget(self.notes)
+        self.refresh()
+
+    @property
+    def model(self) -> FrameModel:
+        model = self.table.model()
+        assert isinstance(model, FrameModel)
+
+        return model
+
+    def refresh(self) -> None:
+        """Read the folder again (on the database thread: it is on the share)."""
+        draft = self.draft
+
+        if draft.mouse_id is None:
+            return
+
+        folder = f"{draft.folder}/{self.name}"
+        self.found.setText(f"Reading {folder}/raw...")
+        self.context.run(
+            lambda db: list_tiffs(db.main_folder, folder, self.kind),
+            self._listed,
+            "list TIFFs",
+        )
+
+    def _listed(self, frame) -> None:
+        noted = set(self.draft.files(self.name))
+        missing = sorted(noted - set(frame["file"]))
+
+        if missing:
+            frame = pd.concat(
+                [frame, pd.DataFrame({"file": missing, "started": "not on the share"})],
+                ignore_index=True,
+            )
+
+        frame["notes"] = ["yes" if f in noted else "" for f in frame["file"]]
+        count = len(frame) - len(missing)
+        self.found.setText(
+            f"{count} TIFF{'' if count == 1 else 's'} in "
+            f"{self.draft.folder}/{self.name}/raw"
+        )
+        keep = self.file
+        files = list(frame["file"])
+        self.model.set_frame(frame.set_index("file"))  # its first column
+
+        if keep in files:
+            self.table.selectRow(files.index(keep))
+
+    def _pick(self, row: int) -> None:
+        frame = self.model.frame
+
+        if row < 0 or row >= len(frame):
+            return
+
+        self.file = str(frame.index[row])
+        self._show_notes()
+
+    def _show_notes(self) -> None:
+        if self.file_form is not None:
+            self.file_form.setParent(None)
+            self.file_form.deleteLater()
+
+        self.file_form = self.loop = None
+        file = self.file
+
+        if file is None:
+            return
+
+        noted = self.draft.files(self.name).get(file, {})
+        self.notes.setTitle(file)
+
+        self.file_form = Form(self.file_fields)
+        self.file_form.set_values(
+            {k: v for k, v in noted.items() if k not in FILE_SETTINGS}
+        )
+        self.file_form.changed.connect(lambda key, value: self._note(**{key: value}))
+
+        if self.kind == "zstack":
+            # The form's first row, so its label lines up with the others
+            loops = [
+                str(e["name"]) for e in self.draft.parts if e.get("kind") == "loop"
+            ]
+            self.loop = QComboBox()
+            self.loop.addItems(["", *loops])
+            self.loop.setCurrentText(str(noted.get("loop", "")))
+            self.loop.currentTextChanged.connect(
+                lambda text: self._note(loop=text or None)
+            )
+            layout = self.file_form.layout()
+            assert isinstance(layout, QFormLayout)
+            layout.insertRow(0, "Taken for loop", self.loop)
+
+        self.notes_layout.addWidget(self.file_form)
+
+    def _note(self, **fields) -> None:
+        if self.file is None:
+            return
+
+        self.draft.set_file(self.name, self.file, **fields)
+        notes = self.model.frame
+
+        if "notes" in notes and self.file in notes.index:
+            notes.loc[self.file, "notes"] = "yes"
+            self.model.layoutChanged.emit()
+
+    def refresh_status(self) -> None:
+        """Nothing to say after a submit that kept the draft: the table says it."""
 
 
 class SessionPage(QWidget):
@@ -385,11 +578,11 @@ class SessionPage(QWidget):
     def _refresh_identity(self) -> None:
         draft = self.draft
 
-        # A recording is named and placed for the mouse and the day
-        locked = draft is not None and draft.recorded
+        # Folders and recordings are named and placed for the mouse and the day
+        locked = draft is not None and draft.fixed
         why = (
-            "Fixed once a recording was made: remove the session and add a new "
-            "one to change it"
+            "Fixed once a folder or a recording was made: remove the session and "
+            "add a new one to change it"
             if locked
             else ""
         )
@@ -465,19 +658,21 @@ class NoSessionPage(QWidget):
         layout.addWidget(self.message)
 
 
-class ExperimentPage(QWidget):
-    """One experiment of the selected draft, and the button to remove it."""
+class PartPage(QWidget):
+    """One part of the selected draft: a loop, or its grabs or z-stacks."""
+
+    TITLES = {"loop": "Loop", "grab": "Grabs", "zstack": "Z-stacks"}
 
     def __init__(self, sessions: Sessions, parent=None):
         super().__init__(parent)
         self.sessions = sessions
         self.draft: None | Draft = None
         self.name: None | str = None
-        self.shown: None | ExperimentForm = None
+        self.shown: None | LoopForm | FilesForm = None
 
         inner = QWidget()
         layout = QVBoxLayout(inner)
-        self.box = QGroupBox("Experiment")
+        self.box = QGroupBox("Loop")
         self.box_layout = QVBoxLayout(self.box)
         layout.addWidget(self.box)
 
@@ -487,8 +682,14 @@ class ExperimentPage(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(centered(inner))
 
-    def show_experiment(self, draft: None | Draft, name: None | str) -> None:
-        """Fill the page from experiment `name` of `draft`."""
+    def title(self, draft: Draft, name: str) -> str:
+        """`Loop 20260929/m442/e1`, `Grabs 20260929/m442/grabs`..."""
+        kind = (draft.part(name) or {}).get("kind", "loop")
+
+        return f"{self.TITLES.get(kind, 'Part')} {draft.where}/{name}"
+
+    def show_part(self, draft: None | Draft, name: None | str) -> None:
+        """Fill the page from part `name` of `draft`."""
         if self.shown is not None:
             self.shown.setParent(None)
             self.shown.deleteLater()
@@ -496,17 +697,28 @@ class ExperimentPage(QWidget):
 
         self.draft, self.name = draft, name
 
-        if draft is None or name is None or draft.experiment(name) is None:
-            self.box.setTitle("Experiment")
+        if draft is None or name is None or draft.part(name) is None:
+            self.box.setTitle("Loop")
             return
 
-        self.box.setTitle(f"Experiment {draft.where}/{name}")
-        self.shown = ExperimentForm(
-            draft,
-            name,
-            self.sessions.experiment_fields,
-            self.sessions.condition_choices,
-        )
+        self.box.setTitle(self.title(draft, name))
+        kind = (draft.part(name) or {}).get("kind", "loop")
+
+        if kind == "loop":
+            self.shown = LoopForm(
+                draft,
+                name,
+                self.sessions.loop_fields,
+                self.sessions.condition_choices,
+            )
+        else:
+            self.shown = FilesForm(
+                self.sessions.context,
+                draft,
+                name,
+                self.sessions.file_fields.get(kind, []),
+            )
+
         self.box_layout.addWidget(self.shown)
 
 
@@ -515,21 +727,21 @@ class Sessions(QObject):
     The drafts in progress and what can be done to them.
 
     `drafts` is in the order the sessions were started. The pages and the
-    window's right bar call `new`, `remove`, `add_experiment`,
-    `remove_experiment`, `undo`, `check` and `submit`; each acts on the
-    selected draft (`Context.draft`). Removing only marks the draft or the
-    experiment removed and pushes it on `removals`, the undo stack.
+    window's right bar call `new`, `remove`, `add_loop`, `add_grabs`,
+    `add_zstacks`, `remove_part`, `undo`, `check` and `submit`; each acts on
+    the selected draft (`Context.draft`). Removing only marks the draft or the
+    part removed and pushes it on `removals`, the undo stack.
 
     - `listed` fires when drafts come or go (the right bar rebuilds);
     - `removals_changed` fires when the undo stack may have changed;
     - `reported(text)` carries what Check or Submit found;
-    - `experiment_added(name)` fires once a new experiment is selected.
+    - `part_added(name)` fires once a new part is selected.
     """
 
     listed = Signal()
     removals_changed = Signal()
     reported = Signal(str)
-    experiment_added = Signal(str)
+    part_added = Signal(str)
 
     def __init__(self, context: Context, parent=None):
         super().__init__(parent)
@@ -537,14 +749,15 @@ class Sessions(QObject):
         self.drafts: list[Draft] = []
         self.removals = Removals(context.drafts)
         self.session_fields: list[Field] = []
-        self.experiment_fields: list[Field] = []
+        self.loop_fields: list[Field] = []
+        self.file_fields: dict[str, list[Field]] = {}
         self.condition_choices: tuple[str, ...] = ()
         self.mice: list[int] = []
         self.panels: list[tuple[int, str]] = []
         self.vials = None
 
         self.session_page = SessionPage(self)
-        self.experiment_page = ExperimentPage(self)
+        self.part_page = PartPage(self)
         self.no_session_page = NoSessionPage()
 
         context.changed.connect(self.reload_choices)
@@ -590,6 +803,7 @@ class Sessions(QObject):
             return (
                 form_fields(db, "session"),
                 (form_fields(db, "loop"), conditions),
+                {kind: form_fields(db, kind) for kind in FOLDER_OF},
                 [int(m) for m in db.mice.index],
                 (panels, current_vials(vials)),
             )
@@ -597,12 +811,13 @@ class Sessions(QObject):
         self.context.run(load, self._choices_loaded, "session choices")
 
     def _choices_loaded(self, loaded) -> None:
-        session_fields, (experiment_fields, conditions), mice, (panels, vials) = loaded
+        session_fields, (loop_fields, conditions), files, mice, (panels, vials) = loaded
+        self.file_fields = files
         self.condition_choices = tuple(conditions)
         self.session_fields = [
             f for f in session_fields if f.key not in ("mouse_id", "session_date")
         ]
-        self.experiment_fields = experiment_fields
+        self.loop_fields = loop_fields
         self.mice = mice
         self.panels, self.vials = panels, vials
         self.refresh_current()
@@ -627,7 +842,7 @@ class Sessions(QObject):
     def refresh_current(self) -> None:
         """Redraw both pages from the selected draft."""
         self.session_page.show_draft(self.current)
-        self.experiment_page.show_experiment(self.current, self.context.experiment)
+        self.part_page.show_part(self.current, self.context.part)
 
     def _follow_selection(self) -> None:
         draft = self.current
@@ -635,23 +850,23 @@ class Sessions(QObject):
         if self.session_page.draft is not draft:
             self.session_page.show_draft(draft)
 
-        page = self.experiment_page
+        page = self.part_page
 
-        if page.draft is not draft or page.name != self.context.experiment:
-            page.show_experiment(draft, self.context.experiment)
+        if page.draft is not draft or page.name != self.context.part:
+            page.show_part(draft, self.context.part)
 
     def _follow_draft(self) -> None:
-        """The selected draft changed (mouse, date, experiments, recordings)."""
+        """The selected draft changed (mouse, date, parts, recordings)."""
         draft = self.current
-        page = self.experiment_page
+        page = self.part_page
 
         if self.session_page.draft is draft:
             self.session_page._refresh_identity()
 
-        if draft is not None and page.name != self.context.experiment:
-            page.show_experiment(draft, self.context.experiment)
-        elif draft is not None and page.shown is not None:
-            page.box.setTitle(f"Experiment {draft.where}/{page.name}")
+        if draft is not None and page.name != self.context.part:
+            page.show_part(draft, self.context.part)
+        elif draft is not None and page.shown is not None and page.name is not None:
+            page.box.setTitle(page.title(draft, page.name))
 
     # ----------------------------------------------------------------- #
     # Actions
@@ -686,8 +901,8 @@ class Sessions(QObject):
 
     def undo(self) -> None | tuple[Draft, None | str]:
         """
-        Bring back the latest removed session or experiment and select it;
-        returns `(draft, experiment or None)`, None if nothing was left.
+        Bring back the latest removed session or part and select it;
+        returns `(draft, part or None)`, None if nothing was left.
         """
         restored = self.removals.undo(self.drafts)
         self.removals_changed.emit()
@@ -695,15 +910,15 @@ class Sessions(QObject):
         if restored is None:
             return None
 
-        draft, experiment = restored
+        draft, part = restored
 
-        if experiment is None:
+        if part is None:
             self.drafts.append(draft)
             self.drafts.sort(key=lambda d: d.path.name)
             self.listed.emit()
             self.context.select(draft)
         else:
-            self.context.select(draft, experiment)
+            self.context.select(draft, part)
             self.context.announce_draft()
 
         self.refresh_current()
@@ -717,71 +932,113 @@ class Sessions(QObject):
         if found is None:
             return None
 
-        draft, experiment = found
+        draft, part = found
 
-        if experiment is None:
+        if part is None:
             return f"Undo remove: session {draft.where}"
 
-        return f"Undo remove: experiment {draft.where}/{experiment}"
+        return f"Undo remove: {draft.describe(part)}"
 
-    def add_experiment(self, name: None | str = None, exp_type: str = "loop") -> None:
+    def add_loop(self) -> None:
         """
-        Add an experiment folder to the selected draft, asking for its name
-        (`e<n+1>` offered) unless given, and select it.
+        Add the next loop (`e<n>`) to the selected draft in one click, make its
+        folders on the share, and select it. The number is one past every
+        loop of the draft (removed ones too) and every `eN` folder already in
+        the session's folder on the share.
         """
-        draft = self.current
+        draft = self._identified("Loop")
 
         if draft is None:
-            self.context.report("Experiment", "Add a session first.")
             return
 
-        if name is None:
-            # Removed experiments still hold their names
-            numbers = [
-                int(taken[1:])
-                for taken in draft.names_taken()
-                if taken.startswith("e") and taken[1:].isdigit()
-            ]
-            name, ok = QInputDialog.getText(
-                self.context.window,
-                "Folder name",
-                "Experiment folder:",
-                text=f"e{max(numbers, default=0) + 1}",
-            )
+        self._add_part(draft, draft.next_loop(self._loops_on_share(draft)), "loop")
 
-            if not ok:
-                return
+    def add_grabs(self) -> None:
+        """Add the session's grabs (once), make their folders, and select them."""
+        self._add_folder("grab")
 
-        name = name.strip()
+    def add_zstacks(self) -> None:
+        """Add the session's z-stacks (once), make their folders, and select them."""
+        self._add_folder("zstack")
 
-        if not name:
+    def _add_folder(self, kind: str) -> None:
+        what = "Grabs" if kind == "grab" else "Z-stacks"
+        draft = self._identified(what)
+
+        if draft is None:
             return
 
-        if draft.experiment(name) is not None:
-            self.context.report("Experiment", f"'{name}' is already listed.")
+        name = FOLDER_OF[kind]
+
+        if draft.part(name) is not None:
+            self.context.select(draft, name)
+            self.part_added.emit(name)
             return
 
         if draft.is_removed(name):
             self.context.report(
-                "Experiment",
-                f"'{name}' was removed. Pick another name.",
+                what, f"'{name}' was removed: undo that to bring it back."
             )
             return
 
-        draft.set_experiment(name, exp_type=exp_type)
+        self._add_part(draft, name, kind)
+
+    def _identified(self, what: str) -> None | Draft:
+        """The selected draft, once it has a mouse (its folders are named for it)."""
+        draft = self.current
+
+        if draft is None:
+            self.context.report(what, "Add a session first.")
+            return None
+
+        if draft.mouse_id is None:
+            self.context.report(
+                what, "Pick the session's mouse first: the folders are named for it."
+            )
+            return None
+
+        return draft
+
+    def _loops_on_share(self, draft: Draft) -> tuple[int, ...]:
+        """The numbers of the `eN` folders already in the session's folder."""
+        folder = self.context.main_folder / draft.folder
+
+        try:
+            return tuple(
+                int(path.name[1:])
+                for path in folder.iterdir()
+                if path.is_dir() and re.fullmatch(r"e\d+", path.name)
+            )
+
+        except OSError:
+            return ()
+
+    def _add_part(self, draft: Draft, name: str, kind: str) -> None:
+        draft.set_part(name)
+
+        try:
+            make_part_folders(self.context.main_folder / draft.folder / name, kind)
+            draft.set_part(name, folder_made=True)
+
+        except OSError as error:
+            self.context.status.emit(
+                f"Could not make {draft.folder}/{name} on the share yet ({error}). "
+                "Make it before ScanImage saves there."
+            )
+
         self.context.announce_draft()
         self.context.select(draft, name)
-        self.experiment_added.emit(name)
+        self.part_added.emit(name)
 
-    def remove_experiment(self, name: None | str = None) -> None:
-        """Remove experiment `name` (the selected one if None) from the draft."""
+    def remove_part(self, name: None | str = None) -> None:
+        """Remove part `name` (the selected one if None) from the draft."""
         draft = self.current
-        name = name or self.context.experiment
+        name = name or self.context.part
 
-        if draft is None or name is None or draft.experiment(name) is None:
+        if draft is None or name is None or draft.part(name) is None:
             return
 
-        draft.remove_experiment(name)
+        draft.remove_part(name)
         self.removals.push(draft, name)
         self.context.announce_draft()
         self.removals_changed.emit()
@@ -837,7 +1094,8 @@ class Sessions(QObject):
             written = result.written
             lines.insert(
                 0,
-                f"Session {written.session_id}: {len(written.experiments)} experiments, "
+                f"Session {written.session_id}: {len(written.loops)} loops, "
+                f"{len(written.grabs)} grabs, {len(written.zstacks)} z-stacks, "
                 f"{written.annotations} annotations, sync decoded for "
                 f"{', '.join(written.decoded) or 'none'}.",
             )
@@ -854,5 +1112,5 @@ class Sessions(QObject):
 
         if result.submitted:
             self.reload_drafts()
-        elif self.experiment_page.shown is not None:
-            self.experiment_page.shown.refresh_status()
+        elif self.part_page.shown is not None:
+            self.part_page.shown.refresh_status()

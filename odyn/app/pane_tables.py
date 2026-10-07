@@ -4,7 +4,7 @@ it whole (and its annotations, when it is something that can be annotated).
 
 Nothing here writes. The one thing it offers beyond looking is annotating the
 selected row, for the once-a-day and after-the-fact facts (a mouse's weight
-was typed wrong, an experiment was bad) that do not belong to a draft.
+was typed wrong, a loop was bad) that do not belong to a draft.
 """
 
 from __future__ import annotations

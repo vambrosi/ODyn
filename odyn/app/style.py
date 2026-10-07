@@ -36,7 +36,7 @@ ROW_SPACING_PX = 8
 # The gap between the buttons at the bottom of a form
 BUTTON_SPACING_PX = 8
 
-# The session and experiment pages stop growing at this width and are
+# The session and part pages stop growing at this width and are
 # centered in what is left
 PAGE_MAX_PX = 1000
 
