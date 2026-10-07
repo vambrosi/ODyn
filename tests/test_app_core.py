@@ -27,20 +27,20 @@ START = datetime(2026, 1, 1, 10, 0, 0)
 def test_forms_come_from_the_registry(tmp_path):
     db = Database(tmp_path, can_create=True)
 
-    fields = form_fields(db, "experiment")
+    fields = form_fields(db, "loop")
     keys = [f.key for f in fields]
 
     assert keys[0] == "objective" and fields[0].options == ("10", "20")
-    assert "fov_depth_um" in keys and "treatment" in keys
+    assert "pmt_gain" in keys and "treatment" in keys
     # what a file fills in is not asked for
     assert all(f.editable for f in fields)
     assert "laser_power_920" not in keys
 
-    db.retire_annotation_key(applies_to="experiment", key="treatment")
-    assert "treatment" not in [f.key for f in form_fields(db, "experiment")]
+    db.retire_annotation_key(applies_to="loop", key="treatment")
+    assert "treatment" not in [f.key for f in form_fields(db, "loop")]
 
     db.add_annotation_key(
-        applies_to="experiment",
+        applies_to="loop",
         key="new",
         label="New",
         value_type="enum",
@@ -48,7 +48,7 @@ def test_forms_come_from_the_registry(tmp_path):
         description="d",
         required=True,
     )
-    new = form_fields(db, "experiment")[-1]
+    new = form_fields(db, "loop")[-1]
     assert new.options == ("a",) and new.required
 
     assert form_fields(db, "vial") == []
@@ -109,7 +109,7 @@ def test_a_draft_is_saved_on_every_change(tmp_path):
 
     draft.identify(mouse_id="442", date="2026-07-08")
     draft.update_session(goal="x", mouse_weight_g=24.0)
-    draft.set_experiment("e1", objective=20, fov_depth_um=70)
+    draft.set_experiment("e1", objective=20, pmt_gain=70)
     draft.set_experiment("grabs")
     draft.set_vials([3, 1, 1])
 
@@ -189,7 +189,7 @@ def share(tmp_path):
 
     draft = Draft.start(tmp_path / "drafts", mouse_id=1, date="2026-01-01")
     draft.update_session(goal="test", mouse_weight_g=24)
-    draft.set_experiment("e1", objective=20, fov_depth_um=70, treatment="fine")
+    draft.set_experiment("e1", objective=20, pmt_gain=70, treatment="fine")
     draft.set_vials(vials)
 
     return db, draft
@@ -203,12 +203,12 @@ def test_check_lists_what_is_wrong(share):
         "e1: No olfactometer Events file found. (can submit anyway)"
     ]
 
-    draft.set_experiment("e2", objective=None, fov_depth_um="deep")
+    draft.set_experiment("e2", objective=None, pmt_gain="deep")
     draft.set_vials([99])
     messages = [str(p) for p in check(db, draft)]
 
     assert any("e2: No objective" in m for m in messages)
-    assert any("e2: FOV depth is a number" in m for m in messages)
+    assert any("e2: PMT gain is a number" in m for m in messages)
     assert any("e2: Folder 'e2' is not on the share" in m for m in messages)
     assert any("vials: No vials with ids [99]" in m for m in messages)
     assert [m for m in messages if "can submit anyway" in m] == [
@@ -236,11 +236,11 @@ def test_submit_does_the_whole_day(share):
     assert result.written.decoded == ["e1"]
 
     exp_id = result.written.experiments["e1"]
-    assert db.annotations_for("experiment").loc[exp_id, "fov_depth_um"] == 70
+    assert db.annotations_for("loop").loc[exp_id, "pmt_gain"] == 70
     assert (
         db.annotations_for("session").loc[result.written.session_id, "goal"] == "test"
     )
-    assert list(db.experiment_vials.loc[[exp_id], "vial_id"]) == draft.vial_ids
+    assert list(db.loop_vials.loc[[exp_id], "vial_id"]) == draft.vial_ids
     assert len(db.sync_blocks) == 3
     assert result.written.decode_failed == {}
 
@@ -275,9 +275,9 @@ def test_a_second_submit_does_not_ingest_twice(share):
 
     assert second.submitted, second.error
     assert second.written.experiments == first.written.experiments
-    assert len(db.experiments) == 1
-    assert db.annotations_for("experiment").iloc[0]["treatment"] == "updated"
-    assert db.latest_calls("add_experiment").shape[0] == 1
+    assert len(db.loops) == 1
+    assert db.annotations_for("loop").iloc[0]["treatment"] == "updated"
+    assert db.latest_calls("add_loop").shape[0] == 1
 
 
 def test_conditions_are_checked_and_written_per_acquisition(share):
@@ -378,7 +378,7 @@ def test_a_recorded_session_keeps_its_mouse_and_date(tmp_path):
 
 def test_a_removed_experiment_is_hidden_and_keeps_its_name(tmp_path):
     draft = Draft.start(tmp_path, mouse_id=442, date="2026-09-29")
-    draft.set_experiment("e1", fov_depth_um=70).set_experiment("e2")
+    draft.set_experiment("e1", pmt_gain=70).set_experiment("e2")
     draft.remove_experiment("e1")
 
     again = Draft.load(draft.path)
@@ -391,7 +391,7 @@ def test_a_removed_experiment_is_hidden_and_keeps_its_name(tmp_path):
         again.set_experiment("e1")
 
     assert again.restore_experiment("e1")
-    assert again.experiment("e1")["fov_depth_um"] == 70
+    assert again.experiment("e1")["pmt_gain"] == 70
     assert "removed" not in again.experiment("e1")
     assert not again.restore_experiment("e1")  # nothing left to restore
 

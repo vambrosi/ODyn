@@ -317,14 +317,21 @@ def generate(
     exp: str = EXP,
     start: datetime = EXP_START,
     acq_state: str = "loop",
+    z_um: None | float = None,
+    zstack: None | dict = None,
 ) -> dict:
     """
     Write the recording and return what went into it.
 
-    `out` becomes a `main_folder`, holding one experiment at
-    `<date>/<mouse>/<exp>/raw/`, where the date comes from `start`. `acq_state`
-    is what ScanImage writes: `"loop"` for an experiment, `"grab"` for grabs
-    and z-stacks.
+    `out` becomes a `main_folder`, holding one recording folder at
+    `<date>/<mouse>/<exp>/raw/` (`e1`, `grabs`, `zstacks`), where the date
+    comes from `start`. `acq_state` is what ScanImage writes: `"loop"` for a
+    loop, `"grab"` for grabs and z-stacks.
+
+    `z_um` is the sample z ScanImage reports (left out: not written, as in older
+    versions). `zstack` makes every file a z-stack: `slices`, `step_um`,
+    `top_um` (shallowest z), and the power settings `power` (%),
+    `length_um` and `reference_um`; ScanImage takes the slices deep to shallow.
 
     `motion` scales every displacement. Pass `0` for a still recording, which is
     lets you see the response by itself. (Can be used as mcor comparison.)
@@ -410,18 +417,38 @@ def generate(
         else:
             epoch, offset = start + timedelta(seconds=started), 0.0
 
+        settings = [
+            f"SI.acqState = '{acq_state}'",
+            "SI.hBeams.powers = [10 0]",
+            f"SI.hStackManager.framesPerSlice = {frames}",
+            f"SI.hRoiManager.scanFrameRate = {frame_rate}",
+            f"SI.loopAcqInterval = {LOOP_INTERVAL_S}",
+        ]
+
+        if z_um is not None:
+            settings.append(f"SI.hMotors.samplePosition = [0 0 {z_um}]")
+
+        if zstack is not None:
+            top, step = zstack["top_um"], zstack["step_um"]
+            slices = zstack["slices"]
+            zs = [top - step * (slices - 1 - i) for i in range(slices)]
+            settings[1] = f"SI.hBeams.powers = [{zstack['power']} 0]"
+            settings += [
+                "SI.hStackManager.enable = true",
+                f"SI.hStackManager.actualNumSlices = {slices}",
+                f"SI.hStackManager.actualStackZStepSize = {step}",
+                f"SI.hStackManager.zs = [{' '.join(str(z) for z in zs)}]",
+                f"SI.hStackManager.zPowerReference = {zstack['reference_um']}",
+                f"SI.hBeams.lengthConstants = [{zstack['length_um']} Inf]",
+                "SI.hBeams.pzAdjust = [scanimage.types.BeamAdjustTypes.Exponential "
+                "scanimage.types.BeamAdjustTypes.Exponential]",
+                "SI.hBeams.powerFractionLimits = [1 1]",
+            ]
+
         _write_tiff(
             raw_folder / name,
             noisy,
-            frame_data="\n".join(
-                [
-                    f"SI.acqState = '{acq_state}'",
-                    "SI.hBeams.powers = [10 0]",
-                    f"SI.hStackManager.framesPerSlice = {frames}",
-                    f"SI.hRoiManager.scanFrameRate = {frame_rate}",
-                    f"SI.loopAcqInterval = {LOOP_INTERVAL_S}",
-                ]
-            ),
+            frame_data="\n".join(settings),
             description="\n".join(
                 [
                     "frameNumbers = 1",

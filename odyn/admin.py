@@ -22,7 +22,7 @@ python -m odyn.admin <main_folder> retire-user <login>
 from odyn.admin import Admin
 
 admin = Admin(main_folder)
-admin.sql(statements="UPDATE experiments SET exp_name = 'x' WHERE exp_id = 10")
+admin.sql(statements="UPDATE loops SET loop_number = 2 WHERE loop_id = 10")
 ```
 """
 
@@ -120,7 +120,7 @@ class Admin(CallRecorder):
 
         **EXAMPLE**
         ```python
-        admin.sql(statements="UPDATE experiments SET exp_name = 'x' WHERE exp_id = 10")
+        admin.sql(statements="UPDATE loops SET loop_number = 2 WHERE loop_id = 10")
         ```
         """
         if not statements.strip():

@@ -55,11 +55,11 @@ def test_json_columns_hold_python_objects(db):
     assert call["consumed_calls"] is None
 
     keys = db.annotation_keys
-    assert keys.loc[("experiment", "depth_goal"), "allowed_values"] == [
+    assert keys.loc[("loop", "depth_goal"), "allowed_values"] == [
         "superficial",
         "deep",
     ]
-    assert keys.loc[("experiment", "treatment"), "allowed_values"] is None
+    assert keys.loc[("loop", "treatment"), "allowed_values"] is None
 
 
 def test_the_cache_is_one_dict_that_writes_clear(db):
@@ -77,21 +77,21 @@ def test_a_group_view_is_the_same_reader_restricted(db):
     db.add_session(mouse_id=1, session_date="2026-01-01")
 
     with db._writing() as cur:
-        for exp_id in (1, 2):
+        for loop_id in (1, 2):
             cur.execute(
                 """
-                INSERT INTO experiments
-                    ( exp_id, session_id, exp_name, exp_type, exp_path, exp_start
-                    , height_px, width_px, height_um, width_um, frame_count
+                INSERT INTO loops
+                    ( loop_id, session_id, loop_number, loop_path, loop_start
+                    , height_px, width_px, height_um, width_um, frames_per_slice
                     , frame_rate, objective
-                    ) VALUES (?, 1, ?, 'loop', 'p', ?, 1, 1, 1, 1, 1, 1, 20);
+                    ) VALUES (?, 1, ?, ?, ?, 1, 1, 1, 1, 1, 1, 20);
                 """,
-                [exp_id, f"e{exp_id}", f"2026-01-01 1{exp_id}:00:00"],
+                [loop_id, loop_id, f"p{loop_id}", f"2026-01-01 1{loop_id}:00:00"],
             )
 
-    group = db.add_group(exp_ids=[2])
+    group = db.add_group([2])
 
-    assert list(db.experiments.index) == [1, 2]
-    assert list(group.experiments.index) == [2]
+    assert list(db.loops.index) == [1, 2]
+    assert list(group.loops.index) == [2]
     assert list(group.sessions.index) == [1]
-    assert list(group.experiments.columns) == list(db.experiments.columns)
+    assert list(group.loops.columns) == list(db.loops.columns)

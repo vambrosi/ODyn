@@ -87,8 +87,11 @@ CREATE TABLE IF NOT EXISTS mouse_viruses
     , FOREIGN KEY (virus_name) REFERENCES viruses(virus_name) ON UPDATE CASCADE
     ) STRICT;
 
--- Session exist only to add annotations about a mice and experiment setup
--- in a particular day. Panels, streams, and others belong to an experiment.
+-- Session exist only to add annotations about a mice and recording setup
+-- in a particular day. Panels, streams, and others belong to a loop.
+--
+-- A mouse imaged twice on one day is one session: its loops just carry on
+-- numbering (`e3`, `e4`, ...) in the same folder.
 CREATE TABLE IF NOT EXISTS sessions
     ( session_id        INTEGER PRIMARY KEY AUTOINCREMENT
     , mouse_id          INTEGER NOT NULL
@@ -101,69 +104,144 @@ CREATE TABLE IF NOT EXISTS sessions
 -------------------------------------------------------------------------------
 -- Recordings
 -------------------------------------------------------------------------------
+--
+-- A session folder holds three kinds of ScanImage recordings:
+--
+--     <yyyymmdd>/m<mouse>/e1, e2, ...    loops, one folder each
+--     <yyyymmdd>/m<mouse>/grabs          every grab of the day
+--     <yyyymmdd>/m<mouse>/zstacks        every z-stack of the day
+--
+-- each with `raw/` for the TIFFs (and `sync/`, `processed/` where they apply).
+--
+-- Z positions are from ScanImage (`z_um`), in microns from the z = 0. Details
+-- about how the z = 0 location was chosen are recorded in the `z_landmark`
+-- annotation. Negative z points deeper into the sample.
 
--- Groups are *processing units*, e.g. experiments that share a field of view
--- so they can be motion corrected together and have a single ROI mask. This is
+-- Groups are *processing units*, e.g. loops that share a field of view so
+-- they can be motion corrected together and have a single ROI mask. This is
 -- kept simple so that the provenance and data sections are easily excisable.
 CREATE TABLE IF NOT EXISTS groups
     ( group_id      INTEGER PRIMARY KEY AUTOINCREMENT ) STRICT;
 
--- Experiment is a ScanImage recording unit (has a unique loop start).
+-- A loop is a ScanImage loop: one start, many acquisitions (TIFFs) with the
+-- same settings, usually with the olfactometer running.
 --
--- Identity: exp_id, session_id, exp_name, exp_type, exp_path, exp_start.
--- Contract: height_px, width_px, height_um, width_um, frame_count, frame_rate,
---           objective. Minimal set so odyn can run.
+-- Identity: loop_id, session_id, loop_number, loop_path, loop_start.
+-- Contract: height_px, width_px, height_um, width_um, frames_per_slice,
+--           frame_rate, objective. Minimal set so odyn can run.
 --
 -- NOTES:
--- - `exp_path` is the folder, relative to the main folder. A loop has a folder
--- of its own, but grabs and z-stacks share one per session.
--- - `objective` is needed by anything scale-dependent (µm/px is stored by
+-- - `loop_number` is the N of its `eN` folder; `loop_path` is the folder,
+-- relative to the main folder. New loops are always `<session folder>/eN`;
+-- the path is stored because older folders do not follow that pattern.
+-- - `objective` is needed by anything scale-dependent (um/px is stored by
 -- ScanImage as if every acquisition were 20x), so it is required at insertion.
--- - `frame_count` is equal to ScanImage framesPerSlice (not actually counted)
-CREATE TABLE IF NOT EXISTS experiments
-    ( exp_id                INTEGER PRIMARY KEY AUTOINCREMENT
+-- - `frames_per_slice` is ScanImage's framesPerSlice, as set (not counted): the
+-- frames of one acquisition, since a loop has one slice.
+-- - `z_um` is NULL when the TIFFs do not say (older ScanImage versions).
+CREATE TABLE IF NOT EXISTS loops
+    ( loop_id               INTEGER PRIMARY KEY AUTOINCREMENT
     , session_id            INTEGER NOT NULL
-    , exp_name              TEXT NOT NULL
-    , exp_type              TEXT NOT NULL CHECK(exp_type IN ('loop', 'grab', 'zstack'))
-    , exp_path              TEXT NOT NULL
-    , exp_start             TEXT NOT NULL UNIQUE CHECK(datetime(exp_start) IS NOT NULL)
+    , loop_number           INTEGER NOT NULL CHECK(loop_number > 0)
+    , loop_path             TEXT NOT NULL UNIQUE
+    , loop_start            TEXT NOT NULL UNIQUE CHECK(datetime(loop_start) IS NOT NULL)
     , height_px             INTEGER NOT NULL
     , width_px              INTEGER NOT NULL
     , height_um             REAL NOT NULL
     , width_um              REAL NOT NULL
-    , frame_count           INTEGER NOT NULL
+    , frames_per_slice      INTEGER NOT NULL
     , frame_rate            REAL NOT NULL
     , objective             INTEGER NOT NULL CHECK(objective > 0)
+    , z_um                  REAL
     , added_to_db_at        TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 
-    , UNIQUE (session_id, exp_name)
+    , UNIQUE (session_id, loop_number)
+    , UNIQUE (loop_id, session_id)
     , FOREIGN KEY (session_id) REFERENCES sessions(session_id)
     ) STRICT;
 
-CREATE TABLE IF NOT EXISTS group_experiments
+CREATE TABLE IF NOT EXISTS group_loops
     ( group_id          INTEGER NOT NULL
-    , exp_id            INTEGER NOT NULL
+    , loop_id           INTEGER NOT NULL
     , added_to_db_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 
-    , PRIMARY KEY (group_id, exp_id)
-    , FOREIGN KEY (group_id) REFERENCES groups(group_id)     ON DELETE CASCADE
-    , FOREIGN KEY (exp_id)   REFERENCES experiments(exp_id)  ON DELETE CASCADE
+    , PRIMARY KEY (group_id, loop_id)
+    , FOREIGN KEY (group_id) REFERENCES groups(group_id)   ON DELETE CASCADE
+    , FOREIGN KEY (loop_id)  REFERENCES loops(loop_id)     ON DELETE CASCADE
     ) STRICT;
 
--- Acquisition is a ScanImage TIFF output.
+-- Acquisition is a ScanImage TIFF output of a loop.
 -- Alignment to other streams is in `sync_blocks`.
 CREATE TABLE IF NOT EXISTS acquisitions
     ( acq_id            INTEGER PRIMARY KEY AUTOINCREMENT
-    , exp_id            INTEGER NOT NULL
+    , loop_id           INTEGER NOT NULL
     , acq_start         TEXT NOT NULL CHECK(datetime(acq_start) IS NOT NULL)
     , raw_path          TEXT NOT NULL UNIQUE
 
-    , UNIQUE (exp_id, acq_start)
-    , FOREIGN KEY (exp_id) REFERENCES experiments(exp_id) ON DELETE CASCADE
+    , UNIQUE (loop_id, acq_start)
+    , FOREIGN KEY (loop_id) REFERENCES loops(loop_id) ON DELETE CASCADE
+    ) STRICT;
+
+-- A grab is a time-series ScanImage grab. It corresponds to one TIFF in the
+-- session's `grabs/raw`. Grabs belong to the session, and may have a sync
+-- recording (pupil, wheel, breathing) but never the olfactometer.
+--
+-- Same contract as a loop; `grab_start` is the TIFF's own start.
+CREATE TABLE IF NOT EXISTS grabs
+    ( grab_id               INTEGER PRIMARY KEY AUTOINCREMENT
+    , session_id            INTEGER NOT NULL
+    , raw_path              TEXT NOT NULL UNIQUE
+    , grab_start            TEXT NOT NULL UNIQUE CHECK(datetime(grab_start) IS NOT NULL)
+    , height_px             INTEGER NOT NULL
+    , width_px              INTEGER NOT NULL
+    , height_um             REAL NOT NULL
+    , width_um              REAL NOT NULL
+    , frames_per_slice      INTEGER NOT NULL
+    , frame_rate            REAL NOT NULL
+    , objective             INTEGER NOT NULL CHECK(objective > 0)
+    , z_um                  REAL
+    , added_to_db_at        TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+
+    , FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+    ) STRICT;
+
+-- A z-stack is a ScanImage z-stack grab. It corresponds to one TIFF in the
+-- session's `zstacks/raw`. It has `slice_count` slices `z_step_um` apart, with
+-- `frames_per_slice` frames each. It might be associated with a loop, which
+-- `loop_id` then names. That loop (if it exists) must be in the same session.
+--
+-- NOTES:
+-- - `z_start_um` is the shallowest slice and `z_end_um` the deepest, but
+-- ScanImage may take them in either order.
+-- - Laser powers at either end are annotations (`metadata`).
+CREATE TABLE IF NOT EXISTS zstacks
+    ( zstack_id             INTEGER PRIMARY KEY AUTOINCREMENT
+    , session_id            INTEGER NOT NULL
+    , loop_id               INTEGER
+    , raw_path              TEXT NOT NULL UNIQUE
+    , zstack_start          TEXT NOT NULL UNIQUE CHECK(datetime(zstack_start) IS NOT NULL)
+    , height_px             INTEGER NOT NULL
+    , width_px              INTEGER NOT NULL
+    , height_um             REAL NOT NULL
+    , width_um              REAL NOT NULL
+    , frames_per_slice      INTEGER NOT NULL
+    , frame_rate            REAL NOT NULL
+    , objective             INTEGER NOT NULL CHECK(objective > 0)
+    , slice_count           INTEGER NOT NULL CHECK(slice_count > 1)
+    , z_step_um             REAL NOT NULL CHECK(z_step_um > 0)
+    , z_start_um            REAL NOT NULL
+    , z_end_um              REAL NOT NULL CHECK(z_end_um <= z_start_um)
+    , added_to_db_at        TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+
+    , FOREIGN KEY (session_id)          REFERENCES sessions(session_id)
+    , FOREIGN KEY (loop_id, session_id) REFERENCES loops(loop_id, session_id)
     ) STRICT;
 
 -- Other recordings streams, i.e. the DAQ sync H5, pupil videos.
 -- The database only stores the path and a header.
+--
+-- A stream belongs to a loop, or (`loop_id` NULL) to the session's grabs; a
+-- session's grabs can have several, one per recording.
 --
 -- NOTES:
 -- - `stop_time` NULL means the recording was interrupted. The rig writer
@@ -172,7 +250,8 @@ CREATE TABLE IF NOT EXISTS acquisitions
 -- - `attributes` keeps the file's own header as written.
 CREATE TABLE IF NOT EXISTS streams
     ( stream_id         INTEGER PRIMARY KEY
-    , exp_id            INTEGER NOT NULL
+    , session_id        INTEGER NOT NULL
+    , loop_id           INTEGER
     , stream_type       TEXT NOT NULL CHECK(stream_type IN ('sync', 'pupil_video'))
     , file_path         TEXT NOT NULL UNIQUE
     , rate_hz           REAL
@@ -181,34 +260,37 @@ CREATE TABLE IF NOT EXISTS streams
     , n_samples         INTEGER
     , attributes        TEXT CHECK(attributes IS NULL OR json_valid(attributes))
     , method_call_id    INTEGER NOT NULL
-    , FOREIGN KEY (exp_id)         REFERENCES experiments(exp_id) ON DELETE CASCADE
-    , FOREIGN KEY (method_call_id) REFERENCES method_calls(method_call_id)
+    , FOREIGN KEY (session_id)          REFERENCES sessions(session_id)
+    , FOREIGN KEY (loop_id, session_id) REFERENCES loops(loop_id, session_id) ON DELETE CASCADE
+    , FOREIGN KEY (method_call_id)      REFERENCES method_calls(method_call_id)
     ) STRICT;
 
--- Sync blocks are busts of imaging frames from the sync stream.
--- We skip burst not associated with acquisitions.
+-- Sync blocks are busts of imaging frames from the sync stream, each the
+-- frames of one loop acquisition (`acq_id`) or one grab (`grab_id`).
+-- We skip burst not associated with either.
 --
 -- The rows of one stream come from one decode call and are replaced as a
--- whole when it is rerun, so the table can be filled after the experiment was
+-- whole when it is rerun, so the table can be filled after the recordings were
 -- inserted (the TIFFs and the sync file are copied at different times).
 --
 -- NOTES:
--- - `sync_frame_count` is to be compared against `experiments.frame_count`
--- to check for dropped frames.
+-- - `sync_frame_count` is to be compared against the recording's
+-- `frames_per_slice` to check for dropped frames.
 -- - `sync_odor_on_frame` is the frame during which the valve opened, and
 -- `sync_odor_on_residual_s` how long after that frame began (always >= 0).
 -- `sync_odor_off_frame` is the first frame with the valve closed.
 -- - `sync_odor_pulses` counts valve pulses inside the burst; anything but 1
--- on an imaging burst is a defect.
+-- on a loop's burst is a defect (and anything but 0 on a grab's).
 -- - `sync_camera_frames` counts camera strobes inside the burst. Zero means
 -- no pupil data: the camera block is a fixed frame count, so a long
--- experiment can outrun it (which has happened).
--- - `clock_offset_ms` = `acq_start` (ScanImage) - burst start (olfactometer),
--- a measure of the skew between the two computers.
+-- loop can outrun it (which has happened).
+-- - `clock_offset_ms` = recording start (ScanImage) - burst start
+-- (olfactometer computer), a measure of the skew between the two computers.
 CREATE TABLE IF NOT EXISTS sync_blocks
     ( stream_id                 INTEGER NOT NULL
     , sync_block                INTEGER NOT NULL
     , acq_id                    INTEGER UNIQUE
+    , grab_id                   INTEGER UNIQUE
     , sync_start_sample         INTEGER NOT NULL
     , sync_frame_count          INTEGER NOT NULL
     , sync_frame_period_s       REAL NOT NULL
@@ -223,9 +305,11 @@ CREATE TABLE IF NOT EXISTS sync_blocks
     , method_call_id            INTEGER NOT NULL
 
     , PRIMARY KEY (stream_id, sync_block)
+    , CHECK(acq_id IS NULL OR grab_id IS NULL)
 
     , FOREIGN KEY (stream_id)      REFERENCES streams(stream_id)      ON DELETE CASCADE
     , FOREIGN KEY (acq_id)         REFERENCES acquisitions(acq_id)    ON DELETE CASCADE
+    , FOREIGN KEY (grab_id)        REFERENCES grabs(grab_id)          ON DELETE CASCADE
     , FOREIGN KEY (method_call_id) REFERENCES method_calls(method_call_id)
     ) STRICT;
 
@@ -245,20 +329,20 @@ CREATE TABLE IF NOT EXISTS mcor_files
 -- Stimulus
 -------------------------------------------------------------------------------
 
--- One olfactometer run inside an experiment.
+-- One olfactometer run inside a loop.
 --
 -- `program_config` is the olfactometer program's definition as it was stored.
 CREATE TABLE IF NOT EXISTS programs
     ( program_id        INTEGER PRIMARY KEY AUTOINCREMENT
-    , exp_id            INTEGER NOT NULL
+    , loop_id           INTEGER NOT NULL
     , program_name      TEXT NOT NULL
     , program_type      TEXT NOT NULL
     , program_start     TEXT NOT NULL CHECK(datetime(program_start) IS NOT NULL)
     , program_path      TEXT NOT NULL
     , program_config    TEXT CHECK(program_config IS NULL OR json_valid(program_config))
 
-    , UNIQUE (exp_id, program_id)
-    , FOREIGN KEY (exp_id) REFERENCES experiments(exp_id) ON DELETE CASCADE
+    , UNIQUE (loop_id, program_id)
+    , FOREIGN KEY (loop_id) REFERENCES loops(loop_id) ON DELETE CASCADE
     ) STRICT;
 
 -- Olfactometer trial. `acq_id` can be null because it is filled by the
@@ -272,12 +356,12 @@ CREATE TABLE IF NOT EXISTS trials
     , outcome           TEXT NOT NULL
     , acq_id            INTEGER UNIQUE
     , program_id        INTEGER NOT NULL
-    , exp_id            INTEGER NOT NULL
+    , loop_id           INTEGER NOT NULL
 
     , UNIQUE (trial_id, program_id)
     , UNIQUE (trial_start, program_id)
 
-    , FOREIGN KEY (program_id, exp_id) REFERENCES programs(program_id, exp_id) ON DELETE CASCADE
+    , FOREIGN KEY (program_id, loop_id) REFERENCES programs(program_id, loop_id) ON DELETE CASCADE
     , FOREIGN KEY (acq_id)             REFERENCES acquisitions(acq_id)         ON DELETE SET NULL
     , FOREIGN KEY (odor_id)            REFERENCES odors(odor_id)
     ) STRICT;
@@ -395,16 +479,16 @@ CREATE TABLE IF NOT EXISTS vial_odors
     , FOREIGN KEY (odor_id) REFERENCES odors(odor_id)
     ) STRICT;
 
--- Which vials were in the olfactometer for an experiment. One experiment is
--- one olfactometer run, so it always uses one rack, but the link is per vial
--- so a single refilled vial is recorded as exactly that. The positions come
+-- Which vials were in the olfactometer for a loop. One loop always uses one
+-- whole odor panel rack, but the link is per vial, so a single refilled vial
+-- is recorded as exactly that. The positions come
 -- from `vials` and are checked against the olfactometer config at submit.
-CREATE TABLE IF NOT EXISTS experiment_vials
-    ( exp_id        INTEGER NOT NULL
+CREATE TABLE IF NOT EXISTS loop_vials
+    ( loop_id       INTEGER NOT NULL
     , vial_id       INTEGER NOT NULL
 
-    , PRIMARY KEY (exp_id, vial_id)
-    , FOREIGN KEY (exp_id)  REFERENCES experiments(exp_id) ON DELETE CASCADE
+    , PRIMARY KEY (loop_id, vial_id)
+    , FOREIGN KEY (loop_id) REFERENCES loops(loop_id) ON DELETE CASCADE
     , FOREIGN KEY (vial_id) REFERENCES vials(vial_id)
     ) STRICT;
 
@@ -431,7 +515,9 @@ CREATE TABLE IF NOT EXISTS annotation_keys
     ( applies_to        TEXT NOT NULL CHECK(applies_to IN
                             ( 'mouse'
                             , 'session'
-                            , 'experiment'
+                            , 'loop'
+                            , 'grab'
+                            , 'zstack'
                             , 'program'
                             , 'acquisition'
                             , 'group'
@@ -683,7 +769,7 @@ INSERT OR IGNORE INTO annotation_keys
     ( 'session'
     , 'mouse_weight_g', 'Mouse weight'
     , 'real', NULL, 'g'
-    , 'Weight on the day of the experiment.'
+    , 'Weight on the day of the session.'
     , 'user', FALSE
     ),
 
@@ -743,71 +829,64 @@ INSERT OR IGNORE INTO annotation_keys
     , 'user', FALSE
     ),
 
--- experiment
-    ( 'experiment'
+-- loop
+    ( 'loop'
     , 'goal', 'Goal'
     , 'text', NULL, NULL
-    , 'Experiment goal.'
+    , 'Loop goal.'
     , 'user', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'fov_description', 'FOV description'
     , 'text', NULL, NULL
     , 'Description of the field of view, e.g. "medial-rostral left bulb".'
     , 'user', FALSE
     ),
 
-    ( 'experiment'
-    , 'fov_depth_um', 'FOV depth'
-    , 'real', NULL, 'um'
-    , 'Depth below the surface.'
-    , 'user', FALSE
-    ),
-
-    ( 'experiment'
-    , 'fov_depth_raw', 'FOV depth (as written)'
+    ( 'loop'
+    , 'z_landmark', 'Z=0 landmark'
     , 'text', NULL, NULL
-    , 'The depth as written down, signs and approximation marks kept. (For records only.)'
+    , 'Where z = 0 was set, e.g. "surface of right bulb".'
     , 'user', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'depth_goal', 'Depth goal'
     , 'enum', '["superficial", "deep"]', NULL
-    , 'Experiment depth goal. Not recomputed from fov_depth_um.'
+    , 'Depth goal. Not recomputed from z_um.'
     , 'user', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'pmt_gain', 'PMT gain'
     , 'real', NULL, NULL
     , 'PMT gain setting.'
     , 'user', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'laser_power_920', 'Laser power 920 nm'
     , 'integer', NULL, '%'
     , 'Rig setting, from the TIFF header.'
     , 'metadata', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'laser_power_1040', 'Laser power 1040 nm'
     , 'integer', NULL, '%'
     , 'Rig setting, from the TIFF header.'
     , 'metadata', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'loop_acq_interval_s', 'Acq interval'
     , 'real', NULL, 's'
     , 'Programmed interval between acquisitions in a loop, from the TIFF header.'
     , 'metadata', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'treatment', 'Treatment'
     , 'text', NULL, NULL
     , 'What was administered, if anything.'
@@ -816,59 +895,173 @@ INSERT OR IGNORE INTO annotation_keys
 
     -- The trial block, as typed in before the recording. Can be checked
     -- against `programs.program_config` and the sync values.
-    ( 'experiment'
+    ( 'loop'
     , 'block_baseline_s', 'Pre-odor baseline'
     , 'real', NULL, 's'
     , 'Planned time from trial start to odor onset.'
     , 'user', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'block_odor_s', 'Odor presentation'
     , 'real', NULL, 's'
     , 'Planned odor pulse length.'
     , 'user', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'block_post_odor_delay_s', 'Post-odor delay'
     , 'real', NULL, 's'
     , 'Planned time after the odor before the trial ends.'
     , 'user', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'block_iti_s', 'Inter-trial interval'
     , 'real', NULL, 's'
     , 'Planned time between trials.'
     , 'user', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'block_post_odor_acq_s', 'Post-odor acq time'
     , 'real', NULL, 's'
     , 'Imaging time after odor onset, as set in ScanImage.'
     , 'user', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'block_n_odors', '# odors'
     , 'integer', NULL, NULL
     , 'Planned number of odors in the program.'
     , 'user', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'block_n_trials', '# trials'
     , 'integer', NULL, NULL
     , 'Planned number of trials per program.'
     , 'user', FALSE
     ),
 
-    ( 'experiment'
+    ( 'loop'
     , 'flag', 'Flag'
     , 'boolean', NULL, NULL
-    , 'Check this if something went wrong in this experiment.'
+    , 'Check this if something went wrong in this loop.'
+    , 'user', FALSE
+    ),
+
+-- grab
+    ( 'grab'
+    , 'goal', 'Goal'
+    , 'text', NULL, NULL
+    , 'What the grab was for, e.g. a reference image.'
+    , 'user', FALSE
+    ),
+
+    ( 'grab'
+    , 'fov_description', 'FOV description'
+    , 'text', NULL, NULL
+    , 'Description of the field of view, e.g. "medial-rostral left bulb".'
+    , 'user', FALSE
+    ),
+
+    ( 'grab'
+    , 'z_landmark', 'Z=0 landmark'
+    , 'text', NULL, NULL
+    , 'Where z = 0 was set, e.g. "surface of right bulb".'
+    , 'user', FALSE
+    ),
+
+    ( 'grab'
+    , 'pmt_gain', 'PMT gain'
+    , 'real', NULL, NULL
+    , 'PMT gain setting.'
+    , 'user', FALSE
+    ),
+
+    ( 'grab'
+    , 'laser_power_920', 'Laser power 920 nm'
+    , 'integer', NULL, '%'
+    , 'Rig setting, from the TIFF header.'
+    , 'metadata', FALSE
+    ),
+
+    ( 'grab'
+    , 'laser_power_1040', 'Laser power 1040 nm'
+    , 'integer', NULL, '%'
+    , 'Rig setting, from the TIFF header.'
+    , 'metadata', FALSE
+    ),
+
+    ( 'grab'
+    , 'condition', 'Condition'
+    , 'enum', '["baseline", "ket/xyl"]', NULL
+    , 'Before or after anesthesia.'
+    , 'user', FALSE
+    ),
+
+    ( 'grab'
+    , 'note', 'Note'
+    , 'long_text', NULL, NULL
+    , 'Anything worth knowing about this grab.'
+    , 'user', FALSE
+    ),
+
+    ( 'grab'
+    , 'flag', 'Flag'
+    , 'boolean', NULL, NULL
+    , 'Check this if something went wrong in this grab.'
+    , 'user', FALSE
+    ),
+
+-- zstack
+    ( 'zstack'
+    , 'z_landmark', 'Z=0 landmark'
+    , 'text', NULL, NULL
+    , 'Where z = 0 was set, e.g. "surface of right bulb".'
+    , 'user', FALSE
+    ),
+
+    ( 'zstack'
+    , 'power_start_pct', 'Power at z start'
+    , 'real', NULL, '%'
+    , '920 nm laser power at the shallowest slice, from the TIFF header.'
+    , 'metadata', FALSE
+    ),
+
+    ( 'zstack'
+    , 'power_end_pct', 'Power at z end'
+    , 'real', NULL, '%'
+    , '920 nm laser power at the deepest slice, from the TIFF header.'
+    , 'metadata', FALSE
+    ),
+
+    ( 'zstack'
+    , 'power_length_um', 'Power length constant'
+    , 'real', NULL, 'um'
+    , 'ScanImage exponential power-depth length constant (920 nm), from the TIFF header.'
+    , 'metadata', FALSE
+    ),
+
+    ( 'zstack'
+    , 'condition', 'Condition'
+    , 'enum', '["baseline", "ket/xyl"]', NULL
+    , 'Before or after anesthesia.'
+    , 'user', FALSE
+    ),
+
+    ( 'zstack'
+    , 'note', 'Note'
+    , 'long_text', NULL, NULL
+    , 'Anything worth knowing about this z-stack.'
+    , 'user', FALSE
+    ),
+
+    ( 'zstack'
+    , 'flag', 'Flag'
+    , 'boolean', NULL, NULL
+    , 'Check this if something went wrong in this z-stack.'
     , 'user', FALSE
     ),
 

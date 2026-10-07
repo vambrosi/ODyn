@@ -175,7 +175,7 @@ def test_reads_wait_for_another_holder(tmp_path):
     thread.start()
     time.sleep(0.05)
 
-    db.experiments
+    db.loops
     read_at = time.monotonic()
 
     thread.join(timeout=5)
@@ -186,7 +186,7 @@ def test_nothing_is_left_behind(tmp_path):
     db, group = build(tmp_path)
     write_mcor(tmp_path, 1)
     group.add_mcor_files()
-    db.from_query("SELECT * FROM experiments;")
+    db.from_query("SELECT * FROM loops;")
 
     assert not DatabaseLock(db.path).path.exists()
 
@@ -194,7 +194,7 @@ def test_nothing_is_left_behind(tmp_path):
 def test_a_migration_while_open_stops_the_next_use(tmp_path):
     """A notebook left open must not keep writing through an old schema."""
     db = Database(tmp_path, can_create=True)
-    db.experiments
+    db.loops
 
     with DatabaseLock(db.path):
         con = sqlite3.connect(db.path)
@@ -232,8 +232,8 @@ def test_ingestion_and_reads_run_under_the_lock(tmp_path):
 
     db.set_mouse(mouse_id="m1")
     session_id = db.add_session(mouse_id="m1", session_date="2026-01-01")
-    db.add_experiment(session_id=session_id, exp_path="20260101/m1/e1", objective=20)
-    db.add_experiment(session_id=session_id, exp_path="20260101/m1/e1", objective=20)
+    db.add_loop(session_id=session_id, loop_path="20260101/m1/e1", objective=20)
+    db.add_loop(session_id=session_id, loop_path="20260101/m1/e1", objective=20)
 
     for table in (
         "acquisitions",
@@ -241,10 +241,11 @@ def test_ingestion_and_reads_run_under_the_lock(tmp_path):
         "annotation_keys",
         "annotations",
         "events",
-        "experiment_vials",
-        "experiments",
-        "group_experiments",
+        "grabs",
+        "group_loops",
         "lines",
+        "loop_vials",
+        "loops",
         "mcor_files",
         "method_calls",
         "mice",
@@ -263,26 +264,28 @@ def test_ingestion_and_reads_run_under_the_lock(tmp_path):
         "vial_odors",
         "vials",
         "viruses",
+        "zstacks",
     ):
         getattr(db, table)
 
-    db.annotations_for("experiment")
+    db.annotations_for("loop")
     db.missing_annotations()
     db.session_for("m1", "2026-01-01")
-    db.experiment_for(session_id, "20260101_m1_e1")
+    db.loop_for(session_id, 1)
 
-    db.from_query("SELECT count(*) FROM experiments;")
-    db.latest_calls("add_experiment")
-    db.latest_output("add_experiment")
+    db.from_query("SELECT count(*) FROM loops;")
+    db.latest_calls("add_loop")
+    db.latest_output("add_loop")
 
-    group = db.add_group(exp_ids=[1])
+    group = db.add_group([1])
 
     for table in (
         "acquisitions",
         "acquisition_trials",
         "events",
-        "experiment_vials",
-        "experiments",
+        "loop_names",
+        "loop_vials",
+        "loops",
         "mcor_files",
         "method_calls",
         "outputs",

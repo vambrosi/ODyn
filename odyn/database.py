@@ -1,4 +1,5 @@
 import json
+import math
 import re
 import sqlite3
 
@@ -7,7 +8,7 @@ from contextlib import contextmanager
 from datetime import date, time, datetime, timedelta
 from enum import IntEnum, IntFlag
 from pathlib import Path
-from sqlite3 import Connection, Cursor
+from sqlite3 import Cursor
 from tifffile import TiffFile, TiffPage
 from typing import Final
 
@@ -29,13 +30,14 @@ from .utils import (
     CROSS,
     DB_TIMEOUT_S,
     EVENTS,
-    EXPERIMENT_VIALS,
-    EXPERIMENTS,
-    GROUP_EXPERIMENTS,
+    GRABS,
+    GROUP_LOOPS,
     INFO_FOLDER,
     MCOR_FILES,
     METHOD_CALLS,
     LINES,
+    LOOP_VIALS,
+    LOOPS,
     MICE,
     MOUSE_LINES,
     MOUSE_VIRUSES,
@@ -55,6 +57,7 @@ from .utils import (
     VIAL_ODORS,
     VIALS,
     VIRUSES,
+    ZSTACKS,
     CallFrame,
     CallRecorder,
     Object,
@@ -81,15 +84,23 @@ WHOLE_TOLERANCE = 0.01
 # dict as the columns so the across-TIFF consistency check still sees it.
 RIG_ANNOTATIONS = ("laser_power_920", "laser_power_1040", "loop_acq_interval_s")
 
-# What ScanImage calls a recording of each `exp_type`. A z-stack is a grab with
-# several slices, so the TIFF cannot tell the two apart; the caller does.
-ACQ_STATES = {"loop": "loop", "grab": "grab", "zstack": "grab"}
+# The columns every recording table (loops, grabs, z-stacks) takes from a TIFF
+CONTRACT = (
+    "height_px",
+    "width_px",
+    "height_um",
+    "width_um",
+    "frames_per_slice",
+    "frame_rate",
+    "z_um",
+)
 
-# Where the GUI leaves the olfactometer's own definition of the programs an
-# experiment ran, one JSON file per program, inside the experiment folder.
+# Where the GUI leaves the olfactometer's own definition of the programs a
+# loop ran, one JSON file per program, inside the loop folder.
 OLFACTOMETER_FOLDER = "olfactometer"
 
-# Where the sync H5 of an experiment lives, inside the experiment folder
+# Where the sync H5 of a loop lives, inside the loop folder (and of the grabs,
+# inside the grabs folder)
 SYNC_FOLDER = "sync"
 
 # TODO: Make program types part of the database
@@ -104,35 +115,40 @@ PROGRAM_TYPES = [
 ]
 
 
-class ExpFlag(IntFlag):
+class IngestFlag(IntFlag):
     """
-    call_flag bits for `Database.add_experiment` (bit 0 reserved by `CallFlag.RAISED`).
+    call_flag bits for `Database.add_loop`, `add_grabs` and `add_zstacks` (bit
+    0 reserved by `CallFlag.RAISED`).
     """
 
-    ALREADY_IN_DB = 1 << 1  # experiment already present, nothing inserted
+    ALREADY_IN_DB = 1 << 1  # recording already present, nothing inserted
     UNSUPPORTED_METADATA = 1 << 3  # TIFF does not have expected metadata format
     METADATA_CHANGED = 1 << 4  # TIFF metadata changed, skipped
     NOT_THE_SESSION = 1 << 5  # file names disagree with the session given
-    WRONG_ACQ_STATE = 1 << 7  # a TIFF is not what `exp_type` says (loop/grab)
+    WRONG_ACQ_STATE = 1 << 7  # a TIFF is not the kind asked for (loop/grab/z-stack)
     NO_PROGRAM_CONFIG = 1 << 8  # a program has no olfactometer definition
+    STACK_LOOP = 1 << 9  # a loop of z-stacks, which cannot be processed yet
 
 
 class SyncFlag(IntFlag):
     """
-    call_flag bits for `Database.decode_sync` (bit 0 reserved by `CallFlag.RAISED`).
+    call_flag bits for `Database.decode_sync` and `decode_grabs_sync` (bit 0
+    reserved by `CallFlag.RAISED`).
     """
 
-    NO_SYNC_FILE = 1 << 1  # nothing to decode in <experiment>/sync/
+    NO_SYNC_FILE = 1 << 1  # nothing to decode in <loop>/sync/
     MULTIPLE_SYNC_FILES = 1 << 2  # more than one H5 there and none was named
     INTERRUPTED = 1 << 3  # the recording was not stopped properly
     FRAGMENTS = 1 << 4  # short bursts were set aside
-    BLOCK_COUNT_MISMATCH = 1 << 5  # bursts and acquisitions do not pair up
+    BLOCK_COUNT_MISMATCH = 1 << 5  # bursts and acquisitions (or grabs) do not pair up
     TRIAL_COUNT_MISMATCH = 1 << 6  # odor bursts and trials do not pair up
-    ODOR_PULSES = 1 << 7  # a burst with no valve pulse, or more than one
+    ODOR_PULSES = (
+        1 << 7
+    )  # a loop burst without exactly one valve pulse, a grab's with any
     CLOCK_SKEW = 1 << 8  # the two computers disagree beyond `max_skew_s`
     NO_CAMERA = 1 << 9  # an acquisition without camera strobes (no pupil)
     FRAME_COUNT = 1 << 10  # frames in a burst differ from the ScanImage setting
-    NO_TRIALS = 1 << 11  # the experiment has no trials to match the odor bursts to
+    NO_TRIALS = 1 << 11  # the loop has no trials to match the odor bursts to
 
 
 class TrialPhase(IntEnum):
@@ -162,18 +178,20 @@ class Database(CallRecorder):
     ```python
         db.groups             # `List` of `Group`s for processing/analysis
 
-        db.mice               # `DataFrame` per table: mice, sessions, experiments,
-        db.experiments        #   acquisitions, streams, sync_blocks, programs,
-        db.acquisitions       #   trials, events, odors, panels, vials, vial_odors,
-        db.annotations        #   experiment_vials, annotation_keys, annotations,
-        db.method_calls       #   method_calls, outputs, users, mcor_files
+        db.mice               # `DataFrame` per table: mice, sessions, loops,
+        db.loops              #   grabs, zstacks, acquisitions, streams,
+        db.acquisitions       #   sync_blocks, programs, trials, events, odors,
+        db.annotations        #   panels, vials, vial_odors, loop_vials,
+        db.method_calls       #   annotation_keys, annotations, method_calls,
+                              #   outputs, users, mcor_files
     ```
 
     **RELEVANT METHODS**
     ```python
-        db.add_experiment(...)          # Add a recording folder to a session
+        db.add_loop(...)                # Add a loop folder to a session
+        db.add_grabs(...)               # ... or its grabs, or its z-stacks
         db.add_annotations(...)         # Record facts about a row
-        db.annotations_for("experiment")# One column per annotation key
+        db.annotations_for("loop")      # One column per annotation key
         db.latest_calls(method_name)    # `DataFrame` with `method_name` calls
         db.from_query(sql)              # `DataFrame` from a SQL `SELECT`
     ```
@@ -188,7 +206,7 @@ class Database(CallRecorder):
     ):
         """
         **PARAMETERS**
-        - `path` is the main folder holding the experiment folders
+        - `path` is the main folder holding the session folders
         - `project` is a separate database in the same main folder, at
         `.odyn/projects/<project>.db`. `None` is the shared one.
         - `can_create` makes a new, empty database if none is found. Leave it
@@ -200,7 +218,7 @@ class Database(CallRecorder):
 
         **ALERT**
         Projects do not see each other. Two of them can hold the same
-        experiment and neither will know, so use one when work should be kept
+        loop and neither will know, so use one when work should be kept
         apart, not to split work that has to be compared later.
         """
         # Resolved so that every path built from it is absolute and symlink
@@ -413,14 +431,29 @@ class Database(CallRecorder):
         return self._table(SESSIONS)
 
     @property
-    def experiments(self) -> pd.DataFrame:
-        """`DataFrame` with experiment metadata"""
-        return self._table(EXPERIMENTS)
+    def loops(self) -> pd.DataFrame:
+        """`DataFrame` with loop metadata"""
+        return self._table(LOOPS)
 
     @property
-    def group_experiments(self) -> pd.DataFrame:
-        """`DataFrame` with both group and experiment data"""
-        return self._table(GROUP_EXPERIMENTS)
+    def group_loops(self) -> pd.DataFrame:
+        """`DataFrame` with both group and loop data"""
+        return self._table(GROUP_LOOPS)
+
+    @property
+    def grabs(self) -> pd.DataFrame:
+        """
+        `DataFrame` with grab metadata
+
+        The `sync_*` columns come from the decoded sync file and are empty
+        until `decode_grabs_sync` has run for its recording.
+        """
+        return self._table(GRABS)
+
+    @property
+    def zstacks(self) -> pd.DataFrame:
+        """`DataFrame` with z-stack metadata"""
+        return self._table(ZSTACKS)
 
     @property
     def acquisitions(self) -> pd.DataFrame:
@@ -428,7 +461,7 @@ class Database(CallRecorder):
         `DataFrame` with acquisition metadata
 
         The `sync_*` columns come from the decoded sync file and are empty
-        until `decode_sync` has run for the experiment.
+        until `decode_sync` has run for the loop.
         """
         return self._table(ACQUISITIONS)
 
@@ -509,9 +542,9 @@ class Database(CallRecorder):
         return self._table(VIAL_ODORS)
 
     @property
-    def experiment_vials(self) -> pd.DataFrame:
-        """`DataFrame` with which vials each experiment ran"""
-        return self._table(EXPERIMENT_VIALS)
+    def loop_vials(self) -> pd.DataFrame:
+        """`DataFrame` with which vials each loop ran"""
+        return self._table(LOOP_VIALS)
 
     @property
     def annotation_keys(self) -> pd.DataFrame:
@@ -557,12 +590,12 @@ class Database(CallRecorder):
 
     def annotations_for(self, target_type: str) -> pd.DataFrame:
         """
-        One row per annotated `session`/`experiment`/`program`/... , one column per key.
+        One row per annotated `session`/`loop`/`grab`/... , one column per key.
 
         **EXAMPLE**
         ```python
-        deep = db.annotations_for("experiment").query("fov_depth_um > 200")
-        db.experiments.join(deep, how="inner")
+        superficial = db.annotations_for("loop").query("depth_goal == 'superficial'")
+        db.loops.join(superficial, how="inner")
         ```
 
         Every key holds one value, so each column is a plain number, string or
@@ -683,15 +716,22 @@ class Database(CallRecorder):
 
         return None if row is None else int(row["session_id"])
 
-    def experiment_for(self, session_id: int, exp_name: str) -> None | int:
-        """The `exp_id` of an experiment by name within a session, or `None`."""
+    def loop_for(self, session_id: int, loop_number: int) -> None | int:
+        """
+        The `loop_id` of a session's loop by number (`eN`), or `None`.
+
+        **EXAMPLE**
+        ```python
+        db.loop_for(db.session_for("m442", "2026-07-08"), 2)
+        ```
+        """
         with self._locked() as con:
             row = con.execute(
-                "SELECT exp_id FROM experiments WHERE session_id = ? AND exp_name = ?;",
-                [int(session_id), exp_name],
+                "SELECT loop_id FROM loops WHERE session_id = ? AND loop_number = ?;",
+                [int(session_id), int(loop_number)],
             ).fetchone()
 
-        return None if row is None else int(row["exp_id"])
+        return None if row is None else int(row["loop_id"])
 
     # ----------------------------------------------------------------------- #
     # Private Methods
@@ -721,7 +761,14 @@ class Database(CallRecorder):
             "Your code is out of date! Pull the latest version and restart Python."
         )
 
-    def _get_raw_metadata(self, path: Path) -> None | tuple[Object, Object]:
+    def _read_tiff(self, path: Path) -> None | tuple[Object, Object]:
+        """
+        What a ScanImage TIFF says about its recording and about itself, or
+        `None` when it is not a ScanImage file this can read.
+
+        The recording's part must be the same across a loop's TIFFs; `stack`
+        is `None` unless ScanImage took a z-stack.
+        """
         tif = TiffFile(path)
 
         if (
@@ -736,20 +783,21 @@ class Database(CallRecorder):
         SI_metadata = tif.scanimage_metadata["FrameData"]
         laser_powers = SI_metadata["SI.hBeams.powers"]
 
-        # Get the data that must be the same across the experiment
+        # Get the data that must be the same across a loop
         file_stem_parts = path.stem.split("_")
 
-        experiment: Object = {
-            "exp_name": "_".join(file_stem_parts[:-1]),
+        recording: Object = {
+            "name": "_".join(file_stem_parts[:-1]),
             "acq_state": SI_metadata["SI.acqState"],
             "height_px": tif.pages[0].tags["ImageLength"].value,
             "width_px": tif.pages[0].tags["ImageWidth"].value,
-            "frame_count": _whole_number(
+            "frames_per_slice": _whole_number(
                 SI_metadata["SI.hStackManager.framesPerSlice"],
-                "Frame count",
+                "Frames per slice",
                 path,
             ),
             "frame_rate": SI_metadata["SI.hRoiManager.scanFrameRate"],
+            "z_um": _sample_z(SI_metadata),
             "laser_power_920": _whole_number(
                 laser_powers[0],
                 "Laser power at 920 nm",
@@ -761,6 +809,7 @@ class Database(CallRecorder):
                 path,
             ),
             "loop_acq_interval_s": SI_metadata["SI.loopAcqInterval"],
+            "stack": _stack(SI_metadata),
         }
 
         # Assume unit is centimeters
@@ -773,8 +822,8 @@ class Database(CallRecorder):
         factor_y = round(1e4 * ny / dy, 4)
 
         # Size of image in um
-        experiment["width_um"] = experiment["width_px"] * factor_x
-        experiment["height_um"] = experiment["height_px"] * factor_y
+        recording["width_um"] = recording["width_px"] * factor_x
+        recording["height_um"] = recording["height_px"] * factor_y
 
         # Parse ImageDescription
         image_description = dict(
@@ -785,20 +834,19 @@ class Database(CallRecorder):
         # Parse ImageDescription epoch as a datetime
         date_string = image_description["epoch"].strip("[]")
         date_string = " ".join(date_string.split())
-        loop_start = datetime.strptime(date_string, "%Y %m %d %H %M %S.%f")
+        started = datetime.strptime(date_string, "%Y %m %d %H %M %S.%f")
 
-        experiment["exp_start"] = loop_start
+        recording["start"] = started
 
-        # Data specific to the acquisition
+        # Data specific to the TIFF: when its first frame was taken
         delta_sec = float(image_description["frameTimestamps_sec"])
-        acquisition_time = loop_start + timedelta(seconds=delta_sec)
 
-        acquisition: Object = {
+        tiff: Object = {
             "raw_path": path.relative_to(self.main_folder).as_posix(),
-            "acq_start": acquisition_time,
+            "acq_start": started + timedelta(seconds=delta_sec),
         }
 
-        return experiment, acquisition
+        return recording, tiff
 
     def _refresh_if_stale(self) -> None:
         """Reset caches if another connection has committed since the last check."""
@@ -822,50 +870,31 @@ class Database(CallRecorder):
     # Database Queries
     # ----------------------------------------------------------------------- #
 
-    def add_group(self, exp_ids=None, exp_names=None) -> Group:
+    def add_group(self, loop_ids: list[int]) -> Group:
         """
-        Add a group with the experiments listed and return it.
+        Add a group with the loops listed and return it.
 
-        **USAGE**
+        **EXAMPLE**
         ```python
-        db = Database(main_folder)
-        group = db.add_group(list of exp_ids or exp_names)
+        group = db.add_group([3, 10, 12])
         ```
 
-        **EXAMPLES**
-        ```python
-        group = db.add_group(
-                    exp_names=[
-                        "20250303_sid172_e1",
-                        "20250303_sid172_e2"
-                    ]
-                )
-
-        group = db.add_group(exp_ids=[3,10,12])
+        Every loop already has a group of its own; this makes one that
+        processes several together (a field of view imaged in several loops).
+        An existing group with exactly these loops is returned instead.
         """
+        missing = set(int(i) for i in loop_ids) - set(self.loops.index)
 
-        if (exp_ids is None) == (exp_names is None):
-            raise ValueError("Provide exactly one of exp_ids or exp_names.")
+        if missing:
+            raise ValueError(f"No loops with ids: {sorted(missing)}")
 
-        if exp_names is not None:
-            missing = set(exp_names) - set(self.experiments["exp_name"])
-            if missing:
-                raise ValueError(f"No experiments named: {sorted(missing)}")
+        target = frozenset(int(i) for i in loop_ids)
 
-            matched = self.experiments[self.experiments["exp_name"].isin(exp_names)]
-            target = frozenset(int(e) for e in matched.index)
-
-        else:
-            missing = set(exp_ids) - set(self.experiments.index)
-            if missing:
-                raise ValueError(f"No experiments with ids: {sorted(missing)}")
-
-            target = frozenset(int(e) for e in exp_ids)
-
-        # Check if there is a group with exactly those experiments
+        # Check if there is a group with exactly those loops
         members: dict[int, set[int]] = {}
-        for group_id, exp_id in self.group_experiments["exp_id"].items():
-            members.setdefault(group_id, set()).add(int(exp_id))
+
+        for group_id, loop_id in self.group_loops["loop_id"].items():
+            members.setdefault(group_id, set()).add(int(loop_id))
 
         for group_id, member_ids in members.items():
             if member_ids == set(target):
@@ -879,8 +908,8 @@ class Database(CallRecorder):
             group_id = cur.lastrowid
 
             cur.executemany(
-                "INSERT INTO group_experiments (group_id, exp_id) VALUES (?, ?);",
-                [(group_id, exp_id) for exp_id in target],
+                "INSERT INTO group_loops (group_id, loop_id) VALUES (?, ?);",
+                [(group_id, loop_id) for loop_id in target],
             )
 
         assert group_id is not None
@@ -899,7 +928,7 @@ class Database(CallRecorder):
 
         **EXAMPLE**
         ```python
-        db.from_query("SELECT exp_id, exp_name FROM experiments;")
+        db.from_query("SELECT loop_id, loop_path FROM loops;")
         ```
         """
         with self._locked() as con:
@@ -1276,7 +1305,7 @@ class Database(CallRecorder):
         Correct what is recorded about an odor. Only what is passed changes.
 
         The number, the name and what a mix is made of never change. The
-        number is the olfactometer's, and the trials, vials and experiment
+        number is the olfactometer's, and the trials, vials and loop
         ingestion go by the number and name together. A wrong one is a new
         odor. `retired=True` takes the odor out of the dropdown menus.
         """
@@ -1435,7 +1464,7 @@ class Database(CallRecorder):
         defaults to today, since vials are usually recorded as they are made
 
         Remaking vials is a new call, for some of the panel's positions or all
-        of them. A vial an experiment has used is never edited, so what was in
+        of them. A vial a loop has used is never edited, so what was in
         the olfactometer stays on record.
         """
         day = _date_string(datetime.now() if made_on is None else made_on)
@@ -1477,13 +1506,13 @@ class Database(CallRecorder):
         return vial_ids
 
     @record_call
-    def set_experiment_vials(self, *, exp_id: int, vial_ids: list[int]) -> None:
+    def set_loop_vials(self, *, loop_id: int, vial_ids: list[int]) -> None:
         """
-        Record which vials were in the olfactometer for an experiment.
+        Record which vials were in the olfactometer for a loop.
 
         **USAGE**
         ```python
-        db.set_experiment_vials(exp_id=12, vial_ids=[1, 2, 3, 4])
+        db.set_loop_vials(loop_id=12, vial_ids=[1, 2, 3, 4])
         ```
 
         Replaces the whole set: a rack is only true as a whole. The vials must
@@ -1504,19 +1533,19 @@ class Database(CallRecorder):
                 raise ValueError(f"No vials with ids {sorted(missing)}.")
 
             if len({row["panel_id"] for row in rows}) > 1:
-                raise ValueError("An experiment runs vials from one panel only.")
+                raise ValueError("A loop runs vials from one panel only.")
 
             positions = [row["vial_position"] for row in rows]
             if len(positions) != len(set(positions)):
                 raise ValueError("Two of these vials sit in the same position.")
 
-            cur.execute("DELETE FROM experiment_vials WHERE exp_id = ?;", [int(exp_id)])
+            cur.execute("DELETE FROM loop_vials WHERE loop_id = ?;", [int(loop_id)])
             cur.executemany(
-                "INSERT INTO experiment_vials (exp_id, vial_id) VALUES (?, ?);",
-                [(int(exp_id), vial_id) for vial_id in ids],
+                "INSERT INTO loop_vials (loop_id, vial_id) VALUES (?, ?);",
+                [(int(loop_id), vial_id) for vial_id in ids],
             )
 
-        logger.info(f"Experiment {exp_id} ran vials {ids}. {CHECK}")
+        logger.info(f"Loop {loop_id} ran vials {ids}. {CHECK}")
 
     # ----------------------------------------------------------------------- #
     # Annotations
@@ -1527,11 +1556,12 @@ class Database(CallRecorder):
         self, *, target_type: str, target_id: int, values: dict[str, Value]
     ) -> None:
         """
-        Record things about an experiment, session, mouse, program, etc.
+        Record things about a loop, session, mouse, program, etc.
 
         **PARAMETERS**
         - `target_type` is what this is about: `'mouse'`, `'session'`,
-        `'experiment'`, `'program'`, `'acquisition'` or `'group'`.
+        `'loop'`, `'grab'`, `'zstack'`, `'program'`, `'acquisition'` or
+        `'group'`.
         - `target_id` is that row's id (on the target_type table)
         - `values` maps keys from `db.annotation_keys` to their values, which
         have to match the type each key was registered with. `None` clears a
@@ -1540,9 +1570,12 @@ class Database(CallRecorder):
         **EXAMPLE**
         ```python
         db.add_annotations(
-            target_type="experiment",
+            target_type="loop",
             target_id=12,
-            values={"fov_depth_um": 70, "fov_description": "medial-rostral left bulb"},
+            values={
+                "z_landmark": "surface of right bulb",
+                "fov_description": "medial-rostral left bulb",
+            },
         )
         ```
 
@@ -1589,8 +1622,8 @@ class Database(CallRecorder):
         Register something new that can be annotated in this project.
 
         **PARAMETERS**
-        - `applies_to` is `'mouse'`, `'session'`, `'experiment'`, `'program'`,
-        `'acquisition'` or `'group'`
+        - `applies_to` is `'mouse'`, `'session'`, `'loop'`, `'grab'`,
+        `'zstack'`, `'program'`, `'acquisition'` or `'group'`
         - `key` is what `add_annotations` will be called with
         - `value_type` is `'text'`, `'long_text'`, `'integer'`, `'real'`,
         `'boolean'`, `'date'`, or `'enum'`; an `'enum'` needs `allowed_values`.
@@ -1603,7 +1636,7 @@ class Database(CallRecorder):
         **EXAMPLE**
         ```python
         db.add_annotation_key(
-            applies_to="experiment",
+            applies_to="loop",
             key="uses_odor_batch",
             label="Odor batch used",
             value_type="text",
@@ -1655,7 +1688,7 @@ class Database(CallRecorder):
         **USAGE**
         ```python
         db.update_annotation_key(
-            applies_to="experiment",
+            applies_to="loop",
             key="depth_class",
             add_values=["intermediate"],
         )
@@ -1712,9 +1745,9 @@ class Database(CallRecorder):
 
         **USAGE**
         ```python
-        db.retire_annotation_key(applies_to="experiment", key="cohort")
+        db.retire_annotation_key(applies_to="loop", key="cohort")
         db.retire_annotation_key(
-            applies_to="experiment",
+            applies_to="loop",
             key="cohort",
             retired=False,
         )
@@ -1752,114 +1785,295 @@ class Database(CallRecorder):
     # ----------------------------------------------------------------------- #
 
     @record_call
-    def add_experiment(
+    def add_loop(
         self,
         *,
         session_id: int,
-        exp_path: str,
+        loop_path: str,
         objective: int,
+        loop_number: None | int = None,
         rel_raw_paths: None | list[str] = None,
     ) -> None | int:
         """
-        Add a loop recording folder to a session. Returns its `exp_id`.
+        Add a loop folder to a session. Returns its `loop_id`.
 
         **PARAMETERS**
-        - `session_id` is the session (mouse and day) the recording belongs to
-        - `exp_path` is the experiment folder path relative to the `main_folder`
+        - `session_id` is the session (mouse and day) the loop belongs to
+        - `loop_path` is the loop folder, relative to the `main_folder`
         - `objective` is the objective it was imaged through (10, 20, ...)
+        - `loop_number` is the loop's number in the session. Left out, it is
+        the N of a folder named `eN`
         - `rel_raw_paths` is the raw files list (if None it searches the raw folder)
 
         **EXAMPLE**
         ```python
-        db.add_experiment(session_id=3, exp_path="20260623/m462/e2", objective=20)
+        db.add_loop(session_id=3, loop_path="20260623/m462/e2", objective=20)
         ```
 
         Reads the TIFFs, the olfactometer event files and the program
-        definitions in `<exp_path>/olfactometer/`, and inserts the experiment,
-        its acquisitions, programs, trials and events in one transaction. The
+        definitions in `<loop_path>/olfactometer/`, and inserts the loop, its
+        acquisitions, programs, trials and events in one transaction. The
         sync file is decoded separately (`decode_sync`).
 
-        Returns `None` when nothing was added: the experiment was already in
+        Returns `None` when nothing was added: the loop was already in
         the database, or the files did not pass the checks (see the log).
         """
-        added = self._add_recordings(
-            session_id=int(session_id),
-            exp_path=exp_path,
-            objective=int(objective),
-            exp_type="loop",
-            rel_raw_paths=rel_raw_paths,
+        logger.info("Adding a loop to the database...")
+
+        if loop_number is None:
+            match = re.fullmatch(r"e(\d+)", Path(loop_path).name)
+
+            if match is None:
+                raise ValueError(
+                    f"'{Path(loop_path).name}' is not named eN: give `loop_number`."
+                )
+
+            loop_number = int(match.group(1))
+
+        folder, session, tiffs = self._recordings_folder(
+            session_id, loop_path, rel_raw_paths
         )
 
-        return added[0] if added else None
+        # ----------------------------------------------------------------- #
+        # Phase 1: Load
+        # ----------------------------------------------------------------- #
+
+        loop: None | Object = None
+        acquisitions: list[Object] = []
+        checks_failed = 0
+
+        for path in tqdm(tiffs, desc="Loading TIFF Metadata"):
+            read = self._read_kind(path, "loop")
+
+            if read is None:
+                continue
+
+            recording, acquisition = read
+
+            if loop is None:
+                loop = recording
+
+            elif recording != loop:
+                checks_failed += 1
+                logger.warning(
+                    f"'{path.relative_to(self.main_folder)}' metadata"
+                    " is inconsistent with the previous acquisition."
+                )
+
+            acquisitions.append(acquisition)
+
+        if checks_failed > 0:
+            logger.error(
+                f"TIFF metadata changed {checks_failed} or more times in the raw "
+                f"folder. {CROSS}"
+            )
+            logger.info("Are there multiple loops in the same folder?")
+            logger.error("The loop will not be added to the DB.")
+            self.add_flag(IngestFlag.METADATA_CHANGED)
+            return None
+
+        if loop is None:
+            logger.error(f"No loop TIFF with the expected metadata found. {CROSS}")
+            return None
+
+        if loop["stack"] is not None:
+            self.fail(
+                IngestFlag.STACK_LOOP,
+                f"'{loop_path}' is a z-stack loop ({loop['stack']['slice_count']} "
+                "slices), which odyn cannot process yet.",
+            )
+
+        # The session is given, not read off the files; but the file names say
+        # which mouse and day ScanImage was told, and a disagreement means the
+        # folder is not what the caller thinks it is.
+        _check_session(loop, session, self)
+
+        logger.info(f"Passed all TIFF metadata checks! {CHECK}")
+
+        programs_data = self._load_programs(folder)
+
+        # ----------------------------------------------------------------- #
+        # Phase 2: Insert
+        # ----------------------------------------------------------------- #
+
+        rig_settings = {key: loop[key] for key in RIG_ANNOTATIONS}
+        loop_start = _dt_string(loop["start"])
+
+        with self._writing() as cur:
+            exists = cur.execute(
+                "SELECT EXISTS(SELECT 1 FROM loops WHERE loop_start = ?);",
+                [loop_start],
+            ).fetchone()[0]
+
+            if exists:
+                logger.info(f"'{loop_path}' already in DB.")
+                self.add_flag(IngestFlag.ALREADY_IN_DB)
+                return None
+
+            loop_id = _db_insert(
+                cur,
+                "loops",
+                {
+                    **_contract(loop),
+                    "session_id": session_id,
+                    "loop_number": int(loop_number),
+                    "loop_path": folder.resolve()
+                    .relative_to(self.main_folder)
+                    .as_posix(),
+                    "loop_start": loop_start,
+                    "objective": int(objective),
+                },
+            )
+
+            # Every loop starts as a group of its own
+            cur.execute("INSERT INTO groups DEFAULT VALUES;")
+            cur.execute(
+                "INSERT INTO group_loops (group_id, loop_id) VALUES (?, ?);",
+                [cur.lastrowid, loop_id],
+            )
+
+            for acquisition in acquisitions:
+                _db_insert(
+                    cur,
+                    "acquisitions",
+                    {
+                        **acquisition,
+                        "loop_id": loop_id,
+                        "acq_start": _dt_string(acquisition["acq_start"]),
+                    },
+                )
+
+            for key, value in rig_settings.items():
+                _db_annotate(
+                    cur,
+                    target_type="loop",
+                    target_id=loop_id,
+                    key=key,
+                    value=value,
+                    method_call_id=self.current_call_id,
+                )
+
+            for program_data in programs_data:
+                _insert_program(cur, loop_id, program_data)
+
+        self.set_output({"loop_ids": [loop_id]})
+        logger.info(f"Added '{loop_path}' (loop_id = {loop_id}). {CHECK}")
+
+        return loop_id
 
     @record_call
     def add_grabs(
         self,
         *,
         session_id: int,
-        exp_path: str,
+        folder: str,
         objective: int,
-        exp_type: str = "grab",
         rel_raw_paths: None | list[str] = None,
     ) -> list[int]:
         """
-        Add a folder of grabs (or z-stacks), each as its own experiment.
+        Add a session's grabs, one per TIFF. Returns the `grab_id`s added.
 
         **PARAMETERS**
-        - `session_id` is the session (mouse and day) the recordings belong to
-        - `exp_path` is the folder path relative to the `main_folder`
+        - `session_id` is the session (mouse and day) the grabs belong to
+        - `folder` is the grabs folder relative to the `main_folder`
         - `objective` is the objective they were imaged through
-        - `exp_type` is `'grab'` or `'zstack'`
         - `rel_raw_paths` is the raw files list (if None it searches the raw folder)
 
         **EXAMPLE**
         ```python
-        db.add_grabs(session_id=3, exp_path="20260623/m462/grabs", objective=20)
+        db.add_grabs(session_id=3, folder="20260623/m462/grabs", objective=20)
         ```
 
         Files already in the database are skipped, so running this again after
-        adding more grabs to the folder only adds the new ones. Returns the
-        `exp_id`s added.
+        more grabs were taken only adds the new ones. Their sync recordings are
+        decoded separately (`decode_grabs_sync`).
         """
-        if exp_type not in ("grab", "zstack"):
-            raise ValueError(f"exp_type is 'grab' or 'zstack', not {exp_type!r}.")
+        return self._add_singles("grab", session_id, folder, objective, rel_raw_paths)
 
-        return self._add_recordings(
-            session_id=int(session_id),
-            exp_path=exp_path,
-            objective=int(objective),
-            exp_type=exp_type,
-            rel_raw_paths=rel_raw_paths,
-        )
-
-    def _add_recordings(
+    @record_call
+    def add_zstacks(
         self,
         *,
         session_id: int,
-        exp_path: str,
+        folder: str,
         objective: int,
-        exp_type: str,
-        rel_raw_paths: None | list[str],
+        rel_raw_paths: None | list[str] = None,
     ) -> list[int]:
         """
-        Shared body of `add_experiment` and `add_grabs`.
+        Add a session's z-stacks, one per TIFF. Returns the `zstack_id`s added.
 
-        A loop is one experiment holding every TIFF in the folder; a grab or
-        z-stack folder holds one experiment per TIFF. Files are read without
-        the database lock, which is taken for the short lookups and once for
-        the inserts, so a failure anywhere leaves nothing behind.
+        **PARAMETERS**
+        - `session_id` is the session (mouse and day) the z-stacks belong to
+        - `folder` is the z-stacks folder relative to the `main_folder`
+        - `objective` is the objective they were imaged with
+        - `rel_raw_paths` is the raw files list (if None it searches the raw folder)
+
+        **EXAMPLE**
+        ```python
+        db.add_zstacks(session_id=3, folder="20260623/m462/zstacks", objective=20)
+        ```
+
+        The stack (slices, step, z range) is read from each TIFF, and the laser
+        power at its shallowest and deepest slices stored as annotations. Files
+        already in the database are skipped. Which loop a z-stack was taken for
+        is set with `set_zstack_loop`.
         """
-        logger.info(f"Adding {exp_type} recordings to database...")
+        return self._add_singles("zstack", session_id, folder, objective, rel_raw_paths)
 
-        folder = self.main_folder / exp_path
+    @record_call
+    def set_zstack_loop(self, *, zstack_id: int, loop_id: None | int) -> None:
+        """
+        Say which loop a z-stack was taken for (`None`: none).
+
+        **EXAMPLE**
+        ```python
+        db.set_zstack_loop(zstack_id=4, loop_id=12)
+        ```
+
+        The loop must be from the z-stack's session.
+        """
+        with self._writing() as cur:
+            row = cur.execute(
+                "SELECT session_id FROM zstacks WHERE zstack_id = ?;", [int(zstack_id)]
+            ).fetchone()
+
+            if row is None:
+                raise ValueError(f"There is no z-stack {zstack_id}.")
+
+            if loop_id is not None:
+                loop = cur.execute(
+                    "SELECT session_id FROM loops WHERE loop_id = ?;", [int(loop_id)]
+                ).fetchone()
+
+                if loop is None:
+                    raise ValueError(f"There is no loop {loop_id}.")
+
+                if loop["session_id"] != row["session_id"]:
+                    raise ValueError(
+                        f"Loop {loop_id} is from another session than z-stack "
+                        f"{zstack_id}."
+                    )
+
+            cur.execute(
+                "UPDATE zstacks SET loop_id = ? WHERE zstack_id = ?;",
+                [None if loop_id is None else int(loop_id), int(zstack_id)],
+            )
+
+        logger.info(f"Z-stack {zstack_id} is for loop {loop_id}. {CHECK}")
+
+    def _recordings_folder(
+        self, session_id: int, folder_path: str, rel_raw_paths: None | list[str]
+    ) -> tuple[Path, sqlite3.Row, list[Path]]:
+        """The folder, its session's row and the TIFFs to read."""
+        folder = self.main_folder / folder_path
         assert folder.is_dir(), f"Folder not found: '{folder.resolve()}'"
 
-        raw_paths = (
+        tiffs = (
             sorted(folder.glob("raw/[!.]?*.tif"))
             if rel_raw_paths is None
             else [self.main_folder / p for p in rel_raw_paths]
         )
-        assert raw_paths, "Did not find any raw/*.tif files."
+        assert tiffs, "Did not find any raw/*.tif files."
 
         logger.info(f"Processing folder: '{folder.resolve()}'")
 
@@ -1867,167 +2081,128 @@ class Database(CallRecorder):
             session = con.execute(
                 "SELECT session_id, mouse_id, session_date FROM sessions "
                 "WHERE session_id = ?;",
-                [session_id],
+                [int(session_id)],
             ).fetchone()
 
         if session is None:
             raise ValueError(f"There is no session {session_id}.")
 
-        rel_folder = folder.resolve().relative_to(self.main_folder).as_posix()
+        return folder, session, tiffs
 
-        # ----------------------------------------------------------------- #
-        # Phase 1: Load
-        # ----------------------------------------------------------------- #
+    def _read_kind(self, path: Path, kind: str) -> None | tuple[Object, Object]:
+        """A TIFF's metadata, or `None` (flagged) when it is not a `kind`."""
+        read = self._read_tiff(path)
 
-        # One experiment per loop folder, one per TIFF otherwise
-        recordings: list[tuple[Object, list[Object]]] = []
-        last_exp_data: None | Object = None
-        checks_failed = 0
+        if read is None:
+            logger.info(f"  Skipped file {path} (metadata format not supported)")
+            self.add_flag(IngestFlag.UNSUPPORTED_METADATA)
+            return None
 
-        for raw_path in tqdm(raw_paths, desc="Loading TIFF Metadata"):
-            raw_metadata = self._get_raw_metadata(raw_path)
+        recording = read[0]
+        state = "loop" if kind == "loop" else "grab"
+        stacked = recording["stack"] is not None
 
-            if raw_metadata is None:
-                logger.info(
-                    f"  Skipped file {raw_path} (metadata format not supported)"
-                )
-                self.add_flag(ExpFlag.UNSUPPORTED_METADATA)
-                continue
+        # A loop may still be a stack (refused by the caller, with the reason)
+        if recording["acq_state"] != state or (
+            kind != "loop" and stacked != (kind == "zstack")
+        ):
+            what = {"loop": "loop", "grab": "grab", "zstack": "z-stack"}[kind]
+            logger.warning(f"  Skipped '{path.name}' (not a {what}).")
+            self.add_flag(IngestFlag.WRONG_ACQ_STATE)
+            return None
 
-            exp_data, acq = raw_metadata
+        return read
 
-            if exp_data.pop("acq_state") != ACQ_STATES[exp_type]:
-                logger.warning(f"  Skipped '{raw_path.name}' (not a {exp_type}).")
-                self.add_flag(ExpFlag.WRONG_ACQ_STATE)
-                continue
+    def _add_singles(
+        self,
+        kind: str,
+        session_id: int,
+        folder_path: str,
+        objective: int,
+        rel_raw_paths: None | list[str],
+    ) -> list[int]:
+        """
+        Shared body of `add_grabs` and `add_zstacks`: one row per TIFF.
 
-            if exp_type != "loop":
-                # Grabs keep the trailing number, to tell them apart
-                exp_data["exp_name"] = raw_path.stem
-                recordings.append((exp_data, [acq]))
-
-            elif not recordings:
-                recordings.append((exp_data, [acq]))
-
-            else:
-                if last_exp_data != exp_data:
-                    checks_failed += 1
-                    logger.warning(
-                        f"'{raw_path.relative_to(self.main_folder)}' metadata"
-                        " is inconsistent with the previous acquisition."
-                    )
-
-                recordings[0][1].append(acq)
-
-            last_exp_data = exp_data
-
-        if checks_failed > 0:
-            logger.error(
-                f"TIFF metadata changed {checks_failed} or more times in the raw folder. {CROSS}"
-            )
-            logger.info("Are there multiple loops or grabs in the same folder?")
-            logger.error("Experiment will not be added to the DB.")
-            self.add_flag(ExpFlag.METADATA_CHANGED)
-            return []
-
-        if not recordings:
-            logger.error(
-                f"No {exp_type} TIFF with the expected metadata found. {CROSS}"
-            )
-            return []
-
-        # The session is given, not read off the files; but the file names say
-        # which mouse and day ScanImage was told, and a disagreement means the
-        # folder is not what the caller thinks it is.
-        for experiment, _ in recordings:
-            _check_session(experiment, session, self)
-
-        logger.info(f"Passed all TIFF metadata checks! {CHECK}")
-
-        # Olfactometer programs, only for loops
-        programs_data: list[dict] = []
-
-        if exp_type == "loop":
-            programs_data = self._load_programs(folder)
-
-        # ----------------------------------------------------------------- #
-        # Phase 2: Insert
-        # ----------------------------------------------------------------- #
+        One transaction per file, so a folder that fails on one file keeps the
+        others.
+        """
+        what = "grab" if kind == "grab" else "z-stack"
+        logger.info(f"Adding {what}s to the database...")
+        _, session, tiffs = self._recordings_folder(
+            session_id, folder_path, rel_raw_paths
+        )
 
         added: list[int] = []
+        seen = 0
 
-        for experiment, acquisitions in recordings:
-            # Formatted rather than passed as a datetime: the column holds
-            # DT_FORMAT strings, and sqlite3's adapter writes isoformat, which
-            # drops '.000000' when the epoch lands exactly on a second.
-            exp_start = experiment.pop("exp_start")
-            assert isinstance(exp_start, datetime)
-            exp_start_str = exp_start.strftime(DT_FORMAT)
+        for path in tqdm(tiffs, desc="Loading TIFF Metadata"):
+            read = self._read_kind(path, kind)
 
-            rig_settings = {key: experiment.pop(key) for key in RIG_ANNOTATIONS}
+            if read is None:
+                continue
 
-            # One transaction per experiment, so a folder of grabs that fails
-            # on one file keeps the others.
+            recording, tiff = read
+            seen += 1
+            _check_session(recording, session, self)
+
+            row = {
+                **_contract(recording),
+                "session_id": int(session_id),
+                "raw_path": tiff["raw_path"],
+                f"{kind}_start": _dt_string(tiff["acq_start"]),
+                "objective": int(objective),
+            }
+
+            if kind == "grab":
+                notes = {
+                    key: recording[key]
+                    for key in ("laser_power_920", "laser_power_1040")
+                }
+
+            else:
+                stack = recording["stack"]
+                row.pop("z_um")
+                row.update(
+                    slice_count=stack["slice_count"],
+                    z_step_um=stack["z_step_um"],
+                    z_start_um=stack["z_start_um"],
+                    z_end_um=stack["z_end_um"],
+                )
+                notes = {
+                    key: stack[key]
+                    for key in ("power_start_pct", "power_end_pct", "power_length_um")
+                    if stack[key] is not None
+                }
+
             with self._writing() as cur:
-                if _experiment_exists(cur, exp_start_str):
-                    logger.info(f"'{experiment['exp_name']}' already in DB.")
-                    self.add_flag(ExpFlag.ALREADY_IN_DB)
+                exists = cur.execute(
+                    f"SELECT EXISTS(SELECT 1 FROM {kind}s WHERE raw_path = ?);",
+                    [tiff["raw_path"]],
+                ).fetchone()[0]
+
+                if exists:
+                    logger.info(f"'{path.name}' already in DB.")
+                    self.add_flag(IngestFlag.ALREADY_IN_DB)
                     continue
 
-                exp_id = _db_insert(
-                    cur,
-                    "experiments",
-                    {
-                        **experiment,
-                        "session_id": session_id,
-                        "exp_type": exp_type,
-                        "exp_path": rel_folder,
-                        "exp_start": exp_start_str,
-                        "objective": objective,
-                    },
-                )
+                row_id = _db_insert(cur, f"{kind}s", row)
 
-                cur.execute("INSERT INTO groups DEFAULT VALUES;")
-                group_id = cur.lastrowid
-
-                cur.execute(
-                    "INSERT INTO group_experiments (group_id, exp_id) VALUES (?, ?);",
-                    [group_id, exp_id],
-                )
-
-                for acq in acquisitions:
-                    acq_start = acq["acq_start"]
-                    assert isinstance(acq_start, datetime)
-
-                    _db_insert(
-                        cur,
-                        "acquisitions",
-                        {
-                            **acq,
-                            "exp_id": exp_id,
-                            "acq_start": acq_start.strftime(DT_FORMAT),
-                        },
-                    )
-
-                for key, value in rig_settings.items():
+                for key, value in notes.items():
                     _db_annotate(
                         cur,
-                        target_type="experiment",
-                        target_id=exp_id,
+                        target_type=kind,
+                        target_id=row_id,
                         key=key,
                         value=value,
                         method_call_id=self.current_call_id,
                     )
 
-                for program_data in programs_data:
-                    _insert_program(cur, exp_id, program_data)
+            added.append(row_id)
+            logger.info(f"Added '{path.name}' ({kind}_id = {row_id}).")
 
-            added.append(exp_id)
-            logger.info(f"Added '{experiment['exp_name']}' (exp_id = {exp_id}).")
-
-        self.set_output({"exp_ids": added})
-
-        logger.info(f"Added {len(added)} of {len(recordings)} {exp_type}s. {CHECK}")
+        self.set_output({f"{kind}_ids": added})
+        logger.info(f"Added {len(added)} of {seen} {what}s. {CHECK}")
 
         return added
 
@@ -2035,53 +2210,54 @@ class Database(CallRecorder):
     def decode_sync(
         self,
         *,
-        exp_id: int,
+        loop_id: int,
         sync_path: None | str = None,
         max_skew_s: float = 5.0,
     ) -> None:
         """
-        Decode an experiment's sync file into `streams` and `sync_blocks`.
+        Decode a loop's sync file into `streams` and `sync_blocks`.
 
         **PARAMETERS**
-        - `exp_id` is the experiment the file was recorded for
+        - `loop_id` is the loop the file was recorded for
         - `sync_path` is the H5 file, relative to the `main_folder`. Left out,
-        it is the one file in `<experiment>/sync/`
+        it is the one file in `<loop>/sync/`
         - `max_skew_s` is how far the ScanImage and olfactometer clocks may
         disagree before the call is flagged (the match itself is by order, so
         this is a sanity check, not a tolerance)
 
         **EXAMPLE**
         ```python
-        db.decode_sync(exp_id=12)
+        db.decode_sync(loop_id=12)
         ```
 
-        Frame-clock bursts are matched to the experiment's acquisitions in
+        Frame-clock bursts are matched to the loop's acquisitions in
         order, and the bursts with an odor pulse to its trials in order, which
         fills `trials.acq_id`. Running it again replaces what the earlier run
         wrote, so a sync file copied late or a corrected one is not a problem.
         """
         with self._locked() as con:
-            experiment = con.execute(
-                "SELECT exp_path, frame_count FROM experiments WHERE exp_id = ?;",
-                [int(exp_id)],
+            loop = con.execute(
+                "SELECT session_id, loop_path, frames_per_slice FROM loops "
+                "WHERE loop_id = ?;",
+                [int(loop_id)],
             ).fetchone()
 
-            if experiment is None:
-                raise ValueError(f"There is no experiment {exp_id}.")
+            if loop is None:
+                raise ValueError(f"There is no loop {loop_id}.")
 
             acquisitions = con.execute(
                 "SELECT acq_id, acq_start FROM acquisitions "
-                "WHERE exp_id = ? ORDER BY acq_start;",
-                [int(exp_id)],
+                "WHERE loop_id = ? ORDER BY acq_start;",
+                [int(loop_id)],
             ).fetchall()
 
             trials = con.execute(
                 "SELECT trial_id, trial_odor_start FROM trials "
-                "WHERE exp_id = ? ORDER BY trial_start;",
-                [int(exp_id)],
+                "WHERE loop_id = ? ORDER BY trial_start;",
+                [int(loop_id)],
             ).fetchall()
 
-        path = self._sync_file(experiment["exp_path"], sync_path)
+        path = self._sync_file(loop["loop_path"], sync_path)
         rel_path = path.relative_to(self.main_folder).as_posix()
 
         logger.info(f"Decoding '{rel_path}'...")
@@ -2089,7 +2265,7 @@ class Database(CallRecorder):
         # Read without the lock: a file is hundreds of megabytes
         decoded = decode(path)
 
-        self._check_sync(decoded, acquisitions, trials, experiment["frame_count"])
+        self._check_sync(decoded, acquisitions, trials, loop["frames_per_slice"])
 
         blocks = decoded.blocks
         acq_ids = [row["acq_id"] for row in acquisitions]
@@ -2137,64 +2313,28 @@ class Database(CallRecorder):
                 f"{max(trial_skews):.1f} s. {CROSS}"
             )
 
-        header = decoded.header
-
         with self._writing() as cur:
             # Replaced as a whole: the rows of one file are one decode
             cur.execute(
-                "DELETE FROM streams WHERE exp_id = ? AND stream_type = 'sync';",
-                [int(exp_id)],
+                "DELETE FROM streams WHERE loop_id = ? AND stream_type = 'sync';",
+                [int(loop_id)],
             )
             cur.execute(
-                "UPDATE trials SET acq_id = NULL WHERE exp_id = ?;", [int(exp_id)]
+                "UPDATE trials SET acq_id = NULL WHERE loop_id = ?;", [int(loop_id)]
             )
 
-            stream_id = _db_insert(
+            stream_id = self._insert_stream(
+                cur, decoded, rel_path, loop["session_id"], int(loop_id)
+            )
+            self._insert_blocks(
                 cur,
-                "streams",
-                {
-                    "exp_id": int(exp_id),
-                    "stream_type": "sync",
-                    "file_path": rel_path,
-                    "rate_hz": header.rate_hz,
-                    "start_time": _optional_datetime_str(header.start_time),
-                    "stop_time": _optional_datetime_str(header.stop_time),
-                    "n_samples": header.n_samples,
-                    "attributes": json.dumps(header.attributes),
-                    "method_call_id": self.current_call_id,
-                },
+                stream_id,
+                decoded,
+                [
+                    (block, {"acq_id": acq_id}, skew)
+                    for block, acq_id, skew in zip(blocks, acq_ids, skews)
+                ],
             )
-
-            for block, acq_id, skew in zip(blocks, acq_ids, skews):
-                _db_insert(
-                    cur,
-                    "sync_blocks",
-                    {
-                        "stream_id": stream_id,
-                        "sync_block": block.sync_block,
-                        "acq_id": acq_id,
-                        "sync_start_sample": block.start_sample,
-                        "sync_frame_count": block.frame_count,
-                        "sync_frame_period_s": block.frame_period_s,
-                        "sync_odor_pulses": block.odor_pulses,
-                        "sync_odor_on_frame": block.odor_on_frame,
-                        "sync_odor_off_frame": block.odor_off_frame,
-                        "sync_odor_on_residual_s": block.odor_on_residual_s,
-                        "sync_odor_start": _optional_datetime_str(
-                            None
-                            if block.odor_on_sample is None
-                            else decoded.time_at(block.odor_on_sample)
-                        ),
-                        "sync_odor_end": _optional_datetime_str(
-                            None
-                            if block.odor_off_sample is None
-                            else decoded.time_at(block.odor_off_sample)
-                        ),
-                        "sync_camera_frames": block.camera_frames,
-                        "clock_offset_ms": skew,
-                        "method_call_id": self.current_call_id,
-                    },
-                )
 
             cur.executemany(
                 "UPDATE trials SET acq_id = ? WHERE trial_id = ?;",
@@ -2218,8 +2358,196 @@ class Database(CallRecorder):
             f"trials. {CHECK}"
         )
 
-    def _sync_file(self, exp_path: str, sync_path: None | str) -> Path:
-        """The sync file to decode, named or found in `<experiment>/sync/`."""
+    @record_call
+    def decode_grabs_sync(
+        self,
+        *,
+        session_id: int,
+        sync_path: str,
+        max_skew_s: float = 5.0,
+    ) -> None:
+        """
+        Decode a sync file recorded during a session's grabs.
+
+        **PARAMETERS**
+        - `session_id` is the session the grabs belong to
+        - `sync_path` is the H5 file, relative to the `main_folder` (one in
+        `<session>/grabs/sync/`)
+        - `max_skew_s` is how far a burst may start from a grab's first frame,
+        the ScanImage and olfactometer clocks included
+
+        **EXAMPLE**
+        ```python
+        db.decode_grabs_sync(
+            session_id=3,
+            sync_path="20260623/m462/grabs/sync/m462_grabs_2026-06-23_14-02-11.h5",
+        )
+        ```
+
+        Grabs are taken whenever needed, so a file may hold any of them: each
+        frame-clock burst is matched to the grab whose first frame is nearest
+        in time, within `max_skew_s`, and bursts with no grab are left out.
+        Running it again replaces what the earlier run of the same file wrote.
+        """
+        with self._locked() as con:
+            grabs = con.execute(
+                "SELECT grab_id, grab_start, frames_per_slice FROM grabs "
+                "WHERE session_id = ? ORDER BY grab_start;",
+                [int(session_id)],
+            ).fetchall()
+
+        path = self._sync_file("", sync_path)
+        rel_path = path.relative_to(self.main_folder).as_posix()
+        logger.info(f"Decoding '{rel_path}'...")
+        decoded = decode(path)
+
+        if decoded.header.interrupted:
+            self.add_flag(SyncFlag.INTERRUPTED)
+            logger.warning("The recording was not stopped properly (no stop time).")
+
+        if decoded.header.start_time is None:
+            self.fail(
+                SyncFlag.BLOCK_COUNT_MISMATCH,
+                "The file has no start time, so its bursts cannot be placed in time.",
+            )
+
+        # Grabs vary in length, so a short burst is as likely a grab as not
+        bursts = sorted(decoded.blocks + decoded.fragments, key=lambda b: b.sync_block)
+        free = {row["grab_id"]: row for row in grabs}
+        matched: list[tuple] = []
+
+        for block in bursts:
+            started = decoded.time_at(block.start_sample)
+            assert started is not None
+            nearest = min(
+                free.values(),
+                key=lambda row: abs(_parse_dt(row["grab_start"]) - started),
+                default=None,
+            )
+
+            if nearest is None:
+                break
+
+            skew = (_parse_dt(nearest["grab_start"]) - started).total_seconds()
+
+            if abs(skew) > max_skew_s:
+                continue
+
+            del free[nearest["grab_id"]]
+            matched.append((block, {"grab_id": nearest["grab_id"]}, skew * 1000))
+
+            if block.frame_count != nearest["frames_per_slice"]:
+                self.add_flag(SyncFlag.FRAME_COUNT)
+                logger.warning(
+                    f"Burst {block.sync_block} has {block.frame_count} frames, "
+                    f"grab {nearest['grab_id']} {nearest['frames_per_slice']}."
+                )
+
+            if block.odor_pulses:
+                self.add_flag(SyncFlag.ODOR_PULSES)
+                logger.warning(f"Burst {block.sync_block} has a valve pulse.")
+
+            if not block.camera_frames:
+                self.add_flag(SyncFlag.NO_CAMERA)
+                logger.warning(
+                    f"No camera strobes during burst {block.sync_block} (no pupil)."
+                )
+
+        if not matched:
+            self.fail(
+                SyncFlag.BLOCK_COUNT_MISMATCH,
+                f"None of the {len(bursts)} frame bursts in '{path.name}' starts "
+                f"within {max_skew_s:g} s of one of the session's {len(grabs)} "
+                "grabs.",
+            )
+
+        with self._writing() as cur:
+            # Replaced as a whole: the rows of one file are one decode
+            cur.execute("DELETE FROM streams WHERE file_path = ?;", [rel_path])
+            cur.executemany(
+                "DELETE FROM sync_blocks WHERE grab_id = ?;",
+                [(ids["grab_id"],) for _, ids, _ in matched],
+            )
+            stream_id = self._insert_stream(
+                cur, decoded, rel_path, int(session_id), None
+            )
+            self._insert_blocks(cur, stream_id, decoded, matched)
+
+        self.set_output(
+            {
+                **summary(decoded),
+                "stream_id": stream_id,
+                "matched_grabs": len(matched),
+                "unmatched_bursts": len(bursts) - len(matched),
+            }
+        )
+
+        logger.info(f"Matched {len(matched)} of {len(bursts)} bursts to grabs. {CHECK}")
+
+    def _insert_stream(
+        self,
+        cur: Cursor,
+        decoded: DecodedSync,
+        rel_path: str,
+        session_id: int,
+        loop_id: None | int,
+    ) -> int:
+        header = decoded.header
+
+        return _db_insert(
+            cur,
+            "streams",
+            {
+                "session_id": session_id,
+                "loop_id": loop_id,
+                "stream_type": "sync",
+                "file_path": rel_path,
+                "rate_hz": header.rate_hz,
+                "start_time": _optional_datetime_str(header.start_time),
+                "stop_time": _optional_datetime_str(header.stop_time),
+                "n_samples": header.n_samples,
+                "attributes": json.dumps(header.attributes),
+                "method_call_id": self.current_call_id,
+            },
+        )
+
+    def _insert_blocks(
+        self, cur: Cursor, stream_id: int, decoded: DecodedSync, pairs: list[tuple]
+    ) -> None:
+        """One `sync_blocks` row per `(block, {acq_id or grab_id}, skew_ms)`."""
+        for block, target, skew in pairs:
+            _db_insert(
+                cur,
+                "sync_blocks",
+                {
+                    "stream_id": stream_id,
+                    "sync_block": block.sync_block,
+                    **target,
+                    "sync_start_sample": block.start_sample,
+                    "sync_frame_count": block.frame_count,
+                    "sync_frame_period_s": block.frame_period_s,
+                    "sync_odor_pulses": block.odor_pulses,
+                    "sync_odor_on_frame": block.odor_on_frame,
+                    "sync_odor_off_frame": block.odor_off_frame,
+                    "sync_odor_on_residual_s": block.odor_on_residual_s,
+                    "sync_odor_start": _optional_datetime_str(
+                        None
+                        if block.odor_on_sample is None
+                        else decoded.time_at(block.odor_on_sample)
+                    ),
+                    "sync_odor_end": _optional_datetime_str(
+                        None
+                        if block.odor_off_sample is None
+                        else decoded.time_at(block.odor_off_sample)
+                    ),
+                    "sync_camera_frames": block.camera_frames,
+                    "clock_offset_ms": skew,
+                    "method_call_id": self.current_call_id,
+                },
+            )
+
+    def _sync_file(self, folder_path: str, sync_path: None | str) -> Path:
+        """The sync file to decode, named or found in `<folder>/sync/`."""
         if sync_path is not None:
             path = self.main_folder / sync_path
 
@@ -2228,7 +2556,7 @@ class Database(CallRecorder):
 
             return path.resolve()
 
-        folder = self.main_folder / exp_path / SYNC_FOLDER
+        folder = self.main_folder / folder_path / SYNC_FOLDER
         found = sorted(folder.glob("*.h5")) if folder.is_dir() else []
         found = [p for p in found if not p.name.startswith(".")]
 
@@ -2252,7 +2580,7 @@ class Database(CallRecorder):
         decoded: DecodedSync,
         acquisitions: list,
         trials: list,
-        frame_count: int,
+        frames_per_slice: int,
     ) -> None:
         """Flag what is off about a decode, and refuse what cannot be matched."""
         blocks = decoded.blocks
@@ -2269,7 +2597,7 @@ class Database(CallRecorder):
         if len(blocks) != len(acquisitions):
             self.fail(
                 SyncFlag.BLOCK_COUNT_MISMATCH,
-                f"The sync file has {len(blocks)} frame bursts but the experiment "
+                f"The sync file has {len(blocks)} frame bursts but the loop "
                 f"has {len(acquisitions)} acquisitions, so they cannot be matched "
                 "in order.",
             )
@@ -2285,23 +2613,23 @@ class Database(CallRecorder):
         if not trials:
             self.add_flag(SyncFlag.NO_TRIALS)
             logger.warning(
-                "The experiment has no trials (no olfactometer Events file was "
+                "The loop has no trials (no olfactometer Events file was "
                 "ingested), so the odor bursts are stored unmatched."
             )
 
         elif with_odor != len(trials):
             self.fail(
                 SyncFlag.TRIAL_COUNT_MISMATCH,
-                f"{with_odor} bursts have an odor pulse but the experiment has "
+                f"{with_odor} bursts have an odor pulse but the loop has "
                 f"{len(trials)} trials, so they cannot be matched in order.",
             )
 
-        wrong = [b.sync_block for b in blocks if b.frame_count != frame_count]
+        wrong = [b.sync_block for b in blocks if b.frame_count != frames_per_slice]
 
         if wrong:
             self.add_flag(SyncFlag.FRAME_COUNT)
             logger.warning(
-                f"Bursts {wrong} do not have the {frame_count} frames ScanImage "
+                f"Bursts {wrong} do not have the {frames_per_slice} frames ScanImage "
                 "was set to."
             )
 
@@ -2312,7 +2640,7 @@ class Database(CallRecorder):
             logger.warning(f"No camera strobes during bursts {no_camera} (no pupil).")
 
     def _load_programs(self, folder: Path) -> list[dict]:
-        """Parse the olfactometer event files of an experiment folder."""
+        """Parse the olfactometer event files of a loop folder."""
         event_files = sorted(
             folder.rglob("[!.]?*Events.csv"), key=lambda x: x.stat().st_mtime
         )
@@ -2345,7 +2673,7 @@ class Database(CallRecorder):
 
             if config is None:
                 logger.warning(f"No olfactometer definition found for '{name}'.")
-                self.add_flag(ExpFlag.NO_PROGRAM_CONFIG)
+                self.add_flag(IngestFlag.NO_PROGRAM_CONFIG)
 
             program_data["metadata"]["program_config"] = config
 
@@ -2358,17 +2686,132 @@ def _has_database(path: Path) -> bool:
     return path.is_file() and path.stat().st_size > 0
 
 
-def _experiment_exists(con: Connection | Cursor, exp_start_str: str) -> bool:
-    """Whether an experiment starting at `exp_start_str` (DT_FORMAT) is in the DB."""
-    row = con.execute(
-        "SELECT EXISTS(SELECT 1 FROM experiments WHERE exp_start = ?);",
-        [exp_start_str],
-    ).fetchone()
+def _dt_string(value: datetime) -> str:
+    """
+    A datetime as the recording tables hold it (DT_FORMAT).
 
-    return bool(row[0])
+    Formatted rather than passed as a datetime: sqlite3's adapter writes
+    isoformat, which drops '.000000' when the time lands exactly on a second.
+    """
+    assert isinstance(value, datetime)
+
+    return value.strftime(DT_FORMAT)
 
 
-def _check_session(experiment: Object, session: sqlite3.Row, db: Database) -> None:
+def _contract(recording: Object) -> Object:
+    """The columns a recording table takes from `_read_tiff`'s first part."""
+    return {key: recording[key] for key in CONTRACT}
+
+
+def _sample_z(si: Object) -> None | float:
+    """
+    Where ScanImage's sample z was, in microns from the z = 0 the lab sets at
+    the landmark (negative is deeper), or `None` when the file does not say.
+    """
+    position = si.get("SI.hMotors.samplePosition")
+
+    try:
+        return float(position[2])  # type: ignore[index]
+
+    except (TypeError, IndexError, ValueError):
+        return None
+
+
+def _first(value) -> Value:
+    """The first beam's entry of a ScanImage per-beam setting."""
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+
+    if isinstance(value, str):
+        parts = value.strip("[]").split()
+        return parts[0] if parts else None
+
+    return value
+
+
+def _stack(si: Object) -> None | Object:
+    """
+    The z-stack ScanImage took, or `None` when it took a single plane.
+
+    `z_start_um` is the shallowest slice and `z_end_um` the deepest (z is
+    negative below the landmark). The 920 nm power at each end follows
+    ScanImage's power-depth adjustment: exponential with
+    `hBeams.lengthConstants`, from `hBeams.powers` at
+    `hStackManager.zPowerReference`, capped at `powerFractionLimits`.
+    """
+    slices = si.get(
+        "SI.hStackManager.actualNumSlices", si.get("SI.hStackManager.numSlices")
+    )
+
+    if not si.get("SI.hStackManager.enable") or slices is None or int(slices) < 2:
+        return None
+
+    zs = si.get("SI.hStackManager.zs")
+    step = si.get(
+        "SI.hStackManager.actualStackZStepSize",
+        si.get("SI.hStackManager.stackZStepSize"),
+    )
+
+    if isinstance(zs, (int, float)):
+        zs = [zs]
+
+    if not zs or step is None:
+        return None
+
+    start, end = max(float(z) for z in zs), min(float(z) for z in zs)
+    stack: Object = {
+        "slice_count": int(slices),
+        "z_step_um": abs(float(step)),
+        "z_start_um": start,
+        "z_end_um": end,
+        "power_start_pct": None,
+        "power_end_pct": None,
+        "power_length_um": None,
+    }
+
+    try:
+        power = float(_first(si["SI.hBeams.powers"]))  # type: ignore[arg-type]
+
+    except (KeyError, TypeError, ValueError):
+        return stack
+
+    limit = 100.0
+
+    try:
+        limit = 100.0 * float(_first(si.get("SI.hBeams.powerFractionLimits", 1)))  # type: ignore[arg-type]
+
+    except (TypeError, ValueError):
+        pass
+
+    adjust = str(_first(si.get("SI.hBeams.pzAdjust")) or "")
+    reference = si.get("SI.hStackManager.zPowerReference")
+
+    try:
+        length = float(_first(si.get("SI.hBeams.lengthConstants")))  # type: ignore[arg-type]
+
+    except (TypeError, ValueError):
+        length = math.inf
+
+    def at(z: float) -> float:
+        if (
+            "Exponential" not in adjust
+            or reference is None
+            or not math.isfinite(length)
+        ):
+            return min(power, limit)
+
+        return min(power * math.exp((z - float(reference)) / length), limit)
+
+    stack["power_start_pct"] = round(at(start), 2)
+    stack["power_end_pct"] = round(at(end), 2)
+
+    if "Exponential" in adjust and math.isfinite(length):
+        stack["power_length_um"] = length
+
+    return stack
+
+
+def _check_session(recording: Object, session: sqlite3.Row, db: Database) -> None:
     """
     Refuse a recording whose file names disagree with the session given.
 
@@ -2376,7 +2819,7 @@ def _check_session(experiment: Object, session: sqlite3.Row, db: Database) -> No
     A folder submitted under the wrong session would land its acquisitions on
     the wrong mouse or day, with nothing to say so.
     """
-    name = str(experiment["exp_name"])
+    name = str(recording["name"])
     match = re.match(r"(\d{8})_([A-Za-z]*\d+)_", name)
 
     if match is None:
@@ -2388,14 +2831,14 @@ def _check_session(experiment: Object, session: sqlite3.Row, db: Database) -> No
 
     if (mouse, day) != (session["mouse_id"], session["session_date"]):
         db.fail(
-            ExpFlag.NOT_THE_SESSION,
+            IngestFlag.NOT_THE_SESSION,
             f"'{name}' is mouse {mouse} on {day}, but session "
             f"{session['session_id']} is mouse {session['mouse_id']} on "
             f"{session['session_date']}.",
         )
 
 
-def _insert_program(cur: Cursor, exp_id: int, program_data: dict) -> int:
+def _insert_program(cur: Cursor, loop_id: int, program_data: dict) -> int:
     """Insert one program with its trials and events."""
     metadata = program_data["metadata"]
     assert isinstance(metadata["program_start"], datetime)
@@ -2405,7 +2848,7 @@ def _insert_program(cur: Cursor, exp_id: int, program_data: dict) -> int:
         "programs",
         {
             **metadata,
-            "exp_id": exp_id,
+            "loop_id": loop_id,
             "program_start": metadata["program_start"].strftime(DT_FORMAT),
         },
     )
@@ -2425,7 +2868,7 @@ def _insert_program(cur: Cursor, exp_id: int, program_data: dict) -> int:
                 "outcome": trial["outcome"],
                 "acq_id": None,
                 "program_id": program_id,
-                "exp_id": exp_id,
+                "loop_id": loop_id,
             },
         )
 
@@ -2442,7 +2885,7 @@ def _insert_program(cur: Cursor, exp_id: int, program_data: dict) -> int:
 
 def _program_configs(folder: Path) -> dict[str, str]:
     """
-    The olfactometer's program definitions left in an experiment folder.
+    The olfactometer's program definitions left in a loop folder.
 
     One JSON file per program, as the olfactometer's `Program.config` holds it
     (a dict with a `Name`). Keyed by that name, as JSON text ready to store.
@@ -2637,6 +3080,11 @@ def _date_string(value: Value) -> str:
 
     except ValueError as error:
         raise ValueError(f"Not a date (YYYY-MM-DD): {value!r}.") from error
+
+
+def _parse_dt(value: str) -> datetime:
+    """A recording table's time (DT_FORMAT) back as a datetime."""
+    return datetime.strptime(value, DT_FORMAT)
 
 
 def _optional_datetime_str(value: None | datetime) -> None | str:
@@ -2926,7 +3374,7 @@ def _load_event_data(
     Parse all event files into structured program/trial/event dicts.
 
     Returns a list of program dicts, each containing:
-        "metadata": fields for the programs table (no exp_id yet)
+        "metadata": fields for the programs table (no loop_id yet)
         "trials":   list of trial dicts (no events key)
         "events":   list of (trial_idx, event_record) in timeline order.
                     trial_idx is the index into "trials" for that event's trial,
@@ -2994,7 +3442,7 @@ def _load_event_data(
 
                 except ValueError as e:
                     logger.error(f"Unexpected event: {event_name}")
-                    logger.error("Experiment will not be added to the DB.")
+                    logger.error("The loop will not be added to the DB.")
                     raise e
 
                 current_trial_idx = len(trials)

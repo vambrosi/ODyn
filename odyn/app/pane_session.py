@@ -589,7 +589,7 @@ class Sessions(QObject):
 
             return (
                 form_fields(db, "session"),
-                (form_fields(db, "experiment"), conditions),
+                (form_fields(db, "loop"), conditions),
                 [int(m) for m in db.mice.index],
                 (panels, current_vials(vials)),
             )

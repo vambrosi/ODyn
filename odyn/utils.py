@@ -118,7 +118,7 @@ Object: TypeAlias = dict[str, "Value"]
 # --------------------------------------------------------------------------- #
 
 # `Database` exposes every table as a cached DataFrame, and `Group` exposes the
-# same tables restricted to its experiments. Each pair differs only in the SQL,
+# same tables restricted to its loops. Each pair differs only in the SQL,
 # so both queries live side by side in one spec and one reader serves both
 # classes: the cache check, the read, the date parsing, the index and the
 # normalization below happen in exactly one place.
@@ -179,10 +179,10 @@ _TRIAL_COLUMNS = """
          , p.program_type
 """
 
-# The join chain that restricts a table to a group's experiments
-_GROUP_EXPERIMENTS = """
-        FROM group_experiments AS g
-        JOIN experiments AS e ON e.exp_id = g.exp_id
+# The join chain that restricts a table to a group's loops
+_GROUP_LOOPS = """
+        FROM group_loops AS g
+        JOIN loops AS e ON e.loop_id = g.loop_id
 """
 
 
@@ -190,14 +190,14 @@ def _simple(name: str, index: str, dates=(), json=(), via: None | str = None):
     """
     A spec for `SELECT * FROM name`, restricted to a group through `via`.
 
-    `via` is the join from `experiments AS e` down to the table, aliased `x`,
-    e.g. `"JOIN acquisitions AS x ON x.exp_id = e.exp_id"`. Tables with no
+    `via` is the join from `loops AS e` down to the table, aliased `x`,
+    e.g. `"JOIN acquisitions AS x ON x.loop_id = e.loop_id"`. Tables with no
     per-group meaning leave it out.
     """
     in_group = None
 
     if via is not None:
-        in_group = f"SELECT x.* {_GROUP_EXPERIMENTS} {via} WHERE g.group_id = ?;"
+        in_group = f"SELECT x.* {_GROUP_LOOPS} {via} WHERE g.group_id = ?;"
 
     return TableSpec(
         name,
@@ -221,20 +221,32 @@ SESSIONS = _simple(
     dates=["added_to_db_at"],
     via="JOIN sessions AS x ON x.session_id = e.session_id",
 )
-EXPERIMENTS = TableSpec(
-    "experiments",
-    "exp_id",
-    "SELECT * FROM experiments;",
-    f"SELECT e.* {_GROUP_EXPERIMENTS} WHERE g.group_id = ?;",
-    dates=("exp_start", "added_to_db_at"),
+LOOPS = TableSpec(
+    "loops",
+    "loop_id",
+    "SELECT * FROM loops;",
+    f"SELECT e.* {_GROUP_LOOPS} WHERE g.group_id = ?;",
+    dates=("loop_start", "added_to_db_at"),
 )
-GROUP_EXPERIMENTS = TableSpec(
-    "group_experiments",
+GROUP_LOOPS = TableSpec(
+    "group_loops",
     "group_id",
-    # Group 0 is the database's own row and has no experiments
-    f"SELECT g.group_id, e.* {_GROUP_EXPERIMENTS} WHERE g.group_id != 0;",
-    dates=("exp_start", "added_to_db_at"),
+    # Group 0 is the database's own row and has no loops
+    f"SELECT g.group_id, e.* {_GROUP_LOOPS} WHERE g.group_id != 0;",
+    dates=("loop_start", "added_to_db_at"),
 )
+GRABS = TableSpec(
+    "grabs",
+    "grab_id",
+    f"""
+    SELECT x.*
+         {_SYNC_COLUMNS}
+        FROM grabs AS x
+        LEFT JOIN sync_blocks AS s ON s.grab_id = x.grab_id;
+    """,
+    dates=("grab_start", "added_to_db_at", "sync_odor_start", "sync_odor_end"),
+)
+ZSTACKS = _simple("zstacks", "zstack_id", dates=["zstack_start", "added_to_db_at"])
 ACQUISITIONS = TableSpec(
     "acquisitions",
     "acq_id",
@@ -247,8 +259,8 @@ ACQUISITIONS = TableSpec(
     f"""
     SELECT a.*
          {_SYNC_COLUMNS}
-        {_GROUP_EXPERIMENTS}
-        JOIN acquisitions AS a ON a.exp_id = e.exp_id
+        {_GROUP_LOOPS}
+        JOIN acquisitions AS a ON a.loop_id = e.loop_id
         LEFT JOIN sync_blocks AS s ON s.acq_id = a.acq_id
         WHERE g.group_id = ?;
     """,
@@ -270,8 +282,8 @@ ACQUISITION_TRIALS = TableSpec(
     SELECT a.*
          {_SYNC_COLUMNS}
          {_TRIAL_COLUMNS}
-        {_GROUP_EXPERIMENTS}
-        JOIN acquisitions     AS a ON a.exp_id = e.exp_id
+        {_GROUP_LOOPS}
+        JOIN acquisitions     AS a ON a.loop_id = e.loop_id
         LEFT JOIN sync_blocks AS s ON s.acq_id = a.acq_id
         LEFT JOIN trials      AS t ON t.acq_id = a.acq_id
         LEFT JOIN programs    AS p ON p.program_id = t.program_id
@@ -291,15 +303,15 @@ STREAMS = _simple(
     "stream_id",
     dates=["start_time", "stop_time"],
     json=["attributes"],
-    via="JOIN streams AS x ON x.exp_id = e.exp_id",
+    via="JOIN streams AS x ON x.loop_id = e.loop_id",
 )
 SYNC_BLOCKS = TableSpec(
     "sync_blocks",
     "acq_id",
     "SELECT * FROM sync_blocks;",
     f"""
-    SELECT x.* {_GROUP_EXPERIMENTS}
-        JOIN streams     AS s ON s.exp_id = e.exp_id
+    SELECT x.* {_GROUP_LOOPS}
+        JOIN streams     AS s ON s.loop_id = e.loop_id
         JOIN sync_blocks AS x ON x.stream_id = s.stream_id
         WHERE g.group_id = ?;
     """,
@@ -308,7 +320,7 @@ SYNC_BLOCKS = TableSpec(
 MCOR_FILES = _simple(
     "mcor_files",
     "acq_id",
-    via="JOIN acquisitions AS a ON a.exp_id = e.exp_id "
+    via="JOIN acquisitions AS a ON a.loop_id = e.loop_id "
     "JOIN mcor_files AS x ON x.acq_id = a.acq_id",
 )
 PROGRAMS = _simple(
@@ -316,20 +328,20 @@ PROGRAMS = _simple(
     "program_id",
     dates=["program_start"],
     json=["program_config"],
-    via="JOIN programs AS x ON x.exp_id = e.exp_id",
+    via="JOIN programs AS x ON x.loop_id = e.loop_id",
 )
 TRIALS = _simple(
     "trials",
     "trial_id",
     dates=["trial_start", "trial_odor_start", "trial_odor_end"],
-    via="JOIN programs AS p ON p.exp_id = e.exp_id "
+    via="JOIN programs AS p ON p.loop_id = e.loop_id "
     "JOIN trials AS x ON x.program_id = p.program_id",
 )
 EVENTS = _simple(
     "events",
     "event_id",
     dates=["event_time"],
-    via="JOIN programs AS p ON p.exp_id = e.exp_id "
+    via="JOIN programs AS p ON p.loop_id = e.loop_id "
     "JOIN events AS x ON x.program_id = p.program_id",
 )
 ODORS = _simple("odors", "odor_id")
@@ -350,12 +362,12 @@ VIALS = TableSpec(
     dates=("made_on", "added_to_db_at"),
 )
 VIAL_ODORS = TableSpec("vial_odors", "vial_id", "SELECT * FROM vial_odors;")
-EXPERIMENT_VIALS = TableSpec(
-    "experiment_vials",
-    "exp_id",
-    "SELECT * FROM experiment_vials;",
-    f"SELECT x.* {_GROUP_EXPERIMENTS} "
-    "JOIN experiment_vials AS x ON x.exp_id = e.exp_id WHERE g.group_id = ?;",
+LOOP_VIALS = TableSpec(
+    "loop_vials",
+    "loop_id",
+    "SELECT * FROM loop_vials;",
+    f"SELECT x.* {_GROUP_LOOPS} "
+    "JOIN loop_vials AS x ON x.loop_id = e.loop_id WHERE g.group_id = ?;",
 )
 ANNOTATION_KEYS = TableSpec(
     "annotation_keys",
@@ -397,7 +409,9 @@ OUTPUTS = TableSpec(
 ANNOTATION_TARGETS: dict[str, TableSpec] = {
     "mouse": MICE,
     "session": SESSIONS,
-    "experiment": EXPERIMENTS,
+    "loop": LOOPS,
+    "grab": GRABS,
+    "zstack": ZSTACKS,
     "program": PROGRAMS,
     "acquisition": ACQUISITIONS,
     "group": TableSpec("groups", "group_id", "SELECT * FROM groups;"),

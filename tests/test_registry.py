@@ -333,7 +333,7 @@ def test_vials_need_a_panel(db):
         db.add_vials(panel_name="nope", vials=RACK)
 
 
-def test_an_experiment_runs_one_rack(db, tmp_path):
+def test_a_loop_runs_one_rack(db, tmp_path):
     db.add_panel(panel_name="a", positions=POSITIONS)
     db.add_panel(panel_name="b", positions=POSITIONS)
     rack_a = db.add_vials(panel_name="a", vials=RACK)
@@ -346,28 +346,28 @@ def test_an_experiment_runs_one_rack(db, tmp_path):
     with db._writing() as cur:
         cur.execute(
             """
-            INSERT INTO experiments
-                ( exp_id, session_id, exp_name, exp_type, exp_path, exp_start
-                , height_px, width_px, height_um, width_um, frame_count
+            INSERT INTO loops
+                ( loop_id, session_id, loop_number, loop_path, loop_start
+                , height_px, width_px, height_um, width_um, frames_per_slice
                 , frame_rate, objective
-                ) VALUES (7, ?, 'e1', 'loop', 'p', '2026-01-01 10:00:00'
+                ) VALUES (7, ?, 1, 'p', '2026-01-01 10:00:00'
                          , 1, 1, 1, 1, 1, 1, 20);
             """,
             [session_id],
         )
 
-    db.set_experiment_vials(exp_id=7, vial_ids=rack_a)
-    assert sorted(db.experiment_vials.loc[[7], "vial_id"]) == sorted(rack_a)
+    db.set_loop_vials(loop_id=7, vial_ids=rack_a)
+    assert sorted(db.loop_vials.loc[[7], "vial_id"]) == sorted(rack_a)
 
     # Declarative: the new set replaces the old one
-    db.set_experiment_vials(exp_id=7, vial_ids=rack_a[1:])
-    assert sorted(db.experiment_vials.loc[[7], "vial_id"]) == sorted(rack_a[1:])
+    db.set_loop_vials(loop_id=7, vial_ids=rack_a[1:])
+    assert sorted(db.loop_vials.loc[[7], "vial_id"]) == sorted(rack_a[1:])
 
     with pytest.raises(ValueError, match="one panel"):
-        db.set_experiment_vials(exp_id=7, vial_ids=rack_a + rack_b)
+        db.set_loop_vials(loop_id=7, vial_ids=rack_a + rack_b)
 
     with pytest.raises(ValueError, match="same position"):
-        db.set_experiment_vials(exp_id=7, vial_ids=rack_a + remade)
+        db.set_loop_vials(loop_id=7, vial_ids=rack_a + remade)
 
     with pytest.raises(ValueError, match="No vials"):
-        db.set_experiment_vials(exp_id=7, vial_ids=[999])
+        db.set_loop_vials(loop_id=7, vial_ids=[999])

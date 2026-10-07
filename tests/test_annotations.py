@@ -16,23 +16,23 @@ def db(tmp_path):
     db.add_session(mouse_id=1, session_date="2026-01-01")
 
     with db._writing() as cur:
-        for exp_id in (1, 2):
+        for loop_id in (1, 2):
             cur.execute(
                 """
-                INSERT INTO experiments
-                    ( exp_id, session_id, exp_name, exp_type, exp_path, exp_start
-                    , height_px, width_px, height_um, width_um, frame_count
+                INSERT INTO loops
+                    ( loop_id, session_id, loop_number, loop_path, loop_start
+                    , height_px, width_px, height_um, width_um, frames_per_slice
                     , frame_rate, objective
-                    ) VALUES (?, 1, ?, 'loop', 'p', ?, 1, 1, 1, 1, 1, 1, 20);
+                    ) VALUES (?, 1, ?, ?, ?, 1, 1, 1, 1, 1, 1, 20);
                 """,
-                [exp_id, f"e{exp_id}", f"2026-01-01 1{exp_id}:00:00"],
+                [loop_id, loop_id, f"e{loop_id}", f"2026-01-01 1{loop_id}:00:00"],
             )
 
     return db
 
 
 def annotate(db, target_id, **values):
-    db.add_annotations(target_type="experiment", target_id=target_id, values=values)
+    db.add_annotations(target_type="loop", target_id=target_id, values=values)
 
 
 # --------------------------------------------------------------------------- #
@@ -44,15 +44,15 @@ def test_values_are_coerced_to_their_declared_type(db):
     annotate(
         db,
         1,
-        fov_depth_um="70",
+        block_iti_s="70",
         laser_power_920=40.0,
         flag="yes",
         depth_goal="Superficial",
         treatment="fine",
     )
 
-    current = db.annotations_for("experiment").loc[1]
-    assert current["fov_depth_um"] == 70.0
+    current = db.annotations_for("loop").loc[1]
+    assert current["block_iti_s"] == 70.0
     assert current["laser_power_920"] == 40
     assert current["flag"] is True
     assert current["depth_goal"] == "superficial"
@@ -62,7 +62,7 @@ def test_values_are_coerced_to_their_declared_type(db):
 @pytest.mark.parametrize(
     "values, message",
     [
-        ({"fov_depth_um": "deep"}, "declared real"),
+        ({"block_iti_s": "deep"}, "declared real"),
         ({"laser_power_920": 3.7}, "not a whole number"),
         ({"flag": "maybe"}, "not yes or no"),
         ({"depth_goal": "medium"}, "expected one of"),
@@ -78,7 +78,7 @@ def test_wrong_values_are_refused_before_anything_is_written(db, values, message
 
 
 def test_a_missing_target_is_refused(db):
-    with pytest.raises(ValueError, match="no experiment 9"):
+    with pytest.raises(ValueError, match="no loop 9"):
         annotate(db, 9, treatment="x")
 
     with pytest.raises(ValueError, match="Cannot annotate"):
@@ -87,7 +87,7 @@ def test_a_missing_target_is_refused(db):
 
 def test_dates_are_validated_and_read_back_as_dates(db):
     db.add_annotation_key(
-        applies_to="experiment",
+        applies_to="loop",
         key="checked_on",
         label="Checked on",
         value_type="date",
@@ -95,9 +95,7 @@ def test_dates_are_validated_and_read_back_as_dates(db):
     )
     annotate(db, 1, checked_on="2026-02-03")
 
-    assert db.annotations_for("experiment").loc[1, "checked_on"] == pd.Timestamp(
-        "2026-02-03"
-    )
+    assert db.annotations_for("loop").loc[1, "checked_on"] == pd.Timestamp("2026-02-03")
 
     with pytest.raises(ValueError, match="Not a date"):
         annotate(db, 1, checked_on="soon")
@@ -109,37 +107,37 @@ def test_dates_are_validated_and_read_back_as_dates(db):
 
 
 def test_the_latest_value_wins_and_the_history_stays(db):
-    annotate(db, 1, fov_depth_um=70)
-    annotate(db, 1, fov_depth_um=75)
+    annotate(db, 1, block_iti_s=70)
+    annotate(db, 1, block_iti_s=75)
 
-    assert db.annotations_for("experiment").loc[1, "fov_depth_um"] == 75
+    assert db.annotations_for("loop").loc[1, "block_iti_s"] == 75
     assert list(db.annotations["value"]) == [70, 75]
 
 
 def test_none_clears_a_key(db):
-    db.update_annotation_key(applies_to="experiment", key="fov_depth_um", required=True)
-    annotate(db, 1, fov_depth_um=70, treatment="x")
-    annotate(db, 1, fov_depth_um=None)
+    db.update_annotation_key(applies_to="loop", key="block_iti_s", required=True)
+    annotate(db, 1, block_iti_s=70, treatment="x")
+    annotate(db, 1, block_iti_s=None)
 
-    current = db.annotations_for("experiment")
-    assert pd.isna(current.loc[1, "fov_depth_um"])
+    current = db.annotations_for("loop")
+    assert pd.isna(current.loc[1, "block_iti_s"])
     assert current.loc[1, "treatment"] == "x"
 
     missing = db.missing_annotations()
-    assert (1, "fov_depth_um") in set(zip(missing["target_id"], missing["key"]))
+    assert (1, "block_iti_s") in set(zip(missing["target_id"], missing["key"]))
 
 
 def test_the_pivot_has_one_row_per_target_and_typed_columns(db):
-    annotate(db, 1, fov_depth_um=70, pmt_gain=20)
-    annotate(db, 2, fov_depth_um=200)
+    annotate(db, 1, block_iti_s=70, pmt_gain=20)
+    annotate(db, 2, block_iti_s=200)
 
-    frame = db.annotations_for("experiment")
-    assert frame.index.name == "exp_id"
+    frame = db.annotations_for("loop")
+    assert frame.index.name == "loop_id"
     assert list(frame.index) == [1, 2]
-    assert frame["fov_depth_um"].dtype.kind == "f"
+    assert frame["block_iti_s"].dtype.kind == "f"
     assert pd.isna(frame.loc[2, "pmt_gain"])
 
-    deep = frame.query("fov_depth_um > 100")
+    deep = frame.query("block_iti_s > 100")
     assert list(deep.index) == [2]
 
 
@@ -158,7 +156,7 @@ def test_nothing_annotated_is_an_empty_frame(db):
 
 def test_keys_are_registered_updated_and_retired(db):
     db.add_annotation_key(
-        applies_to="experiment",
+        applies_to="loop",
         key="cohort",
         label="Cohort",
         value_type="enum",
@@ -166,62 +164,60 @@ def test_keys_are_registered_updated_and_retired(db):
         description="Which cohort.",
         source="user",
     )
-    key = db.annotation_keys.loc[("experiment", "cohort")]
+    key = db.annotation_keys.loc[("loop", "cohort")]
     assert key["allowed_values"] == ["a", "b"]  # parsed, on every pandas
     assert key["source"] == "user"
 
     db.update_annotation_key(
-        applies_to="experiment", key="cohort", add_values=["c"], label="Cohort name"
+        applies_to="loop", key="cohort", add_values=["c"], label="Cohort name"
     )
-    key = db.annotation_keys.loc[("experiment", "cohort")]
+    key = db.annotation_keys.loc[("loop", "cohort")]
     assert key["allowed_values"] == ["a", "b", "c"]
     assert key["label"] == "Cohort name"
 
     annotate(db, 1, cohort="c")
 
-    db.retire_annotation_key(applies_to="experiment", key="cohort")
+    db.retire_annotation_key(applies_to="loop", key="cohort")
 
     with pytest.raises(ValueError, match="retired"):
         annotate(db, 2, cohort="a")
 
     # What was written stays readable
-    assert db.annotations_for("experiment").loc[1, "cohort"] == "c"
+    assert db.annotations_for("loop").loc[1, "cohort"] == "c"
 
-    db.retire_annotation_key(applies_to="experiment", key="cohort", retired=False)
+    db.retire_annotation_key(applies_to="loop", key="cohort", retired=False)
     annotate(db, 2, cohort="a")
 
     with pytest.raises(ValueError, match="not an enum"):
-        db.update_annotation_key(
-            applies_to="experiment", key="treatment", add_values=["x"]
-        )
+        db.update_annotation_key(applies_to="loop", key="treatment", add_values=["x"])
 
     with pytest.raises(ValueError, match="No annotation key"):
-        db.retire_annotation_key(applies_to="experiment", key="nope")
+        db.retire_annotation_key(applies_to="loop", key="nope")
 
 
 def test_required_keys_are_nagged_until_filled(db):
     assert len(db.missing_annotations()) == 0  # nothing is required out of the box
 
-    db.update_annotation_key(applies_to="experiment", key="fov_depth_um", required=True)
+    db.update_annotation_key(applies_to="loop", key="block_iti_s", required=True)
     db.update_annotation_key(applies_to="session", key="mouse_weight_g", required=True)
     missing = db.missing_annotations()
 
     assert set(zip(missing["target_type"], missing["target_id"], missing["key"])) == {
-        ("experiment", 1, "fov_depth_um"),
-        ("experiment", 2, "fov_depth_um"),
+        ("loop", 1, "block_iti_s"),
+        ("loop", 2, "block_iti_s"),
         ("session", 1, "mouse_weight_g"),
     }
 
-    annotate(db, 1, fov_depth_um=70)
+    annotate(db, 1, block_iti_s=70)
     db.add_annotations(
         target_type="session", target_id=1, values={"mouse_weight_g": 24}
     )
 
     missing = db.missing_annotations()
-    assert list(zip(missing["target_id"], missing["key"])) == [(2, "fov_depth_um")]
+    assert list(zip(missing["target_id"], missing["key"])) == [(2, "block_iti_s")]
 
     # A retired key stops being demanded
-    db.retire_annotation_key(applies_to="experiment", key="fov_depth_um")
+    db.retire_annotation_key(applies_to="loop", key="block_iti_s")
     assert len(db.missing_annotations()) == 0
 
 

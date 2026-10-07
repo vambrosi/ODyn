@@ -37,6 +37,9 @@ from .fields import form_fields, missing_required
 from .recordings import pending, sync_pending
 
 RAW_FOLDER = "raw"
+
+# The annotation target of each kind of draft entry
+_TARGETS = {"loop": "loop", "grab": "grab", "zstack": "zstack"}
 EVENTS_PATTERN = "*Events.csv"
 
 
@@ -129,7 +132,7 @@ def check(db, draft: Draft) -> list[Problem]:
             )
         )
 
-    experiment_fields = form_fields(db, "experiment")
+    experiment_fields = form_fields(db, "loop")
 
     for entry in draft.experiments:
         name = str(entry.get("name", ""))
@@ -428,25 +431,27 @@ def _submit(db, draft: Draft, written: Written) -> None:
         draft.set_experiment(name, submitted_exp_id=int(exp_id))
         written.experiments[name] = int(exp_id)
 
-        values = _annotation_values(db, "experiment", entry)
+        target = _TARGETS[entry.get("exp_type", "loop")]
+        values = _annotation_values(db, target, entry)
 
         if values:
-            db.add_annotations(
-                target_type="experiment", target_id=exp_id, values=values
-            )
+            db.add_annotations(target_type=target, target_id=exp_id, values=values)
             written.annotations += len(values)
 
         written.annotations += _write_conditions(db, draft, name, exp_id, entry)
 
-        if draft.vial_ids:
-            db.set_experiment_vials(exp_id=exp_id, vial_ids=draft.vial_ids)
+        if entry.get("exp_type") != "loop":
+            continue
 
-        if entry.get("exp_type") == "loop" and _has_sync(db, exp_path):
+        if draft.vial_ids:
+            db.set_loop_vials(loop_id=exp_id, vial_ids=draft.vial_ids)
+
+        if _has_sync(db, exp_path):
             # The experiment is in either way; a decode that refuses (a burst
             # count that does not match, say) is reported and can be rerun
             # once the file is sorted out.
             try:
-                db.decode_sync(exp_id=exp_id)
+                db.decode_sync(loop_id=exp_id)
                 written.decoded.append(name)
 
             except Exception as error:
@@ -460,32 +465,35 @@ def _ingest(db, session_id: int, exp_path: str, entry: dict) -> None | int:
     exp_type = entry.get("exp_type", "loop")
 
     if exp_type == "loop":
-        exp_id = db.add_experiment(
-            session_id=session_id, exp_path=exp_path, objective=objective
+        exp_id = db.add_loop(
+            session_id=session_id, loop_path=exp_path, objective=objective
         )
 
     else:
-        added = db.add_grabs(
-            session_id=session_id,
-            exp_path=exp_path,
-            objective=objective,
-            exp_type=exp_type,
-        )
-        # A grab folder is several experiments; the annotations go on the
-        # folder's first one, which is what the draft entry stands for
+        add = db.add_grabs if exp_type == "grab" else db.add_zstacks
+        added = add(session_id=session_id, folder=exp_path, objective=objective)
+        # A grab folder holds several; the annotations go on the folder's
+        # first one, which is what the draft entry stands for
         exp_id = added[0] if added else None
 
     if exp_id is not None:
         return exp_id
 
     # Already in the database (an earlier attempt, or someone else's)
-    rows = db.from_query(
-        "SELECT exp_id FROM experiments WHERE session_id = ? AND exp_path = ? "
-        "ORDER BY exp_id;",
-        [session_id, exp_path],
-    )
+    if exp_type == "loop":
+        rows = db.from_query(
+            "SELECT loop_id AS id FROM loops WHERE session_id = ? AND loop_path = ?;",
+            [session_id, exp_path],
+        )
 
-    return None if rows.empty else int(rows["exp_id"].iloc[0])
+    else:
+        rows = db.from_query(
+            f"SELECT {exp_type}_id AS id FROM {exp_type}s WHERE session_id = ? "
+            f"AND raw_path LIKE ? ORDER BY {exp_type}_id;",
+            [session_id, f"{exp_path}/%"],
+        )
+
+    return None if rows.empty else int(rows["id"].iloc[0])
 
 
 def _write_conditions(db, draft: Draft, name: str, exp_id: int, entry: dict) -> int:
@@ -500,7 +508,7 @@ def _write_conditions(db, draft: Draft, name: str, exp_id: int, entry: dict) -> 
         return 0
 
     rows = db.from_query(
-        "SELECT acq_id, raw_path FROM acquisitions WHERE exp_id = ?;", [int(exp_id)]
+        "SELECT acq_id, raw_path FROM acquisitions WHERE loop_id = ?;", [int(exp_id)]
     )
     acq_ids = {
         acquisition_number(path): int(acq_id)

@@ -8,11 +8,12 @@
 --
 -- WHY THERE IS NO MIGRATION:
 -- - `sessions`, `users`, `streams`, `sync_blocks`, the odor panel tables and
---   the annotation tables are new, and what would fill them (which experiments
+--   the annotation tables are new, and what would fill them (which recordings
 --   share a day, who ran a call, which vials were loaded) is not in a v4 file.
--- - `experiments` loses `mouse_id` and the rig-setting columns and gains
---   `session_id`, `exp_path` and a required `objective`; `acquisitions` loses
---   its sync-derived columns to `sync_blocks`, which need the sync H5 re-read.
+-- - `experiments` is split into `loops`, `grabs` and `zstacks`, which lose
+--   `mouse_id` and the rig-setting columns and gain `session_id` and a
+--   required `objective`; `acquisitions` loses its sync-derived columns to
+--   `sync_blocks`, which need the sync H5 re-read.
 --
 -- WHAT TO DO INSTEAD:
 -- Start a new project database, `Database(main_folder, project="main-sync")`,

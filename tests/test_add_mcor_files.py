@@ -13,7 +13,7 @@ import tifffile
 from odyn import Database
 from odyn.groups import MCOR_LAYOUT, McorFlag, McorSource, _tiff_shape
 
-EXP_DIR = "20260101/m001/e1"
+LOOP_DIR = "20260101/m001/e1"
 STEM = "20260101_m001_e1"
 
 # Over 4 frames on purpose: tifffile folds a leading axis of 4 or less into a
@@ -27,7 +27,7 @@ FRAMES, HEIGHT, WIDTH = 6, 64, 80
 
 
 def build(tmp_path, acquisitions=3):
-    """A database with one experiment, its acquisitions, and a group."""
+    """A database with one loop, its acquisitions, and a group."""
     db = Database(tmp_path, can_create=True)
 
     with db._locked() as con, con:
@@ -38,32 +38,32 @@ def build(tmp_path, acquisitions=3):
         )
         con.execute(
             """
-            INSERT INTO experiments
-                ( exp_id, session_id, exp_name, exp_type, exp_path, exp_start
-                , height_px, width_px, height_um, width_um, frame_count, frame_rate
+            INSERT INTO loops
+                ( loop_id, session_id, loop_number, loop_path, loop_start
+                , height_px, width_px, height_um, width_um, frames_per_slice, frame_rate
                 , objective
-                ) VALUES ( 1, 1, ?, 'loop', ?, '2026-01-01 10:00:00'
+                ) VALUES ( 1, 1, 1, ?, '2026-01-01 10:00:00'
                          , ?, ?, ?, ?, ?
                          , 14.0, 20);
             """,
-            [STEM, EXP_DIR, HEIGHT, WIDTH, float(HEIGHT), float(WIDTH), FRAMES],
+            [LOOP_DIR, HEIGHT, WIDTH, float(HEIGHT), float(WIDTH), FRAMES],
         )
 
         for index in range(acquisitions):
             con.execute(
                 """
-                INSERT INTO acquisitions (acq_id, exp_id, acq_start, raw_path)
+                INSERT INTO acquisitions (acq_id, loop_id, acq_start, raw_path)
                     VALUES (?, 1, ?, ?);
                 """,
                 [
                     index + 1,
                     f"2026-01-01 10:0{index}:00",
-                    f"{EXP_DIR}/raw/{STEM}_{index + 1:05d}.tif",
+                    f"{LOOP_DIR}/raw/{STEM}_{index + 1:05d}.tif",
                 ],
             )
 
         con.execute("INSERT INTO groups (group_id) VALUES (1);")
-        con.execute("INSERT INTO group_experiments (group_id, exp_id) VALUES (1, 1);")
+        con.execute("INSERT INTO group_loops (group_id, loop_id) VALUES (1, 1);")
 
     return db, db.groups[1]
 
@@ -81,7 +81,7 @@ def write_mcor(
 ):
     """Put a plausible motion corrected file where the group will look."""
     folder, suffix = MCOR_LAYOUT[source]
-    path = tmp_path / EXP_DIR / folder / f"{STEM}_{index:05d}{suffix}"
+    path = tmp_path / LOOP_DIR / folder / f"{STEM}_{index:05d}{suffix}"
     path.parent.mkdir(parents=True, exist_ok=True)
 
     tifffile.imwrite(path, np.zeros((frames, height, width), dtype), **kwargs)
@@ -167,7 +167,7 @@ def test_files_are_found_beside_the_raw_files(tmp_path):
     rows = stored(db)
 
     assert set(rows) == {1, 2, 3}
-    assert rows[1] == (f"{EXP_DIR}/processed/mcor/{STEM}_00001_mcor.tif", "caiman")
+    assert rows[1] == (f"{LOOP_DIR}/processed/mcor/{STEM}_00001_mcor.tif", "caiman")
 
 
 def test_paths_are_stored_posix_style(tmp_path):
@@ -351,7 +351,7 @@ def test_nothing_to_add_leaves_the_table_empty(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Groups that share an experiment
+# Groups that share a loop
 # --------------------------------------------------------------------------- #
 
 
@@ -371,25 +371,25 @@ def mcor_group(db, acq_id=1):
     return row["group_id"]
 
 
-def share_experiment(db):
-    """A second group over the same experiment, as happens in the real data."""
+def share_loop(db):
+    """A second group over the same loop, as happens in the real data."""
     with db._locked() as con, con:
         con.execute("INSERT INTO groups (group_id) VALUES (2);")
-        con.execute("INSERT INTO group_experiments (group_id, exp_id) VALUES (2, 1);")
+        con.execute("INSERT INTO group_loops (group_id, loop_id) VALUES (2, 1);")
 
     return db.groups[2]
 
 
 def test_replacing_files_another_group_also_uses_is_flagged(tmp_path):
     """
-    Most groups share an experiment with a neighbour, so overwriting reaches
+    Most groups share a loop with a neighbour, so overwriting reaches
     further than the group you called it on.
     """
     db, group = build(tmp_path, acquisitions=1)
     write_mcor(tmp_path, 1)
     group.add_mcor_files()
 
-    other = share_experiment(db)
+    other = share_loop(db)
     group.add_mcor_files(overwrite=True)
 
     assert group.method_calls.iloc[-1]["call_flag"] & McorFlag.SHARED_WITH_OTHER_GROUPS
@@ -398,15 +398,15 @@ def test_replacing_files_another_group_also_uses_is_flagged(tmp_path):
 
 def test_an_analysis_group_spanning_runs_is_not_an_error(tmp_path):
     """
-    Each experiment is corrected by one group, so a group made for analysis
-    routinely holds experiments from different runs. That is normal, and
+    Each loop is corrected by one group, so a group made for analysis
+    routinely holds loops from different runs. That is normal, and
     replacing one of them must not be refused because of it.
     """
     db, group = build(tmp_path, acquisitions=2)
     write_mcor(tmp_path, 1)
     group.add_mcor_files()
 
-    other = share_experiment(db)
+    other = share_loop(db)
     write_mcor(tmp_path, 2)
     group.add_mcor_files(overwrite=True)
 
@@ -424,7 +424,7 @@ def test_replacing_files_another_group_mcor_is_refused(tmp_path):
     write_mcor(tmp_path, 1)
     group.add_mcor_files()
 
-    other = share_experiment(db)
+    other = share_loop(db)
 
     with pytest.raises(RuntimeError):
         other.add_mcor_files(overwrite=True)
@@ -443,7 +443,7 @@ def test_the_mcor_group_can_be_changed_on_purpose(tmp_path):
     write_mcor(tmp_path, 1)
     group.add_mcor_files()
 
-    other = share_experiment(db)
+    other = share_loop(db)
     other.add_mcor_files(overwrite=True, _change_mcor_group=True)
 
     assert other.method_calls.iloc[-1]["call_flag"] & McorFlag.OWNED_BY_OTHER_GROUP

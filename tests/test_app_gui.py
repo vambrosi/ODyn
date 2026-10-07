@@ -753,8 +753,42 @@ def test_qc_pane_lists_nothing_for_a_new_user(window):
     qc = window.qc
     settle(window.context)
 
-    assert qc.experiments_view.model().rowCount() == 0
+    assert qc.recordings_view.model().rowCount() == 0
     assert "tester" in qc.who.text() or "ana" in qc.who.text()
+
+
+def test_qc_lists_every_kind_of_recording_this_user_submitted(tmp_path):
+    from datetime import datetime
+
+    from generate_data import generate
+
+    from odyn.app.pane_qc import my_missing, my_recordings
+
+    day = dict(frames=56, height=32, width=40, start=datetime(2026, 3, 4, 9))
+    generate(tmp_path, acquisitions=2, **day)
+    generate(tmp_path, acquisitions=1, exp="grabs", acq_state="grab", **day)
+    db = Database(tmp_path, can_create=True, user="ana")
+    db.set_mouse(mouse_id=1)
+    session_id = db.add_session(mouse_id=1, session_date="2026-03-04")
+    loop_id = db.add_loop(
+        session_id=session_id, loop_path="20260304/m1/e1", objective=20
+    )
+    (grab_id,) = db.add_grabs(
+        session_id=session_id, folder="20260304/m1/grabs", objective=10
+    )
+
+    mine = my_recordings(db, "ana")
+    assert set(mine.index) == {("loop", loop_id), ("grab", grab_id)}
+    assert mine.loc[("grab", grab_id), "path"].endswith("_grabs_00001.tif")
+    assert mine.loc[("loop", loop_id), "path"] == "20260304/m1/e1"
+    assert set(mine["sync"]) == {"not decoded"}
+    assert my_recordings(db, "someone else").empty
+
+    db.update_annotation_key(applies_to="grab", key="goal", required=True)
+    missing = my_missing(db, mine)
+    assert list(zip(missing["target_type"], missing["target_id"])) == [
+        ("grab", grab_id)
+    ]
 
 
 def test_worker_runs_jobs_in_order(app, tmp_path):

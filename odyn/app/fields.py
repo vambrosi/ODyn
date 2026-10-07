@@ -177,7 +177,7 @@ COLUMN_FIELDS = {
         ),
     ),
 
-    "experiment": (
+    "loop": (
         Field(
             "objective",
             "Objective",
@@ -219,7 +219,7 @@ PANEL_FIELDS = (
 
 def form_fields(db, applies_to: str) -> list[Field]:
     """
-    Every field the form should show for a session, experiment, and so on.
+    Every field the form should show for a session, loop, and so on.
 
     The table's own columns come first and the registry's keys after, as one
     list, so a column and an annotation are asked for, drawn and read back the
