@@ -17,8 +17,9 @@ Recording an experiment again asks first, and replaces the earlier file.
 what the rig runs to check the wiring.
 
 The source is the DAQ board. Without one (no `nidaqmx`, no driver, the board
-unplugged) nothing starts. The app records from the stand-in only when started
-with `--simulate`.
+unplugged) nothing starts. The app records from a stand-in only when started
+with `--simulate` (invented signals) or `--replay FILE` (a recorded sync file
+played back); a replay stops by itself at the end of its file.
 """
 
 from __future__ import annotations
@@ -52,7 +53,6 @@ from .recorder import (
     RESP_LP_DEFAULT,
     DaqSource,
     Recording,
-    SimulatedSource,
     Source,
     minmax_decimate,
     sync_file_name,
@@ -469,11 +469,10 @@ class RecorderPane(QWidget):
         self.stop_button.setEnabled(True)
         self.tick_timer.start()
         self.redraw_timer.start()
-        simulated = (
-            " (simulated source)" if isinstance(self.source, SimulatedSource) else ""
-        )
+        label = getattr(self.source, "label", None)
         self.context.status.emit(
-            f"{'Testing' if path is None else 'Recording ' + path.name}{simulated}"
+            f"{'Testing' if path is None else 'Recording ' + path.name}"
+            + (f" ({label})" if label else "")
         )
 
         return True
@@ -577,6 +576,13 @@ class RecorderPane(QWidget):
         if chunk is not None:
             self.buffer.add(chunk)
             self.status.setText(f"recording {self.recording.duration_s:.1f} s")
+
+        # A replay that reached the end of its file (not when `stop` is the
+        # caller: it stops the timer first)
+        if self.tick_timer.isActive() and getattr(
+            self.recording.source, "finished", False
+        ):
+            self.stop()
 
     def _apply_filter(self) -> None:
         if self.recording is not None:

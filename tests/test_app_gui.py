@@ -30,7 +30,7 @@ from odyn.app.draft import Draft  # noqa: E402
 from odyn.app.models import FrameModel  # noqa: E402
 from odyn.app.pane_recorder import RecorderPane, recording_path  # noqa: E402
 from odyn.app.pane_tables import filter_frame  # noqa: E402
-from odyn.app.recorder import SimulatedSource  # noqa: E402
+from odyn.app.recorder import ReplaySource, SimulatedSource  # noqa: E402
 from odyn.app.window import MainWindow  # noqa: E402
 from odyn.app.worker import DatabaseWorker  # noqa: E402
 
@@ -561,6 +561,47 @@ def test_recorder_records_into_the_session_folder(window, tmp_path):
         (id(shown), "e1"),
         (id(shown), "e2"),
     ]
+
+
+def test_a_replay_records_its_file_and_stops_at_its_end(window, tmp_path, monkeypatch):
+    import generate_sync
+
+    from odyn.app.recorder import RATE
+
+    monkeypatch.setattr(generate_sync, "RATE_HZ", RATE)
+    original = tmp_path / "m7_e1_rig.h5"
+    generate_sync.generate_sync(original, acquisitions=2, frames=20, mouse="m7")
+
+    draft = Draft.start(tmp_path / "drafts", user="tester").identify(
+        mouse_id=7, date="2026-01-01"
+    )
+    window.sessions.reload_drafts()
+    draft = window.sessions.current
+    draft.set_experiment("e1")
+    window.context.announce_draft()
+    window.open_experiment(draft, "e1")
+
+    recorder: RecorderPane = window.recorder
+    recorder.source = ReplaySource(original, speed=50)
+    said = []
+    window.context.status.connect(said.append)
+    recorder.start()
+    assert "(replay of m7_e1_rig.h5, x50)" in said[0]
+
+    # nobody presses Stop: the end of the file does, and the copy follows
+    wait_until(lambda: recorder.recording is None)
+    wait_until(lambda: not recorder.copier.running)
+    record = draft.recordings("e1")[0]
+    assert record["stopped"] and record["copied"]
+
+    with h5py.File(original) as rig, h5py.File(Path(record["local"])) as replayed:
+        assert replayed.attrs["n_samples"] == rig["2pFrameSync"].shape[0]
+        assert replayed.attrs["start_time"] == rig.attrs["start_time"]
+
+    # played again from the start for the next recording
+    recorder.test()
+    wait_until(lambda: recorder.recording is None)
+    assert "stopped after" in recorder.status.text()
 
 
 def test_a_failed_read_stops_the_recording_once(window):

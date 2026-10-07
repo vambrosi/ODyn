@@ -5,8 +5,9 @@ expects it, named for the experiment it belongs to.
 
 `Recording` is the engine and has no Qt in it: it owns the H5 file (none
 when `path` is `None`: a test that only shows the traces) and the DAQ task
-(or a simulated source, for machines without one) and is stepped by whoever
-calls `tick()`. `RecorderPane` is the widget around it.
+(or a stand-in for machines without one: a simulated source, or a recorded
+file played back) and is stepped by whoever calls `tick()`. `RecorderPane`
+is the widget around it.
 
 The file layout is the one `odyn.sync` reads, unchanged from the rig script:
 root attributes `mouse`, `experiment`, `start_time`, `rate_hz`, and at Stop
@@ -28,7 +29,7 @@ from __future__ import annotations
 
 import time
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -95,7 +96,16 @@ def build_resp_sos(hp: float, lp: float, order: int = RESP_ORDER, fs: float = RA
 
 
 class Source(Protocol):
-    """Where samples come from: the DAQ, or a stand-in."""
+    """
+    Where samples come from: the DAQ, or a stand-in.
+
+    A stand-in may also have:
+    - `label`, said in the status bar while it runs ("simulated source");
+    - `start_time`, the wall clock of its first sample, written as the file's
+    `start_time` instead of the time Start was pressed;
+    - `attributes`, more root attributes for the file;
+    - `finished`, true once it has nothing more to give.
+    """
 
     def start(self) -> None: ...
 
@@ -181,6 +191,8 @@ class SimulatedSource:
     and a slowly turning wheel. For trying the app without the rig.
     """
 
+    label = "simulated source"
+
     def __init__(self, rate: int = RATE):
         self.rate = rate
         self._started = 0.0
@@ -216,6 +228,94 @@ class SimulatedSource:
 
     def stop(self) -> None:
         pass
+
+
+class ReplaySource:
+    """
+    A sync file recorded on the rig, played back as if it came from the board,
+    so the app can be tried end to end with a session's real TIFFs and Events
+    file.
+
+    The file written from it keeps the original `start_time`, so the decode's
+    clock check compares like with like, and says where it came from
+    (`replayed_from`), so it is never taken for a real recording. `speed`
+    plays it faster than it was recorded: the samples are the same, only the
+    wait is shorter.
+    """
+
+    def __init__(self, path: str | Path, speed: float = 1.0):
+        self.path = Path(path)
+        self.speed = float(speed)
+
+        if self.speed <= 0:
+            raise ValueError("The replay speed must be above 0.")
+
+        with h5py.File(self.path, "r") as f:
+            rate = int(f.attrs["rate_hz"])
+            started = f.attrs.get("start_time")
+            self.n_samples = int(f["2pFrameSync"].shape[0])
+
+        if rate != RATE:
+            raise ValueError(
+                f"'{self.path.name}' was recorded at {rate} samples/s; the "
+                f"recorder runs at {RATE}."
+            )
+
+        if started is None:
+            raise ValueError(f"'{self.path.name}' has no start time.")
+
+        self.start_time = datetime.fromisoformat(str(started))
+        self.label = f"replay of {self.path.name}, x{self.speed:g}"
+        self.attributes = {
+            "replayed_from": self.path.name,
+            "replay_speed": self.speed,
+        }
+
+        self._file: None | h5py.File = None
+        self._started = 0.0
+        self._sent = 0
+
+    @property
+    def finished(self) -> bool:
+        return self._file is not None and self._sent >= self.n_samples
+
+    def start(self) -> None:
+        self.stop()
+        self._file = h5py.File(self.path, "r")
+        self._started = time.monotonic()
+        self._sent = 0
+
+    def read(self) -> np.ndarray:
+        if self._file is None:
+            return np.empty((0, 6), np.float32)
+
+        elapsed = time.monotonic() - self._started
+        total = min(int(elapsed * RATE * self.speed), self.n_samples)
+
+        if total <= self._sent:
+            return np.empty((0, 6), np.float32)
+
+        f, part = self._file, slice(self._sent, total)
+        self._sent = total
+        encoder = f["encoder"][part, :2]
+
+        # In the board's channel order (CAM, ENC_A, ENC_B, FRAME, RESP, ODOR)
+        return np.column_stack(
+            [
+                f["cameraFrameSync"][part],
+                encoder[:, 0],
+                encoder[:, 1],
+                f["2pFrameSync"][part],
+                f["respiration"][part, 0],
+                f["odorPulse"][part],
+            ]
+        ).astype(np.float32)
+
+    def stop(self) -> None:
+        file, self._file = self._file, None
+
+        if file is not None:
+            file.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -288,7 +388,9 @@ class Recording:
             self.recording = True
             return
 
-        start_dt = datetime.now()
+        # A replayed file keeps the time it was first recorded
+        start_dt = getattr(self.source, "start_time", None) or datetime.now()
+        self.start_dt = start_dt
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.h5 = h5py.File(self.path, "w")
 
@@ -299,7 +401,10 @@ class Recording:
         fa["rate_hz"] = RATE
         fa["writer_version"] = WRITER_VERSION
 
-        for key, value in self.extra_attributes.items():
+        for key, value in {
+            **self.extra_attributes,
+            **getattr(self.source, "attributes", {}),
+        }.items():
             fa[key] = value
 
         self.enc_dset = self.h5.create_dataset(
@@ -475,7 +580,11 @@ class Recording:
         )
         self.h5.attrs["n_samples"] = self.total
         self.h5.attrs["duration_s"] = self.total / RATE
-        self.h5.attrs["stop_time"] = datetime.now().isoformat()
+        self.h5.attrs["stop_time"] = (
+            (self.start_dt + timedelta(seconds=self.total / RATE)).isoformat()
+            if hasattr(self.source, "start_time")
+            else datetime.now().isoformat()
+        )
         self.h5.flush()
         self.h5.close()
         self.h5 = None

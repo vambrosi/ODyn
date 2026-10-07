@@ -446,3 +446,69 @@ def test_an_undone_session_is_pending_again(tmp_path):
     restored, experiment = removals.undo()
     assert experiment is None and restored.session == {"goal": "keep me"}
     assert [d.path for d in Draft.pending(tmp_path)] == [draft.path]
+
+
+def _rig_file(path, monkeypatch, **options) -> dict:
+    """A sync file at the recorder's own sample rate, as the rig writes them."""
+    import generate_sync
+
+    from odyn.app.recorder import RATE
+
+    monkeypatch.setattr(generate_sync, "RATE_HZ", RATE)
+
+    return generate_sync.generate_sync(path, **options)
+
+
+def test_a_replayed_file_decodes_like_the_original(tmp_path, monkeypatch):
+    import h5py
+
+    from datetime import timedelta
+
+    from odyn.app.recorder import RATE, Recording, ReplaySource
+    from odyn.sync import decode
+
+    original = tmp_path / "m7_e1_rig.h5"
+    _rig_file(original, monkeypatch, acquisitions=3, frames=20, mouse="m7")
+    source = ReplaySource(original, speed=1e6)  # all of it at the first read
+    recording = Recording(
+        tmp_path / "replayed.h5", mouse="m7", experiment="e1", source=source
+    )
+    recording.start()
+
+    while not source.finished:
+        recording.tick()
+
+    recording.stop()
+
+    with h5py.File(original) as rig, h5py.File(recording.path) as replayed:
+        n = rig["2pFrameSync"].shape[0]
+        assert replayed.attrs["n_samples"] == n
+        assert replayed.attrs["replayed_from"] == original.name
+        assert replayed.attrs["replay_speed"] == 1e6
+
+        # the original's clock, so the decode's skew check sees the real day
+        started = datetime.fromisoformat(rig.attrs["start_time"])
+        assert replayed.attrs["start_time"] == started.isoformat()
+        assert (
+            replayed.attrs["stop_time"]
+            == (started + timedelta(seconds=n / RATE)).isoformat()
+        )
+
+        for name in ("2pFrameSync", "odorPulse", "cameraFrameSync"):
+            assert (replayed[name][:] == rig[name][:]).all()
+
+    assert decode(recording.path).blocks == decode(original).blocks
+
+
+def test_a_replay_needs_the_recorders_sample_rate(tmp_path):
+    from generate_sync import generate_sync
+
+    from odyn.app.recorder import ReplaySource
+
+    generate_sync(tmp_path / "slow.h5")  # 1000 samples/s
+
+    with pytest.raises(ValueError, match="1000 samples/s"):
+        ReplaySource(tmp_path / "slow.h5")
+
+    with pytest.raises(ValueError, match="above 0"):
+        ReplaySource(tmp_path / "slow.h5", speed=0)
