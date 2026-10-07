@@ -576,7 +576,7 @@ def test_a_failed_read_stops_the_recording_once(window):
     assert recorder.recording is None and recorder.start_button.isEnabled()
     assert window.context.last_report == (
         "Recorder",
-        "Recording stopped: buffer overflow",
+        "Recording stopped:\n\nbuffer overflow",
     )
 
 
@@ -848,6 +848,65 @@ def test_panels_pane_adds_a_panel_then_batches_of_its_vials(
     # clicking a vial in the table loads its panel
     panels.table.clicked.emit(panels.table.model().index(0, 0))
     assert len(panels.cards) == 3 and panels.locked
+
+
+def test_the_wheel_scrolls_the_form_and_never_changes_a_value(window):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+
+    panels = window.panels
+    window.show_page(panels)
+    for _ in range(4):
+        panels.add_card()
+    QApplication.processEvents()
+
+    spin = panels.cards[0].vial_sccm
+    bar = panels.split.form.verticalScrollBar()
+    wait_until(lambda: bar.maximum() > 0)  # four vials do not fit: it scrolls
+    before, value = bar.value(), spin.value()
+
+    down = QWheelEvent(
+        QPointF(5, 5),
+        QPointF(spin.mapToGlobal(QPoint(5, 5))),
+        QPoint(0, 0),
+        QPoint(0, -120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    QApplication.sendEvent(spin, down)
+
+    assert spin.value() == value and bar.value() > before
+
+
+def test_panel_names_are_the_same_whatever_their_case(window, tmp_path):
+    db = Database(tmp_path / "data", user="tester")
+    db.add_panel(panel_name="16 Odors", positions={1: 1})
+
+    with pytest.raises(ValueError, match="already a panel named '16 Odors'"):
+        db.add_panel(panel_name="16 odors", positions={1: 1})
+
+    db.add_vials(  # and a batch finds it however it is typed
+        panel_name="16 ODORS",
+        vials=[
+            {
+                "vial_position": 1,
+                "vial_sccm": 200,
+                "total_sccm": 1500,
+                "total_volume_ml": 5,
+            }
+        ],
+    )
+    window.context.changed.emit()
+    settle(window.context)
+
+    panels = window.panels
+    name = panels.form.rows["panel_name"]
+    name.editor.setText("16 odors")
+    assert "already exists" in name.note.text()
+    name.editor.editingFinished.emit()
+    assert panels.locked and panels.form.values()["panel_name"] == "16 Odors"
 
 
 def test_odors_pane_adds_a_mix_from_its_components(window, tmp_path):

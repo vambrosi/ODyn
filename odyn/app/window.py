@@ -37,6 +37,7 @@ from ..utils import logger
 from . import style
 from .context import Context
 from .draft import Draft, drafts_folder
+from .forms import WheelGuard
 from .guide import Guide
 from .pane_qc import QcPane
 from .pane_recorder import RecorderPane
@@ -89,6 +90,10 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(style.window_stylesheet())
         self.worker = worker
         self.context = Context(worker, worker.main_folder, drafts or drafts_folder())
+
+        # Scrolling a form never changes a value under the pointer
+        self.wheel_guard = WheelGuard(self)
+        QApplication.instance().installEventFilter(self.wheel_guard)
         self.context.window = self
         self.setWindowTitle(
             f"ODyn: {worker.main_folder} ({worker.project or 'default'})"

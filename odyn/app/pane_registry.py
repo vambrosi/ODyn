@@ -12,9 +12,9 @@ from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QLayout,
     QLabel,
     QPushButton,
     QScrollArea,
@@ -29,7 +29,7 @@ from ..database import WILD_TYPE
 from .context import Context
 from .fields import COLUMN_FIELDS, ODOR_FIELDS, PANEL_FIELDS
 from .forms import Form, FormRows, RecipeForm, fit_row
-from .style import COMBO_EXTRA_PX, FORM_PX, text_style
+from .style import BUTTON_SPACING_PX, COMBO_EXTRA_PX, FORM_PX, text_style
 from .symbols import icon
 from .models import FrameModel, fit_columns
 from .panel import UNLIMITED_PX
@@ -37,6 +37,7 @@ from .panel import UNLIMITED_PX
 
 def _table() -> QTableView:
     view = QTableView()
+    view.setObjectName("registryTable")  # no frame: it meets the bars' lines
     view.setModel(FrameModel())
     view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
     view.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
@@ -61,7 +62,14 @@ class TableAndForm(QWidget):
     # Shared by every page; dragging any page's form changes it for all
     form_px = FORM_PX
 
-    def __init__(self, table: QWidget, form: QWidget, parent=None):
+    def __init__(
+        self,
+        table: QWidget,
+        form: QWidget,
+        buttons: None | QLayout = None,
+        parent=None,
+    ):
+        """`buttons` stay at the foot of the form, outside its scrolling."""
         super().__init__(parent)
         self.table = table
 
@@ -78,11 +86,23 @@ class TableAndForm(QWidget):
 
         # The form scrolls rather than squeezing when the window is short
         self.form = QScrollArea()
+        self.form.setObjectName("registryForm")
         self.form.setWidget(form)
         self.form.setWidgetResizable(True)
         self.form.setFrameShape(QScrollArea.Shape.NoFrame)
         self.form.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.form.setMinimumWidth(FORM_PX)
+
+        # What hides with the form: it, and its buttons under it
+        self.body = QWidget()
+        body = QVBoxLayout(self.body)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        body.addWidget(self.form, 1)
+
+        if buttons is not None:
+            buttons.setContentsMargins(*FORM_MARGINS_PX)
+            body.addLayout(buttons)
 
         # The arrow's strip stays when the form is hidden
         self.side = QWidget()
@@ -90,7 +110,7 @@ class TableAndForm(QWidget):
         side_row.setContentsMargins(0, 0, 0, 0)
         side_row.setSpacing(0)
         side_row.addLayout(strip)
-        side_row.addWidget(self.form, 1)
+        side_row.addWidget(self.body, 1)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("tableAndForm")
@@ -108,10 +128,10 @@ class TableAndForm(QWidget):
         self.set_open(True)
 
     def is_open(self) -> bool:
-        return not self.form.isHidden()
+        return not self.body.isHidden()
 
     def set_open(self, opened: bool) -> None:
-        self.form.setHidden(not opened)
+        self.body.setHidden(not opened)
         self.toggle.setIcon(icon("form-close" if opened else "form-open"))
         tip = "Hide the form" if opened else "Show the form"
         self.toggle.setToolTip(tip)
@@ -141,6 +161,29 @@ class TableAndForm(QWidget):
     def _moved(self, *_) -> None:
         if self.is_open():
             TableAndForm.form_px = self.splitter.sizes()[1]
+
+
+# Room between a registry form (and its buttons) and the edges around it
+FORM_MARGINS_PX = (4, 8, 12, 8)
+
+
+def _titled(title: str) -> tuple[QWidget, QVBoxLayout]:
+    """A registry form's body: its title in bold over what goes in it."""
+    box = QWidget()
+    layout = QVBoxLayout(box)
+    layout.setContentsMargins(*FORM_MARGINS_PX)
+    heading = QLabel(title)
+    heading.setStyleSheet("font-weight: bold;")
+    layout.addWidget(heading)
+
+    return box, layout
+
+
+def _fill(page: QWidget, split: TableAndForm) -> None:
+    """The page is its table and form, edge to edge."""
+    layout = QHBoxLayout(page)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(split)
 
 
 def _model(view: QTableView) -> FrameModel:
@@ -425,6 +468,7 @@ def _watch_id(form: Form, key: str, note: str, stored) -> None:
 def _buttons(actions) -> tuple[QHBoxLayout, list[QPushButton]]:
     """A row of buttons, `(text, action)` each, sharing its width."""
     row, buttons = QHBoxLayout(), []
+    row.setSpacing(BUTTON_SPACING_PX)
 
     for text, action in actions:
         button = QPushButton(text)
@@ -455,8 +499,7 @@ class MicePane(QWidget):
         holder = QWidget()
         side = QVBoxLayout(holder)
         side.setContentsMargins(0, 0, 0, 0)
-        box = QGroupBox("Register or update a mouse")
-        box_layout = QVBoxLayout(box)
+        box, box_layout = _titled("Add or update a mouse")
         self.form = Form(list(COLUMN_FIELDS["mouse"]))
         box_layout.addWidget(self.form)
 
@@ -473,12 +516,10 @@ class MicePane(QWidget):
                 ("Save mouse", self._save),
             )
         )
-        box_layout.addLayout(buttons)
-
         side.addWidget(box)
         side.addStretch(1)
-        self.split = TableAndForm(self.table, holder)
-        QHBoxLayout(self).addWidget(self.split)
+        self.split = TableAndForm(self.table, holder, buttons)
+        _fill(self, self.split)
 
         self.table.clicked.connect(self._pick)
         self.form.changed.connect(self._typed)
@@ -563,13 +604,13 @@ class MicePane(QWidget):
         values = self.form.values()
 
         if "mouse_id" not in values:
-            self.context.report("Mouse", "A mouse needs its number.")
+            self.context.report("Mouse", "Mouse ID is required.")
             return
 
         for listed in (self.line_list, self.virus_list):
             if listed.repeated():
                 self.context.report(
-                    "Mouse", f"One of the {listed.what} is listed twice."
+                    "Mouse", f"Some {listed.what} are listed twice."
                 )
                 return
 
@@ -625,8 +666,7 @@ class OdorsPane(QWidget):
         holder = QWidget()
         side = QVBoxLayout(holder)
         side.setContentsMargins(0, 0, 0, 0)
-        box = QGroupBox("Register or update an odor")
-        box_layout = QVBoxLayout(box)
+        box, box_layout = _titled("Add or update an odor")
         self.form = Form(list(ODOR_FIELDS))
         box_layout.addWidget(self.form)
 
@@ -646,12 +686,10 @@ class OdorsPane(QWidget):
                 ("Save odor", self._save),
             )
         )
-        box_layout.addLayout(buttons)
-
         side.addWidget(box)
         side.addStretch(1)
-        self.split = TableAndForm(self.table, holder)
-        QHBoxLayout(self).addWidget(self.split)
+        self.split = TableAndForm(self.table, holder, buttons)
+        _fill(self, self.split)
 
         self.table.clicked.connect(self._pick)
         self.form.changed.connect(self._typed)
@@ -731,10 +769,8 @@ class OdorsPane(QWidget):
         self.form.rows["odor_id"].show_note(_exists_note("Odor"), "warning")
 
     def _lock(self, locked: bool) -> None:
-        # Shown like a value read from elsewhere, not like a placeholder
         name = self.form.rows["odor_name"].editor
         name.setEnabled(not locked)
-        name.setStyleSheet(text_style("computed") if locked else "")
         name.setToolTip(
             "A stored odor's name never changes"
             if locked
@@ -764,11 +800,11 @@ class OdorsPane(QWidget):
         values = self.form.values()
 
         if "odor_id" not in values or "odor_name" not in values:
-            self.context.report("Odor", "An odor needs its number and a name.")
+            self.context.report("Odor", "Odor ID and name are required.")
             return
 
         if self.composition.repeated():
-            self.context.report("Odor", "A component is listed twice.")
+            self.context.report("Odor", "Some components are listed twice.")
             return
 
         odor_id = values["odor_id"]
@@ -863,8 +899,7 @@ class PanelsPane(QWidget):
         holder = QWidget()
         side = QVBoxLayout(holder)
         side.setContentsMargins(0, 0, 0, 0)
-        box = QGroupBox("Add a panel or a batch of its vials")
-        box_layout = QVBoxLayout(box)
+        box, box_layout = _titled("Add a panel or a batch of vials")
         self.form = Form(list(PANEL_FIELDS))
         box_layout.addWidget(self.form)
 
@@ -881,12 +916,10 @@ class PanelsPane(QWidget):
                 ("Save panel", self._save),
             )
         )
-        box_layout.addLayout(buttons)
-
         side.addWidget(box)
         side.addStretch(1)
-        self.split = TableAndForm(self.table, holder)
-        QHBoxLayout(self).addWidget(self.split)
+        self.split = TableAndForm(self.table, holder, buttons)
+        _fill(self, self.split)
 
         self.table.clicked.connect(self._pick)
         self.form.changed.connect(self._typed)
@@ -956,7 +989,9 @@ class PanelsPane(QWidget):
         if self._panels is None or name is None:
             return None
 
-        found = self._panels.index[self._panels["panel_name"] == str(name).strip()]
+        # Whatever the case it is typed in: "16 odors" is "16 Odors"
+        names = self._panels["panel_name"].str.casefold()
+        found = self._panels.index[names == str(name).strip().casefold()]
 
         return int(found[0]) if len(found) else None
 
@@ -989,7 +1024,7 @@ class PanelsPane(QWidget):
         description = self._panels.loc[panel_id, "description"]
         self.form.set_values(
             {
-                "panel_name": name,
+                "panel_name": self._panels.loc[panel_id, "panel_name"],
                 "description": None if description != description else description,
             }
         )
@@ -1026,7 +1061,6 @@ class PanelsPane(QWidget):
         """A stored panel's description and set of vials are its own."""
         description = self.form.rows["description"].editor
         description.setEnabled(not locked)
-        description.setStyleSheet(text_style("computed") if locked else "")
         self.add_vial.setEnabled(not locked)
 
     # ----------------------------------------------------------------- #
@@ -1076,26 +1110,28 @@ class PanelsPane(QWidget):
         made_on = values.get("made_on")
 
         if not name:
-            self.context.report("Panel", "A panel needs a name.")
+            self.context.report("Panel", "Panel name is required.")
             return
 
         if not self.stored(name):
             self._save_new(name, values.get("description"), made_on)
             return
 
+        name = str(self._panels.loc[self._panel_id(name), "panel_name"])
+
         if not self.locked:
             # Typed and saved at once: the panel was never loaded
             self.context.report(
                 "Panel",
-                f"{name} already exists: pick it (or leave the name field) to "
-                "load its vials, then save the batch.",
+                f"{name} already exists. Pick it from the list to load its "
+                "vials.",
             )
             return
 
         batch = [card.vial() for card in self.cards if card.included]
 
         if not batch:
-            self.context.report("Panel", "Check at least one vial to remake.")
+            self.context.report("Panel", "Check at least one vial.")
             return
 
         day = made_on or "today"

@@ -1340,6 +1340,17 @@ class Database(CallRecorder):
             if unknown:
                 raise ValueError(f"No odors with ids {unknown}.")
 
+            taken = cur.execute(
+                "SELECT panel_name FROM panels WHERE panel_name = ? COLLATE NOCASE;",
+                [str(panel_name).strip()],
+            ).fetchone()
+
+            if taken is not None:
+                raise ValueError(
+                    f"There is already a panel named {taken['panel_name']!r} "
+                    "(names are case-insensitive)."
+                )
+
             panel_id = _db_insert(
                 cur,
                 "panels",
@@ -2645,8 +2656,10 @@ def _optional_real(value: Value) -> None | float:
 
 
 def _panel_id(cur: Cursor, panel_name: str) -> int:
+    # Names are case-insensitive ("16 odors" ~ "16 Odors")
     row = cur.execute(
-        "SELECT panel_id FROM panels WHERE panel_name = ?;", [str(panel_name).strip()]
+        "SELECT panel_id FROM panels WHERE panel_name = ? COLLATE NOCASE;",
+        [str(panel_name).strip()],
     ).fetchone()
 
     if row is None:

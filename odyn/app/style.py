@@ -33,6 +33,9 @@ FORM_PX = 580
 # so rows built from several widgets (a mouse's lines) are the same size
 ROW_SPACING_PX = 8
 
+# The gap between the buttons at the bottom of a form
+BUTTON_SPACING_PX = 8
+
 # The session and experiment pages stop growing at this width and are
 # centered in what is left
 PAGE_MAX_PX = 1000
@@ -88,7 +91,11 @@ QLineEdit#shown {{
     border-color: transparent;
 }}
 QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{
-    color: palette(mid);
+    /* locked, not faded: the text reads as well as anywhere, the box is
+       the window's color instead of the fields' (lighter in dark mode,
+       darker in light mode) */
+    color: palette(text);
+    background: palette(window);
 }}
 QComboBox::drop-down {{
     subcontrol-origin: padding;
@@ -132,6 +139,10 @@ QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
 QListWidget, QTableView, QScrollArea, QGroupBox {{
     border: 1px solid palette(mid);
     border-radius: {RADIUS}px;
+}}
+QTableView#registryTable, QScrollArea#registryForm {{
+    /* edge to edge: the bars' and the divider's lines frame them */
+    border: none;
 }}
 QGroupBox {{
     margin-top: 12px;

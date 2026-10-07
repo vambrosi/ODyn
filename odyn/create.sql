@@ -329,7 +329,7 @@ CREATE TABLE IF NOT EXISTS odor_components
 -- when it is added; a different set of odors or positions is a new panel.
 CREATE TABLE IF NOT EXISTS panels
     ( panel_id          INTEGER PRIMARY KEY
-    , panel_name        TEXT NOT NULL UNIQUE
+    , panel_name        TEXT NOT NULL UNIQUE COLLATE NOCASE
     , description       TEXT
     , added_to_db_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     ) STRICT;

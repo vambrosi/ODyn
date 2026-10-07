@@ -14,8 +14,11 @@ from typing import Any
 
 import pandas as pd
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
+    QAbstractSpinBox,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -38,6 +41,31 @@ from PySide6.QtWidgets import (
 from .style import ROW_SPACING_PX, required_label, text_style
 from ..recipes import block_timing, camera_frames, solvent_volume_ml, vial_recipe
 from .fields import BOOLEAN, ENUM, LONG_TEXT, Field
+
+
+class WheelGuard(QObject):
+    """
+    The mouse wheel never changes number boxes and dropdowns; it scrolls the
+    area they sit in.
+
+    Installed once on the application (`QApplication.installEventFilter`).
+    """
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if event.type() != QEvent.Type.Wheel or not isinstance(
+            watched, (QAbstractSpinBox, QComboBox)
+        ):
+            return False
+
+        area = watched.parentWidget()
+
+        while area is not None and not isinstance(area, QAbstractScrollArea):
+            area = area.parentWidget()
+
+        if area is not None:
+            QApplication.sendEvent(area.viewport(), event.clone())
+
+        return True  # the box itself never sees it
 
 
 class FieldRow(QWidget):

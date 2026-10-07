@@ -373,9 +373,9 @@ class RecorderPane(QWidget):
 
         if earlier is not None and not self.context.confirm(
             "Recorder",
-            f"{name} already has a recording ({earlier['file']}). Do you want "
-            "to record a new one? (Only the new one will be used, the old one "
-            "will stay in this computer if needed.)",
+            f"{name} already has a recording ({earlier['file']}).\n\n"
+            "Do you want to record a new one?\n"
+            "(Only the new one will be used.)",
             "Record again",
         ):
             return
@@ -459,7 +459,7 @@ class RecorderPane(QWidget):
 
         except Exception as error:
             self.recording = None
-            self.context.report("Recorder", f"Could not start: {error}")
+            self.context.report("Recorder", f"Could not start:\n\n{error}")
             return False
 
         self.buffer.clear()
@@ -501,7 +501,7 @@ class RecorderPane(QWidget):
             recording.stop()
 
         except Exception as error:
-            self.context.report("Recorder", f"Trouble closing the file: {error}")
+            self.context.report("Recorder", f"Trouble closing the file:\n\n{error}")
 
         what = "test" if recording.path is None else recording.path.name
         self.status.setText(f"stopped after {recording.duration_s:.1f} s: {what}")
@@ -571,7 +571,7 @@ class RecorderPane(QWidget):
         except Exception as error:
             logger.exception("Recording tick failed")
             self.stop(final_read=False)
-            self.context.report("Recorder", f"Recording stopped: {error}")
+            self.context.report("Recorder", f"Recording stopped:\n\n{error}")
             return
 
         if chunk is not None:

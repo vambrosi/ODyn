@@ -147,8 +147,12 @@ class Context(QObject):
         return job
 
     def report(self, title: str, message: str) -> None:
-        """Say what went wrong: the status bar, and a box that does not block."""
-        self.status.emit(f"{title}: {message}")
+        """
+        Say what went wrong: the status bar, and a box that does not block.
+
+        The box shows `message` as written; the status bar gets it on one line.
+        """
+        self.status.emit(f"{title}: {' '.join(message.split())}")
         box = QMessageBox(QMessageBox.Icon.Warning, title, message, parent=self.window)
         box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         box.open()
