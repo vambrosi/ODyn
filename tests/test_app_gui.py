@@ -1509,19 +1509,65 @@ def test_check_opens_the_panel_and_the_log_follows_the_database(window):
     window.sessions.check()
     settle(window.context)
     assert panel.is_open() and panel.current == panel.NAMES.index("Check")
-    assert "didn't pick a mouse" in panel.texts["Check"].toPlainText()
+    draft = window.sessions.current
+    check_tab = panel.texts["Check"]
+    assert check_tab.toPlainText().split("\n") == [
+        f"CHECKED  {draft.label} (1 error, 0 warnings)",
+        "",
+        "session  didn't pick a mouse yet",
+        "",
+        " RESULT  fix errors to submit ✘",
+    ]
+    assert "font-weight" in check_tab.document().toHtml()
 
-    # a write logs on the worker's thread; the line arrives in the Log tab
+    # a write logs on the worker's thread; the line arrives in the Log tab,
+    # its level and check mark in color rather than as terminal codes
     window.mice.form.set_values({"mouse_id": "m8"})
     window.mice._save()
     settle(window.context)
-    assert "Mouse 8 recorded" in panel.texts["Log"].toPlainText()
+    log = panel.texts["Log"]
+    assert "INFO Mouse 8 recorded" in log.toPlainText()
+    assert "\033" not in log.toPlainText() and "[1;" not in log.toPlainText()
+    assert "font-weight" in log.document().toHtml()
 
     # clicking the open tab closes the panel; another tab opens it on that tab
     panel.buttons.button(panel.current).click()
     assert not panel.is_open()
     panel.buttons.button(panel.NAMES.index("Log")).click()
     assert panel.is_open() and panel.current == panel.NAMES.index("Log")
+
+
+def test_the_submit_report_ends_with_what_was_written(window):
+    from odyn.app.submit import Problem, SubmitResult, Written
+
+    window._add_session()
+    draft = window.sessions.current
+    draft.identify(mouse_id=3, date="2026-10-07")
+    window.sessions.add_loop()
+    written = Written(
+        session_id=12,
+        loops={"e1": 1},
+        annotations=2,
+        decode_failed={"e1": "ValueError: 5 frame bursts but 2 acquisitions"},
+    )
+    result = SubmitResult(
+        draft.label,
+        [Problem("e1", "no olfactometer Events file found", blocking=False)],
+        written,
+    )
+    window.sessions._submitted(draft, result)
+
+    # a sync file that did not match is a warning: the session is in
+    assert window.panel.texts["Check"].toPlainText().split("\n") == [
+        f"CHECKED  {draft.label} (0 errors, 2 warnings)",
+        "",
+        "     e1  no olfactometer Events file found",
+        "     e1  could not process the sync file: ValueError: 5 frame bursts but "
+        "2 acquisitions",
+        "",
+        " RESULT  submitted as session 12 (1 loop, 0 grabs, 0 z-stacks, "
+        "2 annotations, sync processed for none) ✔",
+    ]
 
 
 def test_bottom_bar_shows_what_is_hovered_and_what_the_app_says(window):
@@ -1578,6 +1624,51 @@ def test_remove_marks_and_undo_brings_back(window, tmp_path):
     assert draft.part("e1")["goal"] == "typed by hand"
     assert (id(draft), "e1") in window.today
     assert not undo.isEnabled()
+
+
+def test_adding_removed_grabs_brings_them_back_as_they_were(window):
+    sessions, undo = window.sessions, window.undo_action
+    window._add_session()
+    draft = sessions.current
+    draft.identify(mouse_id=1, date="2026-03-04")
+    window.context.announce_draft()
+    sessions.add_loop()
+    sessions.add_grabs()
+    draft.set_file("grabs", "a.tif", goal="reference")
+
+    sessions.remove_part("e1")
+    sessions.remove_part("grabs")
+    assert undo.statusTip().startswith("Undo remove (grabs")
+
+    # Add brings them back, notes included, with no question asked
+    sessions.add_grabs()
+    assert window.context.last_report is None
+    assert window.context.part == "grabs"
+    assert draft.files("grabs") == {"a.tif": {"goal": "reference"}}
+
+    # Undo skips them and goes on to the loop removed before
+    assert undo.statusTip().startswith("Undo remove (loop")
+    undo.trigger()
+    assert draft.part("e1") is not None and not undo.isEnabled()
+
+
+def test_a_folder_that_cannot_be_made_is_said_in_a_box(window, monkeypatch):
+    import odyn.app.pane_session as pane_session
+
+    def refuse(folder, kind):
+        raise PermissionError(f"no access to {folder}")
+
+    monkeypatch.setattr(pane_session, "make_part_folders", refuse)
+    sessions = window.sessions
+    window._add_session()
+    sessions.current.identify(mouse_id=1, date="2026-03-04")
+    window.context.announce_draft()
+    sessions.add_grabs()
+
+    title, message = window.context.last_report
+    assert title == "Grabs" and "no access to" in message
+    assert message.startswith("Could not create 20260304/m1/grabs on the server")
+    assert sessions.current.part("grabs") is not None  # listed all the same
 
 
 def test_guide_points_at_every_bar_button_with_no_session(window):

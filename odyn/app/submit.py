@@ -90,6 +90,68 @@ class SubmitResult:
         return self.written is not None and self.error is None
 
 
+# The Check tab's report is colored as the log is, with terminal codes (the
+# panel shows them as colors): red for what stops a submit, yellow for what
+# does not, blue for the report's own lines
+RED, YELLOW, BLUE, RESET = "\033[1;31m", "\033[1;33m", "\033[1;34m", "\033[0m"
+
+# The report's left column is at least this wide
+LABEL_WIDTH = 7
+
+
+def report(session: str, problems: list[Problem], parts: list[str], result: str) -> str:
+    """
+    The Check tab's report on `session`: a header counting errors (problems
+    that stop a submit) and warnings, then the problems in one block per page
+    (the session's, `vials` included, then each experiment in the order of
+    `parts`), then `result` on the last line.
+
+    **USAGE**
+    ```python
+    report("m3 2026-10-07", problems, ["e1", "grabs"], f"ready to submit {CHECK}")
+    ```
+    """
+    blocks: dict[str, list[Problem]] = {}
+
+    for problem in problems:
+        page = problem.where.split("/")[0]
+        blocks.setdefault("session" if page == "vials" else page, []).append(problem)
+
+    order = ["session", *parts]
+    groups = sorted(
+        blocks, key=lambda group: order.index(group) if group in order else len(order)
+    )
+    width = max([LABEL_WIDTH, *(len(p.where.split("/")[0]) for p in problems)])
+
+    def line(label: str, color: str, text: str) -> str:
+        return f"{color}{label:>{width}}{RESET}  {text}"
+
+    errors = sum(problem.blocking for problem in problems)
+    warnings = len(problems) - errors
+    counts = (
+        f"({errors} {RED}error{'' if errors == 1 else 's'}{RESET}, "
+        f"{warnings} {YELLOW}warning{'' if warnings == 1 else 's'}{RESET})"
+    )
+    lines = [line("CHECKED", BLUE, f"{session} {counts}"), ""]
+
+    for group in groups:
+        for problem in blocks[group]:
+            page, _, file = problem.where.partition("/")
+            text = problem.message + (f" ({file})" if file else "")
+            lines.append(line(page, RED if problem.blocking else YELLOW, text))
+
+        lines.append("")
+
+    lines.append(line("RESULT", BLUE, result))
+
+    return "\n".join(lines)
+
+
+def running(session: str, doing: str) -> str:
+    """The Check tab's line while a check or a submit runs."""
+    return f"{BLUE}{'RUNNING':>{LABEL_WIDTH}}{RESET}  {session} ({doing}...)"
+
+
 # --------------------------------------------------------------------------- #
 # Checking
 # --------------------------------------------------------------------------- #

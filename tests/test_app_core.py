@@ -12,7 +12,8 @@ import pytest
 from odyn import Database
 from odyn.app.draft import Draft, Removals
 from odyn.app.fields import Field, form_fields, missing_required
-from odyn.app.submit import check, submit
+from odyn.app.panel import ANSI
+from odyn.app.submit import Problem, check, report, submit
 from generate_data import generate
 from generate_sync import generate_sync
 
@@ -193,6 +194,40 @@ def share(tmp_path):
     draft.set_vials(vials)
 
     return db, draft
+
+
+def test_problems_are_listed_one_block_per_page():
+    problems = [
+        Problem("grabs/a.tif", "PMT gain should be a number"),
+        Problem("e1", "no TIFFs in 'e1/raw'"),
+        Problem("vials", "the vials come from more than one panel"),
+        Problem("session", "Goal is not filled in", blocking=False),
+        Problem("grabs/b.tif", "not in the server's folder"),
+    ]
+
+    text = report("m3 2026-10-07", problems, ["e1", "grabs"], "fix errors to submit")
+
+    # in a column seven wide, red for errors and yellow for warnings
+    assert ANSI.sub("", text).split("\n") == [
+        "CHECKED  m3 2026-10-07 (4 errors, 1 warning)",
+        "",
+        "  vials  the vials come from more than one panel",
+        "session  Goal is not filled in",
+        "",
+        "     e1  no TIFFs in 'e1/raw'",
+        "",
+        "  grabs  PMT gain should be a number (a.tif)",
+        "  grabs  not in the server's folder (b.tif)",
+        "",
+        " RESULT  fix errors to submit",
+    ]
+    assert "\033[1;33msession" in text and "\033[1;31m     e1" in text
+
+    assert ANSI.sub("", report("m3 2026-10-07", [], ["e1"], "ready")).split("\n") == [
+        "CHECKED  m3 2026-10-07 (0 errors, 0 warnings)",
+        "",
+        " RESULT  ready",
+    ]
 
 
 def test_check_lists_what_is_wrong(share):

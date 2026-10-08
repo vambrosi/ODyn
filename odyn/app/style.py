@@ -159,8 +159,20 @@ QGroupBox::title {{
 # Text colors that are not the palette's: what the app computed, what is
 # wrong, what is worth a look. Two sets, since the dark theme needs paler ones
 TEXT_COLORS = {
-    "light": {"computed": "#555555", "error": "#b00020", "warning": "#8a6d00"},
-    "dark": {"computed": "#b8b8b8", "error": "#ff8a80", "warning": "#ffd54f"},
+    "light": {
+        "computed": "#555555",
+        "error": "#b00020",
+        "warning": "#8a6d00",
+        "ok": "#1b7f3a",
+        "info": "#1f5fbf",
+    },
+    "dark": {
+        "computed": "#b8b8b8",
+        "error": "#ff8a80",
+        "warning": "#ffd54f",
+        "ok": "#81c995",
+        "info": "#8ab4f8",
+    },
 }
 
 
@@ -186,7 +198,7 @@ def required_label(text: str, required: bool = True) -> QLabel:
 
 
 def text_style(kind: str) -> str:
-    """A `color:` stylesheet for `computed`, `error` or `warning` text."""
+    """A `color:` stylesheet for `computed`, `error`, `warning`, `ok` or `info` text."""
     return f"color: {TEXT_COLORS['dark' if is_dark() else 'light'][kind]};"
 
 

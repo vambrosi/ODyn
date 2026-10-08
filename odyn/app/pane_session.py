@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..utils import CHECK, CROSS
 from .context import Context
 from .draft import FILE_SETTINGS, FOLDER_OF, PART_SETTINGS, Draft, Removals
 from .fields import Field, annotation_fields, form_fields
@@ -44,7 +45,7 @@ from .models import FrameModel, fit_columns
 from .pane_registry import current_vials
 from .recordings import make_part_folders
 from .style import COMBO_EXTRA_PX, PAGE_MAX_PX, required_label, text_style
-from .submit import check, list_tiffs, submit
+from .submit import Problem, check, list_tiffs, report, running, submit
 
 TIMING_KEYS = (
     "block_baseline_s",
@@ -969,11 +970,17 @@ class Sessions(QObject):
         self._add_part(draft, draft.next_loop(self._loops_on_share(draft)), "loop")
 
     def add_grabs(self) -> None:
-        """Add the session's grabs (once), make their folders, and select them."""
+        """
+        Add the session's grabs (once; removed ones come back as they were),
+        make their folders, and select them.
+        """
         self._add_folder("grab")
 
     def add_zstacks(self) -> None:
-        """Add the session's z-stacks (once), make their folders, and select them."""
+        """
+        Add the session's z-stacks (once; removed ones come back as they were),
+        make their folders, and select them.
+        """
         self._add_folder("zstack")
 
     def _add_folder(self, kind: str) -> None:
@@ -990,10 +997,14 @@ class Sessions(QObject):
             self.part_added.emit(name)
             return
 
+        # Back as it was, notes included; its entry in the undo list no longer
+        # applies, so Undo goes on to the one before it
         if draft.is_removed(name):
-            self.context.report(
-                what, f"'{name}' was removed: undo that to bring it back."
-            )
+            draft.restore_part(name)
+            self.context.announce_draft()
+            self.context.select(draft, name)
+            self.removals_changed.emit()
+            self.part_added.emit(name)
             return
 
         self._add_part(draft, name, kind)
@@ -1037,9 +1048,10 @@ class Sessions(QObject):
             draft.set_part(name, folder_made=True)
 
         except OSError as error:
-            self.context.status.emit(
-                f"Could not make {draft.folder}/{name} on the share yet ({error}). "
-                "Make it before ScanImage saves there."
+            self.context.report(
+                PartPage.TITLES[kind],
+                f"Could not create {draft.folder}/{name} on the server:\n\n{error}"
+                "\n\nCreate it manually before copying the TIFFs!",
             )
 
         self.context.announce_draft()
@@ -1069,15 +1081,17 @@ class Sessions(QObject):
         if draft is None:
             return
 
-        self.reported.emit(f"Checking {draft.label}...")
+        self.reported.emit(running(draft.label, "checking"))
         self.context.run(
             lambda db: check(db, draft),
-            lambda problems: self.reported.emit(
-                f"{draft.label}\n"
-                + (
-                    "\n".join(str(p) for p in problems)
-                    or "Checks passed (ready to submit)!"
-                )
+            lambda problems: self._report(
+                draft,
+                problems,
+                (
+                    f"fix errors to submit {CROSS}"
+                    if any(p.blocking for p in problems)
+                    else f"ready to submit {CHECK}"
+                ),
             ),
             "check",
         )
@@ -1089,7 +1103,7 @@ class Sessions(QObject):
             return
 
         self.reported.emit(
-            f"Submitting {draft.label}... (reading the recordings can take a while)"
+            running(draft.label, "submitting, reading the recordings can take a while")
         )
         busy = {self.context.recording_now} - {None}
 
@@ -1100,32 +1114,39 @@ class Sessions(QObject):
             writes=True,
         )
 
-    def _submitted(self, draft: Draft, result) -> None:
-        lines = [str(p) for p in result.problems]
+    def _report(self, draft: Draft, problems: list[Problem], result: str) -> None:
+        parts = [str(p["name"]) for p in draft.parts]
+        self.reported.emit(report(draft.label, problems, parts, result))
 
-        if result.written is None:
-            lines.insert(0, "Not submitted (fix what is listed, then try again)!")
+    def _submitted(self, draft: Draft, result) -> None:
+        problems = list(result.problems)
+        written = result.written
+
+        if written is None:
+            outcome = f"fix errors to submit {CROSS}"
 
         else:
-            written = result.written
-            lines.insert(
-                0,
-                f"Session {written.session_id}: {counted(len(written.loops), 'loop')}, "
+            # The session is in the database even if a sync file did not match
+            problems += [
+                Problem(name, f"could not process the sync file: {message}", False)
+                for name, message in written.decode_failed.items()
+            ]
+            outcome = (
+                f"submitted as session {written.session_id} "
+                f"({counted(len(written.loops), 'loop')}, "
                 f"{counted(len(written.grabs), 'grab')}, "
                 f"{counted(len(written.zstacks), 'z-stack')}, "
                 f"{counted(written.annotations, 'annotation')}, sync processed for "
-                f"{', '.join(written.decoded) or 'none'}",
+                f"{', '.join(written.decoded) or 'none'}) {CHECK}"
             )
 
-            for name, message in written.decode_failed.items():
-                lines.append(f"{name}: could not process the sync file: {message}")
+        if result.error:
+            outcome = (
+                f"stopped: {result.error} (draft is kept, submit again after fixing "
+                f"it) {CROSS}"
+            )
 
-            if result.error:
-                lines.append(
-                    f"Stopped: {result.error} (draft is kept, submit again after fixing it)"
-                )
-
-        self.reported.emit(f"{draft.label}\n" + "\n".join(lines))
+        self._report(draft, problems, outcome)
 
         if result.submitted:
             self.reload_drafts()

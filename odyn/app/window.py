@@ -227,9 +227,7 @@ class MainWindow(QMainWindow):
         # The odyn log goes to the panel's Log tab
         self.log_handler = PanelLogHandler()
         self.log_handler.setLevel(logging.INFO)
-        self.log_handler.signal.line.connect(
-            lambda text: self.panel.append("Log", text)
-        )
+        self.log_handler.signal.line.connect(self.panel.append_log)
         logger.addHandler(self.log_handler)
 
         self.context.status.connect(self.say)
