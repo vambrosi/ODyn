@@ -1,13 +1,15 @@
 """
-Forms built from `Field`s, and the two calculator forms.
+Forms built from `Field`s, and the calculator forms.
 
 `Form` draws one row per field -- a line, a box, a dropdown or a yes/no --
-and reads them back as typed values. `RecipeForm` and `TimingForm` are the
-spreadsheets the lab kept: inputs on the left, what follows from them shown
-as they change, through `odyn.recipes`.
+and reads them back as typed values. `RecipeForm`, `TimingForm` and
+`GrabTimingForm` are the spreadsheets the lab kept: inputs on the left, what
+follows from them shown as they change, through `odyn.recipes`.
 """
 
 from __future__ import annotations
+
+import math
 
 from collections.abc import Callable
 from typing import Any
@@ -825,6 +827,54 @@ class TimingForm(QGroupBox):
 
         if values.get("block_n_trials") is not None:
             self.n_trials.setValue(int(values["block_n_trials"]))
+
+
+class GrabTimingForm(QGroupBox):
+    """
+    How long a grab should run, and what that means for ScanImage and for
+    Micromanager when the camera is recording through it (a grab with a sync
+    recording). Nothing in here is stored: it only helps set the rig up.
+    """
+
+    WIDTH_PX = TimingForm.WIDTH_PX
+
+    def __init__(self, parent=None):
+        super().__init__("Quick maths", parent)
+        form = QFormLayout(self)
+        form.setVerticalSpacing(ROW_SPACING_PX)
+        row_px = _spin(0, 1, 0).sizeHint().height()
+
+        _heading(form, "Wants")
+        self.duration = _spin(0.1, 36000, 60.0, 1)
+        self.duration.valueChanged.connect(lambda _: self.recompute())
+        form.addRow("Grab duration (s)", self.duration)
+
+        _heading(form, "ScanImage")
+        self.frame_rate = _spin(0.01, 1000, 12.86, 3)
+        self.frame_rate.valueChanged.connect(lambda _: self.recompute())
+        form.addRow("Frame rate (Hz)", self.frame_rate)
+        self.outputs: dict[str, QLineEdit] = {}
+
+        def output_row(key: str, label: str) -> None:
+            self.outputs[key] = shown_value()
+            self.outputs[key].setMinimumHeight(row_px)
+            form.addRow(label, self.outputs[key])
+
+        output_row("frames", "Frames per grab")
+
+        # The camera runs at the imaging rate; shown again so it is typed right
+        _heading(form, "Micromanager")
+        output_row("camera_rate", "Frame rate")
+        output_row("camera_frames", "Camera frame count")
+
+        self.setFixedWidth(self.WIDTH_PX)
+        self.recompute()
+
+    def recompute(self) -> None:
+        duration, rate = self.duration.value(), self.frame_rate.value()
+        self.outputs["frames"].setText(f"{math.ceil(duration * rate - 1e-9)}")
+        self.outputs["camera_rate"].setText(f"{rate:g} Hz")
+        self.outputs["camera_frames"].setText(f"{camera_frames(duration / 60, rate)}")
 
 
 class PanelPicker(QWidget):

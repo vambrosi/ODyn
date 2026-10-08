@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 from .context import Context
 from .draft import FILE_SETTINGS, FOLDER_OF, PART_SETTINGS, Draft, Removals
 from .fields import Field, annotation_fields, form_fields
-from .forms import Form, FormRows, PanelPicker, TimingForm, fit_row
+from .forms import Form, FormRows, GrabTimingForm, PanelPicker, TimingForm, fit_row
 from .models import FrameModel, fit_columns
 from .pane_registry import current_vials
 from .recordings import make_part_folders
@@ -335,8 +335,17 @@ class FilesForm(QWidget):
         objective = [f for f in fields if f.key == "objective"]
         self.file_fields = [f for f in fields if f.key != "objective"]
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        layout = QVBoxLayout()
+        outer.addLayout(layout, 1)
+
+        # Grabs may run with a sync recording, whose camera needs a frame count
+        self.timing: None | GrabTimingForm = None
+
+        if self.kind == "grab":
+            self.timing = GrabTimingForm()
+            outer.addWidget(self.timing, 0, Qt.AlignmentFlag.AlignTop)
 
         self.form = Form(objective)
         self.form.set_values({"objective": (draft.part(name) or {}).get("objective")})

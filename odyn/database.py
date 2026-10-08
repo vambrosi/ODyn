@@ -2771,7 +2771,7 @@ def _stack(si: Object) -> None | Object:
     start, end = max(float(z) for z in zs), min(float(z) for z in zs)
     stack: Object = {
         "slice_count": int(slices),
-        "z_step_um": abs(float(step)),
+        "z_step_um": round(abs(float(step)), 3),  # ScanImage's has float noise
         "z_start_um": start,
         "z_end_um": end,
         "power_start_pct": None,

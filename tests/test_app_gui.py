@@ -1606,3 +1606,15 @@ def test_guide_points_at_every_bar_button_with_no_session(window):
     # any other page hides it
     window.page_actions[window.mice].trigger()
     assert not guide.isVisible()
+
+
+def test_grab_quick_maths(app):
+    from odyn.app.forms import GrabTimingForm
+
+    form = GrabTimingForm()
+    form.duration.setValue(30)
+    form.frame_rate.setValue(15)
+
+    assert form.outputs["frames"].text() == "450"
+    assert form.outputs["camera_rate"].text() == "15 Hz"
+    assert form.outputs["camera_frames"].text() == "1350"  # and a minute more
