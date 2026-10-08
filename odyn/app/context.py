@@ -11,6 +11,7 @@ from typing import Any
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QMessageBox, QWidget
+from shiboken6 import isValid
 
 from .recordings import LOCAL_FOLDER
 from .worker import DatabaseWorker, Job
@@ -120,17 +121,20 @@ class Context(QObject):
         label: str = "",
         *,
         writes: bool = False,
+        owner: None | QObject = None,
     ) -> Job:
         """
         Run `function(db)` on the database thread.
 
         `on_done` gets the result on the GUI thread. A failure is shown in a
         message box. `writes=True` announces a change to every pane afterwards.
+        `owner` is the widget `on_done` fills in; if it was deleted in the
+        meantime (a page rebuilt for a new selection), `on_done` is skipped.
         """
         job = self.worker.run(function, label)
 
         def finished(result):
-            if on_done is not None:
+            if on_done is not None and (owner is None or isValid(owner)):
                 on_done(result)
 
             if writes:

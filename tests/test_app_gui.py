@@ -6,6 +6,7 @@ file where `submit` will look for it.
 """
 
 import os
+import sys
 import time
 
 from pathlib import Path
@@ -19,7 +20,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # where either is missing, which is what leaves the rest of the suite runnable
 # on a bare machine.
 try:
-    from PySide6.QtCore import QEventLoop
+    from PySide6.QtCore import QEvent, QEventLoop
     from PySide6.QtWidgets import QApplication, QFormLayout, QWidget
 
 except ImportError as error:  # a missing shared library is not a missing module
@@ -1298,6 +1299,28 @@ def test_add_loop_numbers_and_makes_the_folders_in_one_click(window, tmp_path):
 
     with pytest.raises(ValueError, match="fixed"):
         draft.identify(mouse_id=8)
+
+
+def test_a_files_page_rebuilt_before_its_listing_arrives(window, monkeypatch):
+    # The listing runs on the database thread; the page it was for can be gone
+    # by the time it comes back (the selection settling at startup, say)
+    errors = []
+    monkeypatch.setattr(sys, "excepthook", lambda *exc: errors.append(exc))
+
+    sessions = window.sessions
+    window._add_session()
+    draft = sessions.current
+    draft.identify(mouse_id=1, date="2026-03-04")
+    window.context.announce_draft()
+    sessions.add_grabs()
+    first = sessions.part_page.shown
+    sessions.part_page.show_part(draft, "grabs")  # before the listing is back
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    settle(window.context)
+
+    assert errors == []
+    assert sessions.part_page.shown is not first
+    assert "TIFFs in" in sessions.part_page.shown.found.text()
 
 
 def test_the_grabs_page_lists_the_tiffs_and_keeps_notes_per_file(window, tmp_path):

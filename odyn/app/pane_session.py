@@ -407,6 +407,7 @@ class FilesForm(QWidget):
             lambda db: list_tiffs(db.main_folder, folder, self.kind),
             self._listed,
             "list TIFFs",
+            owner=self,
         )
 
     def _listed(self, frame) -> None:
