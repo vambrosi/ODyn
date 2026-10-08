@@ -384,7 +384,7 @@ class ComponentRow(QWidget):
         pressure = self.vapor_pressure
 
         if not pressure or self.target.value() <= 0:
-            self.result.setText("needs a vapor pressure and a target")
+            self.result.setText("needs a vapor pressure and a target ppm")
             return None
 
         recipe = vial_recipe(
@@ -445,7 +445,7 @@ class RecipeForm(QGroupBox):
         )
         self.form.setVerticalSpacing(ROW_SPACING_PX)
         self.form.addRow("Position", self.position)
-        self.form.addRow("Delivers", self.delivered)
+        self.form.addRow("Odor", self.delivered)
         self.form.addRow("Vial flow (sccm)", self.vial_sccm)
         self.form.addRow("Total flow (sccm)", self.total_sccm)
         self.form.addRow("Total volume (ml)", self.total_volume)
@@ -493,10 +493,10 @@ class RecipeForm(QGroupBox):
         self.position.setEnabled(False)
         self.delivered.setEnabled(False)
         self.remove.hide()
-        self.setTitle(f"Position {position}: {self.delivered.currentText()}")
+        self.setTitle(f"Position {position}: Odor {self.delivered.currentText()}")
         self.setCheckable(True)
         self.setChecked(True)
-        self.setToolTip("Unchecked, this vial is not remade in this batch")
+        self.setToolTip("Uncheck if it is not included in this batch")
 
     def set_recipe(self, vial, targets: dict[int, float]) -> None:
         """Fill in a stored vial's flows, volume and targets (to remake it)."""
@@ -791,12 +791,12 @@ class TimingForm(QGroupBox):
         if timing.overrun_s > 0:
             self.overrun.setStyleSheet(text_style("error"))
             self.overrun.setText(
-                f"Delay + Interval is {timing.overrun_s:g} s too short.\n"
-                "Change the olfactometer program."
+                f"Delay + Interval is {timing.overrun_s:g} s too short\n"
+                "Change the olfactometer program"
             )
         elif timing.gap_s <= self.TIGHT_GAP_S:
             self.overrun.setStyleSheet(text_style("warning"))
-            self.overrun.setText(f"Only {timing.gap_s:g} s between acquisitions.")
+            self.overrun.setText(f"Only {timing.gap_s:g} s between acquisitions")
 
         self.overrun.setVisible(
             timing.overrun_s > 0 or timing.gap_s <= self.TIGHT_GAP_S

@@ -754,7 +754,7 @@ INSERT OR IGNORE INTO annotation_keys
     ( 'mouse'
     , 'note', 'Note'
     , 'long_text', NULL, NULL
-    , 'Notes about this mouse.'
+    , 'Notes about this mouse'
     , 'user', FALSE
     ),
 
@@ -762,70 +762,70 @@ INSERT OR IGNORE INTO annotation_keys
     ( 'session'
     , 'goal', 'Goal'
     , 'text', NULL, NULL
-    , 'Goal of this whole session.'
+    , 'Goal of this whole session'
     , 'user', FALSE
     ),
 
     ( 'session'
     , 'mouse_weight_g', 'Mouse weight'
     , 'real', NULL, 'g'
-    , 'Weight on the day of the session.'
+    , 'Weight on the day of the session'
     , 'user', FALSE
     ),
 
     ( 'session'
     , 'injection_volume', 'S.q. injection vol'
     , 'real', NULL, 'ml'
-    , 'Subcutaneous injection volume given during the session.'
+    , 'Subcutaneous injection volume given during the session'
     , 'user', FALSE
     ),
 
     ( 'session'
     , 'injection_drug', 'S.q. injection drug'
     , 'text', NULL, NULL
-    , 'What was injected.'
+    , 'What was injected'
     , 'user', FALSE
     ),
 
     ( 'session'
     , 'injection_time', 'S.q. injection time'
     , 'text', NULL, NULL
-    , 'When the injection was given.'
+    , 'When the injection was given'
     , 'user', FALSE
     ),
 
     ( 'session'
     , 'headplate', 'Headplate'
     , 'text', NULL, NULL
-    , 'Which headplate was used.'
+    , 'Which headplate was used'
     , 'user', FALSE
     ),
 
     ( 'session'
     , 'pitch_angle', 'Pitch angle'
     , 'real', NULL, 'degrees'
-    , 'Head pitch relative to horizontal.'
+    , 'Head pitch relative to horizontal'
     , 'user', FALSE
     ),
 
     ( 'session'
     , 'left_right_correction', 'Left-right-correction'
     , 'long_text', NULL, NULL
-    , 'What was done to correct the head left-right tilt, if anything.'
+    , 'What was done to correct the head left-right tilt (if anything)'
     , 'user', FALSE
     ),
 
     ( 'session'
     , 'note', 'Note'
     , 'long_text', NULL, NULL
-    , 'Notes about the session (including what went wrong).'
+    , 'Notes about the session (including what went wrong)'
     , 'user', FALSE
     ),
 
     ( 'session'
     , 'flag', 'Flag'
     , 'boolean', NULL, NULL
-    , 'Check this if something went wrong in the session.'
+    , 'Check this if something went wrong in the session'
     , 'user', FALSE
     ),
 
@@ -833,63 +833,63 @@ INSERT OR IGNORE INTO annotation_keys
     ( 'loop'
     , 'goal', 'Goal'
     , 'text', NULL, NULL
-    , 'Loop goal.'
+    , 'Acquisition loop goal'
     , 'user', FALSE
     ),
 
     ( 'loop'
     , 'fov_description', 'FOV description'
     , 'text', NULL, NULL
-    , 'Description of the field of view, e.g. "medial-rostral left bulb".'
+    , 'Description of the field of view, e.g. "medial-rostral left bulb"'
     , 'user', FALSE
     ),
 
     ( 'loop'
     , 'z_landmark', 'Z=0 landmark'
     , 'text', NULL, NULL
-    , 'Where z = 0 was set, e.g. "surface of right bulb".'
+    , 'Where z = 0 was set, e.g. "surface of right bulb"'
     , 'user', FALSE
     ),
 
     ( 'loop'
     , 'depth_goal', 'Depth goal'
     , 'enum', '["superficial", "deep"]', NULL
-    , 'Depth goal. Not recomputed from z_um.'
+    , 'Depth goal (not recomputed from z_um)'
     , 'user', FALSE
     ),
 
     ( 'loop'
     , 'pmt_gain', 'PMT gain'
     , 'real', NULL, NULL
-    , 'PMT gain setting.'
+    , 'PMT gain setting'
     , 'user', FALSE
     ),
 
     ( 'loop'
     , 'laser_power_920', 'Laser power 920 nm'
     , 'integer', NULL, '%'
-    , 'Rig setting, from the TIFF header.'
+    , 'Rig setting (from the TIFF header)'
     , 'metadata', FALSE
     ),
 
     ( 'loop'
     , 'laser_power_1040', 'Laser power 1040 nm'
     , 'integer', NULL, '%'
-    , 'Rig setting, from the TIFF header.'
+    , 'Rig setting (from the TIFF header)'
     , 'metadata', FALSE
     ),
 
     ( 'loop'
     , 'loop_acq_interval_s', 'Acq interval'
     , 'real', NULL, 's'
-    , 'Programmed interval between acquisitions in a loop, from the TIFF header.'
+    , 'Programmed interval between acquisitions in a loop (from the TIFF header)'
     , 'metadata', FALSE
     ),
 
     ( 'loop'
     , 'treatment', 'Treatment'
     , 'text', NULL, NULL
-    , 'What was administered, if anything.'
+    , 'What was administered (if anything)'
     , 'user', FALSE
     ),
 
@@ -898,56 +898,56 @@ INSERT OR IGNORE INTO annotation_keys
     ( 'loop'
     , 'block_baseline_s', 'Pre-odor baseline'
     , 'real', NULL, 's'
-    , 'Planned time from trial start to odor onset.'
+    , 'Time from trial start to odor onset'
     , 'user', FALSE
     ),
 
     ( 'loop'
     , 'block_odor_s', 'Odor presentation'
     , 'real', NULL, 's'
-    , 'Planned odor pulse length.'
+    , 'Odor presentation duration'
     , 'user', FALSE
     ),
 
     ( 'loop'
     , 'block_post_odor_delay_s', 'Post-odor delay'
     , 'real', NULL, 's'
-    , 'Planned time after the odor before the trial ends.'
+    , 'Time between odor offset and trial end'
     , 'user', FALSE
     ),
 
     ( 'loop'
     , 'block_iti_s', 'Inter-trial interval'
     , 'real', NULL, 's'
-    , 'Planned time between trials.'
+    , 'Time from the end of a trial to the start of the next'
     , 'user', FALSE
     ),
 
     ( 'loop'
     , 'block_post_odor_acq_s', 'Post-odor acq time'
     , 'real', NULL, 's'
-    , 'Imaging time after odor onset, as set in ScanImage.'
+    , 'Imaging time after odor onset (as in ScanImage)'
     , 'user', FALSE
     ),
 
     ( 'loop'
     , 'block_n_odors', '# odors'
     , 'integer', NULL, NULL
-    , 'Planned number of odors in the program.'
+    , 'Number of odors in the program'
     , 'user', FALSE
     ),
 
     ( 'loop'
     , 'block_n_trials', '# trials'
     , 'integer', NULL, NULL
-    , 'Planned number of trials per program.'
+    , 'Number of trials per program'
     , 'user', FALSE
     ),
 
     ( 'loop'
     , 'flag', 'Flag'
     , 'boolean', NULL, NULL
-    , 'Check this if something went wrong in this loop.'
+    , 'Check this if something went wrong in this loop'
     , 'user', FALSE
     ),
 
@@ -955,63 +955,63 @@ INSERT OR IGNORE INTO annotation_keys
     ( 'grab'
     , 'goal', 'Goal'
     , 'text', NULL, NULL
-    , 'What the grab was for, e.g. a reference image.'
+    , 'Reason for taking this grab, e.g. a reference image'
     , 'user', FALSE
     ),
 
     ( 'grab'
     , 'fov_description', 'FOV description'
     , 'text', NULL, NULL
-    , 'Description of the field of view, e.g. "medial-rostral left bulb".'
+    , 'Description of the field of view, e.g. "medial-rostral left bulb"'
     , 'user', FALSE
     ),
 
     ( 'grab'
     , 'z_landmark', 'Z=0 landmark'
     , 'text', NULL, NULL
-    , 'Where z = 0 was set, e.g. "surface of right bulb".'
+    , 'Where z = 0 was set, e.g. "surface of right bulb"'
     , 'user', FALSE
     ),
 
     ( 'grab'
     , 'pmt_gain', 'PMT gain'
     , 'real', NULL, NULL
-    , 'PMT gain setting.'
+    , 'PMT gain setting'
     , 'user', FALSE
     ),
 
     ( 'grab'
     , 'laser_power_920', 'Laser power 920 nm'
     , 'integer', NULL, '%'
-    , 'Rig setting, from the TIFF header.'
+    , 'Rig setting (from the TIFF header)'
     , 'metadata', FALSE
     ),
 
     ( 'grab'
     , 'laser_power_1040', 'Laser power 1040 nm'
     , 'integer', NULL, '%'
-    , 'Rig setting, from the TIFF header.'
+    , 'Rig setting (from the TIFF header)'
     , 'metadata', FALSE
     ),
 
     ( 'grab'
     , 'condition', 'Condition'
     , 'enum', '["baseline", "ket/xyl"]', NULL
-    , 'Before or after anesthesia.'
+    , 'Before or after anesthesia'
     , 'user', FALSE
     ),
 
     ( 'grab'
     , 'note', 'Note'
     , 'long_text', NULL, NULL
-    , 'Anything worth knowing about this grab.'
+    , 'Notes about this grab'
     , 'user', FALSE
     ),
 
     ( 'grab'
     , 'flag', 'Flag'
     , 'boolean', NULL, NULL
-    , 'Check this if something went wrong in this grab.'
+    , 'Check this if something went wrong in this grab'
     , 'user', FALSE
     ),
 
@@ -1019,49 +1019,49 @@ INSERT OR IGNORE INTO annotation_keys
     ( 'zstack'
     , 'z_landmark', 'Z=0 landmark'
     , 'text', NULL, NULL
-    , 'Where z = 0 was set, e.g. "surface of right bulb".'
+    , 'Where z = 0 was set, e.g. "surface of right bulb"'
     , 'user', FALSE
     ),
 
     ( 'zstack'
     , 'power_start_pct', 'Power at z start'
     , 'real', NULL, '%'
-    , '920 nm laser power at the shallowest slice, from the TIFF header.'
+    , '920 nm laser power at the shallowest slice (from the TIFF header)'
     , 'metadata', FALSE
     ),
 
     ( 'zstack'
     , 'power_end_pct', 'Power at z end'
     , 'real', NULL, '%'
-    , '920 nm laser power at the deepest slice, from the TIFF header.'
+    , '920 nm laser power at the deepest slice (from the TIFF header)'
     , 'metadata', FALSE
     ),
 
     ( 'zstack'
     , 'power_length_um', 'Power length constant'
     , 'real', NULL, 'um'
-    , 'ScanImage exponential power-depth length constant (920 nm), from the TIFF header.'
+    , 'ScanImage exponential power-depth length constant (for 920 nm, from the TIFF header)'
     , 'metadata', FALSE
     ),
 
     ( 'zstack'
     , 'condition', 'Condition'
     , 'enum', '["baseline", "ket/xyl"]', NULL
-    , 'Before or after anesthesia.'
+    , 'Before or after anesthesia'
     , 'user', FALSE
     ),
 
     ( 'zstack'
     , 'note', 'Note'
     , 'long_text', NULL, NULL
-    , 'Anything worth knowing about this z-stack.'
+    , 'Notes about this z-stack'
     , 'user', FALSE
     ),
 
     ( 'zstack'
     , 'flag', 'Flag'
     , 'boolean', NULL, NULL
-    , 'Check this if something went wrong in this z-stack.'
+    , 'Check this if something went wrong with this z-stack'
     , 'user', FALSE
     ),
 
@@ -1069,7 +1069,7 @@ INSERT OR IGNORE INTO annotation_keys
     ( 'program'
     , 'description', 'Description'
     , 'text', NULL, NULL
-    , 'Block description, e.g. "baseline", "post-ketamine".'
+    , 'Block description, e.g. "baseline" or "post-ketamine"'
     , 'user', FALSE
     ),
 
@@ -1077,21 +1077,21 @@ INSERT OR IGNORE INTO annotation_keys
     ( 'acquisition'
     , 'exclusion_reason', 'Exclusion reason'
     , 'text', NULL, NULL
-    , 'Reason why this acquisition should be excluded.'
+    , 'Reason why this acquisition should be excluded'
     , 'user', FALSE
     ),
 
     ( 'acquisition'
     , 'note', 'Note'
     , 'long_text', NULL, NULL
-    , 'Anything worth knowing about this acquisition.'
+    , 'Notes about this acquisition'
     , 'user', FALSE
     ),
 
     ( 'acquisition'
     , 'condition', 'Condition'
     , 'enum', '["baseline", "ket/xyl"]', NULL
-    , 'Before or after anesthesia.'
+    , 'Before or after anesthesia'
     , 'user', FALSE
     ),
 
@@ -1099,13 +1099,13 @@ INSERT OR IGNORE INTO annotation_keys
     ( 'group'
     , 'name', 'Name'
     , 'text', NULL, NULL
-    , 'Display name for this group.'
+    , 'Display name for this group'
     , 'user', FALSE
     ),
 
     ( 'group'
     , 'note', 'Note'
     , 'long_text', NULL, NULL
-    , 'Anything worth knowing about this group.'
+    , 'Notes about this group'
     , 'user', FALSE
     );

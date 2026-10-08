@@ -258,7 +258,7 @@ class Database(CallRecorder):
             is_new = not _has_database(self.path)
 
             if is_new and not can_create:
-                raise FileNotFoundError(f"The database at '{self.path}' is gone.")
+                raise FileNotFoundError(f"Could not find a database at '{self.path}'")
 
             self._con = sqlite3.connect(self.path, timeout=DB_TIMEOUT_S)
             self._con.row_factory = sqlite3.Row
@@ -1121,8 +1121,8 @@ class Database(CallRecorder):
                 ) from error
 
             raise ValueError(
-                f"Mouse {number} already has a session on {day}; "
-                f"use `session_for` to find it."
+                f"Mouse {number} already has a session on {day} (use "
+                f"`session_for` to find it)."
             ) from error
 
         logger.info(f"Session {session_id}: mouse {number} on {day}. {CHECK}")
@@ -1166,7 +1166,7 @@ class Database(CallRecorder):
 
         if len(component_ids) == 1:
             raise ValueError(
-                "A mix has at least two components; a single chemical lists none."
+                "A mix has at least two components (a monomolecular odor has none)."
             )
 
         if len(set(component_ids)) != len(component_ids):
@@ -1180,11 +1180,14 @@ class Database(CallRecorder):
 
             for component_id in component_ids:
                 if component_id not in mixes:
-                    raise ValueError(f"No odor with id {component_id} to mix in.")
+                    raise ValueError(
+                        f"No odor with id {component_id} to add to the mix."
+                    )
 
                 if mixes[component_id]:
                     raise ValueError(
-                        f"Component {component_id} is itself a mix; list its chemicals."
+                        f"Component {component_id} is itself a mix (list its "
+                        "components instead)."
                     )
 
             _db_insert(
@@ -1387,7 +1390,7 @@ class Database(CallRecorder):
         taken = [int(v["vial_position"]) for v in vials]  # type: ignore[arg-type]
 
         if len(set(taken)) < len(taken):
-            raise ValueError("Two vials of the batch are for the same position.")
+            raise ValueError("Two vials in this batch are in the same position.")
 
         with self._writing() as cur:
             panel_id = _panel_id(cur, panel_name)
@@ -1795,8 +1798,8 @@ class Database(CallRecorder):
         if loop["stack"] is not None:
             self.fail(
                 IngestFlag.STACK_LOOP,
-                f"'{loop_path}' is a z-stack loop ({loop['stack']['slice_count']} "
-                "slices), which odyn cannot process yet.",
+                f"'{loop_path}' is a z-stack loop with {loop['stack']['slice_count']} "
+                "slices (odyn cannot process it yet).",
             )
 
         # The session is given, not read off the files; but the file names say
@@ -1966,7 +1969,7 @@ class Database(CallRecorder):
 
                 if loop["session_id"] != row["session_id"]:
                     raise ValueError(
-                        f"Loop {loop_id} is from another session than z-stack "
+                        f"Loop {loop_id} is not from the same session as z-stack "
                         f"{zstack_id}."
                     )
 
@@ -1975,7 +1978,7 @@ class Database(CallRecorder):
                 [None if loop_id is None else int(loop_id), int(zstack_id)],
             )
 
-        logger.info(f"Z-stack {zstack_id} is for loop {loop_id}. {CHECK}")
+        logger.info(f"Z-stack {zstack_id} is associated with loop {loop_id}. {CHECK}")
 
     def _recordings_folder(
         self, session_id: int, folder_path: str, rel_raw_paths: None | list[str]
@@ -2010,7 +2013,7 @@ class Database(CallRecorder):
         read = self._read_tiff(path)
 
         if read is None:
-            logger.info(f"  Skipped file {path} (metadata format not supported)")
+            logger.info(f"  Skipped file {path} (metadata format not supported).")
             self.add_flag(IngestFlag.UNSUPPORTED_METADATA)
             return None
 
@@ -2176,7 +2179,7 @@ class Database(CallRecorder):
         path = self._sync_file(loop["loop_path"], sync_path)
         rel_path = path.relative_to(self.main_folder).as_posix()
 
-        logger.info(f"Decoding '{rel_path}'...")
+        logger.info(f"Processing '{rel_path}'")
 
         # Read without the lock: a file is hundreds of megabytes
         decoded = decode(path)
@@ -2225,7 +2228,7 @@ class Database(CallRecorder):
         if trial_skews and max(trial_skews) > max_skew_s:
             self.add_flag(SyncFlag.CLOCK_SKEW)
             logger.warning(
-                f"Trial odor onsets and valve pulses differ by up to "
+                f"Olfactometer and sync file odor onsets differ by up to "
                 f"{max(trial_skews):.1f} s. {CROSS}"
             )
 
@@ -2270,7 +2273,7 @@ class Database(CallRecorder):
         )
 
         logger.info(
-            f"Decoded {len(blocks)} acquisitions and matched {len(trials)} "
+            f"Processed {len(blocks)} acquisitions and matched {len(trials)} "
             f"trials. {CHECK}"
         )
 
@@ -2314,7 +2317,7 @@ class Database(CallRecorder):
 
         path = self._sync_file("", sync_path)
         rel_path = path.relative_to(self.main_folder).as_posix()
-        logger.info(f"Decoding '{rel_path}'...")
+        logger.info(f"Processing '{rel_path}'")
         decoded = decode(path)
 
         if decoded.header.interrupted:
@@ -2324,7 +2327,7 @@ class Database(CallRecorder):
         if decoded.header.start_time is None:
             self.fail(
                 SyncFlag.BLOCK_COUNT_MISMATCH,
-                "The file has no start time, so its bursts cannot be placed in time.",
+                "Cannot compute the bursts' start times (the file has no start time).",
             )
 
         # Grabs vary in length, so a short burst is as likely a grab as not
@@ -2355,13 +2358,13 @@ class Database(CallRecorder):
             if block.frame_count != nearest["frames_per_slice"]:
                 self.add_flag(SyncFlag.FRAME_COUNT)
                 logger.warning(
-                    f"Burst {block.sync_block} has {block.frame_count} frames, "
-                    f"grab {nearest['grab_id']} {nearest['frames_per_slice']}."
+                    f"Burst {block.sync_block} has {block.frame_count} frames, but "
+                    f"grab {nearest['grab_id']} has {nearest['frames_per_slice']}."
                 )
 
             if block.odor_pulses:
                 self.add_flag(SyncFlag.ODOR_PULSES)
-                logger.warning(f"Burst {block.sync_block} has a valve pulse.")
+                logger.warning(f"Burst {block.sync_block} has an odor presentation.")
 
             if not block.camera_frames:
                 self.add_flag(SyncFlag.NO_CAMERA)
@@ -2479,14 +2482,14 @@ class Database(CallRecorder):
         if not found:
             self.fail(
                 SyncFlag.NO_SYNC_FILE,
-                f"No sync file in '{folder}'. Copy the H5 there, or name it "
-                "with `sync_path`.",
+                f"No sync file in '{folder}'. Copy the H5 there, or use `sync_path`.",
             )
 
         if len(found) > 1:
             self.fail(
                 SyncFlag.MULTIPLE_SYNC_FILES,
-                f"{len(found)} H5 files in '{folder}'; name one with `sync_path`.",
+                f"{len(found)} H5 files in '{folder}', pick one of them with "
+                "`sync_path`.",
             )
 
         return found[0].resolve()
@@ -2508,21 +2511,23 @@ class Database(CallRecorder):
         if decoded.fragments:
             self.add_flag(SyncFlag.FRAGMENTS)
             sizes = [f.frame_count for f in decoded.fragments]
-            logger.warning(f"Set aside {len(sizes)} short bursts of {sizes} frames.")
+            logger.warning(f"Ignored {len(sizes)} short bursts of {sizes} frames.")
 
         if len(blocks) != len(acquisitions):
             self.fail(
                 SyncFlag.BLOCK_COUNT_MISMATCH,
                 f"The sync file has {len(blocks)} frame bursts but the loop "
                 f"has {len(acquisitions)} acquisitions, so they cannot be matched "
-                "in order.",
+                "by order.",
             )
 
         odd = [b.sync_block for b in blocks if b.odor_pulses != 1]
 
         if odd:
             self.add_flag(SyncFlag.ODOR_PULSES)
-            logger.warning(f"Bursts {odd} do not have exactly one odor pulse.")
+            logger.warning(
+                f"Bursts {odd} have more or less than one odor presentation."
+            )
 
         with_odor = sum(1 for b in blocks if b.odor_pulses)
 
@@ -2530,14 +2535,14 @@ class Database(CallRecorder):
             self.add_flag(SyncFlag.NO_TRIALS)
             logger.warning(
                 "The loop has no trials (no olfactometer Events file was "
-                "ingested), so the odor bursts are stored unmatched."
+                "processed), so the odor bursts are stored without matches."
             )
 
         elif with_odor != len(trials):
             self.fail(
                 SyncFlag.TRIAL_COUNT_MISMATCH,
                 f"{with_odor} bursts have an odor pulse but the loop has "
-                f"{len(trials)} trials, so they cannot be matched in order.",
+                f"{len(trials)} trials, so they cannot be matched by order.",
             )
 
         wrong = [b.sync_block for b in blocks if b.frame_count != frames_per_slice]
@@ -2588,7 +2593,7 @@ class Database(CallRecorder):
             config = configs.get(name)
 
             if config is None:
-                logger.warning(f"No olfactometer definition found for '{name}'.")
+                logger.warning(f"No olfactometer config found for '{name}'.")
                 self.add_flag(IngestFlag.NO_PROGRAM_CONFIG)
 
             program_data["metadata"]["program_config"] = config
@@ -2833,7 +2838,7 @@ def _check_session(recording: Object, session: sqlite3.Row, db: Database) -> Non
     match = re.match(r"(\d{8})_([A-Za-z]*\d+)_", name)
 
     if match is None:
-        logger.warning(f"Cannot read a mouse and a day out of '{name}'.")
+        logger.warning(f"Cannot read the mouse and date from the file name '{name}'")
         return
 
     day = datetime.strptime(match.group(1), "%Y%m%d").date().isoformat()
@@ -2842,8 +2847,8 @@ def _check_session(recording: Object, session: sqlite3.Row, db: Database) -> Non
     if (mouse, day) != (session["mouse_id"], session["session_date"]):
         db.fail(
             IngestFlag.NOT_THE_SESSION,
-            f"'{name}' is mouse {mouse} on {day}, but session "
-            f"{session['session_id']} is mouse {session['mouse_id']} on "
+            f"'{name}' is about mouse {mouse} on {day}, but session "
+            f"{session['session_id']} is about mouse {session['mouse_id']} on "
             f"{session['session_date']}.",
         )
 
@@ -2921,7 +2926,7 @@ def _program_configs(folder: Path) -> dict[str, str]:
         name = program.get("Name") if isinstance(program, dict) else None
 
         if name is None:
-            logger.warning(f"'{path.name}' does not look like a program definition.")
+            logger.warning(f"'{path.name}' does not look like a program config.")
             continue
 
         configs[name] = json.dumps(program)
@@ -2979,8 +2984,8 @@ def _mouse_number(name: int | str) -> int:
     # particular animal, so it names no mouse either.
     if match is None or int(match.group(1)) == 0:
         raise ValueError(
-            f"Cannot tell which mouse {name!r} is. A name is an optional prefix "
-            f"and a number above zero, as in 'm442'."
+            f"{name!r} is not a valid mouse name (which is an optional prefix and "
+            f"a number above zero, as in 'm442')."
         )
 
     return int(match.group(1))
@@ -3034,8 +3039,8 @@ def _mouse_lines(lines: dict[str, str]) -> dict[str, str]:
 
         if known is None:
             raise ValueError(
-                f"Cannot tell what {genotype!r} means for {name}. Use one of: "
-                f"{sorted(set(GENOTYPES.values()))}."
+                f"{genotype!r} is not a valid genotype for {name}. Use one of: "
+                f"{', '.join(sorted(set(GENOTYPES.values())))}."
             )
 
         cleaned[name] = known
@@ -3070,7 +3075,7 @@ def _known_lines(registry: pd.DataFrame, lines: dict[str, str]) -> dict[str, str
         name = _registered(registry, "line", name)
 
         if name == WILD_TYPE and genotype != "na":
-            raise ValueError(f"'{WILD_TYPE}' has no genotype: give it 'na'.")
+            raise ValueError(f"'{WILD_TYPE}' genotype must be 'na'.")
 
         known[name] = genotype
 
@@ -3152,16 +3157,16 @@ def _insert_vial(
 
     if position not in holds:
         raise ValueError(
-            f"The panel has no position {position} (it has {sorted(holds)}); "
-            "a different set of positions is a new panel."
+            f"The panel has no position {position} (to change positions, make a "
+            "new panel)."
         )
 
     odor_id = holds[position]
 
     if vial.get("odor_id") is not None and int(vial["odor_id"]) != odor_id:  # type: ignore[arg-type]
         raise ValueError(
-            f"Position {position} holds odor {odor_id}, not {vial['odor_id']}; "
-            "a different odor in a position is a new panel."
+            f"Position {position} holds odor {odor_id}, not {vial['odor_id']} (to "
+            "change positions/odors, make a new panel)."
         )
 
     components = vial.get("components") or []
@@ -3173,20 +3178,20 @@ def _insert_vial(
         if mixes.get(component_id, True):
             raise ValueError(
                 f"Component {component_id} of vial {vial['vial_position']} is "
-                "not a single chemical."
+                "not a monomolecular odor."
             )
 
     if mixes[odor_id]:
         if set(component_ids) != made_of.get(odor_id, set()):
             raise ValueError(
-                f"Vial {vial['vial_position']} holds mix {odor_id}, which is made "
-                f"of {sorted(made_of.get(odor_id, ()))}; list exactly those."
+                f"Vial {vial['vial_position']} holds odor {odor_id}, which is a mix "
+                f"of {sorted(made_of.get(odor_id, ()))} (list all of those)."
             )
 
     elif set(component_ids) - {odor_id}:
         raise ValueError(
-            f"Vial {vial['vial_position']} holds odor {odor_id}, a single "
-            f"chemical, so its only component can be itself."
+            f"Vial {vial['vial_position']} holds odor {odor_id}, which is not a "
+            f"mix, so its only component can be itself."
         )
 
     made_on = vial.get("made_on")
@@ -3282,8 +3287,8 @@ def _db_annotate(
     if row["retired"]:
         raise ValueError(
             f"Annotation '{key}' is retired for a {target_type}, so it does not "
-            f"take new values. What was written under it is still readable. Use "
-            f"`retire_annotation_key(..., retired=False)` to bring it back."
+            f"take new values. Use `retire_annotation_key(..., retired=False)` to "
+            f"bring it back."
         )
 
     # NULL clears the key: the latest row wins, so it reads as unset from now

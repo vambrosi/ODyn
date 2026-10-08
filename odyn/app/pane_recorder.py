@@ -175,9 +175,9 @@ class RecorderPane(QWidget):
 
         layout = QVBoxLayout(self)
 
-        where = QGroupBox("Where the file goes")
+        where = QGroupBox("File details")
         where_form = QFormLayout(where)
-        self.session_label = QLabel("no session selected in the right bar")
+        self.session_label = QLabel("no session selected")
         self.part = QLabel("")
         self.target = QLabel("")
         self.target.setMinimumWidth(TARGET_WIDTH_PX)
@@ -206,7 +206,7 @@ class RecorderPane(QWidget):
         self.hp.setDecimals(2)
         self.hp.setValue(RESP_HP_DEFAULT)
         controls.addWidget(self.hp)
-        controls.addWidget(QLabel("LP (Hz)"))
+        controls.addWidget(QLabel("Resp LP (Hz)"))
         self.lp = QDoubleSpinBox()
         self.lp.setRange(0.0, RATE / 2)
         self.lp.setDecimals(1)
@@ -309,11 +309,11 @@ class RecorderPane(QWidget):
         draft = self.draft
 
         if draft is None:
-            self.session_label.setText("no session selected in the right bar")
+            self.session_label.setText("no session selected")
         elif draft.mouse_id is None:
-            self.session_label.setText(f"{draft.label}: pick its mouse first")
+            self.session_label.setText(f"{draft.label} (pick a mouse first)")
         else:
-            self.session_label.setText(f"{draft.label} in {draft.folder}")
+            self.session_label.setText(draft.label)
 
         self.part.setText(self.picked or "")
         self._refresh_target()
@@ -329,11 +329,11 @@ class RecorderPane(QWidget):
         name = self.picked
 
         if not name:
-            self.target.setText("select a part in the right bar")
+            self.target.setText("select an experiment on the right (or click on test)")
             return
 
         if self.draft is None or self.draft.mouse_id is None:
-            self.target.setText("pick a session with a mouse (or just test)")
+            self.target.setText("select an experiment on the right (or click on test)")
             return
 
         _, share, _ = recording_path(self.context.recordings, self.draft, name)
@@ -357,15 +357,14 @@ class RecorderPane(QWidget):
         if draft is None or draft.mouse_id is None:
             self.context.report(
                 "Recorder",
-                "Select a session with a mouse in the right bar (or just test).",
+                "Select an experiment on the right\n(or just click on test)",
             )
             return
 
         if name is None:
             self.context.report(
                 "Recorder",
-                "Select the part to record in the right bar (add one first "
-                "if the session has none).",
+                "Select an experiment on the right\n(or just click on test)",
             )
             return
 
@@ -375,8 +374,7 @@ class RecorderPane(QWidget):
         if kind == "zstack":
             self.context.report(
                 "Recorder",
-                "Z-stacks are not recorded. Select a loop or the grabs in the "
-                "right bar.",
+                "Z-stacks are not recorded\n(pick a different experiment)",
             )
             return
 
@@ -384,7 +382,7 @@ class RecorderPane(QWidget):
 
         if earlier is not None and not self.context.confirm(
             "Recorder",
-            f"{name} already has a recording ({earlier['file']}).\n\n"
+            f"{name} already has a recording:\n{earlier['file']}\n\n"
             "Do you want to record a new one?\n"
             "(Only the new one will be used.)",
             "Record again",
@@ -396,11 +394,12 @@ class RecorderPane(QWidget):
             self.context.recordings, draft, name, started
         )
 
-        # Where ScanImage saves, if the share is there; made again at the copy
+        # The experiment's folders on the server, if it is reachable (made again
+        # at the copy)
         try:
             make_part_folders(self.context.main_folder / draft.folder / name, kind)
         except OSError as error:
-            logger.warning(f"Could not make the part folders yet: {error}")
+            logger.warning(f"Could not create the experiment folders (yet): {error}")
 
         started_ok = self._begin(
             local,
@@ -450,8 +449,8 @@ class RecorderPane(QWidget):
                 logger.exception("No DAQ")
                 self.context.report(
                     "Recorder",
-                    f"Cannot reach the DAQ board: {error}\n\nCheck that it is "
-                    "plugged in and that NI-DAQmx and `nidaqmx` are installed.",
+                    f"Cannot reach the DAQ board:\n\n{error}\n\nCheck that it is "
+                    "plugged in and that NI-DAQmx and `nidaqmx` are installed",
                 )
                 return False
 
@@ -474,7 +473,9 @@ class RecorderPane(QWidget):
             return False
 
         self.buffer.clear()
-        self.target.setText("(test: nothing is written)" if path is None else str(path))
+        self.target.setText(
+            "(this is a test, nothing is saved)" if path is None else str(path)
+        )
         self.start_button.setEnabled(False)
         self.test_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -513,8 +514,7 @@ class RecorderPane(QWidget):
         except Exception as error:
             self.context.report("Recorder", f"Trouble closing the file:\n\n{error}")
 
-        what = "test" if recording.path is None else recording.path.name
-        self.status.setText(f"stopped after {recording.duration_s:.1f} s: {what}")
+        self.status.setText(f"stopped after {recording.duration_s:.1f} s")
         self.start_button.setEnabled(True)
         self.test_button.setEnabled(True)
         self.stop_button.setEnabled(False)
@@ -530,7 +530,9 @@ class RecorderPane(QWidget):
                 record["file"],
                 stopped=datetime.now().isoformat(sep=" ", timespec="seconds"),
             )
-            self.context.status.emit(f"Saved {record['file']}; copying it to the share")
+            self.context.status.emit(
+                f"Saved {record['file']} (copying it to the server)"
+            )
             self.copier.copy(draft, name, record, self.context.main_folder)
 
     def _copied(self, draft_path: str, name: str, file: str, error: str) -> None:
@@ -540,7 +542,7 @@ class RecorderPane(QWidget):
 
         if error:
             message = (
-                f"Could not copy {file} to the network share ({error}).\n"
+                f"Could not copy {file} to the server ({error})\n"
                 f"'Submit' will try to copy it again."
             )
             self.status.setText(message)
@@ -560,7 +562,7 @@ class RecorderPane(QWidget):
         if record is not None and record.get("replaced"):
             self._hide(draft, name, record)  # re-recorded while it copied
 
-        self.context.status.emit(f"Copied {file} to the share")
+        self.context.status.emit(f"Copied {file} to the server")
 
     def _hide(self, draft: Draft, name: str, record: dict) -> None:
         """A replaced recording's copy, out of the decoder's sight (or at Submit)."""
@@ -569,7 +571,9 @@ class RecorderPane(QWidget):
             draft.update_recording(name, record["file"], hidden=True)
 
         except OSError as error:
-            logger.warning(f"Could not hide {record['file']} yet: {error}")
+            logger.warning(
+                f"Could not rename the old recording {record['file']} (yet): {error}"
+            )
 
     def _tick(self) -> None:
         if self.recording is None:

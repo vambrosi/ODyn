@@ -196,7 +196,7 @@ def test_mice_pane_loads_a_stored_mouse_and_asks_before_overwriting(
     number.editor.setText("m7")
     number.editor.editingFinished.emit()
     assert mice.form.values() == {"mouse_id": 7, "sex": "F"}
-    assert number.note.text() == "Mouse ID already exists, saving will overwrite data."
+    assert number.note.text() == "Mouse ID already exists (saving will overwrite data)"
 
     # saving over it asks, and Cancel writes nothing
     mice.form.rows["sex"].set_value("M")
@@ -492,7 +492,7 @@ def test_recorder_test_shows_traces_and_writes_nothing(window, tmp_path):
     recorder.stop()
 
     assert recorder.recording is None and recorder.test_button.isEnabled()
-    assert "test" in recorder.status.text()
+    assert "stopped after" in recorder.status.text()
     assert list(tmp_path.rglob("*.h5")) == []
 
 
@@ -513,7 +513,7 @@ def test_recorder_records_into_the_session_folder(window, tmp_path):
     assert recorder.picked is None
     recorder.start()
     assert recorder.recording is None
-    assert "Select the part" in window.context.last_report[1]
+    assert "Select an experiment" in window.context.last_report[1]
 
     window.open_part(draft, "e2")
     assert recorder.picked == "e2"
@@ -785,7 +785,7 @@ def test_qc_lists_every_kind_of_recording_this_user_submitted(tmp_path):
     assert set(mine.index) == {("loop", loop_id), ("grab", grab_id)}
     assert mine.loc[("grab", grab_id), "path"].endswith("_grabs_00001.tif")
     assert mine.loc[("loop", loop_id), "path"] == "20260304/m1/e1"
-    assert set(mine["sync"]) == {"not decoded"}
+    assert set(mine["sync"]) == {"not processed"}
     assert my_recordings(db, "someone else").empty
 
     db.update_annotation_key(applies_to="grab", key="goal", required=True)
@@ -888,7 +888,7 @@ def test_panels_pane_adds_a_panel_then_batches_of_its_vials(
 
     # once saved it is loaded: one locked, checked box per position, with the
     # last recipe, and no adding or removing vials
-    assert [c.title() for c in panels.cards][1] == "Position 2: 17 - alpha"
+    assert [c.title() for c in panels.cards][1] == "Position 2: Odor 17 - alpha"
     assert all(c.isChecked() and not c.delivered.isEnabled() for c in panels.cards)
     assert panels.cards[1].components[0].target.value() == pytest.approx(44.2)
     assert not panels.add_vial.isEnabled()
@@ -899,7 +899,7 @@ def test_panels_pane_adds_a_panel_then_batches_of_its_vials(
     panels.form.rows["made_on"].set_value("2026-10-06")
     panels._save()
     settle(window.context)
-    assert "2 of its 3 vials, made on 2026-10-06" in asked[-1][1]
+    assert "2 of its 3 vials were included (made on 2026-10-06)" in asked[-1][1]
     later = Database(tmp_path / "data").vials
     assert len(later) == 5
     assert sorted(later.loc[later.index.difference(first.index), "vial_position"]) == [
@@ -1027,7 +1027,7 @@ def test_odors_pane_never_renames_a_stored_odor(window, tmp_path, monkeypatch):
     number.editor.editingFinished.emit()
     assert odors.form.values()["odor_name"] == stored
     assert not odors.form.rows["odor_name"].editor.isEnabled()
-    assert number.note.text() == "Odor ID already exists, saving will overwrite data."
+    assert number.note.text() == "Odor ID already exists (saving will overwrite data)"
 
     # its vapor pressure can be overwritten
     odors.form.rows["vapor_pressure_mmhg"].set_value(12.5)
@@ -1049,7 +1049,7 @@ def test_odors_pane_never_renames_a_stored_odor(window, tmp_path, monkeypatch):
     settle(window.context)
     assert window.context.last_report == (
         "Odor",
-        "Cannot change the name and composition of an odor.",
+        "Cannot change the name and composition of an odor",
     )
     assert Database(tmp_path / "data").odors.loc[1, "odor_name"] == stored
 
@@ -1150,12 +1150,12 @@ def test_session_and_recorder_share_one_selection(window, tmp_path):
     settle(window.context)
     draft = sessions.current
     assert context.draft is draft and context.part is None
-    assert "no mouse yet" in recorder.session_label.text()
+    assert "m? " in recorder.session_label.text()
 
     # picking the mouse shows in the recorder at once, and on the right bar
     sessions.session_page.mouse.setCurrentText("m5")
     assert draft.mouse_id == 5
-    assert draft.folder in recorder.session_label.text()
+    assert recorder.session_label.text() == draft.label
     assert window.today[(id(draft), None)].toolTip() == draft.where
     assert window.selection.text() == draft.where
 
@@ -1163,7 +1163,7 @@ def test_session_and_recorder_share_one_selection(window, tmp_path):
     assert recorder.part.text() == ""
     recorder.start()
     assert recorder.recording is None
-    assert "Select the part" in context.last_report[1]
+    assert "Select an experiment" in context.last_report[1]
 
     # a part added is selected, and is what the recorder records
     sessions.add_loop()
@@ -1250,7 +1250,7 @@ def test_add_loop_numbers_and_makes_the_folders_in_one_click(window, tmp_path):
 
     window._add_session()
     sessions.add_loop()
-    assert "Pick the session's mouse first" in window.context.last_report[1]
+    assert "Pick a mouse for the session first" in window.context.last_report[1]
     assert window.sessions.current.parts == []
 
     draft = window.sessions.current
@@ -1428,7 +1428,7 @@ def test_quick_maths_warns_when_imaging_outlasts_the_trial(app):
 
     form.inputs["block_post_odor_acq_s"].setValue(9)
     assert form.overrun.isVisibleTo(form)  # fits, but with nothing to spare
-    assert form.overrun.text() == "Only 0 s between acquisitions."
+    assert form.overrun.text() == "Only 0 s between acquisitions"
 
     form.inputs["block_post_odor_acq_s"].setValue(8)
     assert "Only 1 s" in form.overrun.text()
@@ -1509,7 +1509,7 @@ def test_check_opens_the_panel_and_the_log_follows_the_database(window):
     window.sessions.check()
     settle(window.context)
     assert panel.is_open() and panel.current == panel.NAMES.index("Check")
-    assert "no mouse" in panel.texts["Check"].toPlainText()
+    assert "didn't pick a mouse" in panel.texts["Check"].toPlainText()
 
     # a write logs on the worker's thread; the line arrives in the Log tab
     window.mice.form.set_values({"mouse_id": "m8"})
@@ -1561,11 +1561,11 @@ def test_remove_marks_and_undo_brings_back(window, tmp_path):
     sessions.remove_part()
     assert list(window.today) == [(id(draft), None), (id(draft), "e2")]
     assert undo.isEnabled()
-    assert undo.statusTip() == f"Undo remove: loop {date}/m442/e1"
+    assert undo.statusTip() == f"Undo remove (loop {date}/m442/e1)"
 
     sessions.remove()
     assert sessions.drafts == [] and window.today == {}
-    assert undo.statusTip() == f"Undo remove: session {date}/m442"
+    assert undo.statusTip() == f"Undo remove (session {date}/m442)"
 
     # undo in reverse order, each shown as it comes back
     undo.trigger()

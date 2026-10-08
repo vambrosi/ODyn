@@ -81,7 +81,7 @@ def my_recordings(db, user: None | str) -> pd.DataFrame:
                 "path": table.loc[row_id, PATH_COLUMN[kind]],
                 "objective": table.loc[row_id, "objective"],
                 "submitted_at": submitted,
-                "sync": decoded or ("" if kind == "zstack" else "not decoded"),
+                "sync": decoded or ("" if kind == "zstack" else "not processed"),
             }
         )
 
@@ -123,13 +123,13 @@ def _grab_sync_flags(db) -> dict[tuple[str, int], str]:
 
 
 def sync_flags(call_flag: int) -> str:
-    """The names of the bits set on a `decode_sync` call, or `clean`."""
+    """The names of the bits set on a `decode_sync` call, or `succeeded`."""
     names = [flag.name for flag in SyncFlag if call_flag & int(flag) and flag.name]
 
     if call_flag & 1:
-        names.insert(0, "RAISED")
+        names.insert(0, "FAILED")
 
-    return ", ".join(names) or "clean"
+    return ", ".join(names) or "succeeded"
 
 
 def my_missing(db, mine: pd.DataFrame) -> pd.DataFrame:
@@ -167,16 +167,11 @@ class QcPane(QWidget):
         splitter = QSplitter(Qt.Orientation.Vertical)
         layout.addWidget(splitter)
 
-        self.recordings_view = self._table("Experiments I submitted", splitter)
+        self.recordings_view = self._table("Submissions", splitter)
         self.missing_view = self._table(
-            "Required annotations still empty on them", splitter
+            "Required annotations that were not filled", splitter
         )
-        splitter.addWidget(
-            QLabel(
-                "Motion-correction candidate picking (movie previews) lands here "
-                "once the cluster writer produces them."
-            )
-        )
+        splitter.addWidget(QLabel("Motion-correction (pick the best test run)"))
 
         context.changed.connect(self.reload)
         context.user_changed.connect(lambda _: self.reload())
@@ -200,17 +195,23 @@ class QcPane(QWidget):
 
     def reload(self) -> None:
         user = self.context.user
-        self.who.setText(
-            f"Pending for {user}" if user else "Pick your name in the Users tab"
-        )
+        if not user:
+            self.who.setText("Pick a user to start")
 
         def load(db):
             mine = my_recordings(db, user)
+            users = db.users
+            named = users.loc[users["user_name"] == user, "display_name"]
+            name = str(named.iloc[0]) if len(named) else user
 
-            return mine, my_missing(db, mine)
+            return name, mine, my_missing(db, mine)
 
         def loaded(result):
-            mine, missing = result
+            name, mine, missing = result
+
+            if user:
+                self.who.setText(f"To-do list for {name}")
+
             self._model(self.recordings_view).set_frame(mine.reset_index(drop=True))
             self._model(self.missing_view).set_frame(missing)
 

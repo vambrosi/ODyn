@@ -146,7 +146,7 @@ class BottomPanel(QWidget):
 
         self.body.setHidden(not opened)
         self.toggle.setIcon(icon("panel-close" if opened else "panel-open"))
-        self.toggle.setToolTip("Close the panel" if opened else "Open the panel")
+        self.toggle.setToolTip("Close panel" if opened else "Open panel")
         header_px = self.header.sizeHint().height()
         self.setMaximumHeight(UNLIMITED_PX if opened else header_px)
 

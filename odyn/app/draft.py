@@ -127,9 +127,7 @@ def _check_date(value: str) -> str:
         return datetime.strptime(str(value).strip(), "%Y-%m-%d").strftime("%Y-%m-%d")
 
     except ValueError:
-        raise ValueError(
-            f"Session data format is 'YYYY-MM-DD', not {value!r}."
-        ) from None
+        raise ValueError("Date format is YYYY-MM-DD") from None
 
 
 class Draft:
@@ -360,7 +358,7 @@ class Draft:
     @property
     def label(self) -> str:
         """How the session appears on the screen."""
-        who = "no mouse yet" if self.mouse_id is None else f"m{self.mouse_id}"
+        who = "m?" if self.mouse_id is None else f"m{self.mouse_id}"
 
         return f"{who} {self.date}"
 
@@ -419,7 +417,7 @@ class Draft:
         entry = next((e for e in self._entries if e.get("name") == name), {})
         kind = entry.get("kind", _default_type(name))
 
-        return f"{KIND_WORDS.get(kind, 'part')} {self.where}/{name}"
+        return f"{KIND_WORDS.get(kind, 'experiment')} {self.where}/{name}"
 
     def files(self, name: str) -> dict[str, dict[str, Any]]:
         """What was noted per TIFF of part `name` (grabs, z-stacks), by file name."""
@@ -544,7 +542,7 @@ class Draft:
             raise ValueError(f"There is no part '{name}' to record into.")
 
         if entry.get("kind") == "zstack":
-            raise ValueError("Z-stacks are not recorded.")
+            raise ValueError("Z-stacks are not recorded")
 
         recordings = entry.setdefault("recordings", [])
 

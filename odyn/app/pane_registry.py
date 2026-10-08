@@ -8,6 +8,8 @@ is a fact on its own and does not wait for the end of the day.
 
 from __future__ import annotations
 
+from datetime import date
+
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
@@ -133,7 +135,7 @@ class TableAndForm(QWidget):
     def set_open(self, opened: bool) -> None:
         self.body.setHidden(not opened)
         self.toggle.setIcon(icon("form-close" if opened else "form-open"))
-        tip = "Hide the form" if opened else "Show the form"
+        tip = "Hide form" if opened else "Show form"
         self.toggle.setToolTip(tip)
         self.toggle.setStatusTip(tip)
 
@@ -264,10 +266,7 @@ class UsersPane(QWidget):
             self.names.addWidget(button)
 
         if active.empty:
-            self.hint.setText(
-                "No users yet: add one with  python -m odyn.admin <folder> "
-                'add-user <login> "<Name>"'
-            )
+            self.hint.setText("No users yet (add one via python -m odyn.admin)")
         elif current in self.buttons:
             self.hint.setText(f"Signed in as {self.buttons[current].text()}")
         else:
@@ -384,7 +383,7 @@ class PickList(FormRows):
         if name is None and not self.names:
             self.context.report(
                 self.what.capitalize(),
-                f"No {self.what} are listed yet: they are added to the database.",
+                f"No {self.what} registered in the database",
             )
             return
 
@@ -432,7 +431,7 @@ class PickList(FormRows):
 
 
 def _exists_note(what: str) -> str:
-    return f"{what} ID already exists, saving will overwrite data."
+    return f"{what} ID already exists (saving will overwrite data)"
 
 
 def _stored(frame, key: int) -> dict:
@@ -598,20 +597,18 @@ class MicePane(QWidget):
         self.form.commit()
 
         if problems := self.form.problems():
-            self.context.report("Mouse", " ".join(problems))
+            self.context.report("Mouse", "\n".join(problems))
             return
 
         values = self.form.values()
 
         if "mouse_id" not in values:
-            self.context.report("Mouse", "Mouse ID is required.")
+            self.context.report("Mouse", "Mouse ID is required")
             return
 
         for listed in (self.line_list, self.virus_list):
             if listed.repeated():
-                self.context.report(
-                    "Mouse", f"Some {listed.what} are listed twice."
-                )
+                self.context.report("Mouse", f"Some {listed.what} are listed twice")
                 return
 
         mouse_id = values["mouse_id"]
@@ -772,7 +769,7 @@ class OdorsPane(QWidget):
         name = self.form.rows["odor_name"].editor
         name.setEnabled(not locked)
         name.setToolTip(
-            "A stored odor's name never changes"
+            "Odor names cannot be changed"
             if locked
             else self.form.rows["odor_name"].field.description
         )
@@ -794,17 +791,17 @@ class OdorsPane(QWidget):
         self.form.commit()
 
         if problems := self.form.problems():
-            self.context.report("Odor", " ".join(problems))
+            self.context.report("Odor", "\n".join(problems))
             return
 
         values = self.form.values()
 
         if "odor_id" not in values or "odor_name" not in values:
-            self.context.report("Odor", "Odor ID and name are required.")
+            self.context.report("Odor", "Odor ID and name are required")
             return
 
         if self.composition.repeated():
-            self.context.report("Odor", "Some components are listed twice.")
+            self.context.report("Odor", "Some components are listed twice")
             return
 
         odor_id = values["odor_id"]
@@ -834,7 +831,7 @@ class OdorsPane(QWidget):
             self._parts(odor_id)
         ):
             self.context.report(
-                "Odor", "Cannot change the name and composition of an odor."
+                "Odor", "Cannot change the name and composition of an odor"
             )
             return
 
@@ -867,7 +864,7 @@ def current_vials(vials):
     return latest.set_index("vial_id")
 
 
-PANEL_NOTE = "Panel already exists, saving adds a new batch of its vials."
+PANEL_NOTE = "Panel already exists (saving adds a new batch of vials)"
 
 
 class PanelsPane(QWidget):
@@ -1102,7 +1099,7 @@ class PanelsPane(QWidget):
         self.form.commit()
 
         if problems := self.form.problems():
-            self.context.report("Panel", " ".join(problems))
+            self.context.report("Panel", "\n".join(problems))
             return
 
         values = self.form.values()
@@ -1110,7 +1107,7 @@ class PanelsPane(QWidget):
         made_on = values.get("made_on")
 
         if not name:
-            self.context.report("Panel", "Panel name is required.")
+            self.context.report("Panel", "Panel name is required")
             return
 
         if not self.stored(name):
@@ -1123,23 +1120,26 @@ class PanelsPane(QWidget):
             # Typed and saved at once: the panel was never loaded
             self.context.report(
                 "Panel",
-                f"{name} already exists. Pick it from the list to load its "
-                "vials.",
+                f"Panel '{name}' already exists\n(pick it from the list to add a batch)",
             )
             return
 
         batch = [card.vial() for card in self.cards if card.included]
 
         if not batch:
-            self.context.report("Panel", "Check at least one vial.")
+            self.context.report("Panel", "Check at least one vial")
             return
 
-        day = made_on or "today"
+        made = (
+            "made today"
+            if made_on in (None, date.today().isoformat())
+            else f"made on {made_on}"
+        )
 
         if not self.context.confirm(
             "Panel",
-            f"This saves a new batch for {name}: {len(batch)} of its "
-            f"{len(self.cards)} vials, made on {day}.",
+            f"This adds a new batch to the {name} panel:\n{len(batch)} of its "
+            f"{len(self.cards)} vials were included ({made})",
             "Save batch",
         ):
             return
@@ -1157,11 +1157,11 @@ class PanelsPane(QWidget):
         positions = [v["vial_position"] for v in vials]
 
         if not vials:
-            self.context.report("Panel", "Add the panel's vials first.")
+            self.context.report("Panel", "Add the panel's vials first")
             return
 
         if len(set(positions)) < len(positions):
-            self.context.report("Panel", "Two vials are in the same position.")
+            self.context.report("Panel", "Two vials are in the same position")
             return
 
         def add(db):

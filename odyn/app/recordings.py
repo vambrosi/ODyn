@@ -76,7 +76,7 @@ def copy_to_share(local: Path, target: Path) -> None:
         if target.stat().st_size == size:
             return
 
-        raise FileExistsError(f"A different file is already at '{target}'.")
+        raise FileExistsError(f"A different file is already at '{target}'")
 
     make_part_folders(target.parent.parent)
     partial = target.with_name(f".{target.name}.partial")

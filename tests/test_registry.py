@@ -109,11 +109,11 @@ def test_viruses_are_a_registry_too(db):
 
 def test_a_genotype_is_always_stated(db):
     # not genotyped is 'na', never a blank
-    with pytest.raises(ValueError, match="Cannot tell what None means"):
+    with pytest.raises(ValueError, match="None is not a valid genotype"):
         db.set_mouse(mouse_id=1, lines={"TH-Cre": None})
 
     # a wild-type mouse has nothing to genotype
-    with pytest.raises(ValueError, match="has no genotype"):
+    with pytest.raises(ValueError, match="genotype must be .na."):
         db.set_mouse(mouse_id=1, lines={"Wild Type": "het"})
 
     db.set_mouse(mouse_id=1, lines={"wild type": "na", "TH-Cre": "N/A"})
@@ -123,7 +123,7 @@ def test_a_genotype_is_always_stated(db):
 
 @pytest.mark.parametrize("bad", ["m0", "mouse", "", "x-1"])
 def test_a_mouse_needs_a_number(db, bad):
-    with pytest.raises(ValueError, match="which mouse"):
+    with pytest.raises(ValueError, match="not a valid mouse name"):
         db.set_mouse(mouse_id=bad)
 
 
@@ -306,14 +306,14 @@ def test_vials_record_the_rack_as_made(db):
             {**RACK[0], "components": [{"odor_id": 2, "target_ppm": 1}]},
             "only component",
         ),
-        ({**RACK[2], "components": []}, "list exactly those"),
+        ({**RACK[2], "components": []}, "list all of those"),
         (
             {**RACK[2], "components": [{"odor_id": 4, "target_ppm": 1}]},
-            "list exactly those",
+            "list all of those",
         ),
         (
             {**RACK[2], "components": [{"odor_id": 18, "target_ppm": 1}]},
-            "not a single chemical",
+            "not a monomolecular odor",
         ),
         ({**RACK[0], "odor_id": 999}, "holds odor 1, not 999"),
         ({"vial_position": 1, "odor_id": 1}, "A vial needs"),

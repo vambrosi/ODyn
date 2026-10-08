@@ -83,7 +83,7 @@ def test_typed_values_are_read_as_their_type(field_, written, expected):
     ],
 )
 def test_wrong_values_name_the_field(field_, written):
-    with pytest.raises(ValueError, match="K is"):
+    with pytest.raises(ValueError, match="K should be"):
         field_.parse(written)
 
 
@@ -200,25 +200,25 @@ def test_check_lists_what_is_wrong(share):
 
     # Only the advisory: the synthetic share has no olfactometer files
     assert [str(p) for p in check(db, draft)] == [
-        "e1: No olfactometer Events file found. (can submit anyway)"
+        "e1: no olfactometer Events file found. (Not required to submit.)"
     ]
 
     draft.set_part("e2", objective=None, pmt_gain="deep")
     draft.set_vials([99])
     messages = [str(p) for p in check(db, draft)]
 
-    assert any("e2: No objective" in m for m in messages)
-    assert any("e2: PMT gain is a number" in m for m in messages)
-    assert any("e2: Folder 'e2' is not on the share" in m for m in messages)
-    assert any("vials: No vials with ids [99]" in m for m in messages)
-    assert [m for m in messages if "can submit anyway" in m] == [
-        "e1: No olfactometer Events file found. (can submit anyway)"
+    assert any("e2: didn't pick an objective" in m for m in messages)
+    assert any("e2: PMT gain should be a number" in m for m in messages)
+    assert any("e2: folder 'e2' is not on the server" in m for m in messages)
+    assert any("vials: no vials with ids 99" in m for m in messages)
+    assert [m for m in messages if "Not required to submit" in m] == [
+        "e1: no olfactometer Events file found. (Not required to submit.)"
     ]
 
     draft.remove_part("e2").set_vials([]).identify(mouse_id=7)
     messages = [str(p) for p in check(db, draft)]
-    assert messages[0].startswith("session: Mouse 7 is not registered")
-    assert any("Folder '20260101/m7' is not on the share" in m for m in messages)
+    assert messages[0].startswith("session: mouse 7 is not registered")
+    assert any("folder '20260101/m7' is not on the server" in m for m in messages)
 
 
 def test_submit_does_the_whole_day(share):
@@ -285,22 +285,19 @@ def test_conditions_are_checked_and_written_per_acquisition(share):
 
     def messages(conditions):
         draft.set_part("e1", conditions=conditions)
-        return [str(p) for p in check(db, draft) if "Condition" in str(p)]
+        return [str(p) for p in check(db, draft) if "condition " in str(p)]
 
     assert messages([{"start": 2, "end": 1, "condition": "baseline"}]) == [
-        "e1: Condition baseline 2 to 1 ends before it starts."
+        "e1: condition baseline 2 to 1 ends before it starts"
     ]
     assert messages(
         [
             {"start": 1, "end": 2, "condition": "baseline"},
             {"start": 2, "end": 3, "condition": "ket/xyl"},
         ]
-    ) == [
-        "e1: Condition ket/xyl 2 to 3 overlaps baseline 1 to 2 at acquisition 2: "
-        "each acquisition has one condition."
-    ]
+    ) == ["e1: condition ket/xyl 2 to 3 overlaps baseline 1 to 2 at acquisition 2"]
     assert messages([{"start": 2, "end": 5, "condition": "ket/xyl"}]) == [
-        "e1: Condition ket/xyl 2 to 5 names acquisitions with no TIFF: 4-5."
+        "e1: condition ket/xyl 2 to 5 names acquisitions with no TIFF: 4-5"
     ]
 
     draft.set_part(
@@ -349,13 +346,13 @@ def test_submit_copies_a_recording_kept_on_this_computer(share, tmp_path):
     )
 
     messages = [str(p) for p in check(db, draft)]
-    assert any("m1_e1.h5 is only on this computer" in m for m in messages)
-    assert not any("No sync file" in m for m in messages)
+    assert any("m1_e1.h5 was not copied to the server" in m for m in messages)
+    assert not any("no sync file" in m for m in messages)
 
     # one still being written is left alone, and blocks the submit
     early = submit(db, draft, busy={str(local)})
     assert early.written is None and not on_share.exists()
-    assert "e1: Still recording: stop it first." in [str(p) for p in early.problems]
+    assert "e1: still recording (stop it first)" in [str(p) for p in early.problems]
 
     result = submit(db, draft)
     assert result.submitted, result.error
@@ -609,12 +606,15 @@ def test_grabs_and_zstacks_notes_are_checked(a_day):
     draft.set_file("grabs", "late_00009.tif", pmt_gain="high")
 
     messages = [str(p) for p in check(db, draft)]
-    assert "zstacks/20260304_m1_zstacks_00001.tif: Its loop, e9, is not listed." in (
-        messages
-    )
-    assert any("grabs/late_00009.tif: PMT gain is a number" in m for m in messages)
     assert (
-        "grabs/late_00009.tif: Not in the folder on the share. (can submit anyway)"
+        "zstacks/20260304_m1_zstacks_00001.tif: the z-stack loop e9 is not listed"
+        in messages
+    )
+    assert any(
+        "grabs/late_00009.tif: PMT gain should be a number" in m for m in messages
+    )
+    assert (
+        "grabs/late_00009.tif: not in the server's folder. (Not required to submit.)"
         in messages
     )
 

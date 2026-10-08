@@ -195,7 +195,7 @@ def test_a_loop_of_z_stacks_is_refused_for_now(tmp_path):
     db.set_mouse(mouse_id=1)
     db.add_session(mouse_id=1, session_date="2026-01-01")
 
-    with pytest.raises(RuntimeError, match="z-stack loop \\(21 slices\\)"):
+    with pytest.raises(RuntimeError, match="z-stack loop with 21 slices"):
         db.add_loop(session_id=1, loop_path="20260101/m1/e1", objective=20)
 
     assert db.latest_calls("add_loop").iloc[0]["call_flag"] & IngestFlag.STACK_LOOP
@@ -300,7 +300,7 @@ def test_a_zstack_is_for_a_loop_of_its_own_session(tmp_path):
         )
         foreign = cur.lastrowid
 
-    with pytest.raises(ValueError, match="another session"):
+    with pytest.raises(ValueError, match="not from the same session"):
         db.set_zstack_loop(zstack_id=zstack_id, loop_id=foreign)
 
     db.set_zstack_loop(zstack_id=zstack_id, loop_id=None)

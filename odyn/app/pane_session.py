@@ -80,6 +80,11 @@ def session_label(draft: Draft, position: int) -> str:
     return f"s{position + 1}" if draft.mouse_id is None else f"m{draft.mouse_id}"
 
 
+def counted(count: int, word: str) -> str:
+    """`1 loop`, `3 loops`."""
+    return f"{count} {word}{'' if count == 1 else 's'}"
+
+
 # The highest acquisition (TIFF) number a condition can name
 MAX_ACQUISITION = 99999
 
@@ -295,7 +300,7 @@ class LoopForm(QWidget):
         entry = self.draft.part(self.name) or {}
         loop_id = entry.get("submitted_id")
         self.submitted.setText(
-            "" if loop_id is None else f"In the database as loop_id {loop_id}."
+            "" if loop_id is None else f"Already in the database as loop_id {loop_id}"
         )
 
     def _set(self, **fields) -> None:
@@ -382,7 +387,7 @@ class FilesForm(QWidget):
         )
         layout.addWidget(self.table)
 
-        self.notes = QGroupBox("Pick a file above to note something about it")
+        self.notes = QGroupBox("Pick a file above to write notes")
         self.notes_layout = QVBoxLayout(self.notes)
         layout.addWidget(self.notes)
         self.refresh()
@@ -416,7 +421,10 @@ class FilesForm(QWidget):
 
         if missing:
             frame = pd.concat(
-                [frame, pd.DataFrame({"file": missing, "started": "not on the share"})],
+                [
+                    frame,
+                    pd.DataFrame({"file": missing, "started": "not on the server"}),
+                ],
                 ignore_index=True,
             )
 
@@ -475,7 +483,7 @@ class FilesForm(QWidget):
             )
             layout = self.file_form.layout()
             assert isinstance(layout, QFormLayout)
-            layout.insertRow(0, "Taken for loop", self.loop)
+            layout.insertRow(0, "Associated with the loop", self.loop)
 
         self.notes_layout.addWidget(self.file_form)
 
@@ -591,10 +599,7 @@ class SessionPage(QWidget):
         # Folders and recordings are named and placed for the mouse and the day
         locked = draft is not None and draft.fixed
         why = (
-            "Fixed once a folder or a recording was made: remove the session and "
-            "add a new one to change it"
-            if locked
-            else ""
+            "Cannot be changed after folder or recording was created" if locked else ""
         )
 
         for widget in (self.mouse, self.date):
@@ -602,11 +607,11 @@ class SessionPage(QWidget):
             widget.setToolTip(why)
 
         if draft is None:
-            self.identity.setTitle("No session selected: pick or add one on the right")
+            self.identity.setTitle("No session selected")
             self.folder.setText("")
         elif draft.mouse_id is None:
             self.identity.setTitle(f"Session {draft.where}")
-            self.folder.setText("pick a mouse")
+            self.folder.setText("pick a mouse first")
         else:
             self.identity.setTitle(f"Session {draft.where}")
             self.folder.setText(draft.folder)
@@ -653,7 +658,7 @@ class SessionPage(QWidget):
 class NoSessionPage(QWidget):
     """What the middle shows when no session is selected."""
 
-    MESSAGE = "No session selected.\nPick one or add one using the right bar buttons."
+    MESSAGE = "No session selected\nPick one or add one using the right bar buttons"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -696,7 +701,7 @@ class PartPage(QWidget):
         """`Loop 20260929/m442/e1`, `Grabs 20260929/m442/grabs`..."""
         kind = (draft.part(name) or {}).get("kind", "loop")
 
-        return f"{self.TITLES.get(kind, 'Part')} {draft.where}/{name}"
+        return f"{self.TITLES.get(kind, 'Experiment')} {draft.where}/{name}"
 
     def show_part(self, draft: None | Draft, name: None | str) -> None:
         """Fill the page from part `name` of `draft`."""
@@ -945,9 +950,9 @@ class Sessions(QObject):
         draft, part = found
 
         if part is None:
-            return f"Undo remove: session {draft.where}"
+            return f"Undo remove (session {draft.where})"
 
-        return f"Undo remove: {draft.describe(part)}"
+        return f"Undo remove ({draft.describe(part)})"
 
     def add_loop(self) -> None:
         """
@@ -998,12 +1003,13 @@ class Sessions(QObject):
         draft = self.current
 
         if draft is None:
-            self.context.report(what, "Add a session first.")
+            self.context.report(what, "Add a session first")
             return None
 
         if draft.mouse_id is None:
             self.context.report(
-                what, "Pick the session's mouse first: the folders are named for it."
+                what,
+                "Pick a mouse for the session first\n(it is needed for the folder name)",
             )
             return None
 
@@ -1070,7 +1076,7 @@ class Sessions(QObject):
                 f"{draft.label}\n"
                 + (
                     "\n".join(str(p) for p in problems)
-                    or "Nothing wrong: ready to submit."
+                    or "Checks passed (ready to submit)!"
                 )
             ),
             "check",
@@ -1098,24 +1104,25 @@ class Sessions(QObject):
         lines = [str(p) for p in result.problems]
 
         if result.written is None:
-            lines.insert(0, "Not submitted: fix what is listed, then try again.")
+            lines.insert(0, "Not submitted (fix what is listed, then try again)!")
 
         else:
             written = result.written
             lines.insert(
                 0,
-                f"Session {written.session_id}: {len(written.loops)} loops, "
-                f"{len(written.grabs)} grabs, {len(written.zstacks)} z-stacks, "
-                f"{written.annotations} annotations, sync decoded for "
-                f"{', '.join(written.decoded) or 'none'}.",
+                f"Session {written.session_id}: {counted(len(written.loops), 'loop')}, "
+                f"{counted(len(written.grabs), 'grab')}, "
+                f"{counted(len(written.zstacks), 'z-stack')}, "
+                f"{counted(written.annotations, 'annotation')}, sync processed for "
+                f"{', '.join(written.decoded) or 'none'}",
             )
 
             for name, message in written.decode_failed.items():
-                lines.append(f"{name}: sync decode failed: {message}")
+                lines.append(f"{name}: could not process the sync file: {message}")
 
             if result.error:
                 lines.append(
-                    f"Stopped: {result.error}. The draft is kept; submit again after fixing it."
+                    f"Stopped: {result.error} (draft is kept, submit again after fixing it)"
                 )
 
         self.reported.emit(f"{draft.label}\n" + "\n".join(lines))

@@ -98,7 +98,7 @@ class MainWindow(QMainWindow):
         QApplication.instance().installEventFilter(self.wheel_guard)
         self.context.window = self
         self.setWindowTitle(
-            f"ODyn: {worker.main_folder} ({worker.project or 'default'})"
+            f"ODyn - {worker.main_folder} ({worker.project or 'default'})"
         )
         self.resize(1300, 850)
         self.view = "page"
@@ -264,7 +264,7 @@ class MainWindow(QMainWindow):
                     self.commands,
                     {
                         self.undo_action: "Undo the last remove",
-                        self.remove_action: "Remove the selected session, loop, grabs or z-stacks",
+                        self.remove_action: "Remove the selected session or experiment",
                     },
                 ),
             ],
@@ -570,7 +570,7 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "Recording",
-                "A recording is running. Stop it and close?",
+                "A recording is running.\nStop it and close?",
             )
 
             if answer != QMessageBox.StandardButton.Yes:
@@ -583,9 +583,8 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "Copying",
-                "A recording is still being copied to the share. Closing stops "
-                "the copy (the file stays on this computer, and Submit copies it "
-                "again). Close anyway?",
+                "A recording is being copied. Close anyway?\n"
+                "(Submitting later will try to copy it again.)",
             )
 
             if answer != QMessageBox.StandardButton.Yes:

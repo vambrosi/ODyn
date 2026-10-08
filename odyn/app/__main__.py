@@ -17,18 +17,23 @@ from pathlib import Path
 def main(argv: None | list[str] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m odyn.app",
-        description="The ODyn entry app: register, record, annotate, submit, check.",
+        description=(
+            "The ODyn app (use it to update the DB, to record/submit experiments, "
+            "and for quality checks)."
+        ),
     )
     parser.add_argument(
-        "main_folder", type=Path, help="the folder holding .odyn/ and the data"
+        "main_folder", type=Path, help="the folder that contains .odyn/ and the data"
     )
     parser.add_argument(
         "--project",
-        default=None,
-        help="the database project (default: the project-less one)",
+        default="main-sync",
+        help='the database project (default: "main-sync"; "" for the project-less one)',
     )
     parser.add_argument(
-        "--user", default=None, help="who is using the app (default: the login name)"
+        "--user",
+        default=None,
+        help="same as the network username (default: the current login name)",
     )
     parser.add_argument(
         "--create",
@@ -78,7 +83,7 @@ def main(argv: None | list[str] = None) -> int:
 
     app, worker, _ = open_window(
         args.main_folder,
-        project=args.project,
+        project=args.project or None,
         user=args.user,
         can_create=args.create,
         recorder_source=source,

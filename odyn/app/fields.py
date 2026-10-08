@@ -118,8 +118,7 @@ class Field:
             return _one_of(text, self)
 
         raise ValueError(
-            f"{self.label} is registered as '{self.value_type}', which the form "
-            f"does not know how to read."
+            f"{self.label} has type '{self.value_type}', which this form cannot read"
         )
 
     def show(self, value) -> str:
@@ -308,10 +307,10 @@ def _whole_number(text: str, field: Field) -> int:
     try:
         number = float(written)
     except ValueError:
-        raise ValueError(f"{field.label} is a whole number, not {text!r}.") from None
+        raise ValueError(f"{field.label} should be a whole number") from None
 
     if not number.is_integer():
-        raise ValueError(f"{field.label} is a whole number, not {text!r}.")
+        raise ValueError(f"{field.label} should be a whole number")
 
     return int(number)
 
@@ -320,7 +319,7 @@ def _number(text: str, field: Field) -> float:
     try:
         return float(text)
     except ValueError:
-        raise ValueError(f"{field.label} is a number, not {text!r}.") from None
+        raise ValueError(f"{field.label} should be a number") from None
 
 
 def _yes_or_no(text: str, field: Field) -> bool:
@@ -332,7 +331,7 @@ def _yes_or_no(text: str, field: Field) -> bool:
     if said in FALSE_WORDS:
         return False
 
-    raise ValueError(f"{field.label} is yes or no, not {text!r}.")
+    raise ValueError(f"{field.label} should be yes or no")
 
 
 def _date(text: str, field: Field) -> str:
@@ -341,7 +340,7 @@ def _date(text: str, field: Field) -> str:
 
     except ValueError:
         raise ValueError(
-            f"{field.label} is a date written 'YYYY-MM-DD', not {text!r}."
+            f"{field.label} should be a date (format 'YYYY-MM-DD')"
         ) from None
 
 
@@ -351,4 +350,4 @@ def _one_of(text: str, field: Field) -> str:
         if option.lower() == text.lower():
             return option
 
-    raise ValueError(f"{field.label} is one of {list(field.options)}, not {text!r}.")
+    raise ValueError(f"{field.label} should be one of {', '.join(field.options)}")

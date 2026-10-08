@@ -53,7 +53,7 @@ class Problem:
     blocking: bool = True
 
     def __str__(self) -> str:
-        kind = "" if self.blocking else " (can submit anyway)"
+        kind = "" if self.blocking else ". (Not required to submit.)"
 
         return f"{self.where}: {self.message}{kind}"
 
@@ -105,13 +105,11 @@ def check(db, draft: Draft) -> list[Problem]:
     problems: list[Problem] = []
 
     if draft.mouse_id is None:
-        problems.append(Problem("session", "No mouse picked."))
+        problems.append(Problem("session", "didn't pick a mouse yet"))
         return problems
 
     if draft.mouse_id not in db.mice.index:
-        problems.append(
-            Problem("session", f"Mouse {draft.mouse_id} is not registered.")
-        )
+        problems.append(Problem("session", f"mouse {draft.mouse_id} is not registered"))
 
     session_fields = form_fields(db, "session")
     problems += _field_problems(
@@ -124,16 +122,14 @@ def check(db, draft: Draft) -> list[Problem]:
     local_only = pending(draft)
 
     if not draft.parts:
-        problems.append(
-            Problem("session", "No loops, grabs or z-stacks listed.", blocking=False)
-        )
+        problems.append(Problem("session", "no experiments listed", blocking=False))
 
     elif not folder.is_dir():
         problems.append(
             Problem(
                 "session",
-                f"Folder '{draft.folder}' is not on the share yet. Copy the "
-                "recordings over first.",
+                f"folder '{draft.folder}' is not on the server (start copying the "
+                "TIFFs first)",
             )
         )
 
@@ -143,17 +139,17 @@ def check(db, draft: Draft) -> list[Problem]:
     for entry in draft.parts:
         name = str(entry.get("name", ""))
         kind = entry.get("kind")
-        where = name or "part"
+        where = name or "experiment"
 
         if not name:
-            problems.append(Problem("part", "A part has no name."))
+            problems.append(Problem("experiment", "the experiment has no name"))
             continue
 
         if kind not in KINDS:
-            problems.append(Problem(where, f"Kind must be one of {KINDS}."))
+            problems.append(Problem(where, f"kind must be one of {', '.join(KINDS)}"))
 
         if entry.get("objective") in (None, ""):
-            problems.append(Problem(where, "No objective set."))
+            problems.append(Problem(where, "didn't pick an objective"))
 
         if kind == "loop":
             problems += _field_problems(where, loop_fields, entry)
@@ -171,8 +167,8 @@ def check(db, draft: Draft) -> list[Problem]:
             problems.append(
                 Problem(
                     where,
-                    f"Sync file {local_only[name]['file']} is only on this computer "
-                    "so far. Submit copies it to the share first.",
+                    f"sync file {local_only[name]['file']} was not copied to the "
+                    "server (submit copies it)",
                     blocking=False,
                 )
             )
@@ -187,14 +183,14 @@ def check(db, draft: Draft) -> list[Problem]:
         missing = sorted(set(draft.vial_ids) - known)
 
         if missing:
-            problems.append(Problem("vials", f"No vials with ids {missing}."))
+            problems.append(Problem("vials", f"no vials with ids {_spans(missing)}"))
 
         else:
             panels = set(db.vials.loc[draft.vial_ids, "panel_id"])
 
             if len(panels) > 1:
                 problems.append(
-                    Problem("vials", "The vials come from more than one panel.")
+                    Problem("vials", "the vials come from more than one panel")
                 )
 
     problems.sort(key=lambda problem: not problem.blocking)
@@ -220,7 +216,7 @@ def _field_problems(where: str, fields, values: dict) -> list[Problem]:
             continue  # blocking above, since ingestion needs it
 
         problems.append(
-            Problem(where, f"{field_.label} is not filled in.", blocking=False)
+            Problem(where, f"{field_.label} is not filled in", blocking=False)
         )
 
     return problems
@@ -246,11 +242,11 @@ def _file_problems(
         loop = noted.get("loop")
 
         if loop is not None and loop not in loops:
-            problems.append(Problem(where, f"Its loop, {loop}, is not listed."))
+            problems.append(Problem(where, f"the z-stack loop {loop} is not listed"))
 
         if folder.is_dir() and file not in on_share:
             problems.append(
-                Problem(where, "Not in the folder on the share.", blocking=False)
+                Problem(where, "not in the server's folder", blocking=False)
             )
 
     return problems
@@ -342,7 +338,7 @@ def _condition_problems(where: str, entry: dict, numbers: None | set[int]):
         return []
 
     if entry.get("kind", "loop") != "loop":
-        return [Problem(where, "Conditions are only noted for loops.")]
+        return [Problem(where, "conditions can only be applied to loops")]
 
     problems = []
     taken: dict[int, str] = {}
@@ -352,7 +348,7 @@ def _condition_problems(where: str, entry: dict, numbers: None | set[int]):
         span = f"{condition['condition']} {start} to {end}"
 
         if end < start:
-            problems.append(Problem(where, f"Condition {span} ends before it starts."))
+            problems.append(Problem(where, f"condition {span} ends before it starts"))
             continue
 
         overlap = sorted(set(range(start, end + 1)) & set(taken))
@@ -361,8 +357,8 @@ def _condition_problems(where: str, entry: dict, numbers: None | set[int]):
             problems.append(
                 Problem(
                     where,
-                    f"Condition {span} overlaps {taken[overlap[0]]} at "
-                    f"acquisition {overlap[0]}: each acquisition has one condition.",
+                    f"condition {span} overlaps {taken[overlap[0]]} at "
+                    f"acquisition {overlap[0]}",
                 )
             )
 
@@ -375,8 +371,8 @@ def _condition_problems(where: str, entry: dict, numbers: None | set[int]):
                 problems.append(
                     Problem(
                         where,
-                        f"Condition {span} names acquisitions with no TIFF: "
-                        f"{_spans(missing)}.",
+                        f"condition {span} names acquisitions with no TIFF: "
+                        f"{_spans(missing)}",
                     )
                 )
 
@@ -403,19 +399,19 @@ def _folder_problems(
     problems = []
 
     if not folder.is_dir():
-        return [Problem(where, f"Folder '{folder.name}' is not on the share yet.")]
+        return [Problem(where, f"folder '{folder.name}' is not on the server yet")]
 
     tiffs = sorted((folder / RAW_FOLDER).glob("[!.]?*.tif"))
 
     if not tiffs:
-        problems.append(Problem(where, f"No TIFFs in '{folder.name}/{RAW_FOLDER}'."))
+        problems.append(Problem(where, f"no TIFFs in '{folder.name}/{RAW_FOLDER}'"))
 
     # A grab's sync recording is optional, and its files add up
 
     if kind == "loop":
         if not any(folder.rglob(EVENTS_PATTERN)):
             problems.append(
-                Problem(where, "No olfactometer Events file found.", blocking=False)
+                Problem(where, "no olfactometer Events file found", blocking=False)
             )
 
         syncs = [
@@ -426,8 +422,8 @@ def _folder_problems(
             problems.append(
                 Problem(
                     where,
-                    f"No sync file in '{folder.name}/{SYNC_FOLDER}'; the odor "
-                    "frames stay unknown until one is decoded.",
+                    f"no sync file in '{folder.name}/{SYNC_FOLDER}' (the odor "
+                    "frames can be added later)",
                     blocking=False,
                 )
             )
@@ -435,7 +431,7 @@ def _folder_problems(
         elif len(syncs) > 1:
             problems.append(
                 Problem(
-                    where, f"{len(syncs)} sync files in '{folder.name}/{SYNC_FOLDER}'."
+                    where, f"{len(syncs)} sync files in '{folder.name}/{SYNC_FOLDER}'"
                 )
             )
 
@@ -467,9 +463,9 @@ def submit(
     not_copied = sync_pending(Path(db.main_folder), draft, busy)
     result = SubmitResult(
         draft.label,
-        [Problem(name, "Still recording: stop it first.") for name in recording]
+        [Problem(name, "still recording (stop it first)") for name in recording]
         + [
-            Problem(name, f"Could not copy the sync file to the share: {why}")
+            Problem(name, f"could not copy the sync file to the server: {why}")
             for name, why in not_copied.items()
         ]
         + check(db, draft),
@@ -574,7 +570,7 @@ def _submit_loop(db, draft: Draft, entry: dict, session_id: int, written) -> Non
             written.decoded.append(name)
 
         except Exception as error:
-            logger.exception(f"Decoding the sync file of {name} failed")
+            logger.exception(f"Processing the sync file of {name} failed")
             written.decode_failed[name] = f"{type(error).__name__}: {error}"
 
 
@@ -628,7 +624,7 @@ def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> No
             written.decoded.append(f"{name}/{record['file']}")
 
         except Exception as error:
-            logger.exception(f"Decoding {record['file']} failed")
+            logger.exception(f"Processing {record['file']} failed")
             written.decode_failed[f"{name}/{record['file']}"] = (
                 f"{type(error).__name__}: {error}"
             )

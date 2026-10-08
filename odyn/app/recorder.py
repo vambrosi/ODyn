@@ -257,8 +257,8 @@ class ReplaySource:
 
         if rate != RATE:
             raise ValueError(
-                f"'{self.path.name}' was recorded at {rate} samples/s; the "
-                f"recorder runs at {RATE}."
+                f"'{self.path.name}' was recorded at {rate} samples/s (the "
+                f"recorder runs at {RATE})."
             )
 
         if started is None:
