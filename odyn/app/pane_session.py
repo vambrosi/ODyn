@@ -1129,7 +1129,7 @@ class Sessions(QObject):
             # The session is in the database even if a sync file did not match
             problems += [
                 Problem(name, f"could not process the sync file: {message}", False)
-                for name, message in written.decode_failed.items()
+                for name, message in written.process_failed.items()
             ]
             outcome = (
                 f"submitted as session {written.session_id} "
@@ -1137,7 +1137,7 @@ class Sessions(QObject):
                 f"{counted(len(written.grabs), 'grab')}, "
                 f"{counted(len(written.zstacks), 'z-stack')}, "
                 f"{counted(written.annotations, 'annotation')}, sync processed for "
-                f"{', '.join(written.decoded) or 'none'}) {CHECK}"
+                f"{', '.join(written.processed) or 'none'}) {CHECK}"
             )
 
         if result.error:

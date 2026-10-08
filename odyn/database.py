@@ -132,11 +132,11 @@ class IngestFlag(IntFlag):
 
 class SyncFlag(IntFlag):
     """
-    call_flag bits for `Database.decode_sync` and `decode_grabs_sync` (bit 0
+    call_flag bits for `Database.process_sync` and `process_grabs_sync` (bit 0
     reserved by `CallFlag.RAISED`).
     """
 
-    NO_SYNC_FILE = 1 << 1  # nothing to decode in <loop>/sync/
+    NO_SYNC_FILE = 1 << 1  # nothing to process in <loop>/sync/
     MULTIPLE_SYNC_FILES = 1 << 2  # more than one H5 there and none was named
     INTERRUPTED = 1 << 3  # the recording was not stopped properly
     FRAGMENTS = 1 << 4  # short bursts were set aside
@@ -445,8 +445,8 @@ class Database(CallRecorder):
         """
         `DataFrame` with grab metadata
 
-        The `sync_*` columns come from the decoded sync file and are empty
-        until `decode_grabs_sync` has run for its recording.
+        The `sync_*` columns come from the processed sync file and are empty
+        until `process_grabs_sync` has run for its recording.
         """
         return self._table(GRABS)
 
@@ -460,8 +460,8 @@ class Database(CallRecorder):
         """
         `DataFrame` with acquisition metadata
 
-        The `sync_*` columns come from the decoded sync file and are empty
-        until `decode_sync` has run for the loop.
+        The `sync_*` columns come from the processed sync file and are empty
+        until `process_sync` has run for the loop.
         """
         return self._table(ACQUISITIONS)
 
@@ -485,7 +485,7 @@ class Database(CallRecorder):
 
     @property
     def sync_blocks(self) -> pd.DataFrame:
-        """`DataFrame` with the decoded frame bursts of every sync file"""
+        """`DataFrame` with the frame bursts of every processed sync file"""
         return self._table(SYNC_BLOCKS)
 
     @property
@@ -1732,7 +1732,7 @@ class Database(CallRecorder):
         Reads the TIFFs, the olfactometer event files and the program
         definitions in `<loop_path>/olfactometer/`, and inserts the loop, its
         acquisitions, programs, trials and events in one transaction. The
-        sync file is decoded separately (`decode_sync`).
+        sync file is processed separately (`process_sync`).
 
         Returns `None` when nothing was added: the loop was already in
         the database, or the files did not pass the checks (see the log).
@@ -1905,7 +1905,7 @@ class Database(CallRecorder):
 
         Files already in the database are skipped, so running this again after
         more grabs were taken only adds the new ones. Their sync recordings are
-        decoded separately (`decode_grabs_sync`).
+        processed separately (`process_grabs_sync`).
         """
         return self._add_singles("grab", session_id, folder, objective, rel_raw_paths)
 
@@ -2126,7 +2126,7 @@ class Database(CallRecorder):
         return added
 
     @record_call
-    def decode_sync(
+    def process_sync(
         self,
         *,
         loop_id: int,
@@ -2134,7 +2134,7 @@ class Database(CallRecorder):
         max_skew_s: float = 5.0,
     ) -> None:
         """
-        Decode a loop's sync file into `streams` and `sync_blocks`.
+        Process a loop's sync file into `streams` and `sync_blocks`.
 
         **PARAMETERS**
         - `loop_id` is the loop the file was recorded for
@@ -2146,7 +2146,7 @@ class Database(CallRecorder):
 
         **EXAMPLE**
         ```python
-        db.decode_sync(loop_id=12)
+        db.process_sync(loop_id=12)
         ```
 
         Frame-clock bursts are matched to the loop's acquisitions in
@@ -2233,7 +2233,7 @@ class Database(CallRecorder):
             )
 
         with self._writing() as cur:
-            # Replaced as a whole: the rows of one file are one decode
+            # Replaced as a whole: the rows of one file are one call
             cur.execute(
                 "DELETE FROM streams WHERE loop_id = ? AND stream_type = 'sync';",
                 [int(loop_id)],
@@ -2278,7 +2278,7 @@ class Database(CallRecorder):
         )
 
     @record_call
-    def decode_grabs_sync(
+    def process_grabs_sync(
         self,
         *,
         session_id: int,
@@ -2286,7 +2286,7 @@ class Database(CallRecorder):
         max_skew_s: float = 5.0,
     ) -> None:
         """
-        Decode a sync file recorded during a session's grabs.
+        Process a sync file recorded during a session's grabs.
 
         **PARAMETERS**
         - `session_id` is the session the grabs belong to
@@ -2297,7 +2297,7 @@ class Database(CallRecorder):
 
         **EXAMPLE**
         ```python
-        db.decode_grabs_sync(
+        db.process_grabs_sync(
             session_id=3,
             sync_path="20260623/m462/grabs/sync/m462_grabs_2026-06-23_14-02-11.h5",
         )
@@ -2381,7 +2381,7 @@ class Database(CallRecorder):
             )
 
         with self._writing() as cur:
-            # Replaced as a whole: the rows of one file are one decode
+            # Replaced as a whole: the rows of one file are one call
             cur.execute("DELETE FROM streams WHERE file_path = ?;", [rel_path])
             cur.executemany(
                 "DELETE FROM sync_blocks WHERE grab_id = ?;",
@@ -2466,7 +2466,7 @@ class Database(CallRecorder):
             )
 
     def _sync_file(self, folder_path: str, sync_path: None | str) -> Path:
-        """The sync file to decode, named or found in `<folder>/sync/`."""
+        """The sync file to process, named or found in `<folder>/sync/`."""
         if sync_path is not None:
             path = self.main_folder / sync_path
 
@@ -2501,7 +2501,7 @@ class Database(CallRecorder):
         trials: list,
         frames_per_slice: int,
     ) -> None:
-        """Flag what is off about a decode, and refuse what cannot be matched."""
+        """Flag what is off about a sync file, and refuse what cannot be matched."""
         blocks = decoded.blocks
 
         if decoded.header.interrupted:

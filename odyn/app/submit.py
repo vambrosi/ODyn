@@ -5,8 +5,8 @@ Turning a draft into database rows: check first, then submit.
 saying which problems block a submit and which are only worth knowing.
 `submit` runs the checks, then does the day's work in order: the session row,
 its annotations, each loop (ingested, annotated, its vials recorded, its sync
-file decoded), then the grabs and z-stacks (each TIFF ingested and annotated,
-the grabs' sync files decoded, each z-stack linked to its loop), and finally
+file processed), then the grabs and z-stacks (each TIFF ingested and annotated,
+the grabs' sync files processed, each z-stack linked to its loop), and finally
 moves the draft aside.
 
 Every step that writes is a recorded `Database` call, and ingesting skips what
@@ -67,9 +67,9 @@ class Written:
     grabs: dict[str, int] = field(default_factory=dict)  # by TIFF name
     zstacks: dict[str, int] = field(default_factory=dict)  # by TIFF name
     annotations: int = 0
-    decoded: list[str] = field(default_factory=list)
+    processed: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
-    decode_failed: dict[str, str] = field(default_factory=dict)
+    process_failed: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -585,7 +585,7 @@ def _submit(db, draft: Draft, written: Written) -> None:
 
 
 def _submit_loop(db, draft: Draft, entry: dict, session_id: int, written) -> None:
-    """Ingest one loop, annotate it, record its vials and decode its sync file."""
+    """Ingest one loop, annotate it, record its vials and process its sync file."""
     name = str(entry["name"])
     loop_path = f"{draft.folder}/{name}"
     loop_id = entry.get("submitted_id")
@@ -624,23 +624,23 @@ def _submit_loop(db, draft: Draft, entry: dict, session_id: int, written) -> Non
         db.set_loop_vials(loop_id=loop_id, vial_ids=draft.vial_ids)
 
     if _has_sync(db, loop_path):
-        # The loop is in either way; a decode that refuses (a burst count
+        # The loop is in either way; a sync file that is refused (a burst count
         # that does not match, say) is reported and can be rerun once the
         # file is sorted out.
         try:
-            db.decode_sync(loop_id=loop_id)
-            written.decoded.append(name)
+            db.process_sync(loop_id=loop_id)
+            written.processed.append(name)
 
         except Exception as error:
             logger.exception(f"Processing the sync file of {name} failed")
-            written.decode_failed[name] = f"{type(error).__name__}: {error}"
+            written.process_failed[name] = f"{type(error).__name__}: {error}"
 
 
 def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> None:
     """
     Ingest every TIFF of the grabs or z-stacks folder (those already in are
     skipped), annotate the ones with notes, link each z-stack to its loop,
-    and decode the grabs' sync files.
+    and process the grabs' sync files.
     """
     name, kind = str(entry["name"]), entry["kind"]
     folder = f"{draft.folder}/{name}"
@@ -682,12 +682,12 @@ def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> No
             continue
 
         try:
-            db.decode_grabs_sync(session_id=session_id, sync_path=record["share"])
-            written.decoded.append(f"{name}/{record['file']}")
+            db.process_grabs_sync(session_id=session_id, sync_path=record["share"])
+            written.processed.append(f"{name}/{record['file']}")
 
         except Exception as error:
             logger.exception(f"Processing {record['file']} failed")
-            written.decode_failed[f"{name}/{record['file']}"] = (
+            written.process_failed[f"{name}/{record['file']}"] = (
                 f"{type(error).__name__}: {error}"
             )
 

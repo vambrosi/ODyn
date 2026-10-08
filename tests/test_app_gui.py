@@ -713,7 +713,7 @@ def test_recording_again_asks_and_hides_the_earlier_copy(window, tmp_path, monke
     first, second = draft.recordings("e1")
     assert first["replaced"] and first["hidden"] and not second.get("replaced")
 
-    # only the new one is in the decoder's sight; the old one is kept, hidden
+    # only the new one is in `process_sync`'s sight; the old one is kept, hidden
     sync = tmp_path / "data" / "20260922" / "m7" / "e1" / "sync"
     assert [p.name for p in sync.glob("[!.]*.h5")] == [second["file"]]
     assert (sync / f".replaced-{first['file']}").is_file()
@@ -1548,7 +1548,7 @@ def test_the_submit_report_ends_with_what_was_written(window):
         session_id=12,
         loops={"e1": 1},
         annotations=2,
-        decode_failed={"e1": "ValueError: 5 frame bursts but 2 acquisitions"},
+        process_failed={"e1": "ValueError: 5 frame bursts but 2 acquisitions"},
     )
     result = SubmitResult(
         draft.label,

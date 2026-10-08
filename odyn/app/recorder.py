@@ -236,7 +236,7 @@ class ReplaySource:
     so the app can be tried end to end with a session's real TIFFs and Events
     file.
 
-    The file written from it keeps the original `start_time`, so the decode's
+    The file written from it keeps the original `start_time`, so `process_sync`'s
     clock check compares like with like, and says where it came from
     (`replayed_from`), so it is never taken for a real recording. `speed`
     plays it faster than it was recorded: the samples are the same, only the

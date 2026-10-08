@@ -261,14 +261,14 @@ def test_submit_does_the_whole_day(share):
 
     # The sync file's frame timings should match: acquisitions start where
     # the generator put the bursts, which is not where the TIFFs say. The
-    # decode matches by order and only flags the skew, so it still lands.
+    # processing matches by order and only flags the skew, so it still lands.
     result = submit(db, draft)
 
     assert result.submitted, result.error
     assert result.written.session_id == db.session_for(1, "2026-01-01")
     assert list(result.written.loops) == ["e1"]
     assert result.written.annotations == 4
-    assert result.written.decoded == ["e1"]
+    assert result.written.processed == ["e1"]
 
     exp_id = result.written.loops["e1"]
     assert db.annotations_for("loop").loc[exp_id, "pmt_gain"] == 70
@@ -277,7 +277,7 @@ def test_submit_does_the_whole_day(share):
     )
     assert list(db.loop_vials.loc[[exp_id], "vial_id"]) == draft.vial_ids
     assert len(db.sync_blocks) == 3
-    assert result.written.decode_failed == {}
+    assert result.written.process_failed == {}
 
     assert draft.path.parent.name == "submitted"
     assert Draft.pending(draft.path.parent.parent / "drafts") == []
@@ -391,7 +391,7 @@ def test_submit_copies_a_recording_kept_on_this_computer(share, tmp_path):
 
     result = submit(db, draft)
     assert result.submitted, result.error
-    assert result.written.decoded == ["e1"]
+    assert result.written.processed == ["e1"]
     assert on_share.is_file() and local.is_file()
     assert draft.recordings("e1")[0]["copied"]
 
@@ -680,7 +680,7 @@ def test_submit_adds_the_grabs_and_zstacks_with_their_notes(a_day):
     assert draft.files("grabs")[grab]["submitted_id"] == grab_id
 
     # the grabs' sync file, matched by time
-    assert written.decoded == ["grabs/m1_grabs.h5"]
+    assert written.processed == ["grabs/m1_grabs.h5"]
     assert db.grabs["sync_block"].tolist() == [0, 1]
 
     # a second submit ingests nothing new

@@ -3,9 +3,9 @@ The QC tab: what is waiting on the person using the app.
 
 For now that is two lists, both drawn from the recorded calls and the
 annotation registry: the recordings (loops, grabs, z-stacks) this user
-submitted, with what their sync decode found, and the required annotations
-still empty on them. Picking motion-correction candidates from movie previews
-joins this tab once the cluster writer produces the previews
+submitted, with what processing their sync file found, and the required
+annotations still empty on them. Picking motion-correction candidates from
+movie previews joins this tab once the cluster writer produces the previews
 (`agents/cluster-writer.md`); the pane is shaped so that becomes a third list,
  not a new tab.
 """
@@ -42,8 +42,8 @@ COLUMNS = ["kind", "path", "objective", "submitted_at", "sync"]
 def my_recordings(db, user: None | str) -> pd.DataFrame:
     """
     One row per loop, grab or z-stack `user` submitted, newest first, with its
-    sync flags when it was decoded. Indexed by `(kind, id)`, as annotations
-    name their target.
+    sync flags once its sync file was processed. Indexed by `(kind, id)`, as
+    annotations name their target.
     """
     calls = db.method_calls
 
@@ -73,7 +73,7 @@ def my_recordings(db, user: None | str) -> pd.DataFrame:
         if row_id not in table.index:
             continue
 
-        decoded = flags.get((kind, row_id))
+        processed = flags.get((kind, row_id))
         rows.append(
             {
                 "kind": kind,
@@ -81,7 +81,7 @@ def my_recordings(db, user: None | str) -> pd.DataFrame:
                 "path": table.loc[row_id, PATH_COLUMN[kind]],
                 "objective": table.loc[row_id, "objective"],
                 "submitted_at": submitted,
-                "sync": decoded or ("" if kind == "zstack" else "not processed"),
+                "sync": processed or ("" if kind == "zstack" else "not processed"),
             }
         )
 
@@ -92,24 +92,24 @@ def my_recordings(db, user: None | str) -> pd.DataFrame:
 
 
 def _loop_sync_flags(db) -> dict[tuple[str, int], str]:
-    """Each loop's latest `decode_sync`, decoded or refused."""
-    decodes = db.latest_calls("decode_sync")
+    """Each loop's latest `process_sync`, decoded or refused."""
+    calls = db.latest_calls("process_sync")
     flags: dict[tuple[str, int], str] = {}
 
-    if decodes.empty or "input_loop_id" not in decodes:
+    if calls.empty or "input_loop_id" not in calls:
         return flags
 
-    for _, decode in decodes.iterrows():  # newest first
-        loop_id = decode["input_loop_id"]
+    for _, call in calls.iterrows():  # newest first
+        loop_id = call["input_loop_id"]
 
         if not pd.isna(loop_id) and ("loop", int(loop_id)) not in flags:
-            flags[("loop", int(loop_id))] = sync_flags(int(decode["call_flag"]))
+            flags[("loop", int(loop_id))] = sync_flags(int(call["call_flag"]))
 
     return flags
 
 
 def _grab_sync_flags(db) -> dict[tuple[str, int], str]:
-    """Each matched grab's decode: the call that wrote its `sync_blocks` row."""
+    """Each matched grab's processing: the call that wrote its `sync_blocks` row."""
     rows = db.from_query(
         "SELECT b.grab_id, c.call_flag FROM sync_blocks AS b "
         "JOIN method_calls AS c ON c.method_call_id = b.method_call_id "
@@ -123,7 +123,7 @@ def _grab_sync_flags(db) -> dict[tuple[str, int], str]:
 
 
 def sync_flags(call_flag: int) -> str:
-    """The names of the bits set on a `decode_sync` call, or `succeeded`."""
+    """The names of the bits set on a `process_sync` call, or `succeeded`."""
     names = [flag.name for flag in SyncFlag if call_flag & int(flag) and flag.name]
 
     if call_flag & 1:

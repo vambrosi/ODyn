@@ -93,7 +93,7 @@ def test_every_raw_tiff_becomes_an_acquisition(db):
     assert len(acquisitions) == 3
     assert list(acquisitions["raw_path"].str.endswith(".tif")) == [True] * 3
 
-    # No sync timing until the sync file is decoded
+    # No sync timing until the sync file is processed
     assert acquisitions["sync_odor_on_frame"].isna().all()
     assert "sync_frame_count" in db.acquisition_trials.columns
 
@@ -223,7 +223,7 @@ def test_each_grab_is_a_row_of_its_own(tmp_path):
     assert set(grabs["session_id"]) == {session_id}
     assert set(grabs["z_um"]) == {-80}
     assert set(grabs["objective"]) == {10}
-    assert grabs["sync_frame_count"].isna().all()  # until a sync file is decoded
+    assert grabs["sync_frame_count"].isna().all()  # until a sync file is processed
 
     assert db.annotations_for("grab").loc[added[0], "laser_power_920"] == 10
 

@@ -565,7 +565,7 @@ class RecorderPane(QWidget):
         self.context.status.emit(f"Copied {file} to the server")
 
     def _hide(self, draft: Draft, name: str, record: dict) -> None:
-        """A replaced recording's copy, out of the decoder's sight (or at Submit)."""
+        """A replaced recording's copy, out of `process_sync`'s sight (or at Submit)."""
         try:
             hide_on_share(self.context.main_folder / record["share"])
             draft.update_recording(name, record["file"], hidden=True)

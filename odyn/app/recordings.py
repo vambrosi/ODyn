@@ -16,7 +16,7 @@ A copy is written under a hidden name (`.<name>.partial`) and renamed once its
 size matches, so a half-copied file never looks like a recording. A file on
 the share is never overwritten. A recording that was replaced by a newer one
 of the same part is hidden on the share (renamed with a leading dot,
-which `decode_sync` ignores) rather than deleted.
+which `process_sync` ignores) rather than deleted.
 
 No Qt in here: the recorder runs `copy_to_share` on a thread of its own, and
 `submit` runs `sync_pending` on the database thread before adding anything.
@@ -89,7 +89,7 @@ def copy_to_share(local: Path, target: Path) -> None:
 
 
 def hide_on_share(target: Path) -> None:
-    """Take a replaced recording out of `decode_sync`'s sight, keeping it."""
+    """Take a replaced recording out of `process_sync`'s sight, keeping it."""
     target = Path(target)
 
     if target.exists():

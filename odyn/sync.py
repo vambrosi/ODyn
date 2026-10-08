@@ -5,7 +5,7 @@ The rig's DAQ records, at one sample rate and on one clock, the 2P frame clock,
 the olfactometer's odor valve, the camera strobe, the respiration probe and the
 wheel encoder. This module turns the frame clock and the valve into
 per-acquisition numbers (`SyncBlock`s) without touching the database;
-`Database.decode_sync` matches them to acquisitions and trials and stores them.
+`Database.process_sync` matches them to acquisitions and trials and stores them.
 
 The file layout is the writer's (`record_behavior.py` on the rig): root
 attributes `mouse`, `experiment`, `rate_hz`, `start_time`, and after Stop
@@ -89,7 +89,7 @@ class SyncBlock:
 
 @dataclass
 class DecodedSync:
-    """Everything `Database.decode_sync` needs from one file."""
+    """Everything `Database.process_sync` needs from one file."""
 
     header: SyncHeader
     blocks: list[SyncBlock]

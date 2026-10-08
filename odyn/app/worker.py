@@ -6,7 +6,7 @@ that made it, and every use of it takes the lock file and may wait on the
 share. So the window never touches the database itself: it hands a function
 to the worker, which runs it against its own `Database` and reports back
 through signals on the job. The window stays responsive while a submit reads
-a folder of TIFFs or a decode chews through a sync file.
+a folder of TIFFs or processing chews through a sync file.
 
 **USAGE**
 ```python

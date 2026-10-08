@@ -269,7 +269,7 @@ CREATE TABLE IF NOT EXISTS streams
 -- frames of one loop acquisition (`acq_id`) or one grab (`grab_id`).
 -- We skip burst not associated with either.
 --
--- The rows of one stream come from one decode call and are replaced as a
+-- The rows of one stream come from one processing call and are replaced as a
 -- whole when it is rerun, so the table can be filled after the recordings were
 -- inserted (the TIFFs and the sync file are copied at different times).
 --

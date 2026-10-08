@@ -147,9 +147,9 @@ class TableSpec:
 
 # Columns `sync_blocks` adds to an acquisition. It is one row per acquisition
 # and was split out for storage reasons (it arrives when the sync file is
-# decoded, and a re-decode replaces it whole), not because it describes
+# processed, and processing it again replaces it whole), not because it describes
 # something else, so it is joined back wherever acquisitions are read. LEFT,
-# because those rows are missing until the decode runs.
+# because those rows are missing until the sync file is processed.
 _SYNC_COLUMNS = """
          , s.stream_id
          , s.sync_block

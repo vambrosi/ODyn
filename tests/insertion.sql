@@ -47,7 +47,7 @@ INSERT INTO events (event_time, event_type, event_tag, program_id, trial_id)
 
 INSERT INTO method_calls
     ( group_id, user, method_name, module, code, parameter_inputs, parameters_used )
-    VALUES (0, 'someone', 'Database.decode_sync', 'odyn.database', '{}', '{}', '{}');
+    VALUES (0, 'someone', 'Database.process_sync', 'odyn.database', '{}', '{}', '{}');
 
 INSERT INTO streams (session_id, loop_id, stream_type, file_path, rate_hz, method_call_id)
     VALUES (1, 1, 'sync', '20250201/m1/e1/sync/m1_e1.h5', 5000, 1);

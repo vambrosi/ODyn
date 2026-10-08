@@ -276,8 +276,8 @@ class Group(CallRecorder):
         """
         `DataFrame` with acquisition metadata
 
-        The `sync_*` columns come from the decoded sync file and are empty
-        until `decode_sync` has run for the loop.
+        The `sync_*` columns come from the processed sync file and are empty
+        until `process_sync` has run for the loop.
         """
         return self._table(ACQUISITIONS)
 
@@ -2283,14 +2283,14 @@ class Group(CallRecorder):
                 else f"{self!r} has no mcor files."
             )
 
-        # An acquisition has no odor onset until its sync file is decoded. We
+        # An acquisition has no odor onset until its sync file is processed. We
         # drop them to avoid NaNs in the np.max and np.min below.
         acquisitions = usable[usable["sync_odor_on_frame"].notna()]
 
         if not len(acquisitions):
             raise RuntimeError(
-                "Found no mcor files with an odor onset. Decode the sync file "
-                "in '<loop>/sync/' first ('db.decode_sync')."
+                "Found no mcor files with an odor onset. Process the sync file "
+                "in '<loop>/sync/' first (`db.process_sync`)."
             )
 
         elif len(acquisitions) < len(usable):
@@ -2342,7 +2342,7 @@ class Group(CallRecorder):
         if pd.isna(onset_frame):
             raise RuntimeError(
                 f"Acquisition {acq_id} has no odor onset, so it cannot be "
-                f"aligned. Decode the sync file in '<loop>/sync/' first."
+                f"aligned. Process the sync file in '<loop>/sync/' first."
             )
 
         onset_frame = int(onset_frame)
