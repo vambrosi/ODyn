@@ -7,9 +7,14 @@
 # Design docs
 *.pdf
 
-# Temp files
-logs/
+# Local material, kept out of the repo
+data/
+private/
+probes/
+references/
+sandbox/
 tmp/
+logs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
