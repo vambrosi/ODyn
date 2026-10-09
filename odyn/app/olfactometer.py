@@ -76,7 +76,7 @@ class OlfactometerFolders:
             settings = loaded if isinstance(loaded, dict) else {}
 
         def folder(key: str) -> Path:
-            return Path(str(settings.get(key) or DEFAULT_FOLDERS[key]))
+            return Path(str(settings.get(key) or DEFAULT_FOLDERS[key])).expanduser()
 
         return cls(
             config=folder("olfactometer_config"),

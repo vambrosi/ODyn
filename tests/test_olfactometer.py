@@ -54,10 +54,12 @@ def test_the_settings_name_the_folders_or_fall_back_to_the_pc(tmp_path):
         DEFAULT_FOLDERS["olfactometer_data"]
     )
 
-    (tmp_path / "settings.json").write_text(json.dumps({"olfactometer_data": "/x"}))
+    settings = {"olfactometer_data": "/x", "olfactometer_config": "~/config"}
+    (tmp_path / "settings.json").write_text(json.dumps(settings))
     folders = OlfactometerFolders.read(tmp_path)
 
     assert folders.data == Path("/x")
+    assert folders.config == Path.home() / "config"
     assert folders.log == Path(DEFAULT_FOLDERS["olfactometer_log"])
 
 
