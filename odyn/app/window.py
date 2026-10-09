@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
@@ -66,6 +67,50 @@ def line(vertical: bool) -> QFrame:
     return frame
 
 
+class PageStack(QStackedWidget):
+    """
+    The middle's pages, each in a scroll area, so the bottom panel can take any
+    height and the page above it scrolls. Sized by the page showing, not by
+    the tallest of them (a plain stack would keep every page as tall as the
+    tallest page needs).
+
+    `addWidget`, `currentWidget` and `setCurrentWidget` take and give the
+    pages themselves, not their scroll areas.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._areas: dict[QWidget, QScrollArea] = {}
+        self.currentChanged.connect(lambda _: self.updateGeometry())
+
+    def addWidget(self, page: QWidget) -> int:  # noqa: N802 (Qt's name)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setWidget(page)
+        self._areas[page] = area
+
+        return super().addWidget(area)
+
+    def currentWidget(self) -> None | QWidget:  # noqa: N802 (Qt's name)
+        area = super().currentWidget()
+
+        return area.widget() if isinstance(area, QScrollArea) else area
+
+    def setCurrentWidget(self, page: QWidget) -> None:  # noqa: N802 (Qt's name)
+        super().setCurrentWidget(self._areas.get(page, page))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt's name)
+        area = super().currentWidget()
+
+        return area.minimumSizeHint() if area is not None else super().minimumSizeHint()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt's name)
+        area = super().currentWidget()
+
+        return area.sizeHint() if area is not None else super().sizeHint()
+
+
 class MainWindow(QMainWindow):
     """
     The app.
@@ -104,7 +149,7 @@ class MainWindow(QMainWindow):
         self.view = "page"
 
         # The middle: the pages over the bottom panel
-        self.pages = QStackedWidget()
+        self.pages = PageStack()
         middle = QSplitter(Qt.Orientation.Vertical)
         middle.setObjectName("middle")
         middle.setHandleWidth(5)

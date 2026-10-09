@@ -12,7 +12,7 @@ import html
 import logging
 import re
 
-from PySide6.QtCore import QObject, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -130,8 +130,10 @@ class BottomPanel(QWidget):
     Tabs of text on the input fields' background: the tabs are flat buttons.
 
     Clicking a tab or the arrow opens the panel; clicking the open tab again
-    or the arrow closes it to its tab strip. It lives in `splitter` under the
-    pages, which take whatever height it leaves.
+    or the arrow closes it to its tab strip. Double-clicking a tab maximizes
+    the panel (the page above keeps only what it cannot do without), and
+    double-clicking again brings back the height it had. It lives in
+    `splitter` under the pages, which take whatever height it leaves.
 
     **USAGE**
     ```python
@@ -150,6 +152,11 @@ class BottomPanel(QWidget):
         self.splitter = splitter
         self.open_px = self.OPEN_PX
         self.current = 0
+        self.maximized = False
+
+        # A double-click starts with a click, which may already have closed
+        # the panel; the double-click acts on how things were before it
+        self._was_maximized = False
 
         self.header = QWidget()
         header_row = QHBoxLayout(self.header)
@@ -168,6 +175,7 @@ class BottomPanel(QWidget):
             tab.setCheckable(True)
             tab.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             tab.clicked.connect(lambda _=False, i=index: self._tab_clicked(i))
+            tab.installEventFilter(self)
             self.buttons.addButton(tab, index)
             header_row.addWidget(tab)
 
@@ -219,9 +227,13 @@ class BottomPanel(QWidget):
         self.texts["Log"].appendHtml(log_html(line))
 
     def set_open(self, opened: bool) -> None:
-        # Closing remembers the height, so opening again brings it back
-        if not opened and self.is_open() and self.isVisible():
+        # Closing remembers the height, so opening again brings it back (a
+        # maximized panel comes back at the height it had before)
+        if not opened and self.is_open() and self.isVisible() and not self.maximized:
             self.open_px = max(self.height(), 80)
+
+        if not opened:
+            self.maximized = False
 
         self.body.setHidden(not opened)
         self.toggle.setIcon(icon("panel-close" if opened else "panel-open"))
@@ -232,6 +244,9 @@ class BottomPanel(QWidget):
         own = self.open_px if opened else header_px
         total = sum(self.splitter.sizes())
 
+        if opened and self.maximized:
+            own = total  # the splitter keeps the page's minimum
+
         if total:
             self.splitter.setSizes([max(total - own, 0), own])
 
@@ -240,7 +255,29 @@ class BottomPanel(QWidget):
         self.buttons.button(index).setChecked(True)
         self.body.setCurrentIndex(index)
 
+    def toggle_maximized(self, index: int) -> None:
+        """Maximize the panel on tab `index`, or bring back its height."""
+        if not self.maximized and self.is_open() and self.isVisible():
+            self.open_px = max(self.height(), 80)
+
+        self.maximized = not self.maximized
+        self._select(index)
+        self.set_open(True)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.MouseButtonDblClick:
+            index = self.buttons.id(watched)
+
+            if index >= 0:
+                self.maximized = self._was_maximized
+                self.toggle_maximized(index)
+                return True
+
+        return super().eventFilter(watched, event)
+
     def _tab_clicked(self, index: int) -> None:
+        self._was_maximized = self.maximized
+
         if self.is_open() and index == self.current:
             self.set_open(False)
         else:

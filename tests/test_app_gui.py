@@ -20,7 +20,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # where either is missing, which is what leaves the rest of the suite runnable
 # on a bare machine.
 try:
-    from PySide6.QtCore import QEvent, QEventLoop
+    from PySide6.QtCore import QEvent, QEventLoop, Qt
     from PySide6.QtWidgets import QApplication, QFormLayout, QWidget
 
 except ImportError as error:  # a missing shared library is not a missing module
@@ -1587,6 +1587,57 @@ def test_the_submit_report_ends_with_what_was_written(window):
         " RESULT  submitted as session 12 (1 loop, 0 grabs, 0 z-stacks, "
         "2 annotations, sync processed for none) ✔",
     ]
+
+
+def test_the_panel_can_take_the_height_and_double_click_maximizes(window):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    panel, splitter = window.panel, window.panel.splitter
+    window.resize(1200, 700)
+    window.show_page(window.qc)  # the page that used to need the most height
+    panel.set_open(True)
+    QApplication.processEvents()
+
+    # Any page gives way: it scrolls instead
+    total = sum(splitter.sizes())
+    splitter.setSizes([0, total])
+    QApplication.processEvents()
+    assert splitter.sizes()[0] < 100
+    assert window.pages.currentWidget() is window.qc
+
+    splitter.setSizes([total - 200, 200])
+    QApplication.processEvents()
+    check = panel.buttons.button(panel.NAMES.index("Check"))
+
+    def double_click():
+        check.click()  # a double-click starts with a click
+        point = QPointF(5, 5)
+        QApplication.sendEvent(
+            check,
+            QMouseEvent(
+                QMouseEvent.Type.MouseButtonDblClick,
+                point,
+                check.mapToGlobal(point),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            ),
+        )
+        QApplication.processEvents()
+
+    double_click()
+    assert panel.maximized and panel.is_open()
+    assert splitter.sizes()[0] < 100
+
+    # A report keeps it as it is
+    panel.show_text("Check", "RESULT  ready to submit")
+    QApplication.processEvents()
+    assert panel.maximized and splitter.sizes()[0] < 100
+
+    double_click()
+    assert not panel.maximized and panel.is_open()
+    assert abs(splitter.sizes()[1] - 200) < 10
 
 
 def test_bottom_bar_shows_what_is_hovered_and_what_the_app_says(window):
