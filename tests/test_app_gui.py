@@ -1567,7 +1567,7 @@ def test_the_submit_report_ends_with_what_was_written(window):
         session_id=12,
         loops={"e1": 1},
         annotations=2,
-        process_failed={"e1": "ValueError: 5 frame bursts but 2 acquisitions"},
+        process_failed={"e1": "5 frame bursts but 2 acquisitions"},
     )
     result = SubmitResult(
         draft.label,
@@ -1581,8 +1581,7 @@ def test_the_submit_report_ends_with_what_was_written(window):
         f"CHECKED  {draft.label} (0 errors, 2 warnings)",
         "",
         "     e1  no olfactometer Events file found",
-        "     e1  could not process the sync file: ValueError: 5 frame bursts but "
-        "2 acquisitions",
+        "     e1  could not process the sync file: 5 frame bursts but 2 acquisitions",
         "",
         " RESULT  submitted as session 12 (1 loop, 0 grabs, 0 z-stacks, "
         "2 annotations, sync processed for none) ✔",

@@ -2849,8 +2849,7 @@ def _check_session(recording: Object, session: sqlite3.Row, db: Database) -> Non
     if (mouse, day) != (session["mouse_id"], session["session_date"]):
         db.fail(
             IngestFlag.NOT_THE_SESSION,
-            f"'{name}' is about mouse {mouse} on {day}, but session "
-            f"{session['session_id']} is about mouse {session['mouse_id']} on "
+            f"'{name}' is not about m{session['mouse_id']} on "
             f"{session['session_date']}.",
         )
 

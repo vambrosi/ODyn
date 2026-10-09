@@ -687,3 +687,14 @@ def test_submit_adds_the_grabs_and_zstacks_with_their_notes(a_day):
     again = Draft.load(draft.path)
     assert submit(db, again, force=True).submitted
     assert len(db.grabs) == 2 and len(db.zstacks) == 1
+
+
+def test_an_error_reads_as_odyn_wrote_it():
+    from odyn.app.submit import described
+
+    assert described(RuntimeError("'x' is not about m1 on 2026-01-01.")) == (
+        "'x' is not about m1 on 2026-01-01"
+    )
+    assert described(FileNotFoundError("No olfactometer log")) == "No olfactometer log"
+    assert described(KeyError("mouse_id")) == "KeyError: 'mouse_id'"
+    assert described(ZeroDivisionError()) == "ZeroDivisionError"

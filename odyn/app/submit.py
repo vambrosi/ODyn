@@ -602,7 +602,7 @@ def submit(
 
     except Exception as error:  # a failed step is reported, not raised
         logger.exception(f"Submit of {draft.label} failed")
-        result.error = f"{type(error).__name__}: {error}"
+        result.error = described(error)
 
     result.written = written
 
@@ -610,6 +610,21 @@ def submit(
         draft.archive()
 
     return result
+
+
+def described(error: Exception) -> str:
+    """
+    An error as the Check report shows it, without a final period. The ones
+    ODyn raises to explain a refusal (`RuntimeError`, `ValueError`, `OSError`)
+    read as they are; any other keeps its type, which is all a bare
+    `KeyError: 'x'` says.
+    """
+    text = str(error).rstrip().rstrip(".")
+
+    if isinstance(error, (RuntimeError, ValueError, OSError)) and text:
+        return text
+
+    return f"{type(error).__name__}: {text}" if text else type(error).__name__
 
 
 def copy_olfactometer(
@@ -726,7 +741,7 @@ def _submit_loop(db, draft: Draft, entry: dict, session_id: int, written) -> Non
 
         except Exception as error:
             logger.exception(f"Processing the sync file of {name} failed")
-            written.process_failed[name] = f"{type(error).__name__}: {error}"
+            written.process_failed[name] = described(error)
 
 
 def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> None:
@@ -780,9 +795,7 @@ def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> No
 
         except Exception as error:
             logger.exception(f"Processing {record['file']} failed")
-            written.process_failed[f"{name}/{record['file']}"] = (
-                f"{type(error).__name__}: {error}"
-            )
+            written.process_failed[f"{name}/{record['file']}"] = described(error)
 
 
 def _write_conditions(db, draft: Draft, name: str, loop_id: int, entry: dict) -> int:

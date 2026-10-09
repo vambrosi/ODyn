@@ -1143,10 +1143,7 @@ class Sessions(QObject):
             )
 
         if result.error:
-            outcome = (
-                f"stopped: {result.error} (draft is kept, submit again after fixing "
-                f"it) {CROSS}"
-            )
+            outcome = f"stopped: {result.error} (submit again after fixing it) {CROSS}"
 
         self._report(draft, problems, outcome)
 
