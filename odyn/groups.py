@@ -61,6 +61,11 @@ if TYPE_CHECKING:
 # Default motion-correction parameters (in um). Single source shared by
 # run_motion_correction and pick_mcor_parameters so the two never drift.
 DEFAULT_STRIDES_UM = [128.0, 128.0]
+
+# The reference every acquisition is aligned to is built from this many
+# acquisitions (around the middle of the loop), about this many frames in all
+REFERENCE_ACQS = 4
+REFERENCE_FRAMES = 200
 DEFAULT_OVERLAP_UM = [96.0, 96.0]
 DEFAULT_MAX_SHIFT_UM = [128.0, 128.0]
 DEFAULT_MAX_DEVIATION_UM = 12.0
@@ -1687,6 +1692,7 @@ class Group(CallRecorder):
         first_acq: int = 0,
         step_acq: int = 1,
         last_acq: int = 3,
+        reference_acqs: int = REFERENCE_ACQS,
         border_nan: bool | str = "copy",
         nonneg_movie: bool = False,
         pw_rigid: bool = True,
@@ -1717,6 +1723,14 @@ class Group(CallRecorder):
         - `first_acq`: Index of the first acquisition to motion correct
         - `step_acq`: Get one acquisition for every 'step_acq' acquisitions
         - `last_acq`: Index of the last acquisition to motion correct
+
+        *Reference*
+        - `reference_acqs`: how many acquisitions, spread around the middle of
+        the loop, the reference image is built from. Every acquisition is
+        aligned to that one image (saved as `reference_group_<id>.tif` in the
+        `processed/mcor` folder of the first). `0` leaves it to caiman, which
+        aligns each acquisition to the template of the one before, starting
+        from the first.
 
         *CaImAn motion correction parameters (before metadata adjustments)*
         - `border_nan`: copy along the boundary (if `True`, fill in with NaN)
@@ -1835,13 +1849,18 @@ class Group(CallRecorder):
         logger.info(f"Using {n_processes} workers.")
         self.update_parameters_used({"n_processes": n_processes})
 
+        template = None
+
+        if reference_acqs > 0:
+            template = self._reference_template(reference_acqs, settings["max_shifts"])
+
         _, dview, _ = cm.cluster.setup_cluster(
             backend="multiprocessing", n_processes=n_processes, single_thread=False
         )
 
         try:
             self.mc = MotionCorrect(raw_paths, dview=dview, **settings)
-            self.mc.motion_correct(save_movie=True)
+            self.mc.motion_correct(template=template, save_movie=True)
 
         except:
             raise
@@ -1916,6 +1935,32 @@ class Group(CallRecorder):
         # Reset mcor DataFrames
         self._tables.pop("mcor_files", None)
         self.db._tables.pop("mcor_files", None)
+
+    def _reference_template(self, wanted: int, max_shifts) -> np.ndarray:
+        """
+        Build, save and record the image `run_motion_correction` aligns every
+        acquisition to (see `odyn.registration`), from `wanted` acquisitions
+        of the whole group, test run or not, so tests and the final share it.
+        """
+        from .registration import reference_acquisitions, reference_image, sample_frames
+
+        acquisitions = self.acquisitions
+        chosen = acquisitions.iloc[reference_acquisitions(len(acquisitions), wanted)]
+        paths = [self.db.main_folder / p for p in chosen["raw_path"]]
+        acq_ids = [int(i) for i in chosen.index]
+
+        logger.info(f"Building the reference image from acquisitions {acq_ids}...")
+        frames = sample_frames(paths, per_file=max(1, REFERENCE_FRAMES // len(paths)))
+        template = reference_image(frames, max_shifts)
+
+        folder = paths[0].parent.parent / "processed" / "mcor"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"reference_group_{self.group_id}.tif"
+        tifffile.imwrite(path, template)
+        self.add_output_file(path)
+        self.update_parameters_used({"reference_acq_ids": acq_ids})
+
+        return template
 
     @record_call
     def add_mcor_files(
