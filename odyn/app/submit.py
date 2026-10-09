@@ -34,10 +34,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..database import SYNC_FOLDER, read_tiff
-from ..utils import logger
+from ..database import OLFACTOMETER_FOLDER, SYNC_FOLDER, read_tiff
+from ..utils import INFO_FOLDER, logger
 from .draft import FILE_SETTINGS, KINDS, PART_SETTINGS, Draft
 from .fields import annotation_fields, form_fields, missing_required
+from .olfactometer import OlfactometerFolders, copy_for_loop, loop_window
 from .recordings import pending, sync_pending
 
 RAW_FOLDER = "raw"
@@ -157,12 +158,16 @@ def running(session: str, doing: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def check(db, draft: Draft) -> list[Problem]:
+def check(
+    db, draft: Draft, olfactometer: None | OlfactometerFolders = None
+) -> list[Problem]:
     """
     Everything wrong with a draft, blocking problems first.
 
-    Looks at the database (is the mouse registered, are the vials real) and at
-    the share (are the recordings there), but writes nothing.
+    Looks at the database (is the mouse registered, are the vials real), at
+    the share (are the recordings there) and, given `olfactometer`, at the
+    olfactometer's folders on this computer (are there files to copy), but
+    writes nothing.
     """
     problems: list[Problem] = []
 
@@ -238,6 +243,11 @@ def check(db, draft: Draft) -> list[Problem]:
         if folder.is_dir():
             problems += _folder_problems(
                 where, folder / name, entry.get("kind"), name in local_only
+            )
+
+        if kind == "loop" and (folder / name).is_dir():
+            problems += _olfactometer_problems(
+                where, entry, folder / name, db, olfactometer
             )
 
     if draft.vial_ids:
@@ -454,6 +464,47 @@ def _spans(numbers: list[int]) -> str:
     return ", ".join(f"{a}-{b}" if a != b else f"{a}" for a, b in spans)
 
 
+def _olfactometer_problems(
+    where: str,
+    entry: dict,
+    folder: Path,
+    db,
+    olfactometer: None | OlfactometerFolders,
+) -> list[Problem]:
+    """
+    What a loop's olfactometer files are missing. Submit copies the runs that
+    started while the loop's sync file was recording, so a loop is fine when
+    it has its Events files already or there are runs to copy; and it then
+    needs the day's program log, in the loop or on this computer.
+    """
+    window = loop_window(entry)
+    runs = (
+        olfactometer.runs_during(*window)
+        if olfactometer is not None and window is not None
+        else []
+    )
+
+    if not runs and not any(folder.rglob(EVENTS_PATTERN)):
+        searched = olfactometer is not None and window is None
+        why = " (no recording to find its runs by)" if searched else ""
+        return [
+            Problem(where, f"no olfactometer Events file found{why}", blocking=False)
+        ]
+
+    day = window[0] if window is not None else None
+    logs = list((folder / OLFACTOMETER_FOLDER / "log").glob("Program_*.txt"))
+
+    if day is not None and not logs:
+        name = f"Program_{day:%Y%m%d}.txt"
+        shared = Path(db.main_folder) / INFO_FOLDER / f"{day:%Y%m}" / name
+        here = olfactometer is not None and olfactometer.program_log(day).is_file()
+
+        if not here and not shared.is_file():
+            return [Problem(where, f"no olfactometer log for {day:%Y-%m-%d} ({name})")]
+
+    return []
+
+
 def _folder_problems(
     where: str, folder: Path, kind, sync_pending: bool = False
 ) -> list[Problem]:
@@ -471,11 +522,6 @@ def _folder_problems(
     # A grab's sync recording is optional, and its files add up
 
     if kind == "loop":
-        if not any(folder.rglob(EVENTS_PATTERN)):
-            problems.append(
-                Problem(where, "no olfactometer Events file found", blocking=False)
-            )
-
         syncs = [
             p for p in (folder / SYNC_FOLDER).glob("*.h5") if not p.name.startswith(".")
         ]
@@ -506,14 +552,20 @@ def _folder_problems(
 
 
 def submit(
-    db, draft: Draft, *, force: bool = False, busy: Container[str] = ()
+    db,
+    draft: Draft,
+    *,
+    force: bool = False,
+    busy: Container[str] = (),
+    olfactometer: None | OlfactometerFolders = None,
 ) -> SubmitResult:
     """
     Put a finished draft in the database.
 
     First copies to the share the sync recordings that are only on this
-    computer (any in `busy` are still being written, and are left); one that
-    cannot be copied blocks. Then refuses while `check` finds a blocking
+    computer (any in `busy` are still being written, and are left), and,
+    given `olfactometer`, each loop's olfactometer files (see
+    `copy_olfactometer`); a copy that fails blocks. Then refuses while `check` finds a blocking
     problem, unless `force`. Otherwise creates (or finds) the session, writes
     its annotations, then each loop and the grabs and z-stacks (see the
     module's description). Steps already done by an earlier attempt are
@@ -523,6 +575,9 @@ def submit(
         name for name, record in pending(draft).items() if record["local"] in busy
     ]
     not_copied = sync_pending(Path(db.main_folder), draft, busy)
+    olfactometer_failed = (
+        {} if olfactometer is None else copy_olfactometer(db, draft, olfactometer)
+    )
     result = SubmitResult(
         draft.label,
         [Problem(name, "still recording (stop it first)") for name in recording]
@@ -530,7 +585,11 @@ def submit(
             Problem(name, f"could not copy the sync file to the server: {why}")
             for name, why in not_copied.items()
         ]
-        + check(db, draft),
+        + [
+            Problem(name, f"could not copy the olfactometer files: {why}")
+            for name, why in olfactometer_failed.items()
+        ]
+        + check(db, draft, olfactometer),
     )
 
     if result.blocked and not force:
@@ -551,6 +610,40 @@ def submit(
         draft.archive()
 
     return result
+
+
+def copy_olfactometer(
+    db, draft: Draft, olfactometer: OlfactometerFolders
+) -> dict[str, str]:
+    """
+    Copy into each loop folder not submitted yet the olfactometer files it
+    needs (`olfactometer.copy_for_loop`), for the loops with a recording and a
+    folder on the share. Returns why it failed, by loop name.
+    """
+    failed = {}
+    session = Path(db.main_folder) / draft.folder
+
+    for entry in draft.parts:
+        if entry.get("kind") != "loop" or entry.get("submitted_id") is not None:
+            continue
+
+        name = str(entry["name"])
+        window = loop_window(entry)
+
+        if window is None or not (session / name).is_dir():
+            continue
+
+        try:
+            copied = copy_for_loop(olfactometer, session / name, window)
+            logger.info(
+                f"Copied the olfactometer files of {name}: {len(copied.runs)} runs, "
+                f"log {copied.log or 'not found'}, {len(copied.config)} config files."
+            )
+
+        except OSError as error:
+            failed[name] = str(error)
+
+    return failed
 
 
 def _submit(db, draft: Draft, written: Written) -> None:

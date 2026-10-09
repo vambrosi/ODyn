@@ -13,6 +13,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QMessageBox, QWidget
 from shiboken6 import isValid
 
+from .olfactometer import OlfactometerFolders
 from .recordings import LOCAL_FOLDER
 from .worker import DatabaseWorker, Job
 
@@ -45,6 +46,9 @@ class Context(QObject):
         self.worker = worker
         self.main_folder = Path(main_folder)
         self.drafts = Path(drafts)
+
+        # Where the olfactometer keeps its files here (settings beside the drafts)
+        self.olfactometer = OlfactometerFolders.read(self.drafts.parent)
         self._user = worker.user
         self.window: None | QWidget = None
         self.draft: Any = None  # a `Draft`, or None

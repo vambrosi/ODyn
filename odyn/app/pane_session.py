@@ -1083,7 +1083,7 @@ class Sessions(QObject):
 
         self.reported.emit(running(draft.label, "checking"))
         self.context.run(
-            lambda db: check(db, draft),
+            lambda db: check(db, draft, self.context.olfactometer),
             lambda problems: self._report(
                 draft,
                 problems,
@@ -1108,7 +1108,9 @@ class Sessions(QObject):
         busy = {self.context.recording_now} - {None}
 
         self.context.run(
-            lambda db: submit(db, draft, busy=busy),
+            lambda db: submit(
+                db, draft, busy=busy, olfactometer=self.context.olfactometer
+            ),
             lambda result: self._submitted(draft, result),
             "submit",
             writes=True,

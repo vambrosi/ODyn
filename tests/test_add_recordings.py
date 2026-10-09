@@ -315,23 +315,45 @@ def test_a_zstack_is_for_a_loop_of_its_own_session(tmp_path):
 def test_program_definitions_are_read_by_name(tmp_path):
     from odyn.database import _program_configs
 
-    folder = tmp_path / "olfactometer"
-    folder.mkdir()
+    def node(name, program=None, items=(), folder=False):
+        return {
+            "Name": name,
+            "IsFolder": folder,
+            "Program": program,
+            "Items": list(items),
+        }
 
-    (folder / "a.json").write_text(
-        json.dumps({"Name": "16odors passive", "Trials": []})
-    )
-    (folder / "b.json").write_text(
-        json.dumps({"Id": "x", "Program": {"Name": "Empty channels", "Trials": []}})
-    )
-    (folder / "c.json").write_text("{not json")
-    (folder / "d.json").write_text(json.dumps({"no": "name"}))
+    passive = {"Name": "16odors passive", "Trials": []}
+    nodes = [
+        node("16odors passive", passive),
+        node(
+            "4.x series",
+            folder=True,
+            items=[
+                node("Buffer program", {"Name": "Buffer program", "Odor": 1}),
+                node("Quick test", {"Name": "Quick test", "Odor": 1}),
+            ],
+        ),
+        node(
+            "5.x series",
+            folder=True,
+            items=[
+                node("Buffer program", {"Name": "Buffer program", "Odor": 1}),
+                node("Quick test", {"Name": "Quick test", "Odor": 2}),
+            ],
+        ),
+    ]
+    folder = tmp_path / "config"
+    folder.mkdir()
+    # The olfactometer writes it with a byte-order mark
+    (folder / "Program.config").write_text(json.dumps(nodes), encoding="utf-8-sig")
 
     configs = _program_configs(folder)
 
-    assert set(configs) == {"16odors passive", "Empty channels"}
-    assert json.loads(configs["Empty channels"]) == {
-        "Name": "Empty channels",
-        "Trials": [],
-    }
+    # Found in folders too; a name kept by two different programs is left out
+    assert set(configs) == {"16odors passive", "Buffer program"}
+    assert json.loads(configs["16odors passive"]) == passive
     assert _program_configs(tmp_path / "missing") == {}
+
+    (folder / "Program.config").write_text("{not json")
+    assert _program_configs(folder) == {}

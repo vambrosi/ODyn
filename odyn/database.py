@@ -95,8 +95,10 @@ CONTRACT = (
     "z_um",
 )
 
-# Where the GUI leaves the olfactometer's own definition of the programs a
-# loop ran, one JSON file per program, inside the loop folder.
+# Where the app copies the olfactometer's own files a loop needs, inside the
+# loop folder: `config/` (its settings, `Program.config` among them), `log/`
+# (the day's `Program_<yyyymmdd>.txt`) and `data/` (one folder per program
+# run, with its Events file)
 OLFACTOMETER_FOLDER = "olfactometer"
 
 # Where the sync H5 of a loop lives, inside the loop folder (and of the grabs,
@@ -2580,13 +2582,13 @@ class Database(CallRecorder):
         events_start = datetime.strptime(
             " ".join(stem_split[-3:-1]), "%Y_%m_%d %H_%M_%S"
         )
-        program_starts = _parse_program_starts(self, events_start)
+        program_starts = _parse_program_starts(self, events_start, folder)
 
         programs_data = _load_event_data(
             event_files, program_starts, odors, self.main_folder
         )
 
-        configs = _program_configs(folder / OLFACTOMETER_FOLDER)
+        configs = _program_configs(folder / OLFACTOMETER_FOLDER / "config")
 
         for program_data in programs_data:
             name = program_data["metadata"]["program_name"]
@@ -2900,36 +2902,52 @@ def _insert_program(cur: Cursor, loop_id: int, program_data: dict) -> int:
 
 def _program_configs(folder: Path) -> dict[str, str]:
     """
-    The olfactometer's program definitions left in a loop folder.
+    The program definitions in the olfactometer's `Program.config`, copied
+    into `folder` (a loop's `olfactometer/config`), keyed by program name as
+    JSON text ready to store.
 
-    One JSON file per program, as the olfactometer's `Program.config` holds it
-    (a dict with a `Name`). Keyed by that name, as JSON text ready to store.
+    The file is a tree of folders and programs. A name used by programs that
+    differ (the same name in two folders) is left out with a warning, since
+    the log names a program only by its name.
     """
-    configs: dict[str, str] = {}
+    path = folder / "Program.config"
 
-    if not folder.is_dir():
-        return configs
+    if not path.is_file():
+        return {}
 
-    for path in sorted(folder.glob("*.json")):
-        if path.name.startswith("."):
+    try:
+        nodes = json.loads(path.read_text(encoding="utf-8-sig"))
+    except ValueError:
+        logger.warning(f"Could not read '{path.name}' as JSON.")
+        return {}
+
+    found: dict[str, set[str]] = {}
+
+    def walk(items) -> None:
+        for node in items if isinstance(items, list) else []:
+            if not isinstance(node, dict):
+                continue
+
+            program = node.get("Program")
+
+            if not node.get("IsFolder") and isinstance(program, dict):
+                name = str(node.get("Name") or program.get("Name"))
+                found.setdefault(name, set()).add(json.dumps(program, sort_keys=True))
+
+            walk(node.get("Items"))
+
+    walk(nodes)
+    configs = {}
+
+    for name, definitions in found.items():
+        if len(definitions) > 1:
+            logger.warning(
+                f"'{name}' names {len(definitions)} different programs in "
+                f"'{path.name}', so its definition is not stored."
+            )
             continue
 
-        try:
-            loaded = json.loads(path.read_text())
-
-        except ValueError:
-            logger.warning(f"Could not read '{path.name}' as JSON.")
-            continue
-
-        # Either the program itself or the tree node that wraps it
-        program = loaded.get("Program", loaded) if isinstance(loaded, dict) else None
-        name = program.get("Name") if isinstance(program, dict) else None
-
-        if name is None:
-            logger.warning(f"'{path.name}' does not look like a program config.")
-            continue
-
-        configs[name] = json.dumps(program)
+        configs[name] = definitions.pop()
 
     return configs
 
@@ -3571,17 +3589,28 @@ def _parse_event_file(path: Path, program_start: datetime) -> pd.DataFrame:
     return df
 
 
-def _parse_program_starts(db: Database, start: datetime) -> list[tuple[datetime, str]]:
-    """ "
-    Gets program starts after a certain datetime (-1s) from olfactometer log file.
+def _parse_program_starts(
+    db: Database, start: datetime, loop_folder: Path
+) -> list[tuple[datetime, str]]:
     """
+    The programs started on `start`'s day from `start` on (1 s earlier, for
+    rounding), read from the olfactometer's log for that day. That is the
+    copy in the loop's `olfactometer/log/`, or else the one in the main
+    folder's `.odyn/olfactometer/Log/Info/` (where older loops left it).
+    """
+    name = f"Program_{start.date().strftime('%Y%m%d')}.txt"
+    candidates = [
+        loop_folder / OLFACTOMETER_FOLDER / "log" / name,
+        db.main_folder / INFO_FOLDER / start.date().strftime("%Y%m") / name,
+    ]
+    log_path = next((path for path in candidates if path.is_file()), None)
 
-    log_path = (
-        db.main_folder
-        / INFO_FOLDER
-        / start.date().strftime("%Y%m")
-        / f"Program_{start.date().strftime('%Y%m%d')}.txt"
-    )
+    if log_path is None:
+        raise FileNotFoundError(
+            f"No olfactometer log for {start.date()} (looked for "
+            f"{' and '.join(repr(str(p)) for p in candidates)}). The app copies it "
+            "into the loop's olfactometer/log at Submit."
+        )
 
     starts = []
 
