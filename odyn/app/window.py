@@ -41,6 +41,7 @@ from .context import Context
 from .draft import FOLDER_OF, Draft, drafts_folder
 from .forms import WheelGuard
 from .guide import Guide
+from .macos import name_bundle, name_process
 from .pane_qc import QcPane
 from .pane_recorder import RecorderPane
 from .pane_registry import MicePane, OdorsPane, PanelsPane, UsersPane
@@ -654,7 +655,7 @@ def open_window(
     put in when it appears (empty until then), so a caller can wait on it.
     """
     if QApplication.instance() is None:
-        _name_on_macos(APP_NAME)
+        name_bundle(APP_NAME)
 
     app = QApplication.instance() or QApplication([])
     app.setApplicationName(APP_NAME)
@@ -666,6 +667,7 @@ def open_window(
         window = MainWindow(worker, drafts=drafts, recorder_source=recorder_source)
         windows.append(window)
         window.show()
+        QTimer.singleShot(0, lambda: name_process(APP_NAME))
 
     def failed(message: str):
         QMessageBox.critical(None, "ODyn", f"Could not open the database:\n{message}")
@@ -680,59 +682,6 @@ def open_window(
 
 APP_NAME = "ODyn"
 APP_ICON = Path(__file__).parent / "assets" / "odyn.png"
-
-
-def _name_on_macos(name: str) -> None:
-    """
-    Give the process `name` in the macOS menu bar and Dock, which otherwise
-    show the Python executable's name. Has to run before the `QApplication`
-    exists: macOS reads the name (`CFBundleName` of the main bundle) once,
-    when the application starts. Does nothing elsewhere, or when the bundle's
-    info cannot be changed.
-    """
-    if sys.platform != "darwin":
-        return
-
-    import ctypes
-    import ctypes.util
-
-    try:
-        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
-        ctypes.cdll.LoadLibrary(ctypes.util.find_library("Foundation"))
-    except (OSError, TypeError):
-        return
-
-    objc.objc_getClass.restype = ctypes.c_void_p
-    objc.objc_getClass.argtypes = [ctypes.c_char_p]
-    objc.sel_registerName.restype = ctypes.c_void_p
-    objc.sel_registerName.argtypes = [ctypes.c_char_p]
-
-    def send(receiver, selector: bytes, *args, returns=ctypes.c_void_p):
-        # A fresh function object per signature, since argtypes differ
-        function = ctypes.CFUNCTYPE(
-            returns,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            *(
-                ctypes.c_char_p if isinstance(a, bytes) else ctypes.c_void_p
-                for a in args
-            ),
-        )(("objc_msgSend", objc))
-
-        return function(receiver, objc.sel_registerName(selector), *args)
-
-    def string(text: str):
-        return send(
-            objc.objc_getClass(b"NSString"), b"stringWithUTF8String:", text.encode()
-        )
-
-    bundle = send(objc.objc_getClass(b"NSBundle"), b"mainBundle")
-    info = send(bundle, b"infoDictionary") if bundle else None
-    can_set = objc.sel_registerName(b"setObject:forKey:")
-
-    # Only a mutable dictionary takes the name (an immutable one would abort)
-    if info and send(info, b"respondsToSelector:", can_set, returns=ctypes.c_bool):
-        send(info, b"setObject:forKey:", string(name), string("CFBundleName"))
 
 
 def _set_app_icon(app: QApplication) -> None:
