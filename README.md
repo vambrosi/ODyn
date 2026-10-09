@@ -30,6 +30,18 @@ pip install -e ODYN_PATH
 
 where `ODYN_PATH` is the folder where you installed `odyn`.
 
+## The entry app
+
+The app that records and submits experiments needs the `gui` extras. Install them, then make a launcher for it (a desktop shortcut on Windows, an app in `~/Applications` on macOS) that opens it on the main folder:
+
+```bash
+conda activate caiman
+pip install -e "ODYN_PATH[gui]"
+python -m odyn.app.install MAIN_FOLDER
+```
+
+where `MAIN_FOLDER` is the folder with the data and its `.odyn` folder (`Z:\ImagingData` on the olfactometer PC). Run the last line again to change the folder, or with `--name "ODyn test"` to make a second launcher (for a test folder, say).
+
 ## Usage
 
 Create a notebook file (extension `.ipynb`) in VS Code, and run `from odyn import Database, Group` in a cell. You will get more instructions after that. You will also need to select `caiman` as your _Python Environment_ and install the Jupyter extension (you will get prompts after you try to run a notebook cell).

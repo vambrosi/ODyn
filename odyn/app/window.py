@@ -41,7 +41,6 @@ from .context import Context
 from .draft import FOLDER_OF, Draft, drafts_folder
 from .forms import WheelGuard
 from .guide import Guide
-from .macos import name_bundle, name_process
 from .pane_qc import QcPane
 from .pane_recorder import RecorderPane
 from .pane_registry import MicePane, OdorsPane, PanelsPane, UsersPane
@@ -654,9 +653,6 @@ def open_window(
     Returns the application, the worker and a one-element list the window is
     put in when it appears (empty until then), so a caller can wait on it.
     """
-    if QApplication.instance() is None:
-        name_bundle(APP_NAME)
-
     app = QApplication.instance() or QApplication([])
     app.setApplicationName(APP_NAME)
     _set_app_icon(app)
@@ -667,7 +663,6 @@ def open_window(
         window = MainWindow(worker, drafts=drafts, recorder_source=recorder_source)
         windows.append(window)
         window.show()
-        QTimer.singleShot(0, lambda: name_process(APP_NAME))
 
     def failed(message: str):
         QMessageBox.critical(None, "ODyn", f"Could not open the database:\n{message}")
