@@ -118,7 +118,9 @@ def my_recordings(db, user: None | str) -> pd.DataFrame:
     frame = pd.DataFrame(rows, columns=["kind", "id", *COLUMNS[1:]])
     frame = frame.set_index(["kind", "id"], drop=False).drop(columns="id")
 
-    return frame.sort_values("submitted_at", ascending=False)
+    # Newest first: the rows are in the order of the calls (and of the ids
+    # within one), so reversed they break ties of `submitted_at` the same way
+    return frame.iloc[::-1].sort_values("submitted_at", ascending=False, kind="stable")
 
 
 def _loop_sync_flags(db) -> dict[tuple[str, int], str]:
@@ -163,19 +165,23 @@ def sync_flags(call_flag: int) -> str:
 
 
 def my_missing(db, mine: pd.DataFrame) -> pd.DataFrame:
-    """The required annotations still empty on `mine`'s recordings."""
+    """
+    The required annotations still empty on `mine`'s recordings, in the order
+    of `mine` (newest first).
+    """
     missing = db.missing_annotations()
 
     if missing.empty or mine.empty:
         return missing.iloc[0:0]
 
-    targets = set(mine.index)
-    on_mine = [
-        (kind, int(row_id)) in targets
+    rank = {target: position for position, target in enumerate(mine.index)}
+    order = [
+        rank.get((kind, int(row_id)))
         for kind, row_id in zip(missing["target_type"], missing["target_id"])
     ]
+    missing = missing.assign(_rank=order).dropna(subset="_rank")
 
-    return missing[on_mine]
+    return missing.sort_values("_rank", kind="stable").drop(columns="_rank")
 
 
 class QcPane(QWidget):

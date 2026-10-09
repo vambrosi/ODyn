@@ -104,7 +104,7 @@ def report(session: str, problems: list[Problem], parts: list[str], result: str)
     """
     The Check tab's report on `session`: a header counting errors (problems
     that stop a submit) and warnings, then the problems in one block per page
-    (the session's, `vials` included, then each experiment in the order of
+    (the user's, the session's with `vials`, then each experiment in the order of
     `parts`), then `result` on the last line.
 
     **USAGE**
@@ -118,7 +118,7 @@ def report(session: str, problems: list[Problem], parts: list[str], result: str)
         page = problem.where.split("/")[0]
         blocks.setdefault("session" if page == "vials" else page, []).append(problem)
 
-    order = ["session", *parts]
+    order = ["user", "session", *parts]
     groups = sorted(
         blocks, key=lambda group: order.index(group) if group in order else len(order)
     )
@@ -164,12 +164,21 @@ def check(
     """
     Everything wrong with a draft, blocking problems first.
 
-    Looks at the database (is the mouse registered, are the vials real), at
+    Looks at the database (is the one submitting a user, is the mouse
+    registered, are the vials real), at
     the share (are the recordings there) and, given `olfactometer`, at the
     olfactometer's folders on this computer (are there files to copy), but
     writes nothing.
     """
     problems: list[Problem] = []
+
+    # The QC page lists a session under who submitted it, so that has to be
+    # someone on the Users page (`db.user` is the computer's login until then)
+    users = db.users
+    active = users.loc[~users["retired"].astype(bool), "user_name"]
+
+    if db.user not in set(active):
+        problems.append(Problem("user", "didn't pick a user yet (Users page)"))
 
     if draft.mouse_id is None:
         problems.append(Problem("session", "didn't pick a mouse yet"))

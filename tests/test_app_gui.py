@@ -782,16 +782,20 @@ def test_qc_lists_every_kind_of_recording_this_user_submitted(tmp_path):
     )
 
     mine = my_recordings(db, "ana")
-    assert set(mine.index) == {("loop", loop_id), ("grab", grab_id)}
+    assert list(mine.index) == [("grab", grab_id), ("loop", loop_id)]  # newest first
     assert mine.loc[("grab", grab_id), "path"].endswith("_grabs_00001.tif")
     assert mine.loc[("loop", loop_id), "path"] == "20260304/m1/e1"
     assert set(mine["sync"]) == {"not processed"}
     assert my_recordings(db, "someone else").empty
 
+    # A key made required afterwards asks for it on what is already in, in
+    # the order of the submissions
+    db.update_annotation_key(applies_to="loop", key="goal", required=True)
     db.update_annotation_key(applies_to="grab", key="goal", required=True)
     missing = my_missing(db, mine)
     assert list(zip(missing["target_type"], missing["target_id"])) == [
-        ("grab", grab_id)
+        ("grab", grab_id),
+        ("loop", loop_id),
     ]
 
 
@@ -1531,7 +1535,9 @@ def test_check_opens_the_panel_and_the_log_follows_the_database(window):
     draft = window.sessions.current
     check_tab = panel.texts["Check"]
     assert check_tab.toPlainText().split("\n") == [
-        f"CHECKED  {draft.label} (1 error, 0 warnings)",
+        f"CHECKED  {draft.label} (2 errors, 0 warnings)",
+        "",
+        "   user  didn't pick a user yet (Users page)",
         "",
         "session  didn't pick a mouse yet",
         "",

@@ -173,6 +173,7 @@ def share(tmp_path):
     generate_sync(tmp_path / "20260101/m1/e1/sync/m1_e1.h5", acquisitions=3, frames=56)
 
     db = Database(tmp_path, can_create=True, user="tester")
+    db.add_user(user_name="tester")
     db.set_mouse(mouse_id=1)
     db.add_panel(panel_name="p", positions={1: 0})
     vials = db.add_vials(
@@ -232,6 +233,11 @@ def test_problems_are_listed_one_block_per_page():
 
 def test_check_lists_what_is_wrong(share):
     db, draft = share
+
+    # Submitting needs someone from the Users page, not the computer's login
+    object.__setattr__(db, "user", "lab-pc")
+    assert str(check(db, draft)[0]) == "user: didn't pick a user yet (Users page)"
+    object.__setattr__(db, "user", "tester")
 
     # Only the advisory: the synthetic share has no olfactometer files
     assert [str(p) for p in check(db, draft)] == [
@@ -621,6 +627,7 @@ def a_day(tmp_path):
     )
 
     db = Database(tmp_path, can_create=True, user="tester")
+    db.add_user(user_name="tester")
     db.set_mouse(mouse_id=1)
 
     draft = Draft.start(tmp_path / "drafts", mouse_id=1, date="2026-03-04")

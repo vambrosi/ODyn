@@ -266,10 +266,15 @@ QStatusBar::item {{
 }}
 QSplitter#middle::handle:vertical {{
     /* one line at the top of a 5 px handle, so it is easy to grab; the
-       rest is the bottom panel's color */
+       rest is the bottom panel's color, open or closed */
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 {c['line']}, stop:0.2 {c['line']},
-        stop:0.21 palette(base), stop:1 palette(base));
+        stop:0.201 palette(base), stop:1 palette(base));
+}}
+QSplitter#middle[panelOpen="false"]::handle:vertical {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {c['line']}, stop:0.2 {c['line']},
+        stop:0.201 palette(window), stop:1 palette(window));
 }}
 QSplitter#tableAndForm::handle:horizontal {{
     /* one line in the middle of a 5 px handle, so it is easy to grab */

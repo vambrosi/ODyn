@@ -247,9 +247,10 @@ class BottomPanel(QWidget):
 
         # Closed, the header is part of the window around it
         if self.property("open") != opened:
-            self.setProperty("open", opened)
-            self.style().unpolish(self)
-            self.style().polish(self)
+            for widget, name in ((self, "open"), (self.splitter, "panelOpen")):
+                widget.setProperty(name, opened)
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
 
         header_px = self.header.sizeHint().height()
         self.setMaximumHeight(UNLIMITED_PX if opened else header_px)
