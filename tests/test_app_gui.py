@@ -795,6 +795,25 @@ def test_qc_lists_every_kind_of_recording_this_user_submitted(tmp_path):
     ]
 
 
+def test_qc_says_when_the_cluster_last_ran(tmp_path):
+    from datetime import datetime, timedelta
+
+    from odyn.app.pane_qc import cluster_line
+    from odyn.cluster import send_request, tick
+
+    db = Database(tmp_path, can_create=True, user="ana")
+    assert cluster_line(db) == ("The cluster has not run yet", "computed")
+
+    tick(tmp_path)
+    send_request(tmp_path, "process_sync", loop_id=1)
+    text, kind = cluster_line(db)
+    assert text.startswith("The cluster last ran at") and kind == "computed"
+    assert text.endswith("(0 min ago), 1 request waiting")
+
+    text, kind = cluster_line(db, now=datetime.now() + timedelta(hours=3))
+    assert "(3 h ago)" in text and "may have stopped" in text and kind == "warning"
+
+
 def test_worker_runs_jobs_in_order(app, tmp_path):
     Database(tmp_path, can_create=True)
     worker = DatabaseWorker(tmp_path, None, user="tester")

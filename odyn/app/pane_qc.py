@@ -27,9 +27,13 @@ from PySide6.QtWidgets import (
 
 from PySide6.QtCore import Qt
 
+from datetime import datetime
+
+from ..cluster import ClusterConfig, heartbeat, pending_requests
 from ..database import SyncFlag
 from .context import Context
 from .models import FrameModel, fit_columns
+from .style import text_style
 
 # The calls that add recordings, and the annotation target each adds
 INGEST_METHODS = {"add_loop": "loop", "add_grabs": "grab", "add_zstacks": "zstack"}
@@ -37,6 +41,32 @@ INGEST_METHODS = {"add_loop": "loop", "add_grabs": "grab", "add_zstacks": "zstac
 # Where each kind's folder (a loop) or file (the others) is
 PATH_COLUMN = {"loop": "loop_path", "grab": "raw_path", "zstack": "raw_path"}
 COLUMNS = ["kind", "path", "objective", "submitted_at", "sync"]
+
+
+def cluster_line(db, now: None | datetime = None) -> tuple[str, str]:
+    """
+    When the cluster last ran its tick, as `(text, kind)` for the QC page. The
+    kind is `warning` when the chain of ticks looks stopped (no tick for twice
+    its interval), else `computed`.
+    """
+    beat = heartbeat(db.main_folder, db.project)
+    waiting = len(pending_requests(db.main_folder, db.project))
+    plural = "" if waiting == 1 else "s"
+    tail = "" if not waiting else f", {waiting} request{plural} waiting"
+
+    if beat is None:
+        return f"The cluster has not run yet{tail}", "computed"
+
+    started = datetime.strptime(beat["started_at"], "%Y-%m-%d %H:%M:%S")
+    minutes = ((now or datetime.now()) - started).total_seconds() / 60
+    every = ClusterConfig.read(db.main_folder).every_minutes
+    ago = f"{minutes:.0f} min" if minutes < 90 else f"{minutes / 60:.0f} h"
+    text = f"The cluster last ran at {beat['started_at'][:16]} ({ago} ago){tail}"
+
+    if minutes > 2 * every:
+        return f"{text}, so its chain of ticks may have stopped", "warning"
+
+    return text, "computed"
 
 
 def my_recordings(db, user: None | str) -> pd.DataFrame:
@@ -163,6 +193,8 @@ class QcPane(QWidget):
         top.addWidget(self.who, stretch=1)
         top.addWidget(reload)
         layout.addLayout(top)
+        self.cluster = QLabel("")
+        layout.addWidget(self.cluster)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         layout.addWidget(splitter)
@@ -204,13 +236,16 @@ class QcPane(QWidget):
             named = users.loc[users["user_name"] == user, "display_name"]
             name = str(named.iloc[0]) if len(named) else user
 
-            return name, mine, my_missing(db, mine)
+            return name, mine, my_missing(db, mine), cluster_line(db)
 
         def loaded(result):
-            name, mine, missing = result
+            name, mine, missing, (cluster, kind) = result
 
             if user:
                 self.who.setText(f"To-do list for {name}")
+
+            self.cluster.setText(cluster)
+            self.cluster.setStyleSheet(text_style(kind))
 
             self._model(self.recordings_view).set_frame(mine.reset_index(drop=True))
             self._model(self.missing_view).set_frame(missing)
