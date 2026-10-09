@@ -1549,8 +1549,8 @@ def test_check_opens_the_panel_and_the_log_follows_the_database(window):
     assert "\033" not in log.toPlainText() and "[1;" not in log.toPlainText()
     assert "font-weight" in log.document().toHtml()
 
-    # clicking the open tab closes the panel; another tab opens it on that tab
-    panel.buttons.button(panel.current).click()
+    # the arrow closes the panel; a tab opens it on that tab
+    panel.toggle.click()
     assert not panel.is_open()
     panel.buttons.button(panel.NAMES.index("Log")).click()
     assert panel.is_open() and panel.current == panel.NAMES.index("Log")
@@ -1637,6 +1637,26 @@ def test_the_panel_can_take_the_height_and_double_click_maximizes(window):
     double_click()
     assert not panel.maximized and panel.is_open()
     assert abs(splitter.sizes()[1] - 200) < 10
+
+    # A click on the open tab leaves it as it is; another tab is shown
+    check.click()
+    assert panel.is_open() and panel.current == panel.NAMES.index("Check")
+    panel.buttons.button(panel.NAMES.index("Log")).click()
+    assert panel.is_open() and panel.current == panel.NAMES.index("Log")
+
+    # The button maximizes and restores; closed, a tab opens the panel
+    panel.maximize.click()
+    QApplication.processEvents()
+    assert panel.maximized and splitter.sizes()[0] < 100
+    assert panel.maximize.toolTip() == "Restore panel"
+    panel.maximize.click()
+    QApplication.processEvents()
+    assert not panel.maximized and abs(splitter.sizes()[1] - 200) < 10
+
+    panel.toggle.click()
+    assert not panel.is_open() and panel.property("open") is False
+    check.click()
+    assert panel.is_open() and panel.current == panel.NAMES.index("Check")
 
 
 def test_bottom_bar_shows_what_is_hovered_and_what_the_app_says(window):

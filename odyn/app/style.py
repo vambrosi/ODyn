@@ -318,6 +318,9 @@ QLabel#selection {{
 QWidget#bottomPanel {{
     background: palette(base);
 }}
+QWidget#bottomPanel[open="false"] {{
+    background: palette(window);
+}}
 QPushButton#panelTab {{
     font-size: {PANEL_FONT_PT}pt;
     background: transparent;

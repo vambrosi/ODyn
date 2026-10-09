@@ -101,6 +101,8 @@ GLYPHS = {
     "recorder": ("radio_button_checked", "", "r"),
     "panel-open": ("keyboard_arrow_up", "", "^"),
     "panel-close": ("keyboard_arrow_down", "", "v"),
+    "panel-maximize": ("open_in_full", "", "+"),
+    "panel-restore": ("close_fullscreen", "", "-"),
     "form-open": ("right_panel_open", "", "<"),
     "form-close": ("right_panel_close", "", ">"),
 }

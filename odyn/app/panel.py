@@ -128,11 +128,12 @@ class PanelLogHandler(logging.Handler):
 class BottomPanel(QWidget):
     """
     Tabs of text on the input fields' background: the tabs are flat buttons.
+    Closed to its tab strip, it takes the window's background.
 
-    Clicking a tab or the arrow opens the panel; clicking the open tab again
-    or the arrow closes it to its tab strip. Double-clicking a tab maximizes
-    the panel (the page above keeps only what it cannot do without), and
-    double-clicking again brings back the height it had. It lives in
+    Clicking a tab shows it, opening the panel if it is closed; the arrow
+    opens and closes it. The button next to the arrow maximizes the panel
+    (the page above keeps only what it cannot do without) and brings back the
+    height it had; double-clicking a tab does the same. It lives in
     `splitter` under the pages, which take whatever height it leaves.
 
     **USAGE**
@@ -153,10 +154,6 @@ class BottomPanel(QWidget):
         self.open_px = self.OPEN_PX
         self.current = 0
         self.maximized = False
-
-        # A double-click starts with a click, which may already have closed
-        # the panel; the double-click acts on how things were before it
-        self._was_maximized = False
 
         self.header = QWidget()
         header_row = QHBoxLayout(self.header)
@@ -188,6 +185,12 @@ class BottomPanel(QWidget):
 
         self.buttons.button(0).setChecked(True)
         header_row.addStretch(1)
+        self.maximize = QToolButton()
+        self.maximize.setObjectName("panelToggle")
+        self.maximize.setIconSize(QSize(20, 20))
+        self.maximize.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.maximize.clicked.connect(lambda: self.toggle_maximized(self.current))
+        header_row.addWidget(self.maximize)
         self.toggle = QToolButton()
         self.toggle.setObjectName("panelToggle")
         self.toggle.setIconSize(QSize(20, 20))
@@ -238,6 +241,16 @@ class BottomPanel(QWidget):
         self.body.setHidden(not opened)
         self.toggle.setIcon(icon("panel-close" if opened else "panel-open"))
         self.toggle.setToolTip("Close panel" if opened else "Open panel")
+        restores = opened and self.maximized
+        self.maximize.setIcon(icon("panel-restore" if restores else "panel-maximize"))
+        self.maximize.setToolTip("Restore panel" if restores else "Maximize panel")
+
+        # Closed, the header is part of the window around it
+        if self.property("open") != opened:
+            self.setProperty("open", opened)
+            self.style().unpolish(self)
+            self.style().polish(self)
+
         header_px = self.header.sizeHint().height()
         self.setMaximumHeight(UNLIMITED_PX if opened else header_px)
 
@@ -269,17 +282,15 @@ class BottomPanel(QWidget):
             index = self.buttons.id(watched)
 
             if index >= 0:
-                self.maximized = self._was_maximized
                 self.toggle_maximized(index)
                 return True
 
         return super().eventFilter(watched, event)
 
     def _tab_clicked(self, index: int) -> None:
-        self._was_maximized = self.maximized
+        # Only the arrow closes: a tab that closed the panel would move away
+        # from under the second click of a double-click
+        self._select(index)
 
-        if self.is_open() and index == self.current:
-            self.set_open(False)
-        else:
-            self._select(index)
+        if not self.is_open():
             self.set_open(True)
