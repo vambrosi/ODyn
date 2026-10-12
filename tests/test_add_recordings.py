@@ -11,8 +11,8 @@ import pandas as pd
 import pytest
 
 from odyn import Database
-from odyn.database import IngestFlag
-from generate_data import EXP_START, generate
+from odyn.database import OBJECTIVE_SCALE, IngestFlag
+from generate_data import EXP_START, UM_PER_PX, generate
 
 # The 2026-08-11 z-stack of m357, as its header has it: 21 slices 5 um apart
 # from -5.7 to -105.7, 35% at -55.7 with a -300 um length constant
@@ -84,6 +84,16 @@ def test_the_loop_points_at_its_session(db):
 
     assert db.loop_for(1, 1) == loop_id
     assert db.loop_for(1, 2) is None
+
+
+def test_the_field_of_view_is_stored_in_real_microns(db):
+    loop_id = add(db)
+
+    # ScanImage's microns assume 20x, so a 20x loop keeps them as they are
+    loop = db.loops.loc[loop_id]
+    assert loop["width_um"] == pytest.approx(40 * UM_PER_PX)
+    assert loop["height_um"] == pytest.approx(32 * UM_PER_PX)
+    assert db.latest_calls("add_loop").iloc[0]["input_um_scale"] == 1.0
 
 
 def test_every_raw_tiff_becomes_an_acquisition(db):
@@ -180,6 +190,13 @@ def test_a_session_that_does_not_exist_is_refused(db):
         db.add_loop(session_id=9, loop_path="20260101/m1/e1", objective=20)
 
 
+def test_an_objective_without_a_scale_is_refused(db):
+    with pytest.raises(ValueError, match="No micron scale for objective 16"):
+        db.add_loop(session_id=1, loop_path="20260101/m1/e1", objective=16)
+
+    assert len(db.loops) == 0
+
+
 def test_a_loop_is_not_a_grab(db):
     added = db.add_grabs(session_id=1, folder="20260101/m1/e1", objective=20)
 
@@ -223,6 +240,10 @@ def test_each_grab_is_a_row_of_its_own(tmp_path):
     assert set(grabs["session_id"]) == {session_id}
     assert set(grabs["z_um"]) == {-80}
     assert set(grabs["objective"]) == {10}
+    assert grabs["width_um"].tolist() == pytest.approx(
+        [40 * UM_PER_PX * OBJECTIVE_SCALE[10]] * 2
+    )
+    assert db.latest_calls("add_grabs").iloc[0]["input_um_scale"] == OBJECTIVE_SCALE[10]
     assert grabs["sync_frame_count"].isna().all()  # until a sync file is processed
 
     assert db.annotations_for("grab").loc[added[0], "laser_power_920"] == 10

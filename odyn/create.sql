@@ -134,8 +134,9 @@ CREATE TABLE IF NOT EXISTS groups
 -- - `loop_number` is the N of its `eN` folder; `loop_path` is the folder,
 -- relative to the main folder. New loops are always `<session folder>/eN`;
 -- the path is stored because older folders do not follow that pattern.
--- - `objective` is needed by anything scale-dependent (um/px is stored by
--- ScanImage as if every acquisition were 20x), so it is required at insertion.
+-- - `height_um` and `width_um` are real microns: ScanImage writes them as if
+-- every recording were 20x, and ingestion corrects them with `objective`
+-- (`OBJECTIVE_SCALE` in database.py), so it is required at insertion.
 -- - `frames_per_slice` is ScanImage's framesPerSlice, as set (not counted): the
 -- frames of one acquisition, since a loop has one slice.
 -- - `z_um` is NULL when the TIFFs do not say (older ScanImage versions).

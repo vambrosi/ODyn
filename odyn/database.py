@@ -95,6 +95,12 @@ CONTRACT = (
     "z_um",
 )
 
+# Real microns per micron ScanImage writes, by objective. ScanImage computes
+# the field of view as if every recording were taken at 20x, so on 10x a real
+# 100 um is written as 45 um (measured, not the nominal 2x). Recordings are
+# stored in real microns; an objective missing here cannot be ingested.
+OBJECTIVE_SCALE = {20: 1.0, 10: 100 / 45}
+
 # Where the app copies the olfactometer's own files a loop needs, inside the
 # loop folder: `config/` (its settings, `Program.config` among them), `log/`
 # (the day's `Program_<yyyymmdd>.txt`) and `data/` (one folder per program
@@ -1740,6 +1746,7 @@ class Database(CallRecorder):
         the database, or the files did not pass the checks (see the log).
         """
         logger.info("Adding a loop to the database...")
+        scale = self._um_scale(objective)
 
         if loop_number is None:
             match = re.fullmatch(r"e(\d+)", Path(loop_path).name)
@@ -1835,7 +1842,7 @@ class Database(CallRecorder):
                 cur,
                 "loops",
                 {
-                    **_contract(loop),
+                    **_contract(loop, scale),
                     "session_id": session_id,
                     "loop_number": int(loop_number),
                     "loop_path": folder.resolve()
@@ -2034,6 +2041,23 @@ class Database(CallRecorder):
 
         return read
 
+    def _um_scale(self, objective: int) -> float:
+        """
+        The `OBJECTIVE_SCALE` for `objective`, recorded as `um_scale` in the
+        running call's parameters. Raises for an objective it does not know.
+        """
+        scale = OBJECTIVE_SCALE.get(int(objective))
+
+        if scale is None:
+            known = ", ".join(str(o) for o in OBJECTIVE_SCALE)
+            raise ValueError(
+                f"No micron scale for objective {objective} (known: {known})."
+            )
+
+        self.update_parameters_used({"um_scale": scale})
+
+        return scale
+
     def _add_singles(
         self,
         kind: str,
@@ -2050,6 +2074,7 @@ class Database(CallRecorder):
         """
         what = "grab" if kind == "grab" else "z-stack"
         logger.info(f"Adding {what}s to the database...")
+        scale = self._um_scale(objective)
         _, session, tiffs = self._recordings_folder(
             session_id, folder_path, rel_raw_paths
         )
@@ -2068,7 +2093,7 @@ class Database(CallRecorder):
             _check_session(recording, session, self)
 
             row = {
-                **_contract(recording),
+                **_contract(recording, scale),
                 "session_id": int(session_id),
                 "raw_path": tiff["raw_path"],
                 f"{kind}_start": _dt_string(tiff["acq_start"]),
@@ -2715,9 +2740,16 @@ def _dt_string(value: datetime) -> str:
     return value.strftime(DT_FORMAT)
 
 
-def _contract(recording: Object) -> Object:
-    """The columns a recording table takes from `_read_tiff`'s first part."""
-    return {key: recording[key] for key in CONTRACT}
+def _contract(recording: Object, um_scale: float) -> Object:
+    """
+    The columns a recording table takes from `_read_tiff`'s first part, with
+    the field of view in real microns (`um_scale` from `OBJECTIVE_SCALE`).
+    """
+    row = {key: recording[key] for key in CONTRACT}
+    row["height_um"] = recording["height_um"] * um_scale
+    row["width_um"] = recording["width_um"] * um_scale
+
+    return row
 
 
 def _sample_z(si: Object) -> None | float:
