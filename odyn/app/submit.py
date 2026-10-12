@@ -1,22 +1,28 @@
 """
-Turning a draft into database rows: check first, then submit.
+Turning a draft into database rows: check first, then ingest.
 
-`check` looks at a draft and the folders it points to and lists what is wrong,
-saying which problems block a submit and which are only worth knowing.
-`submit` runs the checks, then does the day's work in order: the session row,
-its annotations, each loop (ingested, annotated, its vials recorded, its sync
-file processed), then the grabs and z-stacks (each TIFF ingested and annotated,
-the grabs' sync files processed, each z-stack linked to its loop), and finally
-moves the draft aside.
+The checks come in two parts, saying which problems block and which are only
+worth knowing:
+- `check`: what the computer submitting can tell, from the form, the database
+and its own folders (the olfactometer's, the recordings still on it). Quick,
+and it reads nothing from the recordings on the share.
+- `check_files`: what only the recordings on the share can tell (their TIFFs,
+sync files, the acquisition numbers the conditions name).
+
+`ingest` runs both, then does the day's work in order: the session row, its
+annotations, each loop (ingested, annotated, its vials recorded, its sync file
+processed), then the grabs and z-stacks (each TIFF ingested and annotated, the
+grabs' sync files processed, each z-stack linked to its loop). `submit` first
+copies the files only this computer has, ingests, and moves the draft aside.
 
 Every step that writes is a recorded `Database` call, and ingesting skips what
-is already in, so a submit that failed halfway can be run again. What each
+is already in, so an ingest that failed halfway can be run again. What each
 part or file became is remembered in the draft (`submitted_id`).
 
 **USAGE**
 ```python
-problems = check(db, draft)
-result = submit(db, draft)          # refuses while a blocking problem stands
+problems = check(db, draft) + check_files(db, draft)
+result = ingest(db, draft)          # refuses while a blocking problem stands
 result = submit(db, draft, force=True)
 ```
 
@@ -28,7 +34,7 @@ from __future__ import annotations
 
 import re
 
-from collections.abc import Container
+from collections.abc import Container, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -162,13 +168,14 @@ def check(
     db, draft: Draft, olfactometer: None | OlfactometerFolders = None
 ) -> list[Problem]:
     """
-    Everything wrong with a draft, blocking problems first.
+    What is wrong with a draft that this computer can tell, blocking problems
+    first.
 
-    Looks at the database (is the one submitting a user, is the mouse
-    registered, are the vials real), at
-    the share (are the recordings there) and, given `olfactometer`, at the
-    olfactometer's folders on this computer (are there files to copy), but
-    writes nothing.
+    Looks at the form, at the database (is the one submitting a user, is the
+    mouse registered, are the vials real), at whether each part's folder is on
+    the share, and, given `olfactometer`, at the olfactometer's folders on this
+    computer (are there files to copy). The recordings themselves are left to
+    `check_files`. Writes nothing.
     """
     problems: list[Problem] = []
 
@@ -229,12 +236,10 @@ def check(
 
         if kind == "loop":
             problems += _field_problems(where, loop_fields, entry)
-            problems += _condition_problems(
-                where, entry, _tiff_numbers(folder / name / RAW_FOLDER)
-            )
+            problems += _condition_problems(where, entry)
 
         else:
-            problems += _file_problems(db, draft, entry, folder / name, loops)
+            problems += _file_problems(db, entry, loops)
 
         if kind == "loop" and entry.get("submitted_id") is not None:
             continue  # already in the database; the files were checked then
@@ -249,10 +254,8 @@ def check(
                 )
             )
 
-        if folder.is_dir():
-            problems += _folder_problems(
-                where, folder / name, entry.get("kind"), name in local_only
-            )
+        if folder.is_dir() and not (folder / name).is_dir():
+            problems.append(Problem(where, f"folder '{name}' is not on the server yet"))
 
         if kind == "loop" and (folder / name).is_dir():
             problems += _olfactometer_problems(
@@ -303,18 +306,14 @@ def _field_problems(where: str, fields, values: dict) -> list[Problem]:
     return problems
 
 
-def _file_problems(
-    db, draft: Draft, entry: dict, folder: Path, loops: set[str]
-) -> list[Problem]:
+def _file_problems(db, entry: dict, loops: set[str]) -> list[Problem]:
     """
     What is wrong with the notes on a grabs or z-stacks part's TIFFs: values
-    that do not read as their type, a z-stack's loop that is not in the
-    draft, and notes on a TIFF that is not on the share (advisory: it may
-    still be copying).
+    that do not read as their type, and a z-stack's loop that is not in the
+    draft.
     """
     name, kind = str(entry["name"]), entry["kind"]
     fields = annotation_fields(db, kind)
-    on_share = {p.name for p in (folder / RAW_FOLDER).glob("[!.]?*.tif")}
     problems = []
 
     for file, noted in entry.get("files", {}).items():
@@ -324,11 +323,6 @@ def _file_problems(
 
         if loop is not None and loop not in loops:
             problems.append(Problem(where, f"the z-stack loop {loop} is not listed"))
-
-        if folder.is_dir() and file not in on_share:
-            problems.append(
-                Problem(where, "not in the server's folder", blocking=False)
-            )
 
     return problems
 
@@ -407,11 +401,10 @@ def _tiff_numbers(raw: Path) -> None | set[int]:
     return numbers or None
 
 
-def _condition_problems(where: str, entry: dict, numbers: None | set[int]):
+def _condition_problems(where: str, entry: dict) -> list[Problem]:
     """
-    Conditions that cannot be written: an end before its start, ranges that
-    overlap (an acquisition has one condition), and, once the TIFFs are
-    there, numbers that no TIFF has.
+    Conditions that cannot be written: an end before its start, and ranges
+    that overlap (an acquisition has one condition).
     """
     conditions = entry.get("conditions") or []
 
@@ -445,17 +438,31 @@ def _condition_problems(where: str, entry: dict, numbers: None | set[int]):
 
         taken.update({n: span for n in range(start, end + 1)})
 
-        if numbers is not None:
-            missing = sorted(set(range(start, end + 1)) - numbers)
+    return problems
 
-            if missing:
-                problems.append(
-                    Problem(
-                        where,
-                        f"condition {span} names acquisitions with no TIFF: "
-                        f"{_spans(missing)}",
-                    )
+
+def _condition_tiff_problems(
+    where: str, entry: dict, numbers: None | set[int]
+) -> list[Problem]:
+    """Conditions naming acquisition numbers that no TIFF has (once some are there)."""
+    if numbers is None:
+        return []
+
+    problems = []
+
+    for condition in entry.get("conditions") or []:
+        start, end = int(condition["start"]), int(condition["end"])
+        missing = sorted(set(range(start, end + 1)) - numbers)
+
+        if missing:
+            span = f"{condition['condition']} {start} to {end}"
+            problems.append(
+                Problem(
+                    where,
+                    f"condition {span} names acquisitions with no TIFF: "
+                    f"{_spans(missing)}",
                 )
+            )
 
     return problems
 
@@ -514,10 +521,8 @@ def _olfactometer_problems(
     return []
 
 
-def _folder_problems(
-    where: str, folder: Path, kind, sync_pending: bool = False
-) -> list[Problem]:
-    """What a part folder is missing (its sync file may be on its way)."""
+def _folder_problems(where: str, folder: Path, kind) -> list[Problem]:
+    """What a part folder on the share is missing, or has too many of."""
     problems = []
 
     if not folder.is_dir():
@@ -535,7 +540,7 @@ def _folder_problems(
             p for p in (folder / SYNC_FOLDER).glob("*.h5") if not p.name.startswith(".")
         ]
 
-        if not syncs and not sync_pending:
+        if not syncs:
             problems.append(
                 Problem(
                     where,
@@ -555,6 +560,52 @@ def _folder_problems(
     return problems
 
 
+def check_files(db, draft: Draft) -> list[Problem]:
+    """
+    What is wrong between a draft and its recordings on the share, blocking
+    problems first: part folders that are missing, with no TIFFs or with
+    more than one sync file, and conditions or notes that name TIFFs that are
+    not there. It lists the share's folders, which is slow from far away, so
+    it runs where the data is (when the cluster ingests). Writes nothing.
+    """
+    folder = Path(db.main_folder) / draft.folder
+    problems: list[Problem] = []
+
+    for entry in draft.parts:
+        name, kind = str(entry.get("name", "")), entry.get("kind")
+        part = folder / name
+
+        if not name or kind not in KINDS:
+            continue  # check says so
+
+        # Conditions are written again on a resubmit, the loop is not
+        if kind == "loop":
+            problems += _condition_tiff_problems(
+                name, entry, _tiff_numbers(part / RAW_FOLDER)
+            )
+
+            if entry.get("submitted_id") is not None:
+                continue
+
+        if not part.is_dir():
+            problems.append(Problem(name, f"folder '{name}' is not on the server yet"))
+            continue
+
+        problems += _folder_problems(name, part, kind)
+
+        if kind != "loop":
+            on_share = {p.name for p in (part / RAW_FOLDER).glob("[!.]?*.tif")}
+            problems += [
+                Problem(f"{name}/{file}", "not in the server's folder", blocking=False)
+                for file in entry.get("files", {})
+                if file not in on_share
+            ]
+
+    problems.sort(key=lambda problem: not problem.blocking)
+
+    return problems
+
+
 # --------------------------------------------------------------------------- #
 # Submitting
 # --------------------------------------------------------------------------- #
@@ -569,16 +620,13 @@ def submit(
     olfactometer: None | OlfactometerFolders = None,
 ) -> SubmitResult:
     """
-    Put a finished draft in the database.
+    Copy what only this computer has, put the draft in the database
+    (`ingest`), and move it aside once it is in.
 
-    First copies to the share the sync recordings that are only on this
-    computer (any in `busy` are still being written, and are left), and,
-    given `olfactometer`, each loop's olfactometer files (see
-    `copy_olfactometer`); a copy that fails blocks. Then refuses while `check` finds a blocking
-    problem, unless `force`. Otherwise creates (or finds) the session, writes
-    its annotations, then each loop and the grabs and z-stacks (see the
-    module's description). Steps already done by an earlier attempt are
-    skipped, so the call is safe to repeat after fixing what stopped it.
+    The copies are the sync recordings that are only on this computer (any in
+    `busy` are still being written, and are left) and, given `olfactometer`,
+    each loop's olfactometer files (see `copy_olfactometer`). A copy that
+    fails blocks, as a blocking problem of the checks does, unless `force`.
     """
     recording = [
         name for name, record in pending(draft).items() if record["local"] in busy
@@ -587,9 +635,14 @@ def submit(
     olfactometer_failed = (
         {} if olfactometer is None else copy_olfactometer(db, draft, olfactometer)
     )
-    result = SubmitResult(
-        draft.label,
-        [Problem(name, "still recording (stop it first)") for name in recording]
+    result = ingest(
+        db,
+        draft,
+        force=force,
+        olfactometer=olfactometer,
+        problems=[
+            Problem(name, "still recording (stop it first)") for name in recording
+        ]
         + [
             Problem(name, f"could not copy the sync file to the server: {why}")
             for name, why in not_copied.items()
@@ -597,8 +650,38 @@ def submit(
         + [
             Problem(name, f"could not copy the olfactometer files: {why}")
             for name, why in olfactometer_failed.items()
-        ]
-        + check(db, draft, olfactometer),
+        ],
+    )
+
+    if result.submitted:
+        draft.archive()
+
+    return result
+
+
+def ingest(
+    db,
+    draft: Draft,
+    *,
+    force: bool = False,
+    olfactometer: None | OlfactometerFolders = None,
+    problems: Sequence[Problem] = (),
+) -> SubmitResult:
+    """
+    Put a finished draft in the database.
+
+    Refuses while `check` or `check_files` finds a blocking problem, or one of
+    `problems` (found before, a copy that failed, say) blocks, unless `force`.
+    Otherwise creates (or finds) the session, writes its annotations, then
+    each loop and the grabs and z-stacks (see the module's description).
+    Steps already done by an earlier attempt are skipped, so the call is safe
+    to repeat after fixing what stopped it. Leaves the draft file where it is.
+    """
+    # Both checks report a part folder that is not there; it is said once
+    found = [*problems, *check(db, draft, olfactometer), *check_files(db, draft)]
+    result = SubmitResult(
+        draft.label,
+        sorted(dict.fromkeys(found), key=lambda problem: not problem.blocking),
     )
 
     if result.blocked and not force:
@@ -614,9 +697,6 @@ def submit(
         result.error = described(error)
 
     result.written = written
-
-    if result.error is None:
-        draft.archive()
 
     return result
 

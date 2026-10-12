@@ -13,7 +13,7 @@ from odyn import Database
 from odyn.app.draft import Draft, Removals
 from odyn.app.fields import Field, form_fields, missing_required
 from odyn.app.panel import ANSI
-from odyn.app.submit import Problem, check, report, submit
+from odyn.app.submit import Problem, check, check_files, ingest, report, submit
 from generate_data import generate
 from generate_sync import generate_sync
 
@@ -262,6 +262,41 @@ def test_check_lists_what_is_wrong(share):
     assert any("folder '20260101/m7' is not on the server" in m for m in messages)
 
 
+def test_the_recordings_on_the_share_are_checked_apart(share, tmp_path):
+    db, draft = share
+    raw = tmp_path / "20260101/m1/e1/raw"
+    for tiff in raw.glob("*.tif"):
+        tiff.rename(tiff.with_suffix(".tif.away"))
+    (tmp_path / "20260101/m1/e1/sync/extra.h5").write_bytes(b"")
+
+    # The app's check does not look into the folders on the share...
+    assert not any(p.blocking for p in check(db, draft))
+
+    # ...the cluster's does, before it ingests
+    assert [str(p) for p in check_files(db, draft)] == [
+        "e1: no TIFFs in 'e1/raw'",
+        "e1: 2 sync files in 'e1/sync'",
+    ]
+    result = ingest(db, draft)
+    assert result.blocked and result.written is None
+
+    # A folder missing from the share is said once
+    draft.set_part("e2", objective=20)
+    problems = [str(p) for p in ingest(db, draft).problems]
+    assert problems.count("e2: folder 'e2' is not on the server yet") == 1
+
+
+def test_ingest_leaves_the_draft_where_it_is(share):
+    db, draft = share
+    where = draft.path
+
+    result = ingest(db, draft)
+
+    assert result.submitted, result.error
+    assert draft.path == where and where.exists()
+    assert list(result.written.loops) == ["e1"]
+
+
 def test_submit_does_the_whole_day(share):
     db, draft = share
 
@@ -326,7 +361,8 @@ def test_conditions_are_checked_and_written_per_acquisition(share):
 
     def messages(conditions):
         draft.set_part("e1", conditions=conditions)
-        return [str(p) for p in check(db, draft) if "condition " in str(p)]
+        found = check(db, draft) + check_files(db, draft)
+        return [str(p) for p in found if "condition " in str(p)]
 
     assert messages([{"start": 2, "end": 1, "condition": "baseline"}]) == [
         "e1: condition baseline 2 to 1 ends before it starts"
@@ -647,7 +683,7 @@ def test_grabs_and_zstacks_notes_are_checked(a_day):
     draft.set_file("zstacks", "20260304_m1_zstacks_00001.tif", loop="e9")
     draft.set_file("grabs", "late_00009.tif", pmt_gain="high")
 
-    messages = [str(p) for p in check(db, draft)]
+    messages = [str(p) for p in check(db, draft) + check_files(db, draft)]
     assert (
         "zstacks/20260304_m1_zstacks_00001.tif: the z-stack loop e9 is not listed"
         in messages
