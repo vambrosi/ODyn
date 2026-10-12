@@ -32,7 +32,7 @@ where `ODYN_PATH` is the folder where you installed `odyn`.
 
 ## The entry app
 
-The app that records and submits experiments needs the `gui` extras. Install them, then make a launcher for it (a desktop shortcut on Windows, an app in `~/Applications` on macOS) that opens it on the main folder:
+The app that records and submits experiments needs the `gui` extras. Install them, then create a launcher for it (a desktop shortcut on Windows, an app in `~/Applications` on macOS) that opens it on the main folder:
 
 ```bash
 conda activate caiman
@@ -40,7 +40,7 @@ pip install -e "ODYN_PATH[gui]"
 python -m odyn.app.install MAIN_FOLDER
 ```
 
-where `MAIN_FOLDER` is the folder with the data and its `.odyn` folder (`Z:\ImagingData` on the olfactometer PC). Run the last line again to change the folder, or with `--name "ODyn test"` to make a second launcher (for a test folder, say).
+where `ODYN_PATH` is where you cloned this repository and `MAIN_FOLDER` is the folder with the data and its `.odyn` folder (`Z:\ImagingData` on the olfactometer PC). Run the last line again to change the folder, or with `--name "ODyn test"` to create a second launcher (for a test folder, say).
 
 ## Usage
 

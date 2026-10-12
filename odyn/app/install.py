@@ -1,8 +1,8 @@
 """
 `python -m odyn.app.install <main_folder> [--project NAME] [--name NAME]`
 
-Makes a launcher that opens the app on `main_folder` with the Python running
-this command (the `caiman` environment, say), with the ODyn name and icon:
+Creates a launcher that opens the app on `main_folder` with the Python running
+this command, with the ODyn name and icon:
 - **Windows**: `<name>.bat` in `~/.odyn/`, which activates the conda
   environment (Qt and h5py need its DLLs on the PATH) and stays open after an
   error, and a desktop shortcut to it with the ODyn icon (its console starts
@@ -12,7 +12,7 @@ this command (the `caiman` environment, say), with the ODyn name and icon:
   a link inside it, so macOS takes the bundle for the application (see
   `macos_script`); its output goes to `~/.odyn/<name>.log`.
 
-Run it again to change the folder or the project; a second `--name` makes a
+Run it again to change the folder or the project; a second `--name` creates a
 second launcher (one on a test folder, say):
 ```
 python -m odyn.app.install Z:\\ImagingData
@@ -49,7 +49,7 @@ def install(
     platform: str = sys.platform,
 ) -> list[Path]:
     """
-    Make the launcher for this system (see the module's description) and
+    Create the launcher for this system (see the module's description) and
     return what was written. `home` stands in for the user's home folder.
     """
     home = home or Path.home()
@@ -86,7 +86,7 @@ def windows_batch(main_folder: Path, project: str, prefix: Path, python: Path) -
     root = _conda_root(prefix)
     lines = [
         "@echo off",
-        "rem Made by python -m odyn.app.install (run it again to change this).",
+        "rem Created by python -m odyn.app.install (run it again to change this).",
         "rem The console behind the app shows its log, and stays open after an",
         "rem error.",
         "",
@@ -98,7 +98,7 @@ def windows_batch(main_folder: Path, project: str, prefix: Path, python: Path) -
         lines += [
             f'call "{root}\\Scripts\\activate.bat" "{prefix}"',
             "if errorlevel 1 (",
-            f"    echo Could not activate the environment in {prefix}.",
+            f"    echo Could not activate the environment in {prefix}",
             "    pause",
             "    exit /b 1",
             ")",
@@ -107,7 +107,7 @@ def windows_batch(main_folder: Path, project: str, prefix: Path, python: Path) -
 
     lines += [
         f'if not exist "{main_folder}\\{FOLDER_NAME}" (',
-        f"    echo {main_folder} is not reachable, or holds no {FOLDER_NAME} "
+        f"    echo {main_folder} is not reachable, or has no {FOLDER_NAME} "
         "folder. Is the drive mapped?",
         "    pause",
         "    exit /b 1",
@@ -172,16 +172,16 @@ def _windows(main_folder: Path, project: str, name: str, home: Path) -> list[Pat
 
 def macos_script(main_folder: Path, project: str, python: Path, log: Path) -> str:
     """
-    The bundle's executable: the app through the link next to it, which makes
-    macOS take this bundle for the running application. Should the link not
-    start (a Python that cannot find its libraries from there), the
+    The bundle's executable. It runs the app through the link next to it,
+    which makes macOS take this bundle for the running application. Should the
+    link not start (a Python that cannot find its libraries from there), the
     environment's own Python runs the app instead, under its own name.
     """
     arguments = " ".join(_quote(a) for a in _command(main_folder, project))
 
     return (
         "#!/bin/sh\n"
-        "# Made by python -m odyn.app.install (run it again to change this).\n"
+        "# Created by python -m odyn.app.install (run it again to change this).\n"
         'here="$(cd "$(dirname "$0")" && pwd)"\n'
         f"mkdir -p {_quote(str(log.parent))}\n"
         f"exec >> {_quote(str(log))} 2>&1\n"
@@ -233,7 +233,10 @@ def _macos(main_folder: Path, project: str, name: str, home: Path) -> list[Path]
 
 
 def _macos_icon(target: Path) -> None:
-    """`odyn.png` as an `.icns`, with the tools every Mac has (else none)."""
+    """
+    `odyn.png` as an `.icns`, created with `sips` and `iconutil` (every Mac has
+    them). Without them the app has no icon.
+    """
     with tempfile.TemporaryDirectory() as temporary:
         iconset = Path(temporary) / "odyn.iconset"
         iconset.mkdir()
@@ -263,7 +266,7 @@ def _macos_icon(target: Path) -> None:
             )
 
         except (OSError, subprocess.CalledProcessError) as error:
-            print(f"No icon for the app (could not make odyn.icns: {error})")
+            print(f"No icon for the app (could not create odyn.icns: {error})")
 
 
 def _quote(text: str) -> str:
@@ -274,7 +277,7 @@ def main(argv: None | list[str] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m odyn.app.install",
         description=(
-            "Make a launcher for the ODyn app (a desktop shortcut on Windows, "
+            "Create a launcher for the ODyn app (a desktop shortcut on Windows, "
             "an app in ~/Applications on macOS) that runs it with this Python."
         ),
     )
@@ -289,18 +292,21 @@ def main(argv: None | list[str] = None) -> int:
     parser.add_argument(
         "--name",
         default="ODyn",
-        help='the launcher\'s name (default: "ODyn"; another name makes a second one)',
+        help=(
+            'the launcher\'s name (default: "ODyn"; another name creates a second '
+            "one)"
+        ),
     )
     args = parser.parse_args(argv)
 
     if not (args.main_folder / FOLDER_NAME).is_dir():
         print(
-            f"Note: {args.main_folder} holds no {FOLDER_NAME} folder from here "
-            "(the launcher checks again when it starts)"
+            f"Note: {args.main_folder} has no {FOLDER_NAME} folder as seen from this "
+            "computer (the launcher checks again when it starts)"
         )
 
     for path in install(args.main_folder, args.project, args.name):
-        print(f"Made {path}")
+        print(f"Created {path}")
 
     return 0
 
