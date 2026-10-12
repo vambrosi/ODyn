@@ -231,7 +231,7 @@ class Group(CallRecorder):
         group.run_motion_correction(...)
 
         group.delete_temp_files()
-        group.play_movie(...)
+        group.save_preview_movie(...)
     ```
     """
 
@@ -243,7 +243,6 @@ class Group(CallRecorder):
         self._tables: dict[str, pd.DataFrame] = {}
 
         self._call_stack: list[CallFrame] = []
-        self.movies: dict[tuple[MovieType, ...], LazyMovie] = {}
 
     def __repr__(self):
         msg = f"Group {self.group_id}"
@@ -452,8 +451,8 @@ class Group(CallRecorder):
         Returns `(acq_ids, raw_paths, mmap_paths)`, matched by file name and in
         acquisition order. Read from `call_output` using `get_tempdir()`.
 
-        This function allows `play_movie` to be called on test runs even
-        after a kernel crash, as long as all relevant .mmap files are present.
+        This lets `save_preview_movie` show a test run even after a kernel
+        crash, as long as all relevant .mmap files are present.
         """
         from caiman.paths import get_tempdir
 
@@ -1257,157 +1256,6 @@ class Group(CallRecorder):
 
         bpl.show(modify_doc)
 
-    @memorize_params
-    @record_call
-    def play_movie(
-        self,
-        *,
-        grid: list[str] = ["raw", "mcor"],
-        downsample_ratio: float = 0.03,
-        downsample_type: str = "average",
-        opencv_codec: str = "MJPG",
-        save_movie: bool = True,
-        save_folder: str = r"./movies",
-        backend: str = "embed_opencv",
-        do_loop: bool = False,
-        fr: float = 30,
-        magnification: float = 1,
-        plot_text: bool = True,
-        q_max: float = 99.5,
-        q_min: float = 0.00,
-    ) -> None:
-        """
-        Play and save movies for quality control
-
-        **USAGE**
-        ```python
-            group = db.groups[some_index]
-            group.play_movie(...)
-        ```
-
-        **PARAMETERS**
-
-        *Basic settings*
-        - `use_last_parameters`: Use parameters from last run as the defaults
-        - `grid`: How to concatenate movies horizontally ("raw", "mcor", "test" in some order)
-
-        *Movie loading settings*
-        - `downsample_ratio`: Percentage of frames to keep
-        - `downsample_type`: How to drop frames ("average" or "skip")
-
-        **ALERT:** "average" (the default) reads every frame and averages them down.
-        The result looks less noisy, but it smooths away residual motion. "skip" reads
-        only the frames it keeps, which is much faster over the network, but it is noisier.
-
-        *Video saving*
-        - `opencv_codec`: Codec used to encode the saved video
-        - `save_movie`: Put `True` if you want to save the preview video to a file
-        - `save_folder`: where to write it. A path starting with `"."` is taken
-          from the project's folder, or from the main folder when the database
-          has no project. Any other path is used as given. (r is to use \\ in the path)
-
-        *Video settings*
-        - `backend`: "opencv" for popup and "embed_opencv" for inline player
-        - `do_loop`: Loop the video or not
-        - `fr`: How fast to play the video (frames/s)
-        - `magnification`: Magnification of video
-        - `plot_text`: Add current frame label on the video
-        - `q_max`: Quantile to consider as white
-        - `q_min`: Quantile to consider as black
-
-        **EXAMPLES**
-        - Running this command would save a compilation of all raw movies
-        ```python
-        group.play_movie(grid=["raw"], save_folder="~/TempData/20260101/e1/movies")
-        ```
-
-        - This would save a video with raw movies on the left and test on the right
-        ```python
-        group.play_movie(grid=["raw", "test"])
-        ```
-        """
-        # --- Validate parameters --- #
-
-        # Check grid input
-        assert len(grid) == 1 or (
-            len(grid) == 2
-            and MovieType.RAW.value in grid
-            and (MovieType.MCOR.value in grid or MovieType.TEST.value in grid)
-        ), """The parameter 'grid' must be one of the following:
-                ['raw'], ['mcor'], ['test'],
-                ['raw', 'test'], ['raw', 'mcor'],
-                ['test', 'raw'], ['mcor', 'raw']"""
-
-        # Check downsample_type input
-        assert downsample_type in ("average", "skip"), (
-            "The parameter 'downsample_type' must be 'average' or 'skip', "
-            f"but instead got {downsample_type!r}."
-        )
-
-        params = locals()
-
-        # --- Check if movie needs to be updated --- #
-
-        # Exclude the current call (already recorded by decorator) so we find
-        # the most recent *previous* call with the same grid.
-        play_movie_calls = self.method_calls[
-            (self.method_calls["method_name"] == "Group.play_movie")
-            & (self.method_calls.index != self.current_call_id)
-        ]
-        last_call_id = play_movie_calls[
-            play_movie_calls["parameters_used"].apply(lambda x: x.get("grid") == grid)
-        ].index.max()
-
-        # Trigger recompute if the parameters changed from the last call
-        movie_types = tuple(MovieType(s) for s in grid)
-        params.pop("self", None)
-
-        if movie_types not in self.movies:
-            self.movies[movie_types] = LazyMovie(self, movie_types)
-
-        # Recompute if there is no comparable earlier call
-        # (e.g. for rows that were backfilled by a migration)
-        elif (
-            pd.isna(last_call_id)
-            or play_movie_calls.loc[last_call_id, "parameters_used"] != params
-        ):
-            self.movies[movie_types].mark_as_outdated()
-
-        # --- Transform parameters --- #
-
-        # TODO: Change default folder
-        movie_type_str = "_".join(t.value for t in movie_types)
-        filename = self._output_name(movie_type_str, "avi")
-
-        filepath = (
-            (self.db.files_folder / save_folder / filename).resolve()
-            if save_folder[0] == "."
-            else (Path(save_folder) / filename).resolve()
-        )
-
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-
-        # --- Play and maybe update movies --- #
-        # Only updated if run_motion_correction was called invalidating the
-        # relevant files (raw or mcor TIFFs, or test MMAPs)
-        movie_name = str(filepath)
-
-        if save_movie:
-            logger.info(f"Saving movie to {movie_name}")
-
-        self.movies[movie_types].maybe_update(downsample_ratio, downsample_type).play(
-            backend=backend,
-            do_loop=do_loop,
-            fr=fr,
-            magnification=magnification,
-            plot_text=plot_text,
-            q_max=q_max,
-            q_min=q_min,
-            opencv_codec=opencv_codec,
-            save_movie=save_movie,
-            movie_name=movie_name,
-        )
-
     @record_call
     def save_preview_movie(
         self,
@@ -1805,17 +1653,6 @@ class Group(CallRecorder):
             }
         )
 
-        # --- Make sure movies will be updated next time they are played --- #
-
-        if is_test:
-            for movie_types in self.movies.keys():
-                if MovieType.TEST in movie_types:
-                    self.movies[movie_types].mark_as_outdated()
-        else:
-            for movie_types in self.movies.keys():
-                if MovieType.MCOR in movie_types:
-                    self.movies[movie_types].mark_as_outdated()
-
         # --- Get settings for CaImAn MotionCorrection class --- #
 
         # Get raw paths
@@ -1873,7 +1710,7 @@ class Group(CallRecorder):
 
         # --- Save the results in TIFF files (if it is not a test) --- #
         if is_test:
-            # Record what caiman wrote so play_movie can find it after a restart
+            # Record what caiman wrote so save_preview_movie can find it after a restart
             self.set_output({"mmap_names": [Path(p).name for p in self.mc.mmap_file]})
             return
 
@@ -2750,7 +2587,7 @@ class Group(CallRecorder):
 
         ALERT: H.264 cannot be written by most OpenCV builds, so the default is
         MPEG-4 part 2 ('mp4v'). Use `codec="MJPG", extension="avi"` to match
-        `play_movie`. VLC opens either one on any platform.
+        `save_preview_movie`. VLC opens either one on any platform.
         """
         folder = (
             (self.db.files_folder / save_folder).resolve()
@@ -2894,7 +2731,7 @@ def _save_movie(
     Use a fixed `display_range` to make movies comparable.
     """
 
-    # Kept deliberately separate from `play_movie` because that one reads files
+    # Kept deliberately separate from `save_preview_movie` because that one reads files
     # and compares processing steps and this just saves a preprocessed time-series.
     # Costs some repetition but avoid interdependencies between processing paths.
 
@@ -3218,44 +3055,3 @@ def _tiff_shape(path: Path, expected_frames: int) -> tuple[tuple[int, int], int]
             frames = len(tif.pages)
 
     return (height, width), int(frames)
-
-
-# --------------------------------------------------------------------------- #
-# Auxiliary Classes
-# --------------------------------------------------------------------------- #
-
-
-@dataclass
-class LazyMovie:
-    """
-    Movies that only reload when needed.
-    """
-
-    owner: Group
-    types: tuple[MovieType, ...]
-    movie: None | cm.movie = None
-
-    def mark_as_outdated(self):
-        self.movie = None
-
-    def maybe_update(self, downsample_ratio, downsample_type="average") -> cm.movie:
-        if self.movie is not None:
-            logger.info("Using cached movie...")
-            return self.movie
-
-        logger.info("Updating movie...")
-
-        # play_movie has no overlays, so the labels are dropped here
-        self.movie, _ = self.owner._load_preview_movie(
-            self.types, downsample_ratio, downsample_type
-        )
-
-        return self.movie
-
-
-#     def play(self) -> None:
-#         # TODO: - Use Caiman function as blueprint
-#         #       - Add movie type, total time, current time, and speed (e.g. x2) to label
-#         #       - Remove frame number from label
-#         #       - Possibly add total time to config and remove fr in [play.load]
-#         return
