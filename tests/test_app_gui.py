@@ -761,6 +761,85 @@ def test_qc_pane_lists_nothing_for_a_new_user(window):
     assert "tester" in qc.who.text() or "ana" in qc.who.text()
 
 
+def test_qc_lists_the_drafts_waiting_for_the_cluster(window, tmp_path, monkeypatch):
+    from odyn.app.submissions import enqueue
+
+    main = tmp_path / "data"
+    draft = Draft.start(tmp_path / "elsewhere", mouse_id=3, date="2026-10-07")
+    draft.set_part("e1", objective=20)
+    path = enqueue(draft, main, user="tester")
+    enqueue(Draft.start(tmp_path / "x", mouse_id=4), main, user="someone")
+
+    window.context.set_user("tester")
+    qc = window.qc
+    qc.reload()
+    settle(window.context)
+
+    # Only this user's, and nothing to do before one is picked
+    assert qc.queue[["session", "state", "progress"]].values.tolist() == [
+        ["20261007/m3", "waiting", "not looked at yet"]
+    ]
+    assert not qc.add_now.isEnabled() and not qc.edit_draft.isEnabled()
+
+    qc.queue_view.selectRow(0)
+    assert qc.add_now.isEnabled() and qc.edit_draft.isEnabled()
+    assert not qc.submit_again.isEnabled()  # only a failed one
+
+    qc.add_now.click()
+    settle(window.context)
+    assert path.with_name(f"{path.stem}.now").exists()
+
+    # Edit draft takes it out of the queue and opens it among the drafts
+    monkeypatch.setattr(window.context, "confirm", lambda *_: True)
+    qc.queue_view.selectRow(0)
+    qc.edit_draft.click()
+    settle(window.context)
+
+    assert qc.queue.empty and not path.exists()
+    assert window.context.draft.where == "20261007/m3"
+    assert window.pages.currentWidget() is window.sessions.session_page
+
+
+def test_qc_asks_the_cluster_to_process_a_sync_file_again(window, tmp_path):
+    import json
+    from datetime import datetime
+
+    from generate_data import generate
+
+    from odyn.cluster import pending_requests
+
+    main = tmp_path / "data"
+    generate(
+        main,
+        acquisitions=2,
+        frames=56,
+        height=32,
+        width=40,
+        start=datetime(2026, 3, 4, 9),
+    )
+    db = Database(main, user="tester")
+    db.set_mouse(mouse_id=1)
+    session_id = db.add_session(mouse_id=1, session_date="2026-03-04")
+    loop_id = db.add_loop(
+        session_id=session_id, loop_path="20260304/m1/e1", objective=20
+    )
+
+    window.context.set_user("tester")
+    qc = window.qc
+    qc.reload()
+    settle(window.context)
+    assert not qc.rerun_sync.isEnabled()
+
+    qc.recordings_view.selectRow(0)
+    qc.rerun_sync.click()
+    settle(window.context)
+
+    [request] = pending_requests(main)
+    sent = json.loads(request.read_text())
+    assert sent["method"] == "process_sync" and sent["kwargs"] == {"loop_id": loop_id}
+    assert sent["user"] == "tester"
+
+
 def test_qc_lists_every_kind_of_recording_this_user_submitted(tmp_path):
     from datetime import datetime
 

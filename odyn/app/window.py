@@ -285,6 +285,7 @@ class MainWindow(QMainWindow):
         self.sessions.removals_changed.connect(self._refresh_undo)
         self.sessions.listed.connect(self._refresh_undo)
         self.sessions.reported.connect(lambda text: self.panel.show_text("Check", text))
+        self.qc.restored.connect(self._restored)
         self.sessions.part_added.connect(
             lambda name: self.open_part(self.context.draft, name)
         )
@@ -347,6 +348,11 @@ class MainWindow(QMainWindow):
     def selected(self, value: None | str) -> None:
         self.context.focus = value
         self.recorder.follow()
+
+    def _restored(self, path) -> None:
+        """A draft taken back from the cluster: list it and open it."""
+        self.sessions.reload_drafts()
+        self.open_session(self.context.live_draft(path))
 
     def open_session(self, draft: None | Draft) -> None:
         """Select `draft` and show its session page."""

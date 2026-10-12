@@ -24,6 +24,13 @@ The state is a file beside each draft (`<draft>.state.json`, see
 `Submission`); the queued draft itself is what `ingest` updates, so an ingest
 that stopped halfway resumes where it was. Nothing in the queue is deleted.
 
+What the QC page can do with a queued draft:
+- `add_now`: ingest it at the next tick without waiting for its TIFFs (a
+loop stopped early with no sync file to say so, say);
+- `submit_again`: start a failed one over, once what stopped it is fixed;
+- `take_back`: move it out of the queue (to `withdrawn/`) and back among the
+drafts on this computer, to edit it and submit it again.
+
 **USAGE**
 ```python
 path = enqueue(draft, main_folder, project="main-sync", user="ana")
@@ -56,7 +63,12 @@ from .submit import RAW_FOLDER, check_files, ingest
 
 QUEUE_FOLDER = "submissions"
 DONE_FOLDER = "done"
+WITHDRAWN_FOLDER = "withdrawn"
 STATE_SUFFIX = ".state.json"
+NOW_SUFFIX = ".now"
+
+# What `enqueue` adds to a draft, taken off again when it comes back to edit
+QUEUE_KEYS = ("submitted_by", "submitted_at", "submitted_on", "draft_file")
 
 # A draft is ingested once its files stopped changing for this long, and
 # fails when they did not change for this long before it was complete
@@ -105,13 +117,16 @@ def enqueue(
     A draft submitted again replaces its queued copy and starts over as
     waiting (what an earlier ingest added is still skipped).
     """
+    # A draft's name is when it was started on its computer, so two people's
+    # can match: the queued copy also says whose it is (and stays in order)
     folder = queue_folder(main_folder, project)
-    path = folder / draft.path.name
+    path = folder / f"{draft.path.stem}-{user}.json"
     content = {
         **draft.data,
         "submitted_by": user,
         "submitted_at": datetime.now().strftime(TIME_FORMAT),
         "submitted_on": socket.gethostname(),
+        "draft_file": draft.path.name,
     }
     _write_json(path, content)
     _state_path(path).unlink(missing_ok=True)
@@ -129,6 +144,41 @@ def queued(
         return []
 
     return [(path, _read_state(path) or Submission()) for path in _drafts(folder)]
+
+
+def add_now(path: Path) -> None:
+    """Ask the next tick to ingest a queued draft without waiting for its files."""
+    _now_path(path).write_text(datetime.now().strftime(TIME_FORMAT) + "\n")
+
+
+def submit_again(path: Path) -> None:
+    """Start a queued draft over as waiting (a failed one, once it is fixed)."""
+    _state_path(path).unlink(missing_ok=True)
+
+
+def take_back(path: Path, drafts: Path) -> Path:
+    """
+    Move a queued draft to `withdrawn/` and put a copy among the drafts in
+    `drafts` (this computer's), to edit and submit again. Returns the copy.
+    What an earlier ingest added stays in the database, and is skipped when
+    the draft comes back.
+    """
+    content = json.loads(path.read_text())
+    local = Path(drafts) / str(content.get("draft_file") or path.name)
+
+    for key in QUEUE_KEYS:
+        content.pop(key, None)
+
+    _write_json(local, content)
+
+    withdrawn = path.parent / WITHDRAWN_FOLDER
+    withdrawn.mkdir(exist_ok=True)
+
+    for source in (path, _state_path(path), _now_path(path)):
+        if source.exists():
+            os.replace(source, withdrawn / source.name)
+
+    return local
 
 
 def process_submissions(
@@ -155,7 +205,9 @@ def process_submissions(
             first_seen_at=stamp, last_change_at=stamp
         )
 
-        if state.state == "failed" and not state.retry_on_change:
+        now_asked = _now_path(path).exists()
+
+        if state.state == "failed" and not state.retry_on_change and not now_asked:
             continue  # until the draft is submitted again
 
         try:
@@ -174,19 +226,20 @@ def process_submissions(
         if files != state.files:
             state.files, state.last_change_at = files, stamp
 
-        elif state.state == "failed":
+        elif state.state == "failed" and not now_asked:
             continue  # the files did not change since it failed
 
         state.parts = parts
         state.updated_at = stamp
         quiet_s = (now - _time(state.last_change_at)).total_seconds()
 
-        if complete and quiet_s >= settle_s:
-            lines.append(
-                f"{draft.where}: would be added"
-                if dry_run
-                else _ingest(main_folder, project, path, draft, state, stamp)
-            )
+        if now_asked or (complete and quiet_s >= settle_s):
+            if dry_run:
+                lines.append(f"{draft.where}: would be added")
+                continue
+
+            _now_path(path).unlink(missing_ok=True)
+            lines.append(_ingest(main_folder, project, path, draft, state, stamp))
 
         elif quiet_s >= give_up_s:
             message = f"no new files for {give_up_s / 3600:g} h ({_listed(parts)})"
@@ -275,7 +328,7 @@ def _move_to_done(path: Path) -> None:
     done = path.parent / DONE_FOLDER
     done.mkdir(exist_ok=True)
 
-    for source in (path, _state_path(path)):
+    for source in (path, _state_path(path), _now_path(path)):
         if source.exists():
             os.replace(source, done / source.name)
 
@@ -418,6 +471,10 @@ def _drafts(folder: Path) -> list[Path]:
 
 def _state_path(path: Path) -> Path:
     return path.with_name(path.stem + STATE_SUFFIX)
+
+
+def _now_path(path: Path) -> Path:
+    return path.with_name(path.stem + NOW_SUFFIX)
 
 
 def _read_state(path: Path) -> None | Submission:

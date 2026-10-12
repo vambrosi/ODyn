@@ -8,10 +8,13 @@ from datetime import datetime, timedelta
 from odyn import Database
 from odyn.app.draft import Draft
 from odyn.app.submissions import (
+    add_now,
     enqueue,
     process_submissions,
     queue_folder,
     queued,
+    submit_again,
+    take_back,
 )
 from odyn.cluster import status, tick
 from generate_data import generate
@@ -71,6 +74,7 @@ def test_a_complete_draft_is_added_once_the_copy_settles(tmp_path):
     assert queued(tmp_path) == []
     done = queue_folder(tmp_path) / "done"
     assert (done / path.name).exists()
+    assert path.name == f"{draft.path.stem}-ana.json"  # two people's never clash
     assert '"state": "done"' in (done / f"{path.stem}.state.json").read_text()
 
     # The queued copy kept what ingest made of it
@@ -155,3 +159,53 @@ def test_the_tick_looks_at_the_queue(tmp_path):
 
     assert report.submissions == ["20260101/m1: waiting: e1: 3 of 5 TIFFs"]
     assert "Submitted:  1 waiting, 0 failed" in status(tmp_path)
+
+
+def test_add_now_does_not_wait_for_the_tiffs(tmp_path):
+    db, _, path = a_day(tmp_path, acqs_per_loop=5, bursts=5)
+    process_submissions(tmp_path, now=T0)
+
+    # The loop stopped at 3 and the sync file says 5: the user knows better.
+    # The sync file is refused, the loop is still added.
+    add_now(path)
+    [line] = process_submissions(tmp_path, now=T0 + timedelta(minutes=1))
+
+    assert line.startswith("20260101/m1: added as session 1; sync file of e1 refused")
+    assert len(db.acquisitions) == 3
+    assert not (queue_folder(tmp_path) / f"{path.stem}.now").exists()
+
+
+def test_submit_again_starts_a_failed_draft_over(tmp_path):
+    db, _, path = a_day(tmp_path)
+    (tmp_path / "20260101/m1/e1/sync/extra.h5").write_bytes(b"")
+
+    process_submissions(tmp_path, now=T0)
+    [line] = process_submissions(tmp_path, now=SETTLED)
+    assert line == "20260101/m1: failed: e1: 2 sync files in 'e1/sync'"
+
+    # Fixed by hand, then submitted again from the QC page
+    (tmp_path / "20260101/m1/e1/sync/extra.h5").rename(
+        tmp_path / "20260101/m1/e1/sync/.extra.h5"
+    )
+    submit_again(path)
+    later = SETTLED + timedelta(hours=1)
+
+    assert process_submissions(tmp_path, now=later) == [
+        "20260101/m1: waiting for the copy to finish"
+    ]
+    [line] = process_submissions(tmp_path, now=later + timedelta(minutes=11))
+    assert line == "20260101/m1: added as session 1"
+
+
+def test_take_back_puts_the_draft_among_this_computers_again(tmp_path):
+    db, draft, path = a_day(tmp_path, objective=None)
+    process_submissions(tmp_path, now=T0)
+    process_submissions(tmp_path, now=SETTLED)
+
+    local = take_back(path, tmp_path / "drafts")
+
+    assert queued(tmp_path) == []
+    assert (queue_folder(tmp_path) / "withdrawn" / path.name).exists()
+    [back] = Draft.pending(tmp_path / "drafts")
+    assert back.path == local and back.part("e1").get("objective") is None
+    assert "submitted_by" not in back.data
