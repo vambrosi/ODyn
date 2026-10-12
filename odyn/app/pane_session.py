@@ -81,11 +81,6 @@ def session_label(draft: Draft, position: int) -> str:
     return f"s{position + 1}" if draft.mouse_id is None else f"m{draft.mouse_id}"
 
 
-def counted(count: int, word: str) -> str:
-    """`1 loop`, `3 loops`."""
-    return f"{count} {word}{'' if count == 1 else 's'}"
-
-
 # The highest acquisition (TIFF) number a condition can name
 MAX_ACQUISITION = 99999
 
@@ -1102,9 +1097,7 @@ class Sessions(QObject):
         if draft is None:
             return
 
-        self.reported.emit(
-            running(draft.label, "submitting, reading the recordings can take a while")
-        )
+        self.reported.emit(running(draft.label, "submitting"))
         busy = {self.context.recording_now} - {None}
 
         self.context.run(
@@ -1121,45 +1114,16 @@ class Sessions(QObject):
         self.reported.emit(report(draft.label, problems, parts, result))
 
     def _submitted(self, draft: Draft, result) -> None:
-        problems = list(result.problems)
-        written = result.written
-
-        if written is None:
-            outcome = f"fix errors to submit {CROSS}"
-
-        else:
-            # The session is in the database even if a sync file did not match
-            problems += [
-                Problem(name, f"could not process the sync file: {message}", False)
-                for name, message in written.process_failed.items()
-            ]
-            # Only what there is: "1 loop, 4 annotations; sync processed for e1"
-            counts = [
-                counted(n, what)
-                for n, what in (
-                    (len(written.loops), "loop"),
-                    (len(written.grabs), "grab"),
-                    (len(written.zstacks), "z-stack"),
-                    (written.annotations, "annotation"),
-                )
-                if n
-            ]
-            details = ", ".join(counts)
-
-            if written.processed:
-                synced = f"sync processed for {', '.join(written.processed)}"
-                details = f"{details}; {synced}" if details else synced
-
-            outcome = (
-                f"submitted as session {written.session_id}"
-                + (f" ({details})" if details else "")
-                + f" {CHECK}"
-            )
-
         if result.error:
             outcome = f"stopped: {result.error} (submit again after fixing it) {CROSS}"
 
-        self._report(draft, problems, outcome)
+        elif result.queued is None:
+            outcome = f"fix errors to submit {CROSS}"
+
+        else:
+            outcome = f"sent to the cluster (the QC page shows its progress) {CHECK}"
+
+        self._report(draft, list(result.problems), outcome)
 
         if result.submitted:
             self.reload_drafts()

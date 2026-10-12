@@ -13,6 +13,7 @@ from odyn import Database
 from odyn.app.draft import Draft, Removals
 from odyn.app.fields import Field, form_fields, missing_required
 from odyn.app.panel import ANSI
+from odyn.app.submissions import queue_folder
 from odyn.app.submit import Problem, check, check_files, ingest, report, submit
 from generate_data import generate
 from generate_sync import generate_sync
@@ -297,13 +298,29 @@ def test_ingest_leaves_the_draft_where_it_is(share):
     assert list(result.written.loops) == ["e1"]
 
 
-def test_submit_does_the_whole_day(share):
+def test_submit_hands_the_draft_to_the_cluster(share):
+    db, draft = share
+    drafts = draft.path.parent
+
+    result = submit(db, draft)
+
+    assert result.submitted, result.error
+    assert result.queued.parent == queue_folder(db.main_folder)
+    assert Draft.load(result.queued).data["submitted_by"] == "tester"
+
+    # Nothing in the database yet; the draft is set aside here
+    assert len(db.sessions) == 0 and len(db.loops) == 0
+    assert draft.path.parent.name == "submitted"
+    assert Draft.pending(drafts) == []
+
+
+def test_ingest_does_the_whole_day(share):
     db, draft = share
 
     # The sync file's frame timings should match: acquisitions start where
     # the generator put the bursts, which is not where the TIFFs say. The
     # processing matches by order and only flags the skew, so it still lands.
-    result = submit(db, draft)
+    result = ingest(db, draft)
 
     assert result.submitted, result.error
     assert result.written.session_id == db.session_for(1, "2026-01-01")
@@ -320,9 +337,6 @@ def test_submit_does_the_whole_day(share):
     assert len(db.sync_blocks) == 3
     assert result.written.process_failed == {}
 
-    assert draft.path.parent.name == "submitted"
-    assert Draft.pending(draft.path.parent.parent / "drafts") == []
-
 
 def test_a_blocked_submit_writes_nothing(share):
     db, draft = share
@@ -331,23 +345,23 @@ def test_a_blocked_submit_writes_nothing(share):
     result = submit(db, draft)
 
     assert not result.submitted and result.blocked
-    assert result.written is None
-    assert len(db.sessions) == 0
+    assert result.queued is None
+    assert not queue_folder(db.main_folder).exists()
     assert (
         Draft.pending(draft.path.parent) == [draft]
         or Draft.pending(draft.path.parent)[0].path == draft.path
     )
 
 
-def test_a_second_submit_does_not_ingest_twice(share):
+def test_a_second_ingest_does_not_add_twice(share):
     db, draft = share
 
-    first = submit(db, draft)
+    first = ingest(db, draft)
     assert first.submitted
 
     # Something more to say about the same day
     draft.set_part("e1", treatment="updated")
-    second = submit(db, draft, force=True)
+    second = ingest(db, draft, force=True)
 
     assert second.submitted, second.error
     assert second.written.loops == first.written.loops
@@ -384,7 +398,7 @@ def test_conditions_are_checked_and_written_per_acquisition(share):
             {"start": 2, "end": 3, "condition": "ket/xyl"},
         ],
     )
-    result = submit(db, draft)
+    result = ingest(db, draft)
     assert result.submitted, result.error
 
     acquisitions = db.acquisitions.sort_values("acq_start")
@@ -401,7 +415,7 @@ def test_conditions_are_checked_and_written_per_acquisition(share):
         return int(db.from_query(query, ["acquisition"])["n"].iloc[0])
 
     assert written() == 3
-    submit(db, draft, force=True)
+    ingest(db, draft, force=True)
     assert written() == 3
 
 
@@ -428,14 +442,18 @@ def test_submit_copies_a_recording_kept_on_this_computer(share, tmp_path):
 
     # one still being written is left alone, and blocks the submit
     early = submit(db, draft, busy={str(local)})
-    assert early.written is None and not on_share.exists()
+    assert early.queued is None and not on_share.exists()
     assert "e1: still recording (stop it first)" in [str(p) for p in early.problems]
 
     result = submit(db, draft)
     assert result.submitted, result.error
-    assert result.written.processed == ["e1"]
     assert on_share.is_file() and local.is_file()
     assert draft.recordings("e1")[0]["copied"]
+
+    # The queued copy knows it was copied, so the cluster processes it
+    queued = Draft.load(result.queued)
+    assert queued.recordings("e1")[0]["copied"]
+    assert ingest(db, queued).written.processed == ["e1"]
 
 
 def test_a_recorded_session_keeps_its_mouse_and_date(tmp_path):
@@ -697,14 +715,14 @@ def test_grabs_and_zstacks_notes_are_checked(a_day):
     )
 
 
-def test_submit_adds_the_grabs_and_zstacks_with_their_notes(a_day):
+def test_ingest_adds_the_grabs_and_zstacks_with_their_notes(a_day):
     db, draft = a_day
     grab, stack = "20260304_m1_grabs_00002.tif", "20260304_m1_zstacks_00001.tif"
     draft.set_file("grabs", grab, goal="reference", condition="ket/xyl")
     draft.set_file("zstacks", stack, loop="e1", z_landmark="surface of right bulb")
 
     assert not any(p.blocking for p in check(db, draft))
-    result = submit(db, draft)
+    result = ingest(db, draft)
     assert result.submitted, result.error
 
     written = result.written
@@ -726,9 +744,9 @@ def test_submit_adds_the_grabs_and_zstacks_with_their_notes(a_day):
     assert written.processed == ["grabs/m1_grabs.h5"]
     assert db.grabs["sync_block"].tolist() == [0, 1]
 
-    # a second submit ingests nothing new
+    # a second ingest adds nothing new
     again = Draft.load(draft.path)
-    assert submit(db, again, force=True).submitted
+    assert ingest(db, again, force=True).submitted
     assert len(db.grabs) == 2 and len(db.zstacks) == 1
 
 

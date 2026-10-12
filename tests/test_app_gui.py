@@ -1562,35 +1562,33 @@ def test_check_opens_the_panel_and_the_log_follows_the_database(window):
     assert panel.is_open() and panel.current == panel.NAMES.index("Log")
 
 
-def test_the_submit_report_ends_with_what_was_written(window):
-    from odyn.app.submit import Problem, SubmitResult, Written
+def test_the_submit_report_ends_with_where_the_draft_went(window, tmp_path):
+    from odyn.app.submit import Problem, SubmitResult
 
     window._add_session()
     draft = window.sessions.current
     draft.identify(mouse_id=3, date="2026-10-07")
     window.sessions.add_loop()
-    written = Written(
-        session_id=12,
-        loops={"e1": 1},
-        annotations=2,
-        process_failed={"e1": "5 frame bursts but 2 acquisitions"},
-    )
-    result = SubmitResult(
-        draft.label,
-        [Problem("e1", "no olfactometer Events file found", blocking=False)],
-        written,
-    )
+    warning = Problem("e1", "no olfactometer Events file found", blocking=False)
+    result = SubmitResult(draft.label, [warning], queued=tmp_path / "queued.json")
     window.sessions._submitted(draft, result)
 
-    # a sync file that did not match is a warning: the session is in
     assert window.panel.texts["Check"].toPlainText().split("\n") == [
-        f"CHECKED  {draft.label} (0 errors, 2 warnings)",
+        f"CHECKED  {draft.label} (0 errors, 1 warning)",
         "",
         "     e1  no olfactometer Events file found",
-        "     e1  could not process the sync file: 5 frame bursts but 2 acquisitions",
         "",
-        " RESULT  submitted as session 12 (1 loop, 2 annotations) ✔",
+        " RESULT  sent to the cluster (the QC page shows its progress) ✔",
     ]
+
+    # A queue that cannot be written stops it
+    stopped = SubmitResult(draft.label, error="could not put it in the queue: full")
+    window.sessions._submitted(draft, stopped)
+
+    assert window.panel.texts["Check"].toPlainText().split("\n")[-1] == (
+        " RESULT  stopped: could not put it in the queue: full (submit again after "
+        "fixing it) ✘"
+    )
 
 
 def test_the_panel_can_take_the_height_and_double_click_maximizes(window):

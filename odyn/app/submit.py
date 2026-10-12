@@ -1,5 +1,6 @@
 """
-Turning a draft into database rows: check first, then ingest.
+Turning a draft into database rows: the app checks and submits it, the
+cluster ingests it.
 
 The checks come in two parts, saying which problems block and which are only
 worth knowing:
@@ -12,8 +13,12 @@ sync files, the acquisition numbers the conditions name).
 `ingest` runs both, then does the day's work in order: the session row, its
 annotations, each loop (ingested, annotated, its vials recorded, its sync file
 processed), then the grabs and z-stacks (each TIFF ingested and annotated, the
-grabs' sync files processed, each z-stack linked to its loop). `submit` first
-copies the files only this computer has, ingests, and moves the draft aside.
+grabs' sync files processed, each z-stack linked to its loop). The cluster
+runs it once the recordings are on the share (`odyn.app.submissions`).
+
+`submit` is the app's part: it copies the files only this computer has, runs
+`check`, puts the draft in the cluster's queue, and moves it aside. It writes
+nothing to the database.
 
 Every step that writes is a recorded `Database` call, and ingesting skips what
 is already in, so an ingest that failed halfway can be run again. What each
@@ -21,9 +26,9 @@ part or file became is remembered in the draft (`submitted_id`).
 
 **USAGE**
 ```python
+result = submit(db, draft)          # the app: refuses while `check` blocks
 problems = check(db, draft) + check_files(db, draft)
-result = ingest(db, draft)          # refuses while a blocking problem stands
-result = submit(db, draft, force=True)
+result = ingest(db, draft)          # the cluster: refuses while either blocks
 ```
 
 No Qt in here: the window calls these from a worker thread and shows what
@@ -34,7 +39,7 @@ from __future__ import annotations
 
 import re
 
-from collections.abc import Container, Sequence
+from collections.abc import Container
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -81,12 +86,16 @@ class Written:
 
 @dataclass
 class SubmitResult:
-    """The outcome of `submit`: what was written, and what was wrong."""
+    """
+    The outcome of `submit` or `ingest`: what was wrong, and where the draft
+    went (`queued`, by `submit`) or what it became (`written`, by `ingest`).
+    """
 
     label: str
     problems: list[Problem] = field(default_factory=list)
     written: None | Written = None
     error: None | str = None
+    queued: None | Path = None
 
     @property
     def blocked(self) -> bool:
@@ -94,7 +103,9 @@ class SubmitResult:
 
     @property
     def submitted(self) -> bool:
-        return self.written is not None and self.error is None
+        done = self.written is not None or self.queued is not None
+
+        return done and self.error is None
 
 
 # The Check tab's report is colored as the log is, with terminal codes (the
@@ -620,14 +631,17 @@ def submit(
     olfactometer: None | OlfactometerFolders = None,
 ) -> SubmitResult:
     """
-    Copy what only this computer has, put the draft in the database
-    (`ingest`), and move it aside once it is in.
+    Copy what only this computer has, then put the draft in the cluster's
+    queue as `db.user`'s (`submissions.enqueue`) and move it aside. The
+    cluster ingests it once the recordings are on the share.
 
     The copies are the sync recordings that are only on this computer (any in
     `busy` are still being written, and are left) and, given `olfactometer`,
     each loop's olfactometer files (see `copy_olfactometer`). A copy that
-    fails blocks, as a blocking problem of the checks does, unless `force`.
+    fails blocks, as a blocking problem of `check` does, unless `force`.
     """
+    from .submissions import enqueue  # it imports this module
+
     recording = [
         name for name, record in pending(draft).items() if record["local"] in busy
     ]
@@ -635,26 +649,34 @@ def submit(
     olfactometer_failed = (
         {} if olfactometer is None else copy_olfactometer(db, draft, olfactometer)
     )
-    result = ingest(
-        db,
-        draft,
-        force=force,
-        olfactometer=olfactometer,
-        problems=[
-            Problem(name, "still recording (stop it first)") for name in recording
-        ]
-        + [
+    found = [
+        *(Problem(name, "still recording (stop it first)") for name in recording),
+        *(
             Problem(name, f"could not copy the sync file to the server: {why}")
             for name, why in not_copied.items()
-        ]
-        + [
+        ),
+        *(
             Problem(name, f"could not copy the olfactometer files: {why}")
             for name, why in olfactometer_failed.items()
-        ],
+        ),
+        *check(db, draft, olfactometer),
+    ]
+    result = SubmitResult(
+        draft.label, sorted(found, key=lambda problem: not problem.blocking)
     )
 
-    if result.submitted:
-        draft.archive()
+    if result.blocked and not force:
+        return result
+
+    try:
+        result.queued = enqueue(draft, db.main_folder, db.project, user=db.user)
+
+    except OSError as error:
+        logger.exception(f"Submit of {draft.label} failed")
+        result.error = f"could not put it in the cluster's queue: {error}"
+        return result
+
+    draft.archive()
 
     return result
 
@@ -665,20 +687,19 @@ def ingest(
     *,
     force: bool = False,
     olfactometer: None | OlfactometerFolders = None,
-    problems: Sequence[Problem] = (),
 ) -> SubmitResult:
     """
     Put a finished draft in the database.
 
-    Refuses while `check` or `check_files` finds a blocking problem, or one of
-    `problems` (found before, a copy that failed, say) blocks, unless `force`.
+    Refuses while `check` or `check_files` finds a blocking problem, unless
+    `force`.
     Otherwise creates (or finds) the session, writes its annotations, then
     each loop and the grabs and z-stacks (see the module's description).
     Steps already done by an earlier attempt are skipped, so the call is safe
     to repeat after fixing what stopped it. Leaves the draft file where it is.
     """
     # Both checks report a part folder that is not there; it is said once
-    found = [*problems, *check(db, draft, olfactometer), *check_files(db, draft)]
+    found = [*check(db, draft, olfactometer), *check_files(db, draft)]
     result = SubmitResult(
         draft.label,
         sorted(dict.fromkeys(found), key=lambda problem: not problem.blocking),
