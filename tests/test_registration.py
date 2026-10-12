@@ -14,6 +14,7 @@ from odyn.registration import (
     reference_acquisitions,
     reference_image,
     sample_frames,
+    spread_acquisitions,
 )
 
 
@@ -68,6 +69,19 @@ def test_the_reference_acquisitions_avoid_the_start_and_the_exact_middle():
     assert 112 not in reference_acquisitions(224)
     assert reference_acquisitions(3) == [1]
     assert reference_acquisitions(0) == []
+
+
+def test_a_test_spreads_evenly_around_the_middle():
+    assert spread_acquisitions(10, 4) == [1, 3, 6, 8]
+
+    picks = spread_acquisitions(224, 24)
+    assert len(picks) == 24
+    assert set(np.diff(picks)) <= {9, 10}  # even steps of 224 / 24
+    assert picks[0] + picks[-1] == 223  # centered: as far from either end
+
+    # A short loop is tested whole
+    assert spread_acquisitions(8, 24) == list(range(8))
+    assert spread_acquisitions(0, 24) == []
 
 
 def test_frames_are_sampled_evenly_from_each_file(tmp_path):
@@ -133,16 +147,17 @@ def test_run_motion_correction_hands_caiman_one_reference(tmp_path, monkeypatch)
     monkeypatch.setitem(sys.modules, "caiman.motion_correction", motion)
 
     # A test on two acquisitions still uses the reference of the whole loop
-    group.run_motion_correction(use_gui_parameters=False, is_test=True, last_acq=1)
+    group.run_motion_correction(use_gui_parameters=False, is_test=True, test_acqs=2)
 
     assert seen["files"] == 2 and seen["template"].shape == (48, 40)
     call = db.latest_calls("run_motion_correction").iloc[0]
     assert call["input_reference_acq_ids"] == [4, 5, 6]  # middle third of 8 (3 of them)
+    assert call["input_acq_ids"] == [3, 7]  # positions 2 and 6 of 8
     outputs = db.outputs
     assert outputs["file_path"].str.endswith(f"reference_group_{group_id}.tif").any()
 
     # 0 leaves the template to caiman, as before
     group.run_motion_correction(
-        use_gui_parameters=False, is_test=True, last_acq=1, reference_acqs=0
+        use_gui_parameters=False, is_test=True, test_acqs=2, reference_acqs=0
     )
     assert seen["template"] is None

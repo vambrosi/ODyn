@@ -61,6 +61,35 @@ def reference_acquisitions(count: int, wanted: int = 4) -> list[int]:
     )
 
 
+def spread_acquisitions(count: int, wanted: int) -> list[int]:
+    """
+    The positions (0-based, in time order) of `wanted` acquisitions evenly
+    spaced over a loop of `count` and centered on its middle, so the first and
+    last are within half a step of the loop's ends. All of them when the loop
+    has no more than `wanted`. This is the subset a test motion correction
+    runs on.
+
+    **EXAMPLE**
+    ```python
+    spread_acquisitions(10, 4)   # [1, 3, 6, 8]
+    ```
+    """
+    if count <= 0 or wanted <= 0:
+        return []
+
+    if wanted >= count:
+        return list(range(count))
+
+    step = count / wanted
+    middle = (count - 1) / 2
+
+    # Rounded half up (Python's round goes to even, which skews the spread)
+    return [
+        int(np.floor(middle + (i - (wanted - 1) / 2) * step + 0.5))
+        for i in range(wanted)
+    ]
+
+
 def sample_frames(paths: Sequence[Path], per_file: int) -> np.ndarray:
     """
     Up to `per_file` frames from each TIFF in `paths`, evenly spread in time,

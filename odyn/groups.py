@@ -66,8 +66,11 @@ DEFAULT_STRIDES_UM = [128.0, 128.0]
 # acquisitions (around the middle of the loop), about this many frames in all
 REFERENCE_ACQS = 4
 REFERENCE_FRAMES = 200
+
+# A test motion correction runs on this many acquisitions, spread over the loop
+TEST_ACQS = 24
 DEFAULT_OVERLAP_UM = [96.0, 96.0]
-DEFAULT_MAX_SHIFT_UM = [128.0, 128.0]
+DEFAULT_MAX_SHIFT_UM = [80.0, 80.0]
 DEFAULT_MAX_DEVIATION_UM = 12.0
 
 # Preview movie overlay text parameters
@@ -1537,9 +1540,7 @@ class Group(CallRecorder):
         *,
         use_gui_parameters: bool = True,
         is_test: bool = True,
-        first_acq: int = 0,
-        step_acq: int = 1,
-        last_acq: int = 3,
+        test_acqs: int = TEST_ACQS,
         reference_acqs: int = REFERENCE_ACQS,
         border_nan: bool | str = "copy",
         nonneg_movie: bool = False,
@@ -1565,12 +1566,11 @@ class Group(CallRecorder):
         *Basic Parameters*
         - `use_gui_parameters`: Override parameters with latest `pick_mcor_parameters()` values
         - `use_last_parameters`: Use parameters from last run as the defaults
-        - `is_test`: Whether to use a limited range of acquisitions in this run
-
-        *Parameters in this section will be ignored if* `is_test == False`
-        - `first_acq`: Index of the first acquisition to motion correct
-        - `step_acq`: Get one acquisition for every 'step_acq' acquisitions
-        - `last_acq`: Index of the last acquisition to motion correct
+        - `is_test`: Whether to run on a few acquisitions only
+        - `test_acqs`: how many acquisitions to use in a test. (Ignored if
+        `is_test == False`.) Picks will be evenly spread over the loop and
+        centered on its middle. All acquisitions in both test and final motion
+        corrections are aligned to the same template.
 
         *Reference*
         - `reference_acqs`: how many acquisitions, spread around the middle of
@@ -1602,6 +1602,8 @@ class Group(CallRecorder):
         import caiman as cm
         from caiman.motion_correction import MotionCorrect
 
+        from .registration import spread_acquisitions
+
         # --- Optionally override parameters with GUI-picked values --- #
         # These override both the passed arguments and use_last_parameters.
 
@@ -1624,11 +1626,12 @@ class Group(CallRecorder):
 
         # --- Validate and adjust parameters to reasonable values --- #
 
-        # If is not test, include all acquisitions
-        if not is_test:
-            first_acq = 0
-            step_acq = 1
-            last_acq = len(self.acquisitions) - 1
+        positions = (
+            spread_acquisitions(len(self.acquisitions), test_acqs)
+            if is_test
+            else list(range(len(self.acquisitions)))
+        )
+        acquisitions_slice = self.acquisitions.iloc[positions]
 
         # max_shift_um has to less than size of image (in μm / 4)
         height_um = self.loops["height_um"].min()
@@ -1643,9 +1646,7 @@ class Group(CallRecorder):
         # parameters_used, even if it fails below.
         self.update_parameters_used(
             {
-                "first_acq": first_acq,
-                "step_acq": step_acq,
-                "last_acq": last_acq,
+                "acq_ids": [int(i) for i in acquisitions_slice.index],
                 "max_deviation_um": max_deviation_um,
                 "max_shift_um": max_shift_um,
                 "overlap_um": overlap_um,
@@ -1656,10 +1657,9 @@ class Group(CallRecorder):
         # --- Get settings for CaImAn MotionCorrection class --- #
 
         # Get raw paths
-        acquisitions_slice = self.acquisitions.iloc[first_acq : last_acq + 1 : step_acq]
         raw_paths = [self.db.main_folder / p for p in acquisitions_slice["raw_path"]]
 
-        assert raw_paths, "No raw files within the index range."
+        assert raw_paths, "The group has no acquisitions."
 
         # CaImAn only uses pixels as units, so we make the conversion
         factor = [
