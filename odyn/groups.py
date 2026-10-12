@@ -2837,12 +2837,6 @@ def _draw_label(
     )
 
 
-# ScanImage writes um/px as though every acquisition came from a 20x
-# objective. On 10x a real 100 um is written as 45 um (measured).
-# No DB data reflects that, so we plot two scale bars on preview movies.
-TEN_X_CORRECTION = 100 / 45
-
-
 def _nice_length(target_px: int, um_per_px: float, panel_px: int) -> int:
     """
     A round number of um near `target_px`, but capped at a share of the panel.
@@ -2853,7 +2847,7 @@ def _nice_length(target_px: int, um_per_px: float, panel_px: int) -> int:
     return min(fits or ladder[:1], key=lambda rung: abs(rung / um_per_px - target_px))
 
 
-def _draw_scale_bars(
+def _draw_scale_bar(
     picture: np.ndarray,
     left: int,
     right: int,
@@ -2863,59 +2857,45 @@ def _draw_scale_bars(
     offset: int = TEXT_OUTLINE_OFFSET,
 ) -> None:
     """
-    One labelled bar per objective, in the bottom right of `left` to `right`.
-
-    Two bars because `um_per_px` as stored is only right for 20x (see
-    TEN_X_CORRECTION), and which objective was used is not in the files.
+    A labelled scale bar in the bottom right of `left` to `right`.
 
     Some recordings are anisotropic, so we show only the horizontal scale
-    for simplicity. Bars and labels are flush right.
+    for simplicity. Bar and label are flush right.
     """
     # Arbitrary but reasonable parameters
     pad = round(4 * scale) + 2
     margin = round(8 * scale) + 4
     bar_height = max(2, round(4 * scale))
 
-    rows = []
+    # We try to make scale bar width close to text size. Since this is not
+    # known yet, we use a typical text size as an approximation.
+    (target_width, _), _ = cv2.getTextSize(
+        "100 um", cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
+    )
+    microns = _nice_length(target_width, um_per_px, right - left)
+    bar_width = round(microns / um_per_px)
 
-    for objective, correction in (("20x", 1.0), ("10x", TEN_X_CORRECTION)):
-        true_um_per_px = um_per_px * correction
-
-        # We try to make scale bar width close to text size. Since this is
-        # not know yet, we use a typical text size as an approximation.
-        (target_width, _), _ = cv2.getTextSize(
-            f"100 um ({objective})", cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
-        )
-        microns = _nice_length(target_width, true_um_per_px, right - left)
-
-        # 'um' rather than 'µm': Hershey fonts are ASCII-only before OpenCV 5.
-        text = f"{microns:g} um ({objective})"
-        (text_width, text_height), _ = cv2.getTextSize(
-            text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
-        )
-        rows.append((text, round(microns / true_um_per_px), text_width, text_height))
+    # 'um' rather than 'µm': Hershey fonts are ASCII-only before OpenCV 5.
+    text = f"{microns:g} um"
+    (text_width, _), _ = cv2.getTextSize(
+        text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
+    )
 
     end = right - margin
-    bottom = picture.shape[0] - margin
+    bar_top = picture.shape[0] - margin - bar_height
+    text_baseline = bar_top - pad
 
-    # Bottom up, so 20x sits at the edge and 10x above it
-    for text, bar_width, text_width, text_height in rows:
-        bar_top = bottom - bar_height
-        text_baseline = bar_top - pad
+    # The bar gets the same outline as the text
+    picture[
+        bar_top - offset : bar_top + bar_height + offset,
+        end - bar_width - offset : end + offset,
+    ] = 0
 
-        # The bar gets the same outline as the text
-        picture[
-            bar_top - offset : bar_top + bar_height + offset,
-            end - bar_width - offset : end + offset,
-        ] = 0
+    picture[bar_top : bar_top + bar_height, end - bar_width : end] = 255
 
-        picture[bar_top : bar_top + bar_height, end - bar_width : end] = 255
-
-        _draw_label(
-            picture, text, (end - text_width, text_baseline), scale, thickness, offset
-        )
-
-        bottom = text_baseline - text_height - pad
+    _draw_label(
+        picture, text, (end - text_width, text_baseline), scale, thickness, offset
+    )
 
 
 def _write_preview_movie(
@@ -2989,9 +2969,9 @@ def _write_preview_movie(
                 )
 
             # Speed on the bottom left corner (first panel)
-            # Scale bars on the bottom right corner (last panel)
+            # Scale bar on the bottom right corner (last panel)
             if um_per_px is not None:
-                _draw_scale_bars(picture, width - panel_width, width, um_per_px, scale)
+                _draw_scale_bar(picture, width - panel_width, width, um_per_px, scale)
 
             if speed is not None:
                 _draw_label(

@@ -144,7 +144,7 @@ OBJECTIVE = Field(
     "objective",
     "Objective",
     INTEGER,
-    "10 or 20 (preview scalebar uses it)",
+    "10 or 20 (sets the microns per pixel)",
     required=True,
     options=OBJECTIVES,
 )
