@@ -2881,8 +2881,8 @@ def _check_session(recording: Object, session: sqlite3.Row, db: Database) -> Non
     if (mouse, day) != (session["mouse_id"], session["session_date"]):
         db.fail(
             IngestFlag.NOT_THE_SESSION,
-            f"'{name}' is not about m{session['mouse_id']} on "
-            f"{session['session_date']}.",
+            f"The TIFFs {name}_* were recorded as m{mouse} on {day}, but the "
+            f"session is m{session['mouse_id']} on {session['session_date']}.",
         )
 
 
@@ -3638,9 +3638,9 @@ def _parse_program_starts(
 
     if log_path is None:
         raise FileNotFoundError(
-            f"No olfactometer log for {start.date()} (looked for "
-            f"{' and '.join(repr(str(p)) for p in candidates)}). The app copies it "
-            "into the loop's olfactometer/log at Submit."
+            f"No olfactometer log for {start.date()} ({name} in "
+            f"'{loop_folder.name}/{OLFACTOMETER_FOLDER}/log' or "
+            f"'{INFO_FOLDER}/{start.date():%Y%m}')."
         )
 
     starts = []

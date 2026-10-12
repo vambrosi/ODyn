@@ -735,8 +735,8 @@ def test_submit_adds_the_grabs_and_zstacks_with_their_notes(a_day):
 def test_an_error_reads_as_odyn_wrote_it():
     from odyn.app.submit import described
 
-    assert described(RuntimeError("'x' is not about m1 on 2026-01-01.")) == (
-        "'x' is not about m1 on 2026-01-01"
+    assert described(RuntimeError("The TIFFs x_* were recorded as m2.")) == (
+        "The TIFFs x_* were recorded as m2"
     )
     assert described(FileNotFoundError("No olfactometer log")) == "No olfactometer log"
     assert described(KeyError("mouse_id")) == "KeyError: 'mouse_id'"

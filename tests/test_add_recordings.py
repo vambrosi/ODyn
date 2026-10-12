@@ -178,7 +178,7 @@ def test_the_files_must_agree_with_the_session(db):
     db.set_mouse(mouse_id=2)
     other = db.add_session(mouse_id=2, session_date="2026-01-01")
 
-    with pytest.raises(RuntimeError, match="not about m2 on 2026-01-01"):
+    with pytest.raises(RuntimeError, match="but the session is m2 on 2026-01-01"):
         db.add_loop(session_id=other, loop_path="20260101/m1/e1", objective=20)
 
     assert len(db.loops) == 0

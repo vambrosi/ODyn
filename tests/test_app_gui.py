@@ -1589,8 +1589,7 @@ def test_the_submit_report_ends_with_what_was_written(window):
         "     e1  no olfactometer Events file found",
         "     e1  could not process the sync file: 5 frame bursts but 2 acquisitions",
         "",
-        " RESULT  submitted as session 12 (1 loop, 0 grabs, 0 z-stacks, "
-        "2 annotations, sync processed for none) ✔",
+        " RESULT  submitted as session 12 (1 loop, 2 annotations) ✔",
     ]
 
 

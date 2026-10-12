@@ -46,7 +46,7 @@ COLUMNS = ["kind", "path", "objective", "submitted_at", "sync"]
 def cluster_line(db, now: None | datetime = None) -> tuple[str, str]:
     """
     When the cluster last ran its tick, as `(text, kind)` for the QC page. The
-    kind is `warning` when the chain of ticks looks stopped (no tick for twice
+    kind is `warning` when the cluster looks stopped (no tick for twice
     its interval), else `computed`.
     """
     beat = heartbeat(db.main_folder, db.project)
@@ -64,7 +64,7 @@ def cluster_line(db, now: None | datetime = None) -> tuple[str, str]:
     text = f"The cluster last ran at {beat['started_at'][:16]} ({ago} ago){tail}"
 
     if minutes > 2 * every:
-        return f"{text}, so its chain of ticks may have stopped", "warning"
+        return f"{text}; it may have stopped", "warning"
 
     return text, "computed"
 

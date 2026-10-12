@@ -1051,7 +1051,7 @@ class Sessions(QObject):
             self.context.report(
                 PartPage.TITLES[kind],
                 f"Could not create {draft.folder}/{name} on the server:\n\n{error}"
-                "\n\nCreate it manually before copying the TIFFs!",
+                "\n\nCreate it manually before copying the TIFFs",
             )
 
         self.context.announce_draft()
@@ -1133,13 +1133,27 @@ class Sessions(QObject):
                 Problem(name, f"could not process the sync file: {message}", False)
                 for name, message in written.process_failed.items()
             ]
+            # Only what there is: "1 loop, 4 annotations; sync processed for e1"
+            counts = [
+                counted(n, what)
+                for n, what in (
+                    (len(written.loops), "loop"),
+                    (len(written.grabs), "grab"),
+                    (len(written.zstacks), "z-stack"),
+                    (written.annotations, "annotation"),
+                )
+                if n
+            ]
+            details = ", ".join(counts)
+
+            if written.processed:
+                synced = f"sync processed for {', '.join(written.processed)}"
+                details = f"{details}; {synced}" if details else synced
+
             outcome = (
-                f"submitted as session {written.session_id} "
-                f"({counted(len(written.loops), 'loop')}, "
-                f"{counted(len(written.grabs), 'grab')}, "
-                f"{counted(len(written.zstacks), 'z-stack')}, "
-                f"{counted(written.annotations, 'annotation')}, sync processed for "
-                f"{', '.join(written.processed) or 'none'}) {CHECK}"
+                f"submitted as session {written.session_id}"
+                + (f" ({details})" if details else "")
+                + f" {CHECK}"
             )
 
         if result.error:
