@@ -319,6 +319,7 @@ def generate(
     acq_state: str = "loop",
     z_um: None | float = None,
     zstack: None | dict = None,
+    acqs_per_loop: None | int = None,
 ) -> dict:
     """
     Write the recording and return what went into it.
@@ -332,6 +333,9 @@ def generate(
     versions). `zstack` makes every file a z-stack: `slices`, `step_um`,
     `top_um` (shallowest z), and the power settings `power` (%),
     `length_um` and `reference_um`; ScanImage takes the slices deep to shallow.
+
+    `acqs_per_loop` is the loop length ScanImage was set to, written in every
+    header (left out: `acquisitions`, a loop that ran to the end).
 
     `motion` scales every displacement. Pass `0` for a still recording, which is
     lets you see the response by itself. (Can be used as mcor comparison.)
@@ -423,6 +427,7 @@ def generate(
             f"SI.hStackManager.framesPerSlice = {frames}",
             f"SI.hRoiManager.scanFrameRate = {frame_rate}",
             f"SI.loopAcqInterval = {LOOP_INTERVAL_S}",
+            f"SI.acqsPerLoop = {acqs_per_loop or acquisitions}",
         ]
 
         if z_um is not None:

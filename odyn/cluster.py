@@ -4,8 +4,9 @@ them and does what the database is waiting for.
 
 Workstations cannot start cluster jobs (logging in takes a password and Duo),
 so anything that has to run there is left as a request file on the share,
-and a short `tick` on the cluster applies it. A tick also processes the sync
-files that arrived since their loop or grabs were submitted, writes a
+and a short `tick` on the cluster applies it. A tick also adds the submitted
+drafts whose recordings finished copying (`odyn.app.submissions`), processes
+the sync files that arrived since their loop or grabs were added, writes a
 heartbeat, and (as a chain) submits the next tick. Everything a tick does is
 safe to repeat, so a tick that ran twice, or not at all for a day, only
 delays work.
@@ -14,6 +15,8 @@ Files, per database (`main` or the project's name), in
 `<main_folder>/.odyn/cluster/<name>/`:
 - `requests/` holds the requests waiting, `requests/done/` the applied ones
 and `requests/rejected/` the refused ones, each with the reason;
+- `submissions/` holds the submitted drafts not added yet, each with its
+state, and `submissions/done/` the ones added;
 - `heartbeat.json` says when the last tick ran and what it did, and
 `tick.log` keeps a line per tick;
 - `seen.json` is what each sync folder looked like when a tick last tried it;
@@ -271,6 +274,7 @@ class TickReport:
     dry_run: bool = False
     applied: list[str] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)
+    submissions: list[str] = field(default_factory=list)
     processed: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     next_tick: None | str = None
@@ -280,6 +284,7 @@ class TickReport:
         parts = [
             f"{len(self.applied)} requests applied",
             f"{len(self.rejected)} rejected",
+            f"{len(self.submissions)} submissions looked at",
             f"{len(self.processed)} sync files processed",
             f"{len(self.errors)} errors",
         ]
@@ -299,9 +304,11 @@ def tick(
     settle_s: float = SETTLE_S,
 ) -> TickReport:
     """
-    One round of the cluster's work: apply the waiting requests, process the
-    sync files that arrived (or changed) since they were last processed,
-    write the heartbeat and, with `chain`, submit the next tick.
+    One round of the cluster's work: apply the waiting requests, add the
+    submitted drafts whose recordings are complete (see
+    `odyn.app.submissions`), process the sync files that arrived (or changed)
+    since they were last processed, write the heartbeat and, with `chain`,
+    submit the next tick.
 
     **PARAMETERS**
     - `dry_run` lists what would be done and changes nothing
@@ -323,6 +330,11 @@ def tick(
             report.applied.append(f"would apply {path.name}")
         else:
             _apply(path, main_folder, project, report)
+
+    # Imported here: the queue belongs to the app (no Qt in it)
+    from .app.submissions import process_submissions
+
+    report.submissions = process_submissions(main_folder, project, dry_run=dry_run)
 
     db = Database(main_folder, project=project)
     seen = _read_seen(folder)
@@ -686,7 +698,18 @@ def status(main_folder: str | Path, project: None | str = None) -> str:
         for error in beat.get("errors", []):
             lines.append(f"  error     {error}")
 
+    from .app.submissions import queued
+
     lines.append(f"Requests:   {len(pending_requests(main_folder, project))} waiting")
+    states = [state.state for _, state in queued(main_folder, project)]
+    lines.append(
+        f"Submitted:  {states.count('waiting')} waiting, "
+        f"{states.count('failed')} failed"
+    )
+
+    for path, state in queued(main_folder, project):
+        if state.state == "failed":
+            lines.append(f"  failed    {path.name}: {state.message}")
     rejected = sorted((folder / REQUESTS_FOLDER / REJECTED_FOLDER).glob("*.json"))
     lines.append(f"Rejected:   {len(rejected)} in total")
     lines.append(f"Stopped:    {'yes' if (folder / STOP_FILE).exists() else 'no'}")
@@ -728,7 +751,9 @@ def main(argv: None | list[str] = None) -> int:
     parser.add_argument("--project", default=None)
     commands = parser.add_subparsers(dest="command", required=True)
 
-    run = commands.add_parser("tick", help="apply requests and process sync files")
+    run = commands.add_parser(
+        "tick", help="apply requests, add submitted drafts and process sync files"
+    )
     run.add_argument("--dry-run", action="store_true", help="only say what it would do")
     run.add_argument("--chain", action="store_true", help="then submit the next tick")
 
@@ -749,7 +774,7 @@ def main(argv: None | list[str] = None) -> int:
             args.main_folder, args.project, dry_run=args.dry_run, chain=args.chain
         )
 
-        for line in [*report.applied, *report.processed]:
+        for line in [*report.applied, *report.submissions, *report.processed]:
             print(f"  {line}")
 
         for line in report.errors:
