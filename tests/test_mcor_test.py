@@ -17,6 +17,7 @@ import pytest
 import tifffile
 
 from odyn import Database
+from odyn.cluster import cluster_folder, run_mcor_test, submit_mcor_test
 from odyn.registration import spread_acquisitions
 from generate_data import generate
 
@@ -58,7 +59,8 @@ def caiman(monkeypatch, tmp_path):
     return seen
 
 
-def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
+def a_loop(tmp_path, user="ana") -> tuple[Database, int]:
+    """Eight acquisitions of loop e1, added by `user`, and its group."""
     generate(
         tmp_path,
         acquisitions=8,
@@ -67,13 +69,18 @@ def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
         width=40,
         start=datetime(2026, 3, 4, 9),
     )
-    db = Database(tmp_path, can_create=True, user="ana")
+    db = Database(tmp_path, can_create=True, user=user)
     db.set_mouse(mouse_id=1)
     session_id = db.add_session(mouse_id=1, session_date="2026-03-04")
     loop_id = db.add_loop(
         session_id=session_id, loop_path="20260304/m1/e1", objective=20
     )
-    group_id = int(db.group_loops.index[db.group_loops["loop_id"] == loop_id][0])
+
+    return db, int(db.group_loops.index[db.group_loops["loop_id"] == loop_id][0])
+
+
+def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
+    db, group_id = a_loop(tmp_path)
 
     folder = db.groups[group_id].test_motion_correction(test_acqs=4, movie=False)
 
@@ -108,3 +115,44 @@ def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
     assert call["output_folder"] == folder.relative_to(tmp_path).as_posix()
     assert call["output_acq_ids"] == summary["acq_id"].tolist()
     assert db.outputs["file_path"].str.endswith(f"{name}/summary.csv").any()
+
+
+# --------------------------------------------------------------------------- #
+# As a job on the cluster
+# --------------------------------------------------------------------------- #
+
+
+def test_a_test_is_a_job_of_its_own_for_who_added_the_loop(tmp_path, slurm):
+    _, group_id = a_loop(tmp_path, user="ana")
+
+    job_id = submit_mcor_test(tmp_path, None, group_id)
+
+    assert job_id == "4242"
+    assert "sbatch --parsable" in slurm.read_text()
+    script = (
+        cluster_folder(tmp_path) / "jobs" / f"mcor-test-g{group_id}.sh"
+    ).read_text()
+    assert "#SBATCH --gres=disk:128" in script
+    assert 'CAIMAN_TEMP="/mnt/scratch/${SLURM_JOB_ID}"' in script
+    assert "trap 'rm -rf \"$CAIMAN_TEMP\"' EXIT" in script
+    assert f"run-mcor-test --group {group_id} --user ana" in script
+
+    sent = json.loads(
+        (cluster_folder(tmp_path) / "mcor" / f"{group_id}.json").read_text()
+    )
+    assert (sent["job_id"], sent["user"]) == ("4242", "ana")
+
+
+def test_the_job_records_the_test_as_the_owners(tmp_path, monkeypatch):
+    from odyn.groups import Group
+
+    _, group_id = a_loop(tmp_path, user="ana")
+    seen = []
+    monkeypatch.setattr(
+        Group,
+        "test_motion_correction",
+        lambda self: seen.append((self.group_id, self.db.user)) or tmp_path,
+    )
+
+    assert run_mcor_test(tmp_path, None, group_id, "ana") == tmp_path
+    assert seen == [(group_id, "ana")]

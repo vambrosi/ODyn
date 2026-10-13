@@ -21,6 +21,8 @@ state, and `submissions/done/` the ones added;
 `tick.log` keeps a line per tick;
 - `seen.json` is what each sync folder looked like when a tick last tried it;
 - `jobs/` holds the job scripts and their output;
+- `mcor/` has a file per group whose test motion correction was submitted
+(`<group_id>.json`: the job, who it is for, when);
 - `STOP` stops the chain (the running tick does not submit the next one).
 
 The cluster's own settings (partition, conda environment, chain interval) are
@@ -33,6 +35,7 @@ python -m odyn.cluster <main_folder> start [--every MINUTES] [--dry-run]
 python -m odyn.cluster <main_folder> stop
 python -m odyn.cluster <main_folder> status
 python -m odyn.cluster <main_folder> request process_sync loop_id=12
+python -m odyn.cluster <main_folder> mcor-test --group 7 [--dry-run]
 ```
 
 **PYTHON**
@@ -77,6 +80,7 @@ HEARTBEAT_FILE = "heartbeat.json"
 LOG_FILE = "tick.log"
 STOP_FILE = "STOP"
 SEEN_FILE = "seen.json"
+MCOR_FOLDER = "mcor"
 
 # What a request may ask for. A request is executed by name, so this list is
 # the whole of what another computer can make the cluster do.
@@ -120,6 +124,11 @@ class ClusterConfig:
     tick_cpus: int = 1
     tick_memory: str = "8G"
     tick_time: str = "0:30:00"
+    mcor_cpus: int = 12
+    mcor_memory: str = "96G"
+    mcor_time: str = "4:00:00"
+    mcor_disk_gb: int = 128  # the node's scratch disk, for caiman's temporary files
+    scratch: str = "/mnt/scratch"
 
     @classmethod
     def read(cls, main_folder: str | Path) -> ClusterConfig:
@@ -635,6 +644,143 @@ def submit_tick(
     return job_id
 
 
+def mcor_test_script(
+    main_folder: str | Path,
+    project: None | str,
+    group_id: int,
+    user: str,
+    config: ClusterConfig,
+) -> str:
+    """The job script of one test motion correction (see `submit_mcor_test`)."""
+    main_folder = Path(main_folder).resolve()
+    logs = cluster_folder(main_folder, project) / JOBS_FOLDER
+    command = [
+        "python",
+        "-m",
+        "odyn.cluster",
+        str(main_folder),
+        *(["--project", project] if project else []),
+        "run-mcor-test",
+        "--group",
+        str(group_id),
+        "--user",
+        user,
+    ]
+
+    return f"""#!/bin/bash
+#SBATCH --partition={config.partition}
+#SBATCH --job-name=odyn-mcor-{project or 'main'}-g{group_id}
+#SBATCH --output={logs}/%x-%j.out
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task={config.mcor_cpus}
+#SBATCH --mem={config.mcor_memory}
+#SBATCH --time={config.mcor_time}
+#SBATCH --gres=disk:{config.mcor_disk_gb}
+
+# A test motion correction of group {group_id}, for {user}. caiman's temporary
+# files go to the node's scratch disk, removed however the job ends.
+
+set -euo pipefail
+
+export PYTHONUNBUFFERED=1
+export TQDM_DISABLE=1
+export CAIMAN_TEMP="{config.scratch}/${{SLURM_JOB_ID}}"
+mkdir -p "$CAIMAN_TEMP"
+trap 'rm -rf "$CAIMAN_TEMP"' EXIT
+
+source "{config.conda_sh}"
+set +u
+conda activate {config.conda_env}
+set -u
+
+echo "mcor test of group {group_id} as job ${{SLURM_JOB_ID:-none}} on $(hostname)"
+echo "cores    ${{SLURM_CPUS_PER_TASK:-?}}, temporary files in $CAIMAN_TEMP"
+echo "started  $(date --iso-8601=seconds)"
+{shlex.join(command)}
+echo "finished $(date --iso-8601=seconds)"
+"""
+
+
+def submit_mcor_test(
+    main_folder: str | Path,
+    project: None | str,
+    group_id: int,
+    *,
+    user: None | str = None,
+    dry_run: bool = False,
+) -> None | str:
+    """
+    Submit a test motion correction of `group_id` (`Group.test_motion_correction`)
+    as its own job, recorded as `user`'s: by default whoever added the group's
+    loop. Writes the script to `jobs/` and what was submitted to
+    `mcor/<group_id>.json`. Returns the job id (`None` in a dry run, which only
+    writes and shows the script).
+    """
+    if user is None:
+        user = loop_owner(Database(main_folder, project=project), group_id)
+
+    config = ClusterConfig.read(main_folder)
+    folder = cluster_folder(main_folder, project)
+    script = folder / JOBS_FOLDER / f"mcor-test-g{group_id}.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(mcor_test_script(main_folder, project, group_id, user, config))
+    command = ["sbatch", "--parsable", str(script)]
+
+    if dry_run:
+        logger.info(f"Would run: {shlex.join(command)}")
+        print(script.read_text())
+        return None
+
+    done = subprocess.run(command, capture_output=True, text=True)
+
+    if done.returncode != 0:
+        raise RuntimeError(
+            f"sbatch failed: {done.stderr.strip() or done.stdout.strip()}"
+        )
+
+    job_id = done.stdout.strip().split(";")[0]
+    _write_json(
+        folder / MCOR_FOLDER / f"{group_id}.json",
+        {
+            "group_id": group_id,
+            "job_id": job_id,
+            "user": user,
+            "submitted_at": datetime.now().strftime(TIME_FORMAT),
+        },
+    )
+    logger.info(
+        f"Submitted the test motion correction of group {group_id} as job {job_id}."
+    )
+
+    return job_id
+
+
+def run_mcor_test(
+    main_folder: str | Path, project: None | str, group_id: int, user: str
+) -> Path:
+    """What the job runs: the test, recorded as `user`'s. Returns its folder."""
+    db = Database(main_folder, project=project, user=user)
+
+    return db.groups[group_id].test_motion_correction()
+
+
+def loop_owner(db: Database, group_id: int) -> str:
+    """
+    Who added the loop of `group_id` (the user of its `add_loop` call), which
+    is who its tests and their QC belong to.
+    """
+    loop_ids = set(db.group_loops.loc[[group_id], "loop_id"].astype(int))
+    calls = db.latest_calls("add_loop")
+
+    for _, call in calls.iterrows():  # newest first
+        added = call.get("output_loop_ids")
+
+        if isinstance(added, list) and loop_ids & {int(i) for i in added}:
+            return str(call["user"])
+
+    raise ValueError(f"No add_loop call added the loop of group {group_id}.")
+
+
 def queued_ticks(project: None | str = None) -> list[str]:
     """The ids of this database's ticks waiting or running in Slurm."""
     done = subprocess.run(
@@ -763,6 +909,17 @@ def main(argv: None | list[str] = None) -> int:
     commands.add_parser("stop", help="stop the chain of ticks")
     commands.add_parser("status", help="last tick, queue and requests")
 
+    test = commands.add_parser(
+        "mcor-test", help="submit a test motion correction of a group as a job"
+    )
+    test.add_argument("--group", type=int, required=True)
+    test.add_argument("--user", help="whose it is (default: who added the loop)")
+    test.add_argument("--dry-run", action="store_true", help="only show the job")
+
+    job = commands.add_parser("run-mcor-test", help="what the mcor-test job runs")
+    job.add_argument("--group", type=int, required=True)
+    job.add_argument("--user", required=True)
+
     ask = commands.add_parser("request", help="leave a request for the next tick")
     ask.add_argument("method", choices=REQUESTABLE)
     ask.add_argument("arguments", nargs="*", help="key=value")
@@ -790,6 +947,19 @@ def main(argv: None | list[str] = None) -> int:
 
     elif args.command == "status":
         print(status(args.main_folder, args.project))
+
+    elif args.command == "mcor-test":
+        submit_mcor_test(
+            args.main_folder,
+            args.project,
+            args.group,
+            user=args.user,
+            dry_run=args.dry_run,
+        )
+
+    elif args.command == "run-mcor-test":
+        folder = run_mcor_test(args.main_folder, args.project, args.group, args.user)
+        print(f"Wrote {folder}")
 
     elif args.command == "request":
         kwargs = {}
