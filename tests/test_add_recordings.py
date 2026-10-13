@@ -83,6 +83,7 @@ def test_the_loop_points_at_its_session(db):
     assert experiment["objective"] == 20
     assert experiment["frames_per_slice"] == 56
     assert experiment["z_um"] == -120.5
+    assert db.acquisitions["frame_count"].tolist() == [56, 56, 56]
 
     assert db.experiment_for(1, 1) == exp_id
     assert db.experiment_for(1, 2) is None
@@ -254,6 +255,7 @@ def test_a_grab_is_an_experiment_of_one_acquisition(tmp_path):
     assert list(db.acquisitions["raw_path"]) == [
         "20260304/m1/e2/raw/20260304_m1_e2_00001.tif"
     ]
+    assert db.acquisitions["frame_count"].tolist() == [56]
     assert list(db.group_experiments["exp_id"]) == [exp_id]  # a group of its own
 
     # The rig settings, but not the loop interval its header still has

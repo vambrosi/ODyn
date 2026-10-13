@@ -156,7 +156,7 @@ class SyncFlag(IntFlag):
     ODOR_PULSES = 1 << 7
     CLOCK_SKEW = 1 << 8  # the two computers disagree beyond `max_skew_s`
     NO_CAMERA = 1 << 9  # an acquisition without camera strobes (no pupil)
-    FRAME_COUNT = 1 << 10  # frames in a burst differ from the ScanImage setting
+    FRAME_COUNT = 1 << 10  # frames in a burst differ from its TIFF's
     NO_TRIALS = 1 << 11  # the experiment has no trials to match the odor bursts to
 
 
@@ -2178,8 +2178,7 @@ class Database(CallRecorder):
         """
         with self._locked() as con:
             experiment = con.execute(
-                "SELECT exp_path, exp_type, frames_per_slice FROM experiments "
-                "WHERE exp_id = ?;",
+                "SELECT exp_path, exp_type FROM experiments WHERE exp_id = ?;",
                 [int(exp_id)],
             ).fetchone()
 
@@ -2187,7 +2186,7 @@ class Database(CallRecorder):
                 raise ValueError(f"There is no experiment {exp_id}.")
 
             acquisitions = con.execute(
-                "SELECT acq_id, acq_start FROM acquisitions "
+                "SELECT acq_id, acq_start, frame_count FROM acquisitions "
                 "WHERE exp_id = ? ORDER BY acq_start;",
                 [int(exp_id)],
             ).fetchall()
@@ -2206,13 +2205,7 @@ class Database(CallRecorder):
         # Read without the lock: a file is hundreds of megabytes
         decoded = decode(path)
 
-        self._check_sync(
-            decoded,
-            acquisitions,
-            trials,
-            experiment["frames_per_slice"],
-            experiment["exp_type"],
-        )
+        self._check_sync(decoded, acquisitions, trials, experiment["exp_type"])
 
         blocks = decoded.blocks
         acq_ids = [row["acq_id"] for row in acquisitions]
@@ -2397,7 +2390,6 @@ class Database(CallRecorder):
         decoded: DecodedSync,
         acquisitions: list,
         trials: list,
-        frames_per_slice: int,
         exp_type: str,
     ) -> None:
         """Flag what is off about a sync file, and refuse what cannot be matched."""
@@ -2448,13 +2440,23 @@ class Database(CallRecorder):
                 f"{len(trials)} trials, so they cannot be matched by order.",
             )
 
-        wrong = [b.sync_block for b in blocks if b.frame_count != frames_per_slice]
+        # Paired by order (their counts agree, or the call failed above)
+        wrong = [
+            (b, row)
+            for b, row in zip(blocks, acquisitions)
+            if b.frame_count != row["frame_count"]
+        ]
 
         if wrong:
+            bursts = ", ".join(str(b.sync_block) for b, _ in wrong)
+            found = ", ".join(str(b.frame_count) for b, _ in wrong)
+            expected = ", ".join(
+                str(n) for n in sorted({int(row["frame_count"]) for _, row in wrong})
+            )
             self.add_flag(SyncFlag.FRAME_COUNT)
             logger.warning(
-                f"Bursts {wrong} do not have the {frames_per_slice} frames ScanImage "
-                "was set to."
+                f"Frame counts disagree: bursts {bursts} have {found} frames, but "
+                f"their TIFFs have {expected}."
             )
 
         no_camera = [b.sync_block for b in blocks if not b.camera_frames]
@@ -2596,9 +2598,13 @@ def _read_open_tiff(
     # Data specific to the TIFF: when its first frame was taken
     delta_sec = float(image_description["frameTimestamps_sec"])
 
+    # A loop's TIFF holds one acquisition, framesPerSlice frames. So does a
+    # grab's, unless ScanImage split it into files (`SI.hScan2D.
+    # logFramesPerFile`): each then holds that many, the last one the rest.
     tiff: Object = {
         "raw_path": path.relative_to(main_folder).as_posix(),
         "acq_start": started + timedelta(seconds=delta_sec),
+        "frame_count": recording["frames_per_slice"],
     }
 
     return recording, tiff

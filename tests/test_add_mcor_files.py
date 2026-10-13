@@ -52,13 +52,15 @@ def build(tmp_path, acquisitions=3):
         for index in range(acquisitions):
             con.execute(
                 """
-                INSERT INTO acquisitions (acq_id, exp_id, acq_start, raw_path)
-                    VALUES (?, 1, ?, ?);
+                INSERT INTO acquisitions
+                    (acq_id, exp_id, acq_start, raw_path, frame_count)
+                    VALUES (?, 1, ?, ?, ?);
                 """,
                 [
                     index + 1,
                     f"2026-01-01 10:0{index}:00",
                     f"{EXP_DIR}/raw/{STEM}_{index + 1:05d}.tif",
+                    FRAMES,
                 ],
             )
 

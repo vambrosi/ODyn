@@ -177,11 +177,16 @@ CREATE TABLE IF NOT EXISTS group_experiments
 
 -- Acquisition is a ScanImage TIFF output of an experiment.
 -- Alignment to other streams is in `sync_blocks`.
+--
+-- `frame_count` is the frames in its TIFF, from the header (not counted):
+-- the experiment's `frames_per_slice`, except for a grab split into several
+-- files, which odyn refuses for now.
 CREATE TABLE IF NOT EXISTS acquisitions
     ( acq_id            INTEGER PRIMARY KEY AUTOINCREMENT
     , exp_id            INTEGER NOT NULL
     , acq_start         TEXT NOT NULL CHECK(datetime(acq_start) IS NOT NULL)
     , raw_path          TEXT NOT NULL UNIQUE
+    , frame_count       INTEGER NOT NULL CHECK(frame_count > 0)
 
     , UNIQUE (exp_id, acq_start)
     , FOREIGN KEY (exp_id) REFERENCES experiments(exp_id) ON DELETE CASCADE

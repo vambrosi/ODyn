@@ -23,8 +23,8 @@ INSERT INTO experiments
 INSERT INTO programs (exp_id, program_name, program_type, program_start, program_path)
     VALUES (1, 'p', 'passive', '2025-02-01 00:00:00', 'path');
 
-INSERT INTO acquisitions (exp_id, acq_start, raw_path)
-    VALUES (1, '2025-02-01 00:00:00', 'raw');
+INSERT INTO acquisitions (exp_id, acq_start, raw_path, frame_count)
+    VALUES (1, '2025-02-01 00:00:00', 'raw', 30);
 
 INSERT INTO trials
     ( trial_start
@@ -67,8 +67,8 @@ INSERT INTO experiments
         , 300, 60, 20, -80, 'grab'
         );
 
-INSERT INTO acquisitions (exp_id, acq_start, raw_path)
-    VALUES (2, '2025-02-01 02:00:00', '20250201/m1/e2/raw/20250201_m1_e2_00001.tif');
+INSERT INTO acquisitions (exp_id, acq_start, raw_path, frame_count)
+    VALUES (2, '2025-02-01 02:00:00', '20250201/m1/e2/raw/20250201_m1_e2_00001.tif', 300);
 
 INSERT INTO streams (exp_id, stream_type, file_path, rate_hz, method_call_id)
     VALUES (2, 'sync', '20250201/m1/e2/sync/m1_e2.h5', 5000, 1);

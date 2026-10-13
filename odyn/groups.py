@@ -1368,8 +1368,9 @@ class Group(CallRecorder):
         # Get the total number of frames in consideration
         # np.unique because frame_acq to not get repeated acq_ids
         acq_ids = np.unique(frame_acq)
-        experiments = self.experiments.loc[self.acquisitions.loc[acq_ids, "exp_id"]]
-        frames_in = int(experiments["frames_per_slice"].sum())
+        shown = self.acquisitions.loc[acq_ids]
+        experiments = self.experiments.loc[shown["exp_id"]]
+        frames_in = int(shown["frame_count"].sum())
 
         # Speed relative to real-time is more informative than downsample_ratio
         # when viewing the movie. However, the latter is a better control of
@@ -1991,9 +1992,7 @@ class Group(CallRecorder):
             expected = (int(experiment["height_px"]), int(experiment["width_px"]))
 
             try:
-                shape, frames = _tiff_shape(
-                    mcor_path, int(experiment["frames_per_slice"])
-                )
+                shape, frames = _tiff_shape(mcor_path, int(acquisition["frame_count"]))
 
             except FileNotFoundError:
                 report["file_not_found"].append(acq_id)
@@ -2012,10 +2011,10 @@ class Group(CallRecorder):
                 report["wrong_shape"].append(acq_id)
                 continue
 
-            if frames != int(experiment["frames_per_slice"]):
+            if frames != int(acquisition["frame_count"]):
                 logger.warning(
                     f"  '{mcor_path.name}' has {frames} frames, "
-                    f"expected {experiment['frames_per_slice']}."
+                    f"expected {acquisition['frame_count']}."
                 )
                 report["wrong_frame_count"].append(acq_id)
                 continue
@@ -2281,7 +2280,7 @@ class Group(CallRecorder):
         experiments = self.experiments.loc[acquisitions["exp_id"]]
 
         frame_rates = experiments["frame_rate"].to_numpy()
-        frame_counts = experiments["frames_per_slice"].to_numpy()
+        frame_counts = acquisitions["frame_count"].to_numpy()
 
         # Measured on the DAQ, where the frame clock and the valve share one
         # recording, so no arithmetic between two computers' clocks is needed.

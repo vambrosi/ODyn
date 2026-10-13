@@ -154,12 +154,14 @@ def build(
         for index, at in enumerate(starts):
             # ScanImage's clock runs 100 ms ahead of the olfactometer's
             cur.execute(
-                "INSERT INTO acquisitions (acq_id, exp_id, acq_start, raw_path) "
-                "VALUES (?, 1, ?, ?);",
+                "INSERT INTO acquisitions "
+                "(acq_id, exp_id, acq_start, raw_path, frame_count) "
+                "VALUES (?, 1, ?, ?, ?);",
                 [
                     index + 1,
                     (at + timedelta(milliseconds=100)).strftime(DT_FORMAT),
                     f"raw/{index}.tif",
+                    frames_per_slice,
                 ],
             )
 

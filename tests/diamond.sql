@@ -23,8 +23,8 @@ INSERT INTO experiments
         );
 
 -- acquisition on experiment 1 -> acq_id 1
-INSERT INTO acquisitions (exp_id, acq_start, raw_path)
-    VALUES (1, '2025-01-01 00:00:00', 'raw1');
+INSERT INTO acquisitions (exp_id, acq_start, raw_path, frame_count)
+    VALUES (1, '2025-01-01 00:00:00', 'raw1', 30);
 
 -- program on experiment 2 -> program_id 1
 INSERT INTO programs (exp_id, program_name, program_type, program_start, program_path)
