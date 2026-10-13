@@ -69,6 +69,11 @@ REFERENCE_FRAMES = 200
 
 # A test motion correction runs on this many acquisitions, spread over the loop
 TEST_ACQS = 24
+
+# Where `test_motion_correction` writes, in the files folder: files that can
+# be made again, so the whole `cache` folder can be deleted at any time
+CACHE_FOLDER = "cache"
+MCOR_TESTS_FOLDER = "mcor-tests"
 DEFAULT_OVERLAP_UM = [96.0, 96.0]
 DEFAULT_MAX_SHIFT_UM = [80.0, 80.0]
 DEFAULT_MAX_DEVIATION_UM = 12.0
@@ -1699,6 +1704,9 @@ class Group(CallRecorder):
             self.mc = MotionCorrect(raw_paths, dview=dview, **settings)
             self.mc.motion_correct(template=template, save_movie=True)
 
+            # What it was aligned to (None: caiman's own), for test reports
+            self.mc_reference = template
+
         except:
             raise
 
@@ -1772,6 +1780,89 @@ class Group(CallRecorder):
         # Reset mcor DataFrames
         self._tables.pop("mcor_files", None)
         self.db._tables.pop("mcor_files", None)
+
+    @record_call
+    def test_motion_correction(
+        self,
+        *,
+        test_acqs: int = TEST_ACQS,
+        max_shift_um: list[float] = DEFAULT_MAX_SHIFT_UM,
+        movie: bool = True,
+    ) -> Path:
+        """
+        A rigid test motion correction, and the files to judge it by
+
+        **USAGE**
+        ```python
+        group = db.groups[some_index]
+        folder = group.test_motion_correction()
+        ```
+
+        Runs `run_motion_correction` as a rigid test on `test_acqs`
+        acquisitions spread over the loop, all aligned to the loop's
+        reference, then writes into
+        `cache/mcor-tests/<loop>_g<group>/` (in the files folder): the
+        reference, a mean image per acquisition (raw and corrected, and side
+        by side), a summary and a plot of the shifts (see
+        `odyn.mcor_report`), and, with `movie`, the raw | test preview
+        video. Returns the folder.
+
+        The corrected movies themselves are caiman's temporary files, so they
+        go with them; what is written here is what judging the test needs.
+
+        **PARAMETERS**
+        - `test_acqs`: how many acquisitions
+        - `max_shift_um`: max allowed rigid shift
+        - `movie`: also save the preview video
+        """
+        import caiman as cm
+
+        from .mcor_report import write_report
+        from .registration import spread_acquisitions
+
+        self.run_motion_correction(
+            use_gui_parameters=False,
+            is_test=True,
+            test_acqs=test_acqs,
+            pw_rigid=False,
+            max_shift_um=max_shift_um,
+        )
+
+        acquisitions = self.acquisitions
+        positions = spread_acquisitions(len(acquisitions), test_acqs)
+        acq_ids = [int(i) for i in acquisitions.index[positions]]
+        name = f"{self.loop_names.iloc[0]}_g{self.group_id}"
+        folder = self.db.files_folder / CACHE_FOLDER / MCOR_TESTS_FOLDER / name
+
+        logger.info(f"Writing the test's report to {folder}")
+        paths = write_report(
+            folder,
+            [Path(p) for p in self.mc.fname],
+            list(self.mc.mmap_file),
+            lambda path: np.asarray(cm.load(path)),
+            np.asarray(self.mc.shifts_rig),
+            self.mc_reference,
+            max_shifts=list(self.mc.max_shifts),
+            positions=positions,
+            acq_ids=acq_ids,
+        )
+
+        if movie:
+            paths.append(
+                self.save_preview_movie(grid=["raw", "test"], save_folder=str(folder))
+            )
+
+        for path in paths:
+            self.add_output_file(path)
+
+        self.set_output(
+            {
+                "folder": folder.relative_to(self.db.main_folder).as_posix(),
+                "acq_ids": acq_ids,
+            }
+        )
+
+        return folder
 
     def _reference_template(self, wanted: int, max_shifts) -> np.ndarray:
         """
