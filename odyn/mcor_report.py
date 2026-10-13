@@ -159,7 +159,10 @@ def write_report(
         "png": folder / "shifts.png",
     }
     tifffile.imwrite(written["reference"], reference.astype(np.float32))
-    tifffile.imwrite(written["side_by_side"], side_by_side([raw, test]))
+    # Pages, not colors: tifffile takes a stack of 3 or 4 for an RGB image
+    tifffile.imwrite(
+        written["side_by_side"], side_by_side([raw, test]), photometric="minisblack"
+    )
     _write_csv(written["summary"], rows)
     written["metrics"].write_text(json.dumps(metrics, indent=2))
 
@@ -169,7 +172,9 @@ def write_report(
     )
 
     # dx and dy as two pages, so the direction is there too
-    tifffile.imwrite(written["flow"], np.moveaxis(flows[worst], -1, 0))
+    tifffile.imwrite(
+        written["flow"], np.moveaxis(flows[worst], -1, 0), photometric="minisblack"
+    )
     np.savez(
         written["npz"],
         shifts=shifts,

@@ -95,6 +95,8 @@ def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
     assert summary["position"].tolist() == spread_acquisitions(8, 4)
     assert summary["dy_median"].tolist() == [0.5] * 4
     assert tifffile.imread(folder / "side_by_side.tif").shape == (4, 48, 88)
+    with tifffile.TiffFile(folder / "side_by_side.tif") as tif:
+        assert len(tif.pages) == 4  # pages, not one RGB image
     assert tifffile.imread(folder / "reference.tif").shape == (48, 40)
     assert (folder / "shifts.png").stat().st_size > 0
 
