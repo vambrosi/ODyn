@@ -89,10 +89,8 @@ GLYPHS = {
     "tables": ("table", "", "t"),
     "qc": ("fact_check", "", "q"),
     "add-session": ("calendar_today", "add_circle", "+s"),
-    "add-loop": ("repeat", "add_circle", "+e"),
-    "add-grabs": ("photo_camera", "add_circle", "+g"),
+    "add-experiment": ("science", "add_circle", "+e"),
     "add-zstacks": ("stacks", "add_circle", "+z"),
-    "grabs": ("photo_camera", "", "g"),
     "zstacks": ("stacks", "", "z"),
     "undo": ("undo", "", "<"),
     "remove": ("delete", "", "x"),
@@ -119,7 +117,7 @@ def icon(name: str) -> QIcon:
 
 
 def label_icon(text: str) -> QIcon:
-    """A short label, for a session's mouse or a loop's name."""
+    """A short label, for a session's mouse or an experiment's name."""
     return _shaded("", "", text, *_shades())
 
 

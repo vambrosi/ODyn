@@ -2,7 +2,7 @@
 What a form shows, taken from the annotation registry.
 
 A form is not written out widget by widget. `annotation_keys` already says
-what may be recorded about a mouse, a session, a loop or a grab, with a label,
+what may be recorded about a mouse, a session or an experiment, with a label,
 a type, a unit, where the value comes from and whether it is required -- so
 the form is built from it. Registering a new key with
 `Database.add_annotation_key` makes it appear, and retiring one makes it
@@ -139,7 +139,7 @@ class Field:
         return str(value)
 
 
-# What every recording was imaged with (a column of experiments, grabs, z-stacks)
+# What every recording was imaged with (a column of experiments and z-stacks)
 OBJECTIVE = Field(
     "objective",
     "Objective",
@@ -188,8 +188,7 @@ COLUMN_FIELDS = {
 
     "experiment": (OBJECTIVE,),
 
-    # One objective for the session's grabs, one for its z-stacks
-    "grab": (OBJECTIVE,),
+    # One objective for the session's z-stacks
     "zstack": (OBJECTIVE,),
 }
 

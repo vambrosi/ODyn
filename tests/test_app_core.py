@@ -112,23 +112,27 @@ def test_a_draft_is_saved_on_every_change(tmp_path):
     draft.identify(mouse_id="442", date="2026-07-08")
     draft.update_session(goal="x", mouse_weight_g=24.0)
     draft.set_part("e1", objective=20, pmt_gain=70)
-    draft.set_part("grabs")
+    draft.set_part("e2", exp_type="grab")
+    draft.set_part("zstacks")
     draft.set_vials([3, 1, 1])
 
     again = Draft.load(draft.path)
     assert again.mouse_id == 442 and again.date == "2026-07-08"
     assert again.folder == "20260708/m442"
     assert again.session == {"goal": "x", "mouse_weight_g": 24.0}
-    assert [e["name"] for e in again.parts] == ["e1", "grabs"]
-    assert again.part("e1")["kind"] == "loop"
-    assert again.part("grabs")["kind"] == "grab"
+    assert [e["name"] for e in again.parts] == ["e1", "e2", "zstacks"]
+    assert again.part("e1")["kind"] == "experiment"
+    assert again.part("e2")["exp_type"] == "grab"
+    assert again.part("zstacks")["kind"] == "zstack"
+    assert again.describe("e1") == "loop 20260708/m442/e1"
+    assert again.describe("e2") == "grab 20260708/m442/e2"
     assert again.vial_ids == [1, 3]
     assert again.user == "tester"
 
     # `None` clears, and removing a part drops it
-    again.update_session(goal=None).remove_part("grabs")
+    again.update_session(goal=None).remove_part("e2")
     assert Draft.load(draft.path).session == {"mouse_weight_g": 24.0}
-    assert len(Draft.load(draft.path).parts) == 1
+    assert len(Draft.load(draft.path).parts) == 2
 
 
 def test_pending_skips_the_unreadable_and_the_archived(tmp_path):
@@ -628,13 +632,48 @@ def test_a_version_3_draft_is_read_with_parts(tmp_path):
     )
 
     draft = Draft.load(path)
-    assert draft.part("e1") == {"name": "e1", "kind": "loop", "submitted_id": 4}
+    assert draft.part("e1") == {
+        "name": "e1",
+        "kind": "experiment",
+        "exp_type": "loop",
+        "submitted_id": 4,
+    }
     assert draft.is_removed("e2")
 
     # its undo entry still applies
     restored, part = Removals(tmp_path).undo()
     assert part == "e2" and restored.part("e2") is not None
-    assert json.loads(path.read_text())["version"] == 4
+    assert json.loads(path.read_text())["version"] == 5
+
+
+def test_a_version_4_draft_has_experiments_and_no_grabs(tmp_path):
+    path = tmp_path / "20261001-090000.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 4,
+                "mouse_id": 442,
+                "date": "2026-10-01",
+                "session": {},
+                "parts": [
+                    {"name": "e1", "kind": "loop", "objective": 20},
+                    {"name": "grabs", "kind": "grab", "objective": 10},
+                    {
+                        "name": "zstacks",
+                        "kind": "zstack",
+                        "files": {"z_00001.tif": {"loop": "e1", "note": "x"}},
+                    },
+                ],
+                "vial_ids": [],
+            }
+        )
+    )
+
+    draft = Draft.load(path)
+    assert [e["name"] for e in draft.parts] == ["e1", "zstacks"]
+    assert draft.part("e1")["kind"] == "experiment"
+    assert draft.part("e1")["exp_type"] == "loop"
+    assert draft.files("zstacks") == {"z_00001.tif": {"experiment": "e1", "note": "x"}}
 
 
 # The 2026-08-11 z-stack of m357, as its header has it
@@ -645,16 +684,16 @@ STACK["reference_um"] = -55.7
 @pytest.fixture
 def a_day(tmp_path):
     """
-    A loop, two grabs with a sync file running through them, and a z-stack
-    of m1 on 2026-03-04, and a draft for the day with each part added.
+    A loop, a grab with its sync file, and a z-stack of m1 on 2026-03-04, and a
+    draft for the day with each part added.
     """
     day = datetime(2026, 3, 4, 9, 0, 0)
     size = dict(frames=56, height=32, width=40)
     generate(tmp_path, acquisitions=2, start=day + timedelta(hours=1), **size)
     generate(
         tmp_path,
-        acquisitions=2,
-        exp="grabs",
+        acquisitions=1,
+        exp="e2",
         acq_state="grab",
         start=day,
         z_um=-80,
@@ -670,14 +709,14 @@ def a_day(tmp_path):
         **size,
     )
 
-    # Grabs at 0 s and 10 s; the file's bursts at 0 s and 9 s
-    sync = "20260304/m1/grabs/sync/m1_grabs.h5"
+    # The grab's one burst, the sync file started 2 s before it
+    sync = "20260304/m1/e2/sync/m1_e2.h5"
     generate_sync(
         tmp_path / sync,
-        acquisitions=2,
+        acquisitions=1,
         frames=56,
         start=day - timedelta(seconds=2),
-        missing_pulse_in=(0, 1),
+        missing_pulse_in=(0,),
     )
 
     db = Database(tmp_path, can_create=True, user="tester")
@@ -686,51 +725,78 @@ def a_day(tmp_path):
 
     draft = Draft.start(tmp_path / "drafts", mouse_id=1, date="2026-03-04")
     draft.set_part("e1", objective=20)
-    draft.set_part("grabs", objective=10)
+    draft.set_part("e2", exp_type="grab", objective=10)
     draft.add_recording(
-        "grabs",
-        {"file": "m1_grabs.h5", "local": "x", "share": sync, "copied": "yes"},
+        "e2", {"file": "m1_e2.h5", "local": "x", "share": sync, "copied": "yes"}
     )
     draft.set_part("zstacks", objective=20)
 
     return db, draft
 
 
-def test_zstacks_notes_are_checked_and_grabs_refused_for_now(a_day):
+def test_zstacks_notes_are_checked(a_day):
     db, draft = a_day
-    draft.set_file("zstacks", "20260304_m1_zstacks_00001.tif", loop="e9")
+    draft.set_file("zstacks", "20260304_m1_zstacks_00001.tif", experiment="e9")
     draft.set_file("zstacks", "late_00009.tif", z_landmark="x")
 
     messages = [str(p) for p in check(db, draft) + check_files(db, draft)]
     assert (
-        "zstacks/20260304_m1_zstacks_00001.tif: the z-stack loop e9 is not listed"
-        in messages
+        "zstacks/20260304_m1_zstacks_00001.tif: the z-stack's experiment e9 is "
+        "not listed" in messages
     )
     assert (
         "zstacks/late_00009.tif: not in the server's folder. (Not required to "
         "submit.)" in messages
     )
 
-    # A grab is an experiment of its own now, which the app does not record yet
-    assert "grabs: grabs can't be submitted for now" in messages
+    # A grab needs neither olfactometer files nor a sync file
+    assert not [m for m in messages if m.startswith("e2")]
 
 
-def test_ingest_adds_the_zstacks_with_their_notes(a_day):
+def test_the_type_must_be_what_scanimage_recorded(a_day):
+    db, draft = a_day
+    draft.set_part("e2", exp_type="loop")
+
+    messages = [str(p) for p in check_files(db, draft)]
+    assert "e2: the TIFFs were recorded as a grab, not a loop (change the type)" in (
+        messages
+    )
+
+
+def test_ingest_adds_the_grab_and_zstacks_with_their_notes(a_day):
     db, draft = a_day
     stack = "20260304_m1_zstacks_00001.tif"
-    draft.remove_part("grabs")
-    draft.set_file("zstacks", stack, loop="e1", z_landmark="surface of right bulb")
+    draft.set_part(
+        "e2",
+        conditions=[{"start": 1, "end": 1, "condition": "ket/xyl"}],
+        block_iti_s=10,
+    )
+    draft.set_file(
+        "zstacks", stack, experiment="e2", z_landmark="surface of right bulb"
+    )
 
     assert not any(p.blocking for p in check(db, draft))
     result = ingest(db, draft)
     assert result.submitted, result.error
 
     written = result.written
-    assert list(written.experiments) == ["e1"]
+    assert list(written.experiments) == ["e1", "e2"]
     assert list(written.zstacks) == [stack]
 
+    grab = written.experiments["e2"]
+    assert db.experiments.loc[grab, "exp_type"] == "grab"
+    assert written.processed == ["e2"]  # its sync file
+    assert db.acquisitions.loc[
+        db.acquisitions["exp_id"] == grab, "sync_block"
+    ].tolist() == [0]
+
+    # Its condition, on its one acquisition; no trial block for a grab
+    conditions = db.annotations_for("acquisition")["condition"]
+    assert conditions.dropna().tolist() == ["ket/xyl"]
+    assert "block_iti_s" not in db.annotations_for("experiment").columns
+
     stack_id = written.zstacks[stack]
-    assert db.zstacks.loc[stack_id, "exp_id"] == written.experiments["e1"]
+    assert db.zstacks.loc[stack_id, "exp_id"] == grab
     assert (
         db.annotations_for("zstack").loc[stack_id, "z_landmark"]
         == "surface of right bulb"
@@ -740,7 +806,7 @@ def test_ingest_adds_the_zstacks_with_their_notes(a_day):
     # a second ingest adds nothing new
     again = Draft.load(draft.path)
     assert ingest(db, again, force=True).submitted
-    assert len(db.zstacks) == 1
+    assert len(db.experiments) == 2 and len(db.zstacks) == 1
 
 
 def test_an_error_reads_as_odyn_wrote_it():

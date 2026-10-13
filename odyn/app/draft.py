@@ -4,10 +4,10 @@ Work in progress for one session, held on disk until someone submits it.
 A draft is what the app writes throughout an imaging day. This replaces the
 log spreadsheet that was created for each mice and day.
 
-What goes here: the session's annotations, its parts' (each loop folder `e1`,
-`e2`, ..., and the `grabs` and `zstacks` folders) annotations and settings,
-and which vials were loaded. What doesn't go here: Mice, odors, panels, and
-users (those are added directly to the database).
+What goes here: the session's annotations, its parts' (each experiment folder
+`e1`, `e2`, ..., a loop or a grab, and the `zstacks` folder) annotations and
+settings, and which vials were loaded. What doesn't go here: Mice, odors,
+panels, and users (those are added directly to the database).
 
 More than buffers, these files serve as a temporary state where the data might
 not satisfy the database checks, or is otherwise inconsistent, and so it can't
@@ -25,13 +25,14 @@ draft = Draft.start(drafts_folder())        # today, animal not yet known
 draft.identify(mouse_id=442)                # once someone picks it
 
 draft.update_session(goal="10x pre/post ket/xyl", mouse_weight_g=25.1)
-draft.set_part("e1", objective=20, z_landmark="surface of right bulb")
+draft.set_part("e1", exp_type="loop", objective=20)
+draft.set_part("e1", z_landmark="surface of right bulb")
 draft.set_part("e1", conditions=[
     {"start": 3, "end": 40, "condition": "baseline"},     # acquisitions by
     {"start": 41, "end": 80, "condition": "ket/xyl"},     # their TIFF number
 ])
 draft.set_part("zstacks", objective=20)
-draft.set_file("zstacks", "20260914_m442_zstack_00001.tif", loop="e1")
+draft.set_file("zstacks", "20260914_m442_zstack_00001.tif", experiment="e1")
 draft.set_vials([1, 2, 3, 4])
 
 Draft.pending(drafts_folder())   # everything not yet submitted or removed
@@ -68,7 +69,7 @@ from typing import Any
 # Bumped when the stored shape changes in a way a reader must notice.
 # A draft written by a newer app is refused rather than half-read; an older
 # one is brought up to date as it is read (`_upgrade`).
-DRAFT_VERSION = 4
+DRAFT_VERSION = 5
 
 FOLDER_NAME = ".odyn"
 DRAFTS = "drafts"
@@ -81,6 +82,7 @@ REMOVALS = "removed.json"
 PART_SETTINGS = (
     "name",
     "kind",
+    "exp_type",
     "objective",
     "submitted_id",
     "removed",
@@ -91,16 +93,20 @@ PART_SETTINGS = (
     "folder_made",
 )
 
-# The keys of a file's entry (in a grabs or z-stacks part) that are not
-# annotations
-FILE_SETTINGS = ("loop", "submitted_id")
+# The keys of a file's entry (in the z-stacks part) that are not annotations
+FILE_SETTINGS = ("experiment", "submitted_id")
 
-# The kinds of part, and the folder of the two a session has one of
-KINDS = ("loop", "grab", "zstack")
-FOLDER_OF = {"grab": "grabs", "zstack": "zstacks"}
+# The kinds of part (experiments `e1`, `e2`, ..., and the session's z-stacks),
+# and the folder of the one a session has one of
+KINDS = ("experiment", "zstack")
+FOLDER_OF = {"zstack": "zstacks"}
 
-# How the app names each kind of part in a sentence ("Remove loop ...")
-KIND_WORDS = {"loop": "loop", "grab": "grabs", "zstack": "z-stacks"}
+# What an experiment can be, as ScanImage was set (a loop unless said)
+EXP_TYPES = ("loop", "grab")
+
+# How the app names each part in a sentence ("Remove loop ..."): an
+# experiment by its type
+KIND_WORDS = {"loop": "loop", "grab": "grab", "zstack": "z-stacks"}
 
 # A draft is named for when it was started because:
 # - the mouse is picked later and can be corrected;
@@ -338,8 +344,8 @@ class Draft:
     @property
     def parts(self) -> list[dict[str, Any]]:
         """
-        One entry per part of the session (removed ones left out): each loop
-        folder, named like `'e1'`, then `grabs` and `zstacks` if added. This
+        One entry per part of the session (removed ones left out): each
+        experiment folder, named like `'e1'`, then `zstacks` if added. This
         gives entries themselves, so changing one changes the draft (then
         `save`).
         """
@@ -413,23 +419,24 @@ class Draft:
         return None
 
     def describe(self, name: str) -> str:
-        """A part as the app says it: `loop 20260929/m442/e1`, `grabs ...`."""
+        """A part as the app says it: `loop 20260929/m442/e1`, `z-stacks ...`."""
         entry = next((e for e in self._entries if e.get("name") == name), {})
-        kind = entry.get("kind", _default_type(name))
+        kind = entry.get("kind", _default_kind(name))
+        word = kind if kind != "experiment" else entry.get("exp_type", "loop")
 
-        return f"{KIND_WORDS.get(kind, 'experiment')} {self.where}/{name}"
+        return f"{KIND_WORDS.get(word, 'experiment')} {self.where}/{name}"
 
     def files(self, name: str) -> dict[str, dict[str, Any]]:
-        """What was noted per TIFF of part `name` (grabs, z-stacks), by file name."""
+        """What was noted per TIFF of part `name` (z-stacks), by file name."""
         entry = self.part(name)
 
         return {} if entry is None else entry.get("files", {})
 
-    def next_loop(self, taken: tuple[int, ...] = ()) -> str:
+    def next_experiment(self, taken: tuple[int, ...] = ()) -> str:
         """
-        The next loop folder's name, `e<n>`: one past every loop number in the
-        draft (removed ones too, they keep their names) and in `taken` (the
-        numbers already on the share, say).
+        The next experiment folder's name, `e<n>`: one past every experiment
+        number in the draft (removed ones too, they keep their names) and in
+        `taken` (the numbers already on the share, say).
         """
         numbers = [
             int(name[1:]) for name in self.names_taken() if re.fullmatch(r"e\d+", name)
@@ -491,9 +498,9 @@ class Draft:
         """
         Set fields on one part, creating its entry if it is new.
 
-        `name` is the folder under the session (`e1`, `grabs`, `zstacks`), which
-        says its `kind`; `objective` is a setting, everything else is an
-        annotation. Raises `ValueError` for the name of a removed part:
+        `name` is the folder under the session (`e1`, `zstacks`), which says
+        its `kind`; `exp_type` and `objective` are settings, everything else
+        is an annotation. Raises `ValueError` for the name of a removed part:
         restore it instead, so it comes back as it was.
         """
         if self.is_removed(name):
@@ -505,7 +512,7 @@ class Draft:
         entry = self.part(name)
 
         if entry is None:
-            entry = {"name": name, "kind": _default_type(name)}
+            entry = {"name": name, "kind": _default_kind(name)}
             self._entries.append(entry)
             self._entries.sort(key=_part_order)
 
@@ -515,8 +522,8 @@ class Draft:
 
     def set_file(self, name: str, file: str, **fields: Any) -> Draft:
         """
-        Set fields on one TIFF of part `name` (grabs, z-stacks): its
-        annotations, and for a z-stack the `loop` it was taken for.
+        Set fields on one TIFF of part `name` (z-stacks): its annotations,
+        and the `experiment` it was taken for.
         """
         entry = self.part(name)
 
@@ -530,9 +537,8 @@ class Draft:
 
     def add_recording(self, name: str, record: dict[str, Any]) -> Draft:
         """
-        Note a sync recording of part `name`. A loop's replaces any earlier
-        one (those are kept, marked `replaced`); the grabs' add up, since each
-        covers the grabs taken while it ran. `record` holds at least the
+        Note a sync recording of experiment `name`. It replaces any earlier
+        one (those are kept, marked `replaced`). `record` holds at least the
         `file` name, its `local` path and its `share` path (relative to the
         main folder); `stopped` and `copied` are added as they happen.
         """
@@ -546,9 +552,8 @@ class Draft:
 
         recordings = entry.setdefault("recordings", [])
 
-        if entry.get("kind", "loop") == "loop":
-            for earlier in recordings:
-                earlier["replaced"] = True
+        for earlier in recordings:
+            earlier["replaced"] = True
 
         recordings.append(dict(record))
 
@@ -790,15 +795,10 @@ def _merge(into: dict[str, Any], fields: dict[str, Any]) -> None:
             into[key] = value
 
 
-def _default_type(name: str) -> str:
-    """What a folder name says the part is: `e1` a loop, `grabs` grabs."""
-    if name.startswith("zstack"):
-        return "zstack"
-
-    if name.startswith("grab"):
-        return "grab"
-
-    return "loop"
+def _default_kind(name: str) -> str:
+    """What a folder name says the part is: `zstacks` the z-stacks, `e1` an
+    experiment."""
+    return "zstack" if name.startswith("zstack") else "experiment"
 
 
 def _part_order(entry: dict[str, Any]):
@@ -812,22 +812,49 @@ def _upgrade(data: dict[str, Any]) -> dict[str, Any]:
     """
     A draft from an older version of the app, in the current shape.
 
-    Version 3 called a session's parts experiments (`experiments`, with
+    - Version 3 called a session's parts experiments (`experiments`, with
     `exp_type` and `submitted_exp_id`).
+    - Version 4 had loops (`kind` "loop"), the session's grabs ("grab", one
+    folder for all of them) and its z-stacks, which named the loop they were
+    taken for (`loop`). Loops become experiments of type loop; the grabs part
+    is left out, since a grab is now an experiment of its own.
     """
-    if data.get("version", DRAFT_VERSION) >= DRAFT_VERSION:
+    version = data.get("version", DRAFT_VERSION)
+
+    if version >= DRAFT_VERSION:
         return data
 
-    parts = data.pop("experiments", [])
+    if version < 4:
+        parts = data.pop("experiments", [])
 
-    for entry in parts:
-        if "exp_type" in entry:
-            entry["kind"] = entry.pop("exp_type")
+        for entry in parts:
+            if "exp_type" in entry:
+                entry["kind"] = entry.pop("exp_type")
 
-        if "submitted_exp_id" in entry:
-            entry["submitted_id"] = entry.pop("submitted_exp_id")
+            if "submitted_exp_id" in entry:
+                entry["submitted_id"] = entry.pop("submitted_exp_id")
 
-    data["parts"] = parts
+        data["parts"] = parts
+
+    kept = []
+
+    for entry in data.get("parts", []):
+        kind = entry.get("kind", "loop")
+
+        if kind == "grab":
+            continue
+
+        if kind == "loop":
+            entry["kind"] = "experiment"
+            entry.setdefault("exp_type", "loop")
+
+        for noted in entry.get("files", {}).values():
+            if "loop" in noted:
+                noted["experiment"] = noted.pop("loop")
+
+        kept.append(entry)
+
+    data["parts"] = kept
     data["version"] = DRAFT_VERSION
 
     return data

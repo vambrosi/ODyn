@@ -27,8 +27,8 @@ class Context(QObject):
     - `changed` fires after anything was written, so every pane reloads what
       it shows;
     - `user` is who is using the app right now, as picked in the Users tab;
-    - `draft` and `part` are the session and the part of it (a loop, its
-      grabs or its z-stacks) being worked on, the one state every tab shows
+    - `draft` and `part` are the session and the part of it (an experiment
+      or its z-stacks) being worked on, the one state every tab shows
       and follows:
       `selection_changed` fires when either is picked, `draft_changed` when
       the picked draft's contents change (mouse, date, a part added

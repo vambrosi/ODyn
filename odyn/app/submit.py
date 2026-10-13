@@ -11,10 +11,10 @@ and it reads nothing from the recordings on the share.
 sync files, the acquisition numbers the conditions name).
 
 `ingest` runs both, then does the day's work in order: the session row, its
-annotations, each loop (ingested, annotated, its vials recorded, its sync file
-processed), then the z-stacks (each TIFF ingested and annotated, and linked to
-its loop). The cluster runs it once the recordings are on the share
-(`odyn.app.submissions`).
+annotations, each experiment (ingested, annotated, its sync file processed,
+and a loop's vials recorded), then the z-stacks (each TIFF ingested and
+annotated, and linked to its experiment). The cluster runs it once the
+recordings are on the share (`odyn.app.submissions`).
 
 `submit` is the app's part: it copies the files only this computer has, runs
 `check`, puts the draft in the cluster's queue, and moves it aside. It writes
@@ -47,7 +47,7 @@ import pandas as pd
 
 from ..database import OLFACTOMETER_FOLDER, SYNC_FOLDER, read_tiff
 from ..utils import INFO_FOLDER, logger
-from .draft import FILE_SETTINGS, KINDS, PART_SETTINGS, Draft
+from .draft import EXP_TYPES, FILE_SETTINGS, KINDS, PART_SETTINGS, Draft
 from .fields import annotation_fields, form_fields, missing_required
 from .olfactometer import OlfactometerFolders, copy_for_loop, loop_window
 from .recordings import pending, sync_pending
@@ -125,7 +125,7 @@ def report(session: str, problems: list[Problem], parts: list[str], result: str)
 
     **USAGE**
     ```python
-    report("m3 2026-10-07", problems, ["e1", "grabs"], f"ready to submit {CHECK}")
+    report("m3 2026-10-07", problems, ["e1"], f"ready to submit {CHECK}")
     ```
     """
     blocks: dict[str, list[Problem]] = {}
@@ -228,8 +228,8 @@ def check(
             )
         )
 
-    loop_fields = form_fields(db, "experiment")
-    loops = {str(e["name"]) for e in draft.parts if e.get("kind") == "loop"}
+    exp_fields = form_fields(db, "experiment")
+    experiments = {str(e["name"]) for e in draft.parts if e.get("kind") == "experiment"}
 
     for entry in draft.parts:
         name = str(entry.get("name", ""))
@@ -243,22 +243,22 @@ def check(
         if kind not in KINDS:
             problems.append(Problem(where, f"kind must be one of {', '.join(KINDS)}"))
 
-        # The database now keeps a grab as an experiment of its own (`eN`),
-        # which the app does not record yet
-        if kind == "grab":
-            problems.append(Problem(where, "grabs can't be submitted for now"))
+        loop = kind == "experiment" and entry.get("exp_type", "loop") == "loop"
+
+        if kind == "experiment" and entry.get("exp_type", "loop") not in EXP_TYPES:
+            problems.append(Problem(where, "the type must be loop or grab"))
 
         if entry.get("objective") in (None, ""):
             problems.append(Problem(where, "didn't pick an objective"))
 
-        if kind == "loop":
-            problems += _field_problems(where, loop_fields, entry)
+        if kind == "experiment":
+            problems += _field_problems(where, exp_fields, entry)
             problems += _condition_problems(where, entry)
 
         else:
-            problems += _file_problems(db, entry, loops)
+            problems += _file_problems(db, entry, experiments)
 
-        if kind == "loop" and entry.get("submitted_id") is not None:
+        if kind == "experiment" and entry.get("submitted_id") is not None:
             continue  # already in the database; the files were checked then
 
         if name in local_only:
@@ -274,7 +274,8 @@ def check(
         if folder.is_dir() and not (folder / name).is_dir():
             problems.append(Problem(where, f"folder '{name}' is not on the server yet"))
 
-        if kind == "loop" and (folder / name).is_dir():
+        # A grab never runs with the olfactometer
+        if loop and (folder / name).is_dir():
             problems += _olfactometer_problems(
                 where, entry, folder / name, db, olfactometer
             )
@@ -323,11 +324,10 @@ def _field_problems(where: str, fields, values: dict) -> list[Problem]:
     return problems
 
 
-def _file_problems(db, entry: dict, loops: set[str]) -> list[Problem]:
+def _file_problems(db, entry: dict, experiments: set[str]) -> list[Problem]:
     """
-    What is wrong with the notes on a grabs or z-stacks part's TIFFs: values
-    that do not read as their type, and a z-stack's loop that is not in the
-    draft.
+    What is wrong with the notes on the z-stacks' TIFFs: values that do not
+    read as their type, and an experiment that is not in the draft.
     """
     name, kind = str(entry["name"]), entry["kind"]
     fields = annotation_fields(db, kind)
@@ -336,23 +336,23 @@ def _file_problems(db, entry: dict, loops: set[str]) -> list[Problem]:
     for file, noted in entry.get("files", {}).items():
         where = f"{name}/{file}"
         problems += _field_problems(where, fields, noted)
-        loop = noted.get("loop")
+        experiment = noted.get("experiment")
 
-        if loop is not None and loop not in loops:
-            problems.append(Problem(where, f"the z-stack loop {loop} is not listed"))
+        if experiment is not None and experiment not in experiments:
+            problems.append(
+                Problem(where, f"the z-stack's experiment {experiment} is not listed")
+            )
 
     return problems
 
 
 def list_tiffs(main_folder: Path, folder: str, kind: str) -> pd.DataFrame:
     """
-    The TIFFs in a grabs or z-stacks folder's `raw/`, one row each with what
-    its header says: when it started, and its frames and z (a grab) or its
-    stack, frames per slice and powers (a z-stack). Empty when the folder is
-    not there.
+    The TIFFs in a z-stacks folder's `raw/`, one row each with what its header
+    says: when it started, its stack, frames per slice and powers. Empty when
+    the folder is not there.
     """
     columns = {
-        "grab": ["file", "started", "frames", "z_um"],
         "zstack": [
             "file",
             "started",
@@ -428,8 +428,8 @@ def _condition_problems(where: str, entry: dict) -> list[Problem]:
     if not conditions:
         return []
 
-    if entry.get("kind", "loop") != "loop":
-        return [Problem(where, "conditions can only be applied to loops")]
+    if entry.get("kind", "experiment") != "experiment":
+        return [Problem(where, "conditions can only be applied to experiments")]
 
     problems = []
     taken: dict[int, str] = {}
@@ -538,7 +538,7 @@ def _olfactometer_problems(
     return []
 
 
-def _folder_problems(where: str, folder: Path, kind) -> list[Problem]:
+def _folder_problems(where: str, folder: Path, entry: dict) -> list[Problem]:
     """What a part folder on the share is missing, or has too many of."""
     problems = []
 
@@ -550,14 +550,13 @@ def _folder_problems(where: str, folder: Path, kind) -> list[Problem]:
     if not tiffs:
         problems.append(Problem(where, f"no TIFFs in '{folder.name}/{RAW_FOLDER}'"))
 
-    # A grab's sync recording is optional, and its files add up
-
-    if kind == "loop":
+    if entry.get("kind") == "experiment":
         syncs = [
             p for p in (folder / SYNC_FOLDER).glob("*.h5") if not p.name.startswith(".")
         ]
 
-        if not syncs:
+        # A grab's sync recording (pupil, wheel, breathing) is optional
+        if not syncs and entry.get("exp_type", "loop") == "loop":
             problems.append(
                 Problem(
                     where,
@@ -575,6 +574,38 @@ def _folder_problems(where: str, folder: Path, kind) -> list[Problem]:
             )
 
     return problems
+
+
+def _type_problems(
+    where: str, entry: dict, folder: Path, main_folder: Path
+) -> list[Problem]:
+    """An experiment's type against what ScanImage wrote in its first TIFF."""
+    exp_type = entry.get("exp_type", "loop")
+    tiffs = sorted((folder / RAW_FOLDER).glob("[!.]?*.tif"))
+
+    try:
+        read = read_tiff(tiffs[0], Path(main_folder)) if tiffs else None
+    except Exception:  # a file still being copied; its own check says so
+        return []
+
+    if read is None:
+        return []
+
+    recording = read[0]
+
+    if recording["stack"] is not None:
+        return [Problem(where, "the TIFFs are z-stacks (add them to the z-stacks)")]
+
+    if recording["acq_state"] != exp_type:
+        return [
+            Problem(
+                where,
+                f"the TIFFs were recorded as a {recording['acq_state']}, "
+                f"not a {exp_type} (change the type)",
+            )
+        ]
+
+    return []
 
 
 def check_files(db, draft: Draft) -> list[Problem]:
@@ -595,8 +626,8 @@ def check_files(db, draft: Draft) -> list[Problem]:
         if not name or kind not in KINDS:
             continue  # check says so
 
-        # Conditions are written again on a resubmit, the loop is not
-        if kind == "loop":
+        # Conditions are written again on a resubmit, the experiment is not
+        if kind == "experiment":
             problems += _condition_tiff_problems(
                 name, entry, _tiff_numbers(part / RAW_FOLDER)
             )
@@ -608,9 +639,12 @@ def check_files(db, draft: Draft) -> list[Problem]:
             problems.append(Problem(name, f"folder '{name}' is not on the server yet"))
             continue
 
-        problems += _folder_problems(name, part, kind)
+        problems += _folder_problems(name, part, entry)
 
-        if kind != "loop":
+        if kind == "experiment":
+            problems += _type_problems(name, entry, part, db.main_folder)
+
+        else:
             on_share = {p.name for p in (part / RAW_FOLDER).glob("[!.]?*.tif")}
             problems += [
                 Problem(f"{name}/{file}", "not in the server's folder", blocking=False)
@@ -700,7 +734,7 @@ def ingest(
     Refuses while `check` or `check_files` finds a blocking problem, unless
     `force`.
     Otherwise creates (or finds) the session, writes its annotations, then
-    each loop and the z-stacks (see the module's description).
+    each experiment and the z-stacks (see the module's description).
     Steps already done by an earlier attempt are skipped, so the call is safe
     to repeat after fixing what stopped it. Leaves the draft file where it is.
     """
@@ -747,15 +781,19 @@ def copy_olfactometer(
     db, draft: Draft, olfactometer: OlfactometerFolders
 ) -> dict[str, str]:
     """
-    Copy into each loop folder not submitted yet the olfactometer files it
+    Copy into each loop's folder not submitted yet the olfactometer files it
     needs (`olfactometer.copy_for_loop`), for the loops with a recording and a
-    folder on the share. Returns why it failed, by loop name.
+    folder on the share. Returns why it failed, by experiment name.
     """
     failed = {}
     session = Path(db.main_folder) / draft.folder
 
     for entry in draft.parts:
-        if entry.get("kind") != "loop" or entry.get("submitted_id") is not None:
+        loop = entry.get("kind") == "experiment" and (
+            entry.get("exp_type", "loop") == "loop"
+        )
+
+        if not loop or entry.get("submitted_id") is not None:
             continue
 
         name = str(entry["name"])
@@ -797,19 +835,23 @@ def _submit(db, draft: Draft, written: Written) -> None:
         db.add_annotations(target_type="session", target_id=session_id, values=values)
         written.annotations += len(values)
 
-    loops = [e for e in draft.parts if e.get("kind", "loop") == "loop"]
+    experiments = [e for e in draft.parts if e.get("kind") == "experiment"]
     others = [e for e in draft.parts if e.get("kind") == "zstack"]
 
-    for entry in loops:
-        _submit_loop(db, draft, entry, session_id, written)
+    for entry in experiments:
+        _submit_experiment(db, draft, entry, session_id, written)
 
-    # After the loops, so a z-stack can be linked to the loop it was for
+    # After the experiments, so a z-stack can be linked to the one it was for
     for entry in others:
         _submit_files(db, draft, entry, session_id, written)
 
 
-def _submit_loop(db, draft: Draft, entry: dict, session_id: int, written) -> None:
-    """Ingest one loop, annotate it, record its vials and process its sync file."""
+def _submit_experiment(db, draft: Draft, entry: dict, session_id: int, written) -> None:
+    """
+    Ingest one experiment, annotate it, record a loop's vials and process its
+    sync file.
+    """
+    exp_type = str(entry.get("exp_type", "loop"))
     name = str(entry["name"])
     exp_path = f"{draft.folder}/{name}"
     exp_id = entry.get("submitted_id")
@@ -819,6 +861,7 @@ def _submit_loop(db, draft: Draft, entry: dict, session_id: int, written) -> Non
             session_id=session_id,
             exp_path=exp_path,
             objective=int(entry["objective"]),
+            exp_type=exp_type,
         )
 
     if exp_id is None:
@@ -838,19 +881,23 @@ def _submit_loop(db, draft: Draft, entry: dict, session_id: int, written) -> Non
 
     values = _annotation_values(db, "experiment", entry)
 
+    # The trial block is a loop's; a grab keeps none it was typed as a loop
+    if exp_type == "grab":
+        values = {k: v for k, v in values.items() if not k.startswith("block_")}
+
     if values:
         db.add_annotations(target_type="experiment", target_id=exp_id, values=values)
         written.annotations += len(values)
 
     written.annotations += _write_conditions(db, draft, name, exp_id, entry)
 
-    if draft.vial_ids:
+    if draft.vial_ids and exp_type == "loop":
         db.set_experiment_vials(exp_id=exp_id, vial_ids=draft.vial_ids)
 
     if _has_sync(db, exp_path):
-        # The loop is in either way; a sync file that is refused (a burst count
-        # that does not match, say) is reported and can be rerun once the
-        # file is sorted out.
+        # The experiment is in either way; a sync file that is refused (a
+        # burst count that does not match, say) is reported and can be rerun
+        # once the file is sorted out.
         try:
             db.process_sync(exp_id=exp_id)
             written.processed.append(name)
@@ -863,7 +910,7 @@ def _submit_loop(db, draft: Draft, entry: dict, session_id: int, written) -> Non
 def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> None:
     """
     Ingest every TIFF of the z-stacks folder (those already in are skipped),
-    annotate the ones with notes, and link each z-stack to its loop.
+    annotate the ones with notes, and link each z-stack to its experiment.
     """
     name, kind = str(entry["name"]), entry["kind"]
     folder = f"{draft.folder}/{name}"
@@ -890,10 +937,12 @@ def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> No
             db.add_annotations(target_type=kind, target_id=row_id, values=values)
             written.annotations += len(values)
 
-        loop = noted.get("loop")
+        experiment = noted.get("experiment")
 
-        if kind == "zstack" and loop is not None and loop in written.experiments:
-            db.set_zstack_experiment(zstack_id=row_id, exp_id=written.experiments[loop])
+        if experiment is not None and experiment in written.experiments:
+            db.set_zstack_experiment(
+                zstack_id=row_id, exp_id=written.experiments[experiment]
+            )
 
         draft.set_file(name, file, submitted_id=row_id)
 

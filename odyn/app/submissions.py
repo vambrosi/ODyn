@@ -9,9 +9,9 @@ database itself. A tick on the cluster then looks at each queued draft
 - **waiting** while the TIFFs are still arriving. A loop is complete when it
 has as many TIFFs as ScanImage was set to take (`SI.acqsPerLoop`, from the
 first TIFF's header), or as many as its sync file has bursts if that is fewer
-(the loop was stopped early). Grabs and z-stacks are complete once they have
-TIFFs. Then nothing may change for `SETTLE_S` (a TIFF may be half copied),
-and the newest TIFF must read.
+(the loop was stopped early). A grab and the z-stacks are complete once they
+have TIFFs. Then nothing may change for `SETTLE_S` (a TIFF may be half
+copied), and the newest TIFF must read.
 - **failed** when nothing changed for `GIVE_UP_S` before the draft was
 complete (a copy that broke, a share that ran out of space), or when
 `ingest` refused it or stopped. A failure the files caused is tried again
@@ -357,10 +357,11 @@ def _progress(main_folder: Path, draft: Draft) -> tuple[bool, dict[str, str], st
     looks: list[str] = []
 
     for entry in draft.parts:
-        name, kind = str(entry.get("name", "")), entry.get("kind", "loop")
+        name, kind = str(entry.get("name", "")), entry.get("kind", "experiment")
         folder = session / name
+        loop = kind == "experiment" and entry.get("exp_type", "loop") == "loop"
 
-        if kind == "loop" and entry.get("submitted_id") is not None:
+        if kind == "experiment" and entry.get("submitted_id") is not None:
             parts[name] = "added"
             continue
 
@@ -373,8 +374,10 @@ def _progress(main_folder: Path, draft: Draft) -> tuple[bool, dict[str, str], st
             complete = False
             continue
 
-        if kind != "loop":
-            parts[name] = f"{len(tiffs)} TIFFs"
+        # A grab's TIFFs still say the loop length last set, so only a loop
+        # waits for a count
+        if not loop:
+            parts[name] = f"{len(tiffs)} TIFF{'' if len(tiffs) == 1 else 's'}"
             complete = complete and _reads(tiffs[-1])
             continue
 

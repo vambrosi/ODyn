@@ -3,8 +3,8 @@ The main window: two bars of buttons around the page being shown, a panel of
 text under it, a bottom bar, and the worker thread that owns the database.
 
 - **Left bar**: DB views and insertions at the top, the Recorder at the bottom.
-- **Right bar**: the day's sessions, each followed by its parts (loops `e1`,
-  `e2`..., its grabs and z-stacks), at the top, and what you can do to them
+- **Right bar**: the day's sessions, each followed by its parts (experiments
+  `e1`, `e2`..., and its z-stacks), at the top, and what you can do to them
   at the bottom (add, remove, undo, check, and submit).
 - **Bottom panel**: what Check and Submit found, and the `odyn` log.
 - **Bottom bar**: what is being hovered or was selected, and the user.
@@ -122,7 +122,7 @@ class MainWindow(QMainWindow):
 
     What the middle shows is `view`: `"page"` for a left-bar page, or
     `"session"` / `"part"` for the selected draft (`context.draft`) and
-    part (`context.part`: a loop, the grabs or the z-stacks), which the right
+    part (`context.part`: an experiment or the z-stacks), which the right
     bar highlights.
     """
 
@@ -220,10 +220,9 @@ class MainWindow(QMainWindow):
 
         for entry in (
             ("add-session", "Add session", self._add_session),
-            ("add-loop", "Add loop", self.sessions.add_loop),
-            ("add-grabs", "Add grabs", self.sessions.add_grabs),
+            ("add-experiment", "Add experiment", self.sessions.add_experiment),
             ("add-zstacks", "Add z-stacks", self.sessions.add_zstacks),
-            ("recorder", "Record the selected loop or grabs", self.recorder),
+            ("recorder", "Record the selected experiment", self.recorder),
             None,
             ("undo", "Nothing to undo", self._undo),
             ("remove", "Nothing selected to remove", self._remove),
@@ -508,7 +507,7 @@ class MainWindow(QMainWindow):
             for entry in draft.parts:
                 name = str(entry["name"])
                 self.today[(id(draft), name)] = self._today_action(
-                    # Loops by their name; the grabs and z-stacks by a picture
+                    # Experiments by their name; the z-stacks by a picture
                     icon(name) if entry.get("kind") in FOLDER_OF else label_icon(name),
                     f"{draft.where}/{name}",
                     lambda _=False, d=draft, n=name: self.open_part(d, n),

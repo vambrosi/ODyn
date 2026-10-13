@@ -7,10 +7,10 @@ never stops a recording, then copies it to where `submit` looks for it:
     ~/.odyn/sync/20261001/m442/e1/m442_e1_2026-10-01_13-02-11.h5     (local)
     <main folder>/20261001/m442/e1/sync/m442_e1_2026-10-01_13-02-11.h5
 
-The local folders mirror the share's (the grabs' go to `grabs/sync/`), and the
-file keeps its final name, so either copy says what it is without the draft.
-The draft keeps the link (one entry per recording, see `Draft.add_recording`),
-and the local copy is never deleted here.
+The local folders mirror the share's, and the file keeps its final name, so
+either copy says what it is without the draft. The draft keeps the link (one
+entry per recording, see `Draft.add_recording`), and the local copy is never
+deleted here.
 
 A copy is written under a hidden name (`.<name>.partial`) and renamed once its
 size matches, so a half-copied file never looks like a recording. A file on
@@ -40,8 +40,7 @@ LOCAL_FOLDER = "sync"  # beside the drafts folder: ~/.odyn/sync
 # Folders each kind of part gets, so ScanImage and the pipeline find their
 # place. Z-stacks have no sync recording.
 PART_FOLDERS = {
-    "loop": ("raw", SYNC_FOLDER, "processed"),
-    "grab": ("raw", SYNC_FOLDER, "processed"),
+    "experiment": ("raw", SYNC_FOLDER, "processed"),
     "zstack": ("raw", "processed"),
 }
 
@@ -56,7 +55,7 @@ def share_path(folder: str, part: str, name: str) -> str:
     return f"{folder}/{part}/{SYNC_FOLDER}/{name}"
 
 
-def make_part_folders(part_folder: Path, kind: str = "loop") -> None:
+def make_part_folders(part_folder: Path, kind: str = "experiment") -> None:
     """A part's folder and the ones inside it, as its kind needs."""
     for name in PART_FOLDERS[kind]:
         (part_folder / name).mkdir(parents=True, exist_ok=True)
@@ -132,21 +131,16 @@ def sync_pending(
 
 def pending(draft: Draft) -> dict[str, dict[str, Any]]:
     """
-    Each part's recording in use that is not on the share yet: a loop's
-    latest, the grabs' first not copied (they are all in use).
+    Each experiment's recording in use (its latest) that is not on the share
+    yet.
     """
     found = {}
 
     for entry in draft.parts:
-        if entry.get("kind", "loop") == "loop":
-            candidates = [Draft.latest(entry)]
-        else:
-            candidates = entry.get("recordings", [])
+        latest = Draft.latest(entry)
 
-        waiting = [r for r in candidates if r is not None and not r.get("copied")]
-
-        if waiting:
-            found[str(entry["name"])] = waiting[0]
+        if latest is not None and not latest.get("copied"):
+            found[str(entry["name"])] = latest
 
     return found
 

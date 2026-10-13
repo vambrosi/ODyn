@@ -1,17 +1,17 @@
 """
 The recorder tab: the live traces and the Start/Stop around a `Recording`.
 
-What is recorded is a part of the session picked in the right bar: a loop
-(`e1`) or the grabs (z-stacks are not recorded). The file is written on this
-computer, `~/.odyn/sync/<session folder>/<part>/<mouse>_<part>_<started>.h5`,
-so a share that drops never stops a recording, and copied at Stop (in the
+What is recorded is an experiment of the session picked in the right bar
+(`e1`, a loop or a grab; z-stacks are not recorded). The file is written on
+this computer,
+`~/.odyn/sync/<session folder>/<part>/<mouse>_<part>_<started>.h5`, so a
+share that drops never stops a recording, and copied at Stop (in the
 background) to where `submit` looks for it: `<main folder>/<session folder>/
 <part>/sync/`. A copy that fails is retried by Submit (see `recordings`).
 
 The draft notes every recording (`Draft.add_recording`) and from then on the
 session's mouse and date are fixed, since the file is named for them.
-Recording a loop again asks first, and replaces the earlier file; the grabs'
-recordings add up, each covering the grabs taken while it ran.
+Recording an experiment again asks first, and replaces the earlier file.
 
 "Test" runs the source and shows the traces without writing anything: it is
 what the rig runs to check the wiring.
@@ -369,7 +369,7 @@ class RecorderPane(QWidget):
             return
 
         entry = draft.part(name) or {}
-        kind = entry.get("kind", "loop")
+        kind = entry.get("kind", "experiment")
 
         if kind == "zstack":
             self.context.report(
@@ -378,7 +378,7 @@ class RecorderPane(QWidget):
             )
             return
 
-        earlier = Draft.latest(entry) if kind == "loop" else None
+        earlier = Draft.latest(entry)
 
         if earlier is not None and not self.context.confirm(
             "Recorder",
