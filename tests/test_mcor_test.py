@@ -147,6 +147,18 @@ def test_a_test_is_a_job_of_its_own_for_who_added_the_loop(tmp_path, slurm):
     assert (sent["job_id"], sent["user"]) == ("4242", "ana")
 
 
+def test_a_group_that_does_not_exist_is_refused_before_anything_is_written(
+    tmp_path, slurm
+):
+    a_loop(tmp_path)
+
+    with pytest.raises(ValueError, match="no group 999"):
+        submit_mcor_test(tmp_path, None, 999)
+
+    assert not (cluster_folder(tmp_path) / "jobs").exists()
+    assert "sbatch" not in (slurm.read_text() if slurm.exists() else "")
+
+
 def test_the_job_records_the_test_as_the_owners(tmp_path, monkeypatch):
     from odyn.groups import Group
 

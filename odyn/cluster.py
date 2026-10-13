@@ -839,7 +839,12 @@ def experiment_owner(db: Database, group_id: int) -> str:
     Who added the experiment of `group_id` (the user of its `add_experiment`
     call), which is who its tests and their QC belong to.
     """
-    exp_ids = set(db.group_experiments.loc[[group_id], "exp_id"].astype(int))
+    links = db.group_experiments
+
+    if group_id not in links.index:
+        raise ValueError(f"There is no group {group_id} with experiments.")
+
+    exp_ids = set(links.loc[[group_id], "exp_id"].astype(int))
     calls = db.latest_calls("add_experiment")
 
     for _, call in calls.iterrows():  # newest first
