@@ -252,6 +252,9 @@ class Group(CallRecorder):
 
         self._call_stack: list[CallFrame] = []
 
+        # The .mmap files of the last test this object ran, if any
+        self.test_mmap_paths: list[Path] = []
+
     def __repr__(self):
         msg = f"Group {self.group_id}"
 
@@ -460,9 +463,16 @@ class Group(CallRecorder):
         acquisition order. Read from `call_output` using `get_tempdir()`.
 
         This lets `save_preview_movie` show a test run even after a kernel
-        crash, as long as all relevant .mmap files are present.
+        crash, as long as all relevant .mmap files are present. A test this
+        object just ran comes first, so tests run at once on the cluster (a
+        sweep's) each show their own.
         """
         from caiman.paths import get_tempdir
+
+        temp_folder = Path(get_tempdir())
+
+        if self.test_mmap_paths:
+            return self._pair_with_raw(temp_folder, self.test_mmap_paths)
 
         calls = self.latest_calls("Group.run_motion_correction")
 
@@ -481,9 +491,14 @@ class Group(CallRecorder):
         if tests.empty:
             raise RuntimeError(f"{self!r} has no test motion correction. ")
 
-        temp_folder = Path(get_tempdir())
         mmap_paths = [temp_folder / name for name in tests.iloc[0]["output_mmap_names"]]
 
+        return self._pair_with_raw(temp_folder, mmap_paths)
+
+    def _pair_with_raw(
+        self, temp_folder: Path, mmap_paths: list[Path]
+    ) -> tuple[list[int], list[Path], list[Path]]:
+        """Each of a test's .mmap files with its acquisition and raw file."""
         # Pair .mmap with the raw file it came from by name
         acq_ids: list[int] = []
         raw_paths: list[Path] = []
@@ -1277,10 +1292,13 @@ class Group(CallRecorder):
         grid: list[str] = ["raw", "mcor"],
         downsample_ratio: float = 0.03,
         downsample_type: str = "skip",
+        raw_of_test: bool = False,
         save_folder: str = r"./movies",
         frame_rate: float = 30,
         q_min: float = 1.0,
         q_max: float = 99.5,
+        levels: None | Sequence[float] = None,
+        title: None | str = None,
         codec: str = "MJPG",
         extension: str = "avi",
     ) -> Path:
@@ -1299,6 +1317,8 @@ class Group(CallRecorder):
         - `grid`: which movies to show, one or two of "raw", "test", "mcor"
         - `downsample_ratio`: fraction of frames to keep
         - `downsample_type`: how to drop frames ("average" or "skip")
+        - `raw_of_test`: raw movies of the latest test's acquisitions only,
+        the same frames as its "test" panel (always so with "test" in `grid`)
 
         **ALERT:** "average" reads every frame and averages them down, which
         looks less noisy but smooths away residual motion. "skip" (the default)
@@ -1311,6 +1331,9 @@ class Group(CallRecorder):
           other path is used as given. (r is to use \\ in the path)
         - `frame_rate`: how fast to play the video (frames/s)
         - `q_min`, `q_max`: percentiles shown as black and white
+        - `levels`: the values shown as black and white instead, so several
+        videos compare (the ones used are left in `preview_levels`)
+        - `title`: a label in the top right corner (a test's name, say)
         - `codec`, `extension`: how to encode
 
         **EXAMPLES**
@@ -1362,7 +1385,7 @@ class Group(CallRecorder):
         logger.info(f"Saving movie to {path}")
 
         movie, frame_acq = self._load_preview_movie(
-            movie_types, downsample_ratio, downsample_type
+            movie_types, downsample_ratio, downsample_type, raw_of_test
         )
 
         # Get the total number of frames in consideration
@@ -1383,7 +1406,7 @@ class Group(CallRecorder):
         first = self.experiments.iloc[0]
         um_per_px = float(first["width_um"]) / int(first["width_px"])
 
-        _write_preview_movie(
+        self.preview_levels = _write_preview_movie(
             path,
             movie,
             frame_rate=frame_rate,
@@ -1393,6 +1416,8 @@ class Group(CallRecorder):
             speed=speed,
             q_min=q_min,
             q_max=q_max,
+            levels=levels,
+            title=title,
             codec=codec,
         )
 
@@ -1402,14 +1427,19 @@ class Group(CallRecorder):
             self.add_output_file(path)
 
         self.set_output(
-            {"grid": list(grid), "file": path.name, "speed": round(speed, 1)}
+            {
+                "grid": list(grid),
+                "file": path.name,
+                "speed": round(speed, 1),
+                "levels": list(self.preview_levels),
+            }
         )
         logger.info(f"{CHECK} Wrote {len(movie)} frames at {speed:.0f}x real time.")
 
         return path
 
     def _movie_paths(
-        self, movie_types: tuple[MovieType, ...]
+        self, movie_types: tuple[MovieType, ...], raw_of_test: bool = False
     ) -> dict[MovieType, list[Path]]:
         """
         Every file each panel needs, checked before anything is loaded.
@@ -1420,8 +1450,10 @@ class Group(CallRecorder):
         raw_paths: list[Path] = []
         test_paths: list[Path] = []
 
+        of_test = MovieType.TEST in movie_types or raw_of_test
+
         # Raises if the test files are missing
-        if MovieType.TEST in movie_types:
+        if of_test:
             test_acq_ids, raw_paths, test_paths = self._latest_test_movies()
 
         paths_by_type: dict[MovieType, list[tuple[int, Path]]] = {}
@@ -1431,7 +1463,7 @@ class Group(CallRecorder):
                 pairs = list(zip(test_acq_ids, test_paths))
 
             # A test uses a slice of the raw files, so only pick those
-            elif MovieType.TEST in movie_types:
+            elif of_test:
                 pairs = list(zip(test_acq_ids, raw_paths))
 
             else:
@@ -1467,6 +1499,7 @@ class Group(CallRecorder):
         movie_types: tuple[MovieType, ...],
         downsample_ratio: float,
         downsample_type: str,
+        raw_of_test: bool = False,
     ) -> tuple[cm.movie, list[np.ndarray]]:
         """
         Load and downsample the movies for `movie_types`, side by side.
@@ -1486,7 +1519,7 @@ class Group(CallRecorder):
 
         movie_chains = []
         labels: list[np.ndarray] = []
-        paths_by_type = self._movie_paths(movie_types)
+        paths_by_type = self._movie_paths(movie_types, raw_of_test)
 
         for movie_type in movie_types:
             movie_paths = paths_by_type[movie_type]
@@ -1562,6 +1595,7 @@ class Group(CallRecorder):
         max_shift_um: list[float] = DEFAULT_MAX_SHIFT_UM,
         overlap_um: list[float] = DEFAULT_OVERLAP_UM,
         strides_um: list[float] = DEFAULT_STRIDES_UM,
+        reuse_reference: bool = False,
     ) -> None:
         """
         Method that does test/final motion correction
@@ -1591,6 +1625,9 @@ class Group(CallRecorder):
         `processed/mcor` folder of the first). `0` leaves it to caiman, which
         aligns each acquisition to the template of the one before, starting
         from the first.
+        - `reuse_reference`: align to the reference saved by an earlier run,
+        when there is one, instead of building it again (runs that should be
+        compared, like a sweep's, then share the same one)
 
         *CaImAn motion correction parameters (before metadata adjustments)*
         - `border_nan`: copy along the boundary (if `True`, fill in with NaN)
@@ -1699,8 +1736,16 @@ class Group(CallRecorder):
         self.update_parameters_used({"n_processes": n_processes})
 
         template = None
+        saved = self._reference_path()
 
-        if reference_acqs > 0:
+        if reference_acqs > 0 and reuse_reference and saved.is_file():
+            logger.info(f"Using the reference saved in {saved.name}.")
+            template = tifffile.imread(saved)
+            self.update_parameters_used(
+                {"reference_reused": saved.relative_to(self.db.main_folder).as_posix()}
+            )
+
+        elif reference_acqs > 0:
             template = self._reference_template(reference_acqs, settings["max_shifts"])
 
         _, dview, _ = cm.cluster.setup_cluster(
@@ -1727,6 +1772,7 @@ class Group(CallRecorder):
         if is_test:
             # Record what caiman wrote so save_preview_movie can find it after a restart
             self.set_output({"mmap_names": [Path(p).name for p in self.mc.mmap_file]})
+            self.test_mmap_paths = [Path(p) for p in self.mc.mmap_file]
             return
 
         logger.info("Saving mcor files...")
@@ -1794,25 +1840,36 @@ class Group(CallRecorder):
         *,
         test_acqs: int = TEST_ACQS,
         max_shift_um: list[float] = DEFAULT_MAX_SHIFT_UM,
-        movie: bool = True,
+        pw_rigid: bool = False,
+        strides_um: list[float] = DEFAULT_STRIDES_UM,
+        overlap_um: list[float] = DEFAULT_OVERLAP_UM,
+        max_deviation_um: float = DEFAULT_MAX_DEVIATION_UM,
+        run: None | str = None,
+        movies: Sequence[str] = ("raw_test",),
+        levels: None | Sequence[float] = None,
+        side_by_side: bool = True,
+        reuse_reference: bool = False,
     ) -> Path:
         """
-        A rigid test motion correction, and the files to judge it by
+        A test motion correction, and the files to judge it by
 
         **USAGE**
         ```python
         group = db.groups[some_index]
-        folder = group.test_motion_correction()
+        folder = group.test_motion_correction()                 # rigid
+        folder = group.test_motion_correction(                  # piecewise
+            pw_rigid=True, strides_um=[192, 192], overlap_um=[96, 96],
+            max_deviation_um=6, run="s192_o96_d6",
+        )
         ```
 
-        Runs `run_motion_correction` as a rigid test on `test_acqs`
-        acquisitions spread over the experiment, all aligned to the experiment's
-        reference, then writes into
-        `cache/mcor-tests/<experiment>_g<group>/` (in the files folder): the
-        reference, a mean image per acquisition (raw and corrected, and side
-        by side), a summary and a plot of the shifts (see
-        `odyn.mcor_report`), and, with `movie`, the raw | test preview
-        video. Returns the folder.
+        Runs `run_motion_correction` as a test on `test_acqs` acquisitions
+        spread over the experiment, all aligned to the experiment's reference,
+        then writes into `cache/mcor-tests/<experiment>_g<group>/` (in the files
+        folder; in a folder `run` inside it when given): the reference, a
+        summary and a plot of the shifts, the settings and the numbers for the
+        whole test (see `odyn.mcor_report`), and the preview videos. Returns
+        the folder.
 
         The corrected movies themselves are caiman's temporary files, so they
         go with them; what is written here is what judging the test needs.
@@ -1820,7 +1877,18 @@ class Group(CallRecorder):
         **PARAMETERS**
         - `test_acqs`: how many acquisitions
         - `max_shift_um`: max allowed rigid shift
-        - `movie`: also save the preview video
+        - `pw_rigid`, `strides_um`, `overlap_um`, `max_deviation_um`:
+        piecewise rigid and its patches (see `run_motion_correction`)
+        - `run`: the name of this test among others of the experiment (a
+        sweep's), its folder and its label on the videos
+        - `movies`: the preview videos, any of `"raw_test"` (side by side),
+        `"raw"` and `"test"`, all of the same frames, so separate ones can be
+        put together later
+        - `levels`: the values shown as black and white in every video (as
+        another test's `metrics.json` has them, so videos compare); by default
+        the first video's 1st and 99.5th percentiles, used for the rest
+        - `side_by_side`: also write `side_by_side.tif`
+        - `reuse_reference`: align to the reference an earlier run saved
         """
         import caiman as cm
 
@@ -1831,8 +1899,12 @@ class Group(CallRecorder):
             use_gui_parameters=False,
             is_test=True,
             test_acqs=test_acqs,
-            pw_rigid=False,
+            pw_rigid=pw_rigid,
             max_shift_um=max_shift_um,
+            strides_um=strides_um,
+            overlap_um=overlap_um,
+            max_deviation_um=max_deviation_um,
+            reuse_reference=reuse_reference,
         )
 
         acquisitions = self.acquisitions
@@ -1840,6 +1912,33 @@ class Group(CallRecorder):
         acq_ids = [int(i) for i in acquisitions.index[positions]]
         name = f"{self.exp_names.iloc[0]}_g{self.group_id}"
         folder = self.db.files_folder / CACHE_FOLDER / MCOR_TESTS_FOLDER / name
+
+        if run is not None:
+            folder = folder / run
+
+        settings = {
+            "run": run,
+            "pw_rigid": pw_rigid,
+            "max_shift_um": list(max_shift_um),
+            "max_shifts_px": [int(v) for v in self.mc.max_shifts],
+        }
+
+        if pw_rigid:
+            settings |= {
+                "strides_um": list(strides_um),
+                "overlap_um": list(overlap_um),
+                "max_deviation_um": max_deviation_um,
+                "strides_px": [int(v) for v in self.mc.strides],
+                "overlaps_px": [int(v) for v in self.mc.overlaps],
+                "max_deviation_px": float(self.mc.max_deviation_rigid),
+            }
+
+        # Each patch's shift per frame, piecewise rigid only
+        patches = (
+            (np.asarray(self.mc.y_shifts_els), np.asarray(self.mc.x_shifts_els))
+            if pw_rigid
+            else None
+        )
 
         logger.info(f"Writing the test's report to {folder}")
         paths = write_report(
@@ -1852,12 +1951,27 @@ class Group(CallRecorder):
             max_shifts=list(self.mc.max_shifts),
             positions=positions,
             acq_ids=acq_ids,
+            settings=settings,
+            patch_shifts=patches,
+            side_by_side=side_by_side,
         )
 
-        if movie:
+        titles = {"raw": "raw", "test": run, "raw_test": run}
+
+        for kind in movies:
             paths.append(
-                self.save_preview_movie(grid=["raw", "test"], save_folder=str(folder))
+                self.save_preview_movie(
+                    grid=["raw", "test"] if kind == "raw_test" else [kind],
+                    raw_of_test=True,
+                    save_folder=str(folder),
+                    levels=levels,
+                    title=titles[kind],
+                )
             )
+            levels = levels or self.preview_levels
+
+        if levels is not None:
+            _add_to_json(folder / "metrics.json", {"movie_levels": list(levels)})
 
         for path in paths:
             self.add_output_file(path)
@@ -1888,14 +2002,27 @@ class Group(CallRecorder):
         frames = sample_frames(paths, per_file=max(1, REFERENCE_FRAMES // len(paths)))
         template = reference_image(frames, max_shifts)
 
-        folder = paths[0].parent.parent / "processed" / "mcor"
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"reference_group_{self.group_id}.tif"
+        path = self._reference_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
         tifffile.imwrite(path, template)
         self.add_output_file(path)
         self.update_parameters_used({"reference_acq_ids": acq_ids})
 
         return template
+
+    def _reference_path(self) -> Path:
+        """
+        Where the group's reference is saved: `processed/mcor/` of its first
+        experiment.
+        """
+        first = self.db.main_folder / str(self.acquisitions["raw_path"].iloc[0])
+
+        return (
+            first.parent.parent
+            / "processed"
+            / "mcor"
+            / f"reference_group_{self.group_id}.tif"
+        )
 
     @record_call
     def add_mcor_files(
@@ -3007,25 +3134,34 @@ def _write_preview_movie(
     um_per_px: float | None = None,
     q_min: float = 1.0,
     q_max: float = 99.5,
+    levels: None | Sequence[float] = None,
+    title: None | str = None,
     codec: str = "MJPG",
-) -> None:
+) -> tuple[float, float]:
     """
-    Write a grayscale preview of `movie` (time, height, width).
+    Write a grayscale preview of `movie` (time, height, width), and return
+    the values shown as black and white.
 
     Black and white are put at the `q_min` and `q_max` percentiles, so you
-    cannot compare movie scales, which is the opposite of the z-score renderer.
+    cannot compare movie scales, which is the opposite of the z-score renderer;
+    `levels` gives them instead, for videos that should compare.
 
     `panels` names the panels left to right, `frame_acq` says which
     acquisition each frame came from, `speed` is how many times real time the
-    result plays at, and `um_per_px` sizes the scale bar.
+    result plays at, `um_per_px` sizes the scale bar, and `title` goes in the
+    top right corner.
     """
 
     # Percentiles over every frame, so brightness does not drift as it plays.
     # On the whole array at once because it is already downsampled and in RAM.
     # Black at a low percentile, not the minimum: a few very dark pixels (the
     # PMT offset, a copied border) would otherwise leave the background gray.
-    low, high = np.percentile(movie, [q_min, q_max])
-    spread = max(float(high - low), 1e-9)
+    low, high = (
+        (float(levels[0]), float(levels[1]))
+        if levels is not None
+        else (float(v) for v in np.percentile(movie, [q_min, q_max]))
+    )
+    spread = max(high - low, 1e-9)
 
     frames, height, width = movie.shape
 
@@ -3081,10 +3217,23 @@ def _write_preview_movie(
                     scale,
                 )
 
+            if title:
+                (text_width, _), _ = cv2.getTextSize(
+                    title, cv2.FONT_HERSHEY_SIMPLEX, scale, TEXT_CORE_THICKNESS
+                )
+                _draw_label(
+                    picture,
+                    title,
+                    (width - margin - text_width, margin + round(20 * scale)),
+                    scale,
+                )
+
             writer.write(picture)
 
     finally:
         writer.release()
+
+    return low, high
 
 
 def _worker_count() -> int:
@@ -3135,3 +3284,10 @@ def _tiff_shape(path: Path, expected_frames: int) -> tuple[tuple[int, int], int]
             frames = len(tif.pages)
 
     return (height, width), int(frames)
+
+
+def _add_to_json(path: Path, values: dict) -> None:
+    """Add `values` to the JSON object in `path`."""
+    content = json.loads(path.read_text()) if path.is_file() else {}
+    content.update(values)
+    path.write_text(json.dumps(content, indent=2))

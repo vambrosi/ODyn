@@ -1,7 +1,7 @@
 """
-`Group.test_motion_correction`: a rigid test on acquisitions spread over the
-loop, and the report it leaves, with a stand-in for caiman that copies each
-TIFF as its "corrected" movie.
+`Group.test_motion_correction`: a test on acquisitions spread over the
+experiment, and the report it leaves, with a stand-in for caiman that copies
+each TIFF as its "corrected" movie.
 """
 
 import json
@@ -33,6 +33,10 @@ def caiman(monkeypatch, tmp_path):
         def __init__(self, fnames, dview=None, **settings):
             self.fname = [str(f) for f in fnames]
             self.max_shifts = settings["max_shifts"]
+            self.pw_rigid = settings["pw_rigid"]
+            self.strides = settings.get("strides")
+            self.overlaps = settings.get("overlaps")
+            self.max_deviation_rigid = settings.get("max_deviation_rigid")
             seen["settings"] = settings
 
         def motion_correct(self, template=None, save_movie=False):
@@ -45,6 +49,13 @@ def caiman(monkeypatch, tmp_path):
                 np.save(path, movie)
                 self.mmap_file.append(str(path))
                 self.shifts_rig += [(0.5, -0.5)] * len(movie)
+
+            if self.pw_rigid:
+                # Four patches; two jump by 1 px every other frame
+                frames = len(self.shifts_rig)
+                self.y_shifts_els = np.full((frames, 4), 0.5)
+                self.x_shifts_els = np.full((frames, 4), -0.5)
+                self.y_shifts_els[1::2, :2] += 1
 
     module = types.ModuleType("caiman")
     module.cluster = types.SimpleNamespace(setup_cluster=lambda **_: (None, None, None))
@@ -84,7 +95,7 @@ def a_loop(tmp_path, user="ana") -> tuple[Database, int]:
 def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
     db, group_id = a_loop(tmp_path)
 
-    folder = db.groups[group_id].test_motion_correction(test_acqs=4, movie=False)
+    folder = db.groups[group_id].test_motion_correction(test_acqs=4, movies=())
 
     name = f"20260304_m1_e1_g{group_id}"
     assert folder == db.files_folder / "cache" / "mcor-tests" / name
@@ -118,6 +129,9 @@ def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
     assert tifffile.imread(folder / "flow_average.tif").shape == (48, 40)
     metrics = json.loads((folder / "metrics.json").read_text())
     assert metrics["flow_worst_acq_id"] in summary["acq_id"].tolist()
+    assert metrics["settings"]["pw_rigid"] is False
+    assert "patch_jitter_median_px" not in metrics
+    assert "test_patch_jitter_median_px" not in summary
     assert tifffile.imread(folder / "flow_worst.tif").shape == (48, 40)
 
     call = db.latest_calls("test_motion_correction").iloc[0]
@@ -125,6 +139,87 @@ def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
     assert call["output_folder"] == folder.relative_to(tmp_path).as_posix()
     assert call["output_acq_ids"] == summary["acq_id"].tolist()
     assert db.outputs["file_path"].str.endswith(f"{name}/summary.csv").any()
+
+
+def test_a_piecewise_run_has_its_own_folder_and_measures_the_patches(tmp_path, caiman):
+    db, group_id = a_loop(tmp_path)
+    group = db.groups[group_id]
+    base = group.test_motion_correction(test_acqs=4, movies=())
+    reference = tifffile.imread(base / "reference.tif")
+    caiman["template"] = None
+
+    folder = group.test_motion_correction(
+        test_acqs=4,
+        pw_rigid=True,
+        strides_um=[24, 24],
+        overlap_um=[12, 12],
+        max_deviation_um=3,
+        run="s24_o12_d3",
+        movies=(),
+        side_by_side=False,
+        reuse_reference=True,
+    )
+
+    assert folder == base / "s24_o12_d3"
+    assert caiman["settings"]["pw_rigid"] is True
+    # The saved reference, not a new one
+    np.testing.assert_array_equal(caiman["template"], reference)
+    assert not (folder / "side_by_side.tif").exists()
+
+    metrics = json.loads((folder / "metrics.json").read_text())
+    assert metrics["settings"]["run"] == "s24_o12_d3"
+    assert metrics["settings"]["strides_um"] == [24, 24]
+    # Two patches of four move 1 px every frame: 0.5 px over the patches
+    assert metrics["patch_jitter_median_px"] == 0.5
+    summary = pd.read_csv(folder / "summary.csv")
+    assert (summary["test_patch_jitter_p90_px"] == 0.5).all()
+
+    shifts = np.load(folder / "shifts.npz")
+    assert shifts["patch_dy"].shape == (4 * 56, 4)
+
+
+def test_the_videos_of_a_run_share_their_levels(tmp_path, caiman, monkeypatch):
+    from odyn.groups import Group
+
+    db, group_id = a_loop(tmp_path)
+    group = db.groups[group_id]
+    asked = []
+
+    def save_preview_movie(self, **kwargs):
+        asked.append(kwargs)
+        self.preview_levels = kwargs["levels"] or (100.0, 900.0)
+        path = Path(kwargs["save_folder"]) / f"{'_'.join(kwargs['grid'])}.avi"
+        path.write_bytes(b"")
+        return path
+
+    monkeypatch.setattr(Group, "save_preview_movie", save_preview_movie)
+
+    folder = group.test_motion_correction(
+        test_acqs=2, run="r1", movies=("raw", "test", "raw_test")
+    )
+
+    # The first sets the levels and the rest use them; raw is the test's only
+    assert [a["grid"] for a in asked] == [["raw"], ["test"], ["raw", "test"]]
+    assert [a["levels"] for a in asked] == [None, (100.0, 900.0), (100.0, 900.0)]
+    assert all(a["raw_of_test"] for a in asked)
+    assert [a["title"] for a in asked] == ["raw", "r1", "r1"]
+    metrics = json.loads((folder / "metrics.json").read_text())
+    assert metrics["movie_levels"] == [100.0, 900.0]
+
+
+def test_a_video_takes_the_levels_and_the_title_it_is_given(tmp_path):
+    from odyn.groups import _write_preview_movie
+
+    movie = np.random.default_rng(0).uniform(0, 1000, (6, 64, 96)).astype(np.float32)
+
+    levels = _write_preview_movie(
+        tmp_path / "a.avi", movie, frame_rate=10, levels=(10, 20), title="s128_o64_d6"
+    )
+    assert levels == (10, 20)
+
+    levels = _write_preview_movie(tmp_path / "b.avi", movie, frame_rate=10)
+    assert 0 < levels[0] < levels[1] < 1000
+    assert (tmp_path / "b.avi").stat().st_size > 0
 
 
 # --------------------------------------------------------------------------- #

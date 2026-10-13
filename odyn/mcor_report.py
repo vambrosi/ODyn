@@ -3,19 +3,20 @@ The files a test motion correction is judged by, before the app shows it.
 
 For the acquisitions a test ran on, written into one folder:
 - `reference.tif`: the image every acquisition was aligned to;
-- `side_by_side.tif`: one page per acquisition, its mean image raw | test,
-each column scaled on its own. Scrubbed in Fiji, drift shows as the picture
-sliding from page to page;
+- `side_by_side.tif` (unless turned off): one page per acquisition, its mean
+image raw | test, each column scaled on its own. Scrubbed in Fiji, drift
+shows as the picture sliding from page to page;
 - `summary.csv`: per acquisition, how its images match the reference (see
 below), and the rigid shift caiman applied;
-- `metrics.json`: the numbers for the whole test;
+- `metrics.json`: the numbers for the whole test, and the settings it ran
+with when given;
 - `flow_average.tif`: how far the corrected means still are from the
 reference at each point, averaged over the acquisitions (in px, brighter is
 more), which shows where a rigid correction falls short (one part of the
 field moving apart from the rest, say);
 - `flow_worst.tif`: the same for the acquisition with the most of it;
-- `shifts.npz`, `shifts.png`: the shift of every frame and the measures
-below, as plots.
+- `shifts.npz`, `shifts.png`: the shift of every frame (and of every patch,
+for piecewise rigid) and the measures below, as plots.
 
 What is measured, and why this way rather than as NoRMCorre and caiman do:
 - **Mean against the reference** (`*_corr_with_ref`): each acquisition's mean
@@ -27,9 +28,9 @@ Comparing each movie with its own mean (NoRMCorre's `motion_metrics`) is
 circular: a movie that drifted has a blurred mean that its frames still
 match.
 - **Frames against the reference** (`*_frame_corr_with_ref_median`, `_p10`,
-`_p90`): the same per frame, summarized per acquisition. Single frames are noisy, so
-they match less than the means do; the 10th percentile catches a moment of
-movement that the mean smooths over. Noise and odor responses lower it too,
+`_p90`): the same per frame, summarized per acquisition. Single frames are
+noisy, so they match less than the means do; the 10th percentile catches a
+moment of movement that the mean smooths over. Noise and odor responses lower it too,
 so it compares raw with test, or candidates, rather than reading as a grade.
 - **Residual flow** (`test_flow_median_px`, `_p10_px`, `_p90_px`): the
 optical flow (Farneback, as caiman's metrics) from the reference to each
@@ -37,6 +38,12 @@ corrected mean, the median and percentiles of its length over the field
 (away from the edges). A 90th percentile far above the median means part of
 the field moves on its own. What a rigid correction leaves is mostly
 non-rigid motion, so this says whether piecewise rigid would help.
+- **Patch jitter** (piecewise rigid only, `test_patch_jitter_median_px`,
+`_p90_px`; `patch_jitter_median_px` in `metrics.json`): how far each patch's
+own shift, apart from the rigid one, moves from one frame to the next, the
+median over the patches. Tissue bends slowly, so a large jitter means the
+patches follow noise (too small, or too free to deviate) rather than the
+tissue.
 - **Crispness** (`metrics.json`): the mean squared gradient of the average of
 all means, divided by its variance, so it compares across experiments and
 brightness (NoRMCorre's is the unscaled norm of the gradient). Drift blurs
@@ -47,8 +54,11 @@ through `load`, so caiman stays with the caller.
 
 **USAGE**
 ```python
-paths = write_report(folder, raw_paths, mmap_paths, load, shifts, reference,
-                     max_shifts=(60, 60), positions=[3, 12, ...], acq_ids=[...])
+paths = write_report(
+    folder, raw_paths, mmap_paths, load, shifts, reference,
+    max_shifts=(60, 60), positions=[3, 12, ...], acq_ids=[...],
+    settings={...}, patch_shifts=(dy_els, dx_els),
+)
 ```
 """
 
@@ -75,6 +85,9 @@ def write_report(
     max_shifts: Sequence[int],
     positions: Sequence[int],
     acq_ids: Sequence[int],
+    settings: None | dict = None,
+    patch_shifts: None | tuple[np.ndarray, np.ndarray] = None,
+    side_by_side: bool = True,
 ) -> list[Path]:
     """
     Write the report on one test into `folder` (see the module's description)
@@ -84,6 +97,8 @@ def write_report(
     the other, and `positions` and `acq_ids` say which acquisitions they were.
     Without a `reference` (caiman's own template), the average of the
     corrected means stands in for it, and the frames are not compared.
+    `patch_shifts` are piecewise rigid's `(dy, dx)` per frame and patch, each
+    `(frames, patches)`; `settings` go into `metrics.json` as they are.
     """
     folder.mkdir(parents=True, exist_ok=True)
     margin = max(max_shifts) + 2
@@ -111,6 +126,7 @@ def write_report(
     shifts = np.asarray(shifts, dtype=float).reshape(-1, 2)
     edges = np.concatenate([[0], np.cumsum(frame_counts)]).astype(int)
     flows = [residual_flow(reference, image, margin) for image in test]
+    jitter = None if patch_shifts is None else _patch_jitter(shifts, patch_shifts)
 
     rows = []
 
@@ -134,6 +150,11 @@ def write_report(
                 "test_flow_median_px": _round(float(np.median(magnitude)), 2),
                 "test_flow_p10_px": _round(float(np.percentile(magnitude, 10)), 2),
                 "test_flow_p90_px": _round(float(np.percentile(magnitude, 90)), 2),
+                **(
+                    {}
+                    if jitter is None
+                    else _jitter_columns(jitter[edges[i] + 1 : edges[i + 1]])
+                ),
                 "dy_median": _round(_median(part[:, 0]), 2),
                 "dx_median": _round(_median(part[:, 1]), 2),
                 "at_limit": (
@@ -153,6 +174,17 @@ def write_report(
         "frames_at_limit": _round(float(_at_limit(shifts, max_shifts).mean()), 4),
     }
 
+    if jitter is not None:
+        # Steps from one acquisition into the next are not motion
+        steps = np.concatenate(
+            [jitter[edges[i] + 1 : edges[i + 1]] for i in range(len(rows))]
+        )
+        metrics["patch_jitter_median_px"] = _round(_median(steps), 3)
+        metrics["patch_jitter_p90_px"] = _round(_percentile(steps, 90), 3)
+
+    if settings is not None:
+        metrics["settings"] = settings
+
     written = {
         "reference": folder / "reference.tif",
         "side_by_side": folder / "side_by_side.tif",
@@ -164,10 +196,17 @@ def write_report(
         "png": folder / "shifts.png",
     }
     tifffile.imwrite(written["reference"], reference.astype(np.float32))
-    # Pages, not colors: tifffile takes a stack of 3 or 4 for an RGB image
-    tifffile.imwrite(
-        written["side_by_side"], side_by_side([raw, test]), photometric="minisblack"
-    )
+
+    if side_by_side:
+        # Pages, not colors: tifffile takes a stack of 3 or 4 for an RGB image
+        tifffile.imwrite(
+            written["side_by_side"],
+            side_by_side_pages([raw, test]),
+            photometric="minisblack",
+        )
+    else:
+        del written["side_by_side"]
+
     _write_csv(written["summary"], rows)
     written["metrics"].write_text(json.dumps(metrics, indent=2))
 
@@ -183,6 +222,14 @@ def write_report(
         frame_counts=np.array(frame_counts),
         positions=np.array(positions),
         acq_ids=np.array(acq_ids),
+        **(
+            {}
+            if patch_shifts is None
+            else {
+                "patch_dy": np.asarray(patch_shifts[0], np.float32),
+                "patch_dx": np.asarray(patch_shifts[1], np.float32),
+            }
+        ),
     )
     plot_shifts(written["png"], shifts, frame_counts, rows, max_shifts)
 
@@ -232,7 +279,9 @@ def residual_flow(reference: np.ndarray, image: np.ndarray, margin: int) -> np.n
     return flow
 
 
-def side_by_side(columns: Sequence[Sequence[np.ndarray]], gap: int = 8) -> np.ndarray:
+def side_by_side_pages(
+    columns: Sequence[Sequence[np.ndarray]], gap: int = 8
+) -> np.ndarray:
     """
     One page per image of the columns, the columns next to each other, each
     scaled 0 to 1 by its own 1st and 99.5th percentiles (so they compare by
@@ -354,6 +403,26 @@ def _median_and_band(
             lw=0,
             label=f"{what}, 10th to 90th percentile",
         )
+
+
+def _patch_jitter(
+    shifts: np.ndarray, patch_shifts: tuple[np.ndarray, np.ndarray]
+) -> np.ndarray:
+    """
+    Per frame, the median over the patches of how far each patch's shift,
+    less the rigid one, moved since the frame before (the first is 0).
+    """
+    dy = np.asarray(patch_shifts[0], float) - shifts[:, :1]
+    dx = np.asarray(patch_shifts[1], float) - shifts[:, 1:]
+    steps = np.hypot(np.diff(dy, axis=0), np.diff(dx, axis=0))
+    return np.concatenate([[0.0], np.median(steps, axis=1)])
+
+
+def _jitter_columns(steps: np.ndarray) -> dict:
+    return {
+        "test_patch_jitter_median_px": _round(_median(steps), 3),
+        "test_patch_jitter_p90_px": _round(_percentile(steps, 90), 3),
+    }
 
 
 def _summarize(
