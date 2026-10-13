@@ -16,7 +16,7 @@ from odyn.app.submissions import (
     submit_again,
     take_back,
 )
-from odyn.cluster import status, tick
+from odyn.cluster import cluster_folder, status, tick
 from generate_data import generate
 from generate_sync import generate_sync
 
@@ -209,3 +209,44 @@ def test_take_back_puts_the_draft_among_this_computers_again(tmp_path):
     [back] = Draft.pending(tmp_path / "drafts")
     assert back.path == local and back.part("e1").get("objective") is None
     assert "submitted_by" not in back.data
+
+
+def test_the_tick_tests_each_loop_it_adds_once(tmp_path, slurm):
+    a_day(tmp_path)
+    add_now(next(iter(queued(tmp_path)))[0])
+
+    report = tick(tmp_path)
+
+    assert report.submissions == ["20260101/m1: added as session 1"]
+    assert report.tests == ["20260101/m1/e1: test submitted (group 1, job 4242)"]
+    assert (
+        "run-mcor-test --group 1 --user ana"
+        in (cluster_folder(tmp_path) / "jobs" / "mcor-test-g1.sh").read_text()
+    )
+
+    # Never twice
+    assert tick(tmp_path).tests == []
+    assert slurm.read_text().count("sbatch") == 1
+
+    # status says where it is
+    (tmp_path / "queue.txt").write_text("4242 RUNNING\n")
+    assert "Tests:      1 submitted, 1 running" in status(tmp_path)
+    assert "  running   group 1 for ana, job 4242" in status(tmp_path)
+
+    (tmp_path / "queue.txt").write_text("")
+    log = cluster_folder(tmp_path) / "jobs" / "odyn-mcor-main-g1-4242.out"
+    log.write_text("started  ...\nTraceback ...\n")
+    assert "group 1 for ana, job 4242" in status(tmp_path)
+    assert ": see odyn-mcor-main-g1-4242.out" in status(tmp_path)
+
+    log.write_text("started  ...\nfinished 2026-01-01T21:00:00\n")
+    assert "Tests:      1 submitted, 1 finished" in status(tmp_path)
+
+
+def test_the_tick_can_leave_the_tests_out(tmp_path, slurm):
+    a_day(tmp_path)
+    add_now(next(iter(queued(tmp_path)))[0])
+    (tmp_path / ".odyn" / "cluster.json").write_text('{"test_new_loops": false}')
+
+    assert tick(tmp_path).tests == []
+    assert not (cluster_folder(tmp_path) / "mcor").exists()

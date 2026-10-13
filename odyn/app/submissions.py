@@ -146,6 +146,15 @@ def queued(
     return [(path, _read_state(path) or Submission()) for path in _drafts(folder)]
 
 
+def added(
+    main_folder: str | Path, project: None | str = None
+) -> list[tuple[Path, Submission]]:
+    """The drafts the queue added (in `done/`), oldest first."""
+    folder = queue_folder(main_folder, project) / DONE_FOLDER
+
+    return [(path, _read_state(path) or Submission()) for path in _drafts(folder)]
+
+
 def add_now(path: Path) -> None:
     """Ask the next tick to ingest a queued draft without waiting for its files."""
     _now_path(path).write_text(datetime.now().strftime(TIME_FORMAT) + "\n")

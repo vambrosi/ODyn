@@ -5,7 +5,8 @@ them and does what the database is waiting for.
 Workstations cannot start cluster jobs (logging in takes a password and Duo),
 so anything that has to run there is left as a request file on the share,
 and a short `tick` on the cluster applies it. A tick also adds the submitted
-drafts whose recordings finished copying (`odyn.app.submissions`), processes
+drafts whose recordings finished copying (`odyn.app.submissions`), submits a
+test motion correction of each loop it added (`submit_mcor_test`), processes
 the sync files that arrived since their loop or grabs were added, writes a
 heartbeat, and (as a chain) submits the next tick. Everything a tick does is
 safe to repeat, so a tick that ran twice, or not at all for a day, only
@@ -22,7 +23,8 @@ state, and `submissions/done/` the ones added;
 - `seen.json` is what each sync folder looked like when a tick last tried it;
 - `jobs/` holds the job scripts and their output;
 - `mcor/` has a file per group whose test motion correction was submitted
-(`<group_id>.json`: the job, who it is for, when);
+(`<group_id>.json`: the job, who it is for, when), so no group is tested twice
+by the tick;
 - `STOP` stops the chain (the running tick does not submit the next one).
 
 The cluster's own settings (partition, conda environment, chain interval) are
@@ -50,6 +52,7 @@ report = tick(main_folder, project="main-sync")
 from __future__ import annotations
 
 import argparse
+import getpass
 import inspect
 import json
 import os
@@ -121,6 +124,7 @@ class ClusterConfig:
     conda_sh: str = "$HOME/miniforge3/etc/profile.d/conda.sh"
     conda_env: str = "caiman"
     every_minutes: int = 30
+    test_new_loops: bool = True  # the tick submits a test of each loop it adds
     tick_cpus: int = 1
     tick_memory: str = "8G"
     tick_time: str = "0:30:00"
@@ -284,6 +288,7 @@ class TickReport:
     applied: list[str] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)
     submissions: list[str] = field(default_factory=list)
+    tests: list[str] = field(default_factory=list)
     processed: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     next_tick: None | str = None
@@ -294,6 +299,7 @@ class TickReport:
             f"{len(self.applied)} requests applied",
             f"{len(self.rejected)} rejected",
             f"{len(self.submissions)} submissions looked at",
+            f"{len(self.tests)} tests submitted",
             f"{len(self.processed)} sync files processed",
             f"{len(self.errors)} errors",
         ]
@@ -315,9 +321,10 @@ def tick(
     """
     One round of the cluster's work: apply the waiting requests, add the
     submitted drafts whose recordings are complete (see
-    `odyn.app.submissions`), process the sync files that arrived (or changed)
-    since they were last processed, write the heartbeat and, with `chain`,
-    submit the next tick.
+    `odyn.app.submissions`), submit a test motion correction of each loop
+    they added (unless `test_new_loops` is off in `ClusterConfig`), process
+    the sync files that arrived (or changed) since they were last processed,
+    write the heartbeat and, with `chain`, submit the next tick.
 
     **PARAMETERS**
     - `dry_run` lists what would be done and changes nothing
@@ -325,11 +332,13 @@ def tick(
     - `settle_s`: sync files modified more recently than this wait for the
     next tick, since they may still be copying
 
-    Returns a `TickReport`. A request or a sync file that fails is reported
-    and the tick carries on with the rest.
+    Returns a `TickReport`. A request, a test or a sync file that fails is
+    reported and the tick carries on with the rest (a test that could not be
+    submitted is tried again by the next tick).
     """
     main_folder = Path(main_folder).resolve()
     folder = cluster_folder(main_folder, project)
+    config = ClusterConfig.read(main_folder)
     report = TickReport(
         started_at=datetime.now().strftime(TIME_FORMAT), dry_run=dry_run
     )
@@ -346,6 +355,10 @@ def tick(
     report.submissions = process_submissions(main_folder, project, dry_run=dry_run)
 
     db = Database(main_folder, project=project)
+
+    if config.test_new_loops:
+        _submit_tests(db, project, report, dry_run)
+
     seen = _read_seen(folder)
 
     for work in _sync_work(db, settle_s, seen):
@@ -367,7 +380,6 @@ def tick(
         if (folder / STOP_FILE).exists():
             logger.info(f"Not submitting the next tick: '{folder / STOP_FILE}' exists.")
         else:
-            config = ClusterConfig.read(main_folder)
             submit_tick(main_folder, project, delay_minutes=config.every_minutes)
             report.next_tick = (
                 datetime.now() + timedelta(minutes=config.every_minutes)
@@ -379,6 +391,63 @@ def tick(
     logger.info(report.summary())
 
     return report
+
+
+def _submit_tests(
+    db: Database, project: None | str, report: TickReport, dry_run: bool
+) -> None:
+    """Submit a test motion correction of each loop the queue added untested."""
+    for group_id, where in _untested_groups(db, project):
+        if dry_run:
+            report.tests.append(f"{where}: would submit a test (group {group_id})")
+            continue
+
+        try:
+            job_id = submit_mcor_test(db.main_folder, project, group_id)
+            report.tests.append(
+                f"{where}: test submitted (group {group_id}, job {job_id})"
+            )
+
+        except Exception as error:  # the next tick tries again
+            report.errors.append(
+                f"{where}: test of group {group_id}: {type(error).__name__}: {error}"
+            )
+
+
+def _untested_groups(db: Database, project: None | str) -> list[tuple[int, str]]:
+    """
+    The loops the queue added (`odyn.app.submissions.added`) that no test was
+    submitted for: the group each loop started as, and the loop's path.
+    """
+    # Imported here: the queue belongs to the app (no Qt in it)
+    from .app.submissions import added
+
+    loop_ids = {
+        int(loop_id)
+        for _, state in added(db.main_folder, project)
+        for loop_id in state.written.get("loops", {}).values()
+    }
+
+    if not loop_ids:
+        return []
+
+    sent = cluster_folder(db.main_folder, project) / MCOR_FOLDER
+    links = db.group_loops
+    sizes = links.index.value_counts()
+    paths = db.loops["loop_path"]
+    found = {}
+
+    for group_id, loop_id in sorted(zip(links.index, links["loop_id"])):
+        loop_id = int(loop_id)
+
+        if loop_id in loop_ids and sizes[group_id] == 1 and loop_id not in found:
+            found[loop_id] = int(group_id)
+
+    return [
+        (group_id, str(paths.loc[loop_id]))
+        for loop_id, group_id in sorted(found.items())
+        if not (sent / f"{group_id}.json").exists()
+    ]
 
 
 def _sync_work(db: Database, settle_s: float, seen: dict[str, str]) -> list[Work]:
@@ -781,6 +850,67 @@ def loop_owner(db: Database, group_id: int) -> str:
     raise ValueError(f"No add_loop call added the loop of group {group_id}.")
 
 
+def mcor_tests(main_folder: str | Path, project: None | str = None) -> list[dict]:
+    """
+    The submitted tests (`mcor/<group_id>.json`), newest first, each with its
+    `state` and `log` (the job's output file, or `None` before it starts):
+
+    - "pending" or "running" (or another Slurm state) while in Slurm's queue
+    - "finished" once its log ends with the `finished` line
+    - "stopped" when the job ended without it (the log says why)
+    - "unknown" without `squeue` (off the cluster)
+    """
+    folder = cluster_folder(main_folder, project)
+    in_queue = _slurm_jobs()
+    tests = []
+
+    for path in (folder / MCOR_FOLDER).glob("*.json"):
+        test = json.loads(path.read_text())
+        name = f"odyn-mcor-{project or 'main'}-g{test['group_id']}"
+        log = folder / JOBS_FOLDER / f"{name}-{test['job_id']}.out"
+        test["log"] = log if log.is_file() else None
+
+        if in_queue is not None and str(test["job_id"]) in in_queue:
+            test["state"] = in_queue[str(test["job_id"])].lower()
+        elif test["log"] is not None and _last_line(log).startswith("finished"):
+            test["state"] = "finished"
+        elif in_queue is None:
+            test["state"] = "unknown"
+        else:
+            test["state"] = "stopped"
+
+        tests.append(test)
+
+    return sorted(tests, key=lambda t: t["submitted_at"], reverse=True)
+
+
+def _slurm_jobs() -> None | dict[str, str]:
+    """This user's jobs in Slurm's queue and their state; `None` without `squeue`."""
+    try:
+        done = subprocess.run(
+            [
+                "squeue",
+                "--noheader",
+                "--format=%i %T",
+                f"--user={getpass.getuser()}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return None
+
+    return dict(
+        line.split()[:2] for line in done.stdout.splitlines() if len(line.split()) > 1
+    )
+
+
+def _last_line(path: Path) -> str:
+    lines = path.read_text(errors="replace").strip().splitlines()
+
+    return lines[-1] if lines else ""
+
+
 def queued_ticks(project: None | str = None) -> list[str]:
     """The ids of this database's ticks waiting or running in Slurm."""
     done = subprocess.run(
@@ -827,7 +957,10 @@ def stop_chain(main_folder: str | Path, project: None | str = None) -> None:
 
 
 def status(main_folder: str | Path, project: None | str = None) -> str:
-    """The chain's state, as text: last tick, queue, requests, `STOP`."""
+    """
+    The chain's state, as text: last tick, requests, submitted drafts, tests,
+    `STOP` and the queue.
+    """
     folder = cluster_folder(main_folder, project)
     beat = heartbeat(main_folder, project)
     lines = []
@@ -856,6 +989,30 @@ def status(main_folder: str | Path, project: None | str = None) -> str:
     for path, state in queued(main_folder, project):
         if state.state == "failed":
             lines.append(f"  failed    {path.name}: {state.message}")
+
+    tests = mcor_tests(main_folder, project)
+    counts = {}
+
+    for test in tests:
+        counts[test["state"]] = counts.get(test["state"], 0) + 1
+
+    lines.append(
+        f"Tests:      {len(tests)} submitted"
+        + "".join(f", {n} {state}" for state, n in sorted(counts.items()))
+    )
+
+    for test in tests:  # the ones to look at
+        if test["state"] != "finished":
+            lines.append(
+                f"  {test['state']:<9} group {test['group_id']} for {test['user']}, "
+                f"job {test['job_id']} ({test['submitted_at']})"
+                + (
+                    f": see {test['log'].name}"
+                    if test["state"] == "stopped" and test["log"]
+                    else ""
+                )
+            )
+
     rejected = sorted((folder / REQUESTS_FOLDER / REJECTED_FOLDER).glob("*.json"))
     lines.append(f"Rejected:   {len(rejected)} in total")
     lines.append(f"Stopped:    {'yes' if (folder / STOP_FILE).exists() else 'no'}")
@@ -898,7 +1055,8 @@ def main(argv: None | list[str] = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
 
     run = commands.add_parser(
-        "tick", help="apply requests, add submitted drafts and process sync files"
+        "tick",
+        help="apply requests, add submitted drafts, test them, process sync files",
     )
     run.add_argument("--dry-run", action="store_true", help="only say what it would do")
     run.add_argument("--chain", action="store_true", help="then submit the next tick")
@@ -931,7 +1089,12 @@ def main(argv: None | list[str] = None) -> int:
             args.main_folder, args.project, dry_run=args.dry_run, chain=args.chain
         )
 
-        for line in [*report.applied, *report.submissions, *report.processed]:
+        for line in [
+            *report.applied,
+            *report.submissions,
+            *report.tests,
+            *report.processed,
+        ]:
             print(f"  {line}")
 
         for line in report.errors:
