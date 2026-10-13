@@ -308,7 +308,7 @@ class MainWindow(QMainWindow):
                     self.commands,
                     {
                         self.undo_action: "Undo the last remove",
-                        self.remove_action: "Remove the selected session or experiment",
+                        self.remove_action: "Remove the selected session, experiment or z-stacks",
                     },
                 ),
             ],

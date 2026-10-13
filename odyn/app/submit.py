@@ -216,7 +216,9 @@ def check(
     local_only = pending(draft)
 
     if not draft.parts:
-        problems.append(Problem("session", "no experiments listed", blocking=False))
+        problems.append(
+            Problem("session", "no experiments or z-stacks listed", blocking=False)
+        )
 
     elif not folder.is_dir():
         problems.append(
@@ -233,10 +235,10 @@ def check(
     for entry in draft.parts:
         name = str(entry.get("name", ""))
         kind = entry.get("kind")
-        where = name or "experiment"
+        where = name or "session"
 
         if not name:
-            problems.append(Problem("experiment", "the experiment has no name"))
+            problems.append(Problem("session", "an experiment or z-stack has no name"))
             continue
 
         if kind not in KINDS:

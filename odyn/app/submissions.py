@@ -83,7 +83,7 @@ class Submission:
 
     - `state`: "waiting", "failed" or "done"
     - `message`: what it waits for, why it failed, or what was added
-    - `parts`: each experiment's progress ("45 of 160 TIFFs")
+    - `parts`: the progress of each experiment or z-stack ("45 of 160 TIFFs")
     - `files`: what the draft's folders looked like at `last_change_at`
     - `retry_on_change`: a failure the files caused, tried again once they change
     - `written`: the database ids `ingest` made (session, loops, ...)
