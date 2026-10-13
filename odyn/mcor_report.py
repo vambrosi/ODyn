@@ -10,31 +10,33 @@ sliding from page to page;
 below), and the rigid shift caiman applied;
 - `metrics.json`: the numbers for the whole test;
 - `flow_average.tif`: how far the corrected means still are from the
-reference at each point, averaged over the acquisitions (in px), which shows
-where a rigid correction falls short (one part of the field moving apart
-from the rest, say);
-- `flow_worst.tif`: the motion left in the acquisition with the most of it,
-as dx and dy;
+reference at each point, averaged over the acquisitions (in px, brighter is
+more), which shows where a rigid correction falls short (one part of the
+field moving apart from the rest, say);
+- `flow_worst.tif`: the same for the acquisition with the most of it;
 - `shifts.npz`, `shifts.png`: the shift of every frame and the measures
 below, as plots.
 
 What is measured, and why this way rather than as NoRMCorre and caiman do:
-- **Mean against the reference** (`*_corr_reference`): each acquisition's mean
+- **Mean against the reference** (`*_corr_with_ref`): each acquisition's mean
 image against one image, the same for raw and test. Averaging first removes
-most noise and activity, so this follows drift between acquisitions.
+most noise and activity, so this follows drift between acquisitions. The
+test mean is also compared with the average of all test means
+(`test_corr_with_avg`): how well it fits the rest.
 Comparing each movie with its own mean (NoRMCorre's `motion_metrics`) is
 circular: a movie that drifted has a blurred mean that its frames still
 match.
-- **Frames against the reference** (`*_frame_corr_median`, `_p5`, `_p95`): the
-same per frame, summarized per acquisition. The 5th percentile catches a
-moment of movement that the mean smooths over. Noise and odor responses lower it too,
+- **Frames against the reference** (`*_frame_corr_with_ref_median`, `_p10`,
+`_p90`): the same per frame, summarized per acquisition. Single frames are noisy, so
+they match less than the means do; the 10th percentile catches a moment of
+movement that the mean smooths over. Noise and odor responses lower it too,
 so it compares raw with test, or candidates, rather than reading as a grade.
-- **Residual flow** (`test_flow_median_px`, `_p90_px`): the optical flow
-(Farneback, as caiman's metrics) from the reference to each corrected mean,
-the median and 90th percentile of its length over the field (away from the
-edges). A 90th percentile far above the median means part of the field
-moves on its own. What a rigid correction leaves is mostly non-rigid motion, so this
-says whether piecewise rigid would help.
+- **Residual flow** (`test_flow_median_px`, `_p10_px`, `_p90_px`): the
+optical flow (Farneback, as caiman's metrics) from the reference to each
+corrected mean, the median and percentiles of its length over the field
+(away from the edges). A 90th percentile far above the median means part of
+the field moves on its own. What a rigid correction leaves is mostly
+non-rigid motion, so this says whether piecewise rigid would help.
 - **Crispness** (`metrics.json`): the mean squared gradient of the average of
 all means, divided by its variance, so it compares across experiments and
 brightness (NoRMCorre's is the unscaled norm of the gradient). Drift blurs
@@ -120,14 +122,17 @@ def write_report(
                 "position": int(position),
                 "acq_id": int(acq_id),
                 "file": Path(path).name,
-                "raw_corr_reference": _round(correlation(raw[i], reference, margin)),
-                "test_corr_reference": _round(correlation(test[i], reference, margin)),
-                "test_corr_average": _round(correlation(test[i], average, margin)),
-                "raw_frame_corr_median": _round(_median(raw_frames[i])),
-                "test_frame_corr_median": _round(_median(test_frames[i])),
-                "test_frame_corr_p5": _round(_percentile(test_frames[i], 5)),
-                "test_frame_corr_p95": _round(_percentile(test_frames[i], 95)),
+                "raw_corr_with_ref": _round(correlation(raw[i], reference, margin)),
+                "test_corr_with_ref": _round(correlation(test[i], reference, margin)),
+                "test_corr_with_avg": _round(correlation(test[i], average, margin)),
+                "raw_frame_corr_with_ref_median": _round(_median(raw_frames[i])),
+                "raw_frame_corr_with_ref_p10": _round(_percentile(raw_frames[i], 10)),
+                "raw_frame_corr_with_ref_p90": _round(_percentile(raw_frames[i], 90)),
+                "test_frame_corr_with_ref_median": _round(_median(test_frames[i])),
+                "test_frame_corr_with_ref_p10": _round(_percentile(test_frames[i], 10)),
+                "test_frame_corr_with_ref_p90": _round(_percentile(test_frames[i], 90)),
                 "test_flow_median_px": _round(float(np.median(magnitude)), 2),
+                "test_flow_p10_px": _round(float(np.percentile(magnitude, 10)), 2),
                 "test_flow_p90_px": _round(float(np.percentile(magnitude, 90)), 2),
                 "dy_median": _round(_median(part[:, 0]), 2),
                 "dx_median": _round(_median(part[:, 1]), 2),
@@ -171,10 +176,7 @@ def write_report(
         written["flow_average"], np.mean(lengths, axis=0).astype(np.float32)
     )
 
-    # dx and dy as two pages, so the direction is there too
-    tifffile.imwrite(
-        written["flow"], np.moveaxis(flows[worst], -1, 0), photometric="minisblack"
-    )
+    tifffile.imwrite(written["flow"], lengths[worst].astype(np.float32))
     np.savez(
         written["npz"],
         shifts=shifts,
@@ -261,18 +263,23 @@ def plot_shifts(
     max_shifts: Sequence[int],
 ) -> None:
     """
-    The shifts of every frame (dy, dx), each acquisition's match with the
-    reference, and the motion left in it, as a PNG. The shift axes fit the
-    shifts, and say the limit.
+    The shifts of every frame (dy, dx), how each acquisition's frames match the
+    reference, and the motion left in its mean, as a PNG. The shift axes fit
+    the shifts, and say the limit.
     """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(4, 1, figsize=(14, 13), layout="constrained")
+    with plt.rc_context({"font.size": 12, "legend.fontsize": 11}):
+        _draw_shifts(plt, path, shifts, frame_counts, rows, max_shifts)
+
+
+def _draw_shifts(plt, path, shifts, frame_counts, rows, max_shifts) -> None:
+    fig, axes = plt.subplots(4, 1, figsize=(14, 14), layout="constrained")
     fig.get_layout_engine().set(h_pad=0.25)
-    fig.suptitle("Shifts caiman applied", fontsize=10)
+    fig.suptitle("Test motion correction", fontsize=16)
     edges = np.cumsum(frame_counts)[:-1]
 
     for axis, (index, name) in zip(axes[:2], ((0, "dy"), (1, "dx"))):
@@ -284,7 +291,7 @@ def plot_shifts(
 
         reach = max(1.0, float(np.abs(values).max()) if len(values) else 1.0)
         axis.set_ylim(-1.2 * reach, 1.2 * reach)
-        axis.set_ylabel(f"{name} (px)")
+        axis.set_ylabel(f"shift {name} (px)")
         axis.text(
             0.995,
             0.95,
@@ -292,62 +299,61 @@ def plot_shifts(
             transform=axis.transAxes,
             ha="right",
             va="top",
-            fontsize=8,
+            fontsize=10,
             color="0.4",
         )
 
     axes[1].set_xlabel("frame (acquisitions one after the other, gray lines between)")
 
     positions = [row["position"] for row in rows]
-    axes[2].plot(
-        positions,
-        [row["raw_corr_reference"] for row in rows],
-        marker="o",
-        label="raw mean",
-        color="tab:blue",
-    )
-    axes[2].plot(
-        positions,
-        [row["test_corr_reference"] for row in rows],
-        marker="o",
-        label="test mean",
-        color="tab:green",
-    )
-    low = [row["test_frame_corr_p5"] for row in rows]
-    high = [row["test_frame_corr_p95"] for row in rows]
 
-    if all(value is not None for value in low + high):
-        axes[2].fill_between(
+    for who, color in (("raw", "tab:blue"), ("test", "tab:green")):
+        _median_and_band(
+            axes[2],
             positions,
-            low,
-            high,
-            color="tab:green",
-            alpha=0.15,
-            lw=0,
-            label="test frames (5th to 95th percentile)",
+            [row[f"{who}_frame_corr_with_ref_median"] for row in rows],
+            [row[f"{who}_frame_corr_with_ref_p10"] for row in rows],
+            [row[f"{who}_frame_corr_with_ref_p90"] for row in rows],
+            f"{who} frames",
+            color,
         )
 
-    axes[2].set_ylabel("correlation with\nthe reference")
-    axes[2].legend(loc="lower right", fontsize=8)
+    axes[2].set_ylabel("frame correlation\nwith the reference")
+    axes[2].legend(loc="best")
 
-    middle = [row["test_flow_median_px"] for row in rows]
-    axes[3].plot(positions, middle, marker="o", color="tab:green", label="median")
-    axes[3].fill_between(
+    _median_and_band(
+        axes[3],
         positions,
-        middle,
+        [row["test_flow_median_px"] for row in rows],
+        [row["test_flow_p10_px"] for row in rows],
         [row["test_flow_p90_px"] for row in rows],
-        color="tab:green",
-        alpha=0.15,
-        lw=0,
-        label="up to the 90th percentile",
+        "over the field",
     )
     axes[3].set_ylim(bottom=0)
     axes[3].set_ylabel("motion left in the\ntest mean (px)")
-    axes[3].legend(loc="upper right", fontsize=8)
+    axes[3].legend(loc="best")
     axes[3].set_xlabel("acquisition position in the experiment")
 
-    fig.savefig(path, dpi=120)
+    fig.savefig(path, dpi=150)
     plt.close(fig)
+
+
+def _median_and_band(
+    axis, x, median, low, high, what: str, color: str = "tab:green"
+) -> None:
+    """A median line and the 10th to 90th percentile around it, shaded."""
+    axis.plot(x, median, marker="o", color=color, label=f"{what}, median")
+
+    if all(value is not None for value in low + high):
+        axis.fill_between(
+            x,
+            low,
+            high,
+            color=color,
+            alpha=0.15,
+            lw=0,
+            label=f"{what}, 10th to 90th percentile",
+        )
 
 
 def _summarize(

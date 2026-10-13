@@ -104,15 +104,21 @@ def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
 
     # The stand-in leaves the movie as it was: the frames are compared with
     # the reference, and the motion left is measured, for every acquisition
-    assert summary["test_frame_corr_median"].notna().all()
-    assert (summary["test_frame_corr_p5"] <= summary["test_frame_corr_median"]).all()
-    assert (summary["test_frame_corr_median"] <= summary["test_frame_corr_p95"]).all()
+    assert summary["test_frame_corr_with_ref_median"].notna().all()
+    assert (
+        summary["test_frame_corr_with_ref_p10"]
+        <= summary["test_frame_corr_with_ref_median"]
+    ).all()
+    assert (
+        summary["test_frame_corr_with_ref_median"]
+        <= summary["test_frame_corr_with_ref_p90"]
+    ).all()
     assert not (folder / "means_test.tif").exists()  # side_by_side has them
     assert (summary["test_flow_median_px"] <= summary["test_flow_p90_px"]).all()
     assert tifffile.imread(folder / "flow_average.tif").shape == (48, 40)
     metrics = json.loads((folder / "metrics.json").read_text())
     assert metrics["flow_worst_acq_id"] in summary["acq_id"].tolist()
-    assert tifffile.imread(folder / "flow_worst.tif").shape == (2, 48, 40)
+    assert tifffile.imread(folder / "flow_worst.tif").shape == (48, 40)
 
     call = db.latest_calls("test_motion_correction").iloc[0]
     assert call["call_flag"] == 0
