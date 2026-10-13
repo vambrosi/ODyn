@@ -29,7 +29,7 @@ START = datetime(2026, 1, 1, 10, 0, 0)
 def test_forms_come_from_the_registry(tmp_path):
     db = Database(tmp_path, can_create=True)
 
-    fields = form_fields(db, "loop")
+    fields = form_fields(db, "experiment")
     keys = [f.key for f in fields]
 
     assert keys[0] == "objective" and fields[0].options == ("10", "20")
@@ -38,11 +38,11 @@ def test_forms_come_from_the_registry(tmp_path):
     assert all(f.editable for f in fields)
     assert "laser_power_920" not in keys
 
-    db.retire_annotation_key(applies_to="loop", key="treatment")
-    assert "treatment" not in [f.key for f in form_fields(db, "loop")]
+    db.retire_annotation_key(applies_to="experiment", key="treatment")
+    assert "treatment" not in [f.key for f in form_fields(db, "experiment")]
 
     db.add_annotation_key(
-        applies_to="loop",
+        applies_to="experiment",
         key="new",
         label="New",
         value_type="enum",
@@ -50,7 +50,7 @@ def test_forms_come_from_the_registry(tmp_path):
         description="d",
         required=True,
     )
-    new = form_fields(db, "loop")[-1]
+    new = form_fields(db, "experiment")[-1]
     assert new.options == ("a",) and new.required
 
     assert form_fields(db, "vial") == []
@@ -295,7 +295,7 @@ def test_ingest_leaves_the_draft_where_it_is(share):
 
     assert result.submitted, result.error
     assert draft.path == where and where.exists()
-    assert list(result.written.loops) == ["e1"]
+    assert list(result.written.experiments) == ["e1"]
 
 
 def test_submit_hands_the_draft_to_the_cluster(share):
@@ -309,7 +309,7 @@ def test_submit_hands_the_draft_to_the_cluster(share):
     assert Draft.load(result.queued).data["submitted_by"] == "tester"
 
     # Nothing in the database yet; the draft is set aside here
-    assert len(db.sessions) == 0 and len(db.loops) == 0
+    assert len(db.sessions) == 0 and len(db.experiments) == 0
     assert draft.path.parent.name == "submitted"
     assert Draft.pending(drafts) == []
 
@@ -324,16 +324,16 @@ def test_ingest_does_the_whole_day(share):
 
     assert result.submitted, result.error
     assert result.written.session_id == db.session_for(1, "2026-01-01")
-    assert list(result.written.loops) == ["e1"]
+    assert list(result.written.experiments) == ["e1"]
     assert result.written.annotations == 4
     assert result.written.processed == ["e1"]
 
-    exp_id = result.written.loops["e1"]
-    assert db.annotations_for("loop").loc[exp_id, "pmt_gain"] == 70
+    exp_id = result.written.experiments["e1"]
+    assert db.annotations_for("experiment").loc[exp_id, "pmt_gain"] == 70
     assert (
         db.annotations_for("session").loc[result.written.session_id, "goal"] == "test"
     )
-    assert list(db.loop_vials.loc[[exp_id], "vial_id"]) == draft.vial_ids
+    assert list(db.experiment_vials.loc[[exp_id], "vial_id"]) == draft.vial_ids
     assert len(db.sync_blocks) == 3
     assert result.written.process_failed == {}
 
@@ -364,10 +364,10 @@ def test_a_second_ingest_does_not_add_twice(share):
     second = ingest(db, draft, force=True)
 
     assert second.submitted, second.error
-    assert second.written.loops == first.written.loops
-    assert len(db.loops) == 1
-    assert db.annotations_for("loop").iloc[0]["treatment"] == "updated"
-    assert db.latest_calls("add_loop").shape[0] == 1
+    assert second.written.experiments == first.written.experiments
+    assert len(db.experiments) == 1
+    assert db.annotations_for("experiment").iloc[0]["treatment"] == "updated"
+    assert db.latest_calls("add_experiment").shape[0] == 1
 
 
 def test_conditions_are_checked_and_written_per_acquisition(share):
@@ -726,14 +726,14 @@ def test_ingest_adds_the_grabs_and_zstacks_with_their_notes(a_day):
     assert result.submitted, result.error
 
     written = result.written
-    assert list(written.loops) == ["e1"]
+    assert list(written.experiments) == ["e1"]
     assert sorted(written.grabs) == ["20260304_m1_grabs_00001.tif", grab]
     assert list(written.zstacks) == [stack]
 
     grab_id, stack_id = written.grabs[grab], written.zstacks[stack]
     notes = db.annotations_for("grab").loc[grab_id]
     assert (notes["goal"], notes["condition"]) == ("reference", "ket/xyl")
-    assert db.zstacks.loc[stack_id, "loop_id"] == written.loops["e1"]
+    assert db.zstacks.loc[stack_id, "exp_id"] == written.experiments["e1"]
     assert (
         db.annotations_for("zstack").loc[stack_id, "z_landmark"]
         == "surface of right bulb"

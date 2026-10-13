@@ -81,6 +81,6 @@ def test_a_loops_stream_is_its_sessions():
     con = _with_two_sessions()
 
     with pytest.raises(sqlite3.IntegrityError):
-        con.execute("UPDATE streams SET session_id = 2 WHERE loop_id = 1;")
+        con.execute("UPDATE streams SET session_id = 2 WHERE exp_id = 1;")
 
     con.close()

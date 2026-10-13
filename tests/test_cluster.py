@@ -41,12 +41,12 @@ def a_loop(tmp_path, **options):
 
 def test_a_request_runs_as_the_person_who_sent_it(tmp_path):
     db = a_loop(tmp_path)
-    path = send_request(tmp_path, "process_sync", user="ana", loop_id=1)
+    path = send_request(tmp_path, "process_sync", user="ana", exp_id=1)
     assert pending_requests(tmp_path) == [path]
 
     report = tick(tmp_path)
 
-    assert report.applied == ["process_sync(loop_id=1) for ana"]
+    assert report.applied == ["process_sync(exp_id=1) for ana"]
     assert report.processed == []  # processed by the request, not again
     assert pending_requests(tmp_path) == []
     done = json.loads((path.parent / "done" / path.name).read_text())
@@ -85,7 +85,7 @@ def test_a_sync_file_copied_late_is_processed_once(tmp_path):
     shutil.move(tmp_path / SYNC, tmp_path / "away.h5")
 
     with pytest.raises(RuntimeError, match="No sync file"):
-        db.process_sync(loop_id=1)
+        db.process_sync(exp_id=1)
 
     # ...then copied in, keeping its old modification time (as Windows does)
     shutil.move(tmp_path / "away.h5", tmp_path / SYNC)
@@ -215,9 +215,9 @@ def test_starting_the_chain_once(tmp_path, slurm):
 def test_the_command_line(tmp_path, capsys):
     db = a_loop(tmp_path)
 
-    assert main([str(tmp_path), "request", "process_sync", "loop_id=1"]) == 0
+    assert main([str(tmp_path), "request", "process_sync", "exp_id=1"]) == 0
     assert "Left" in capsys.readouterr().out
 
     assert main([str(tmp_path), "tick"]) == 0
-    assert "process_sync(loop_id=1)" in capsys.readouterr().out
+    assert "process_sync(exp_id=1)" in capsys.readouterr().out
     assert len(db.streams) == 1

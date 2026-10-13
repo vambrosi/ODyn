@@ -25,8 +25,8 @@ from .utils import (
     CHECK,
     CROSS,
     EVENTS,
-    LOOP_VIALS,
-    LOOPS,
+    EXPERIMENT_VIALS,
+    EXPERIMENTS,
     MCOR_FILES,
     METHOD_CALLS,
     ODYN_FOLDER,
@@ -63,11 +63,11 @@ if TYPE_CHECKING:
 DEFAULT_STRIDES_UM = [128.0, 128.0]
 
 # The reference every acquisition is aligned to is built from this many
-# acquisitions (around the middle of the loop), about this many frames in all
+# acquisitions (around the middle of the experiment), about this many frames in all
 REFERENCE_ACQS = 4
 REFERENCE_FRAMES = 200
 
-# A test motion correction runs on this many acquisitions, spread over the loop
+# A test motion correction runs on this many acquisitions, spread over the experiment
 TEST_ACQS = 24
 
 # Where `test_motion_correction` writes, in the files folder: files that can
@@ -104,7 +104,7 @@ class McorSource(Enum):
     PATCHWARP = "patchwarp"
 
 
-# mcor files folder, relative to the loop folder, and what the library appends
+# mcor files folder, relative to the experiment folder, and what the library appends
 # to the raw file name. Should mirror McorSource enum and mcor_files.source CHECK.
 MCOR_LAYOUT = {
     McorSource.CAIMAN: ("processed/mcor", "_mcor.tif"),
@@ -126,8 +126,8 @@ class McorFlag(IntFlag):
     OWNED_BY_OTHER_GROUP = 1 << 3  # another group motion corrected these files
     SHARED_WITH_OTHER_GROUPS = 1 << 4  # other groups will see the change
     FILE_NOT_FOUND = 1 << 5  # no motion corrected file where one was expected
-    WRONG_SHAPE = 1 << 6  # frame size does not match the loop
-    WRONG_FRAME_COUNT = 1 << 7  # frame count does not match the loop
+    WRONG_SHAPE = 1 << 6  # frame size does not match the experiment
+    WRONG_FRAME_COUNT = 1 << 7  # frame count does not match the experiment
     UNREADABLE = 1 << 8  # file is there but its header could not be read
     NOTHING_TO_APPROVE = 1 << 9  # group has no mcor files at all
     SOME_NOT_APPROVED = 1 << 10  # approval left some acquisitions out
@@ -224,7 +224,7 @@ class Group(CallRecorder):
     ```python
         group.acquisitions      # `DataFrame` with acquisition metadata
         group.events            # `DataFrame` with olfactometer events
-        group.loops             # `DataFrame` with loop metadata
+        group.experiments             # `DataFrame` with experiment metadata
         group.mcor_files        # `DataFrame` with mcor files metadata
         group.method_calls      # `DataFrame` with `@record_call` functions
         group.programs          # `DataFrame` with one entry per _Event.csv_ file
@@ -255,9 +255,9 @@ class Group(CallRecorder):
     def __repr__(self):
         msg = f"Group {self.group_id}"
 
-        # Show the loop's folder if there is only one
-        if len(self.loops) == 1:
-            msg += f" ({self.loops['loop_path'].iloc[0]})"
+        # Show the experiment's folder if there is only one
+        if len(self.experiments) == 1:
+            msg += f" ({self.experiments['exp_path'].iloc[0]})"
 
         return msg
 
@@ -289,7 +289,7 @@ class Group(CallRecorder):
         `DataFrame` with acquisition metadata
 
         The `sync_*` columns come from the processed sync file and are empty
-        until `process_sync` has run for the loop.
+        until `process_sync` has run for the experiment.
         """
         return self._table(ACQUISITIONS)
 
@@ -312,20 +312,20 @@ class Group(CallRecorder):
         return self._table(EVENTS)
 
     @property
-    def loops(self) -> pd.DataFrame:
-        """`DataFrame` with loop metadata"""
-        return self._table(LOOPS)
+    def experiments(self) -> pd.DataFrame:
+        """`DataFrame` with experiment metadata"""
+        return self._table(EXPERIMENTS)
 
     @property
-    def loop_names(self) -> pd.Series:
+    def exp_names(self) -> pd.Series:
         """
-        Each loop's TIFF name without its acquisition number (e.g.
-        `20260811_m357_e1`), by `loop_id`: what caiman names its temp files
-        after, and how output files say which loop they came from.
+        Each experiment's TIFF name without its acquisition number (e.g.
+        `20260811_m357_e1`), by `exp_id`: what caiman names its temp files
+        after, and how output files say which experiment they came from.
         """
         stems = (
             self.acquisitions.sort_values("acq_start")
-            .groupby("loop_id")["raw_path"]
+            .groupby("exp_id")["raw_path"]
             .first()
         )
 
@@ -333,7 +333,7 @@ class Group(CallRecorder):
 
     @property
     def sessions(self) -> pd.DataFrame:
-        """`DataFrame` with the sessions of this group's loops"""
+        """`DataFrame` with the sessions of this group's experiments"""
         return self._table(SESSIONS)
 
     @property
@@ -347,9 +347,9 @@ class Group(CallRecorder):
         return self._table(SYNC_BLOCKS)
 
     @property
-    def loop_vials(self) -> pd.DataFrame:
-        """`DataFrame` with which vials each loop ran"""
-        return self._table(LOOP_VIALS)
+    def experiment_vials(self) -> pd.DataFrame:
+        """`DataFrame` with which vials each experiment ran"""
+        return self._table(EXPERIMENT_VIALS)
 
     @property
     def mcor_files(self) -> pd.DataFrame:
@@ -434,18 +434,18 @@ class Group(CallRecorder):
         """
         File name for something this group produced.
 
-        **FORMAT**: `Group_<id>_<first_loop_name>_<description>.<extension>`
+        **FORMAT**: `Group_<id>_<first_exp_name>_<description>.<extension>`
 
         **RATIONALE**
 
         - The group comes first so a folder sorts by group;
-        - The loop's name (see `loop_names`) is included because it is
+        - The experiment's name (see `exp_names`) is included because it is
         recognizable at a glance;
         - `call_id` not `None` if older copies are needed for comparison;
         - `call_id=None` if each rerun should overwrite (most common).
         """
-        loop_name = self.loop_names.iloc[0]
-        stem = f"Group_{self.group_id}_{loop_name}_{description}"
+        exp_name = self.exp_names.iloc[0]
+        stem = f"Group_{self.group_id}_{exp_name}_{description}"
 
         if call_id is not None:
             stem = f"{stem}_{call_id}"
@@ -582,8 +582,8 @@ class Group(CallRecorder):
 
         # The likeliest mistake is importing another group's mask, and every
         # later function would then read the wrong pixels without complaining
-        loop = self.loops.iloc[0]
-        shape = (int(loop["height_px"]), int(loop["width_px"]))
+        experiment = self.experiments.iloc[0]
+        shape = (int(experiment["height_px"]), int(experiment["width_px"]))
 
         if labels_image.shape != shape:
             raise ValueError(
@@ -643,7 +643,7 @@ class Group(CallRecorder):
     def delete_temp_files(self) -> None:
         """
         \033[1;35mDELETE_TEMP_FILES**
-        Deletes all temp files associated with this group's loops
+        Deletes all temp files associated with this group's experiments
 
         **USAGE*
             group = db.groups[group_id]
@@ -657,13 +657,13 @@ class Group(CallRecorder):
         # Get file paths for mmaps in the temp folder
         path = Path(get_tempdir())
 
-        loop_movies = []
-        for loop_name in self.loop_names:
-            loop_movies.append((loop_name, sorted(path.glob(f"{loop_name}*.mmap"))))
+        exp_movies = []
+        for exp_name in self.exp_names:
+            exp_movies.append((exp_name, sorted(path.glob(f"{exp_name}*.mmap"))))
 
         # Remove files
-        for loop_name, movie_paths in loop_movies:
-            logger.info(f"Removing .mmap files that start with {loop_name}...")
+        for exp_name, movie_paths in exp_movies:
+            logger.info(f"Removing .mmap files that start with {exp_name}...")
             if movie_paths:
                 total_size = 0.0  # in bytes
                 for movie_path in movie_paths:
@@ -722,9 +722,15 @@ class Group(CallRecorder):
             output_notebook()
 
         # Metadata from the database
-        loop = self.loops.iloc[0]
-        dims = (int(loop["height_px"]), int(loop["width_px"]))  # (rows, cols) = (y, x)
-        um_per_px = (loop["height_um"] / dims[0], loop["width_um"] / dims[1])
+        experiment = self.experiments.iloc[0]
+        dims = (
+            int(experiment["height_px"]),
+            int(experiment["width_px"]),
+        )  # (rows, cols) = (y, x)
+        um_per_px = (
+            experiment["height_um"] / dims[0],
+            experiment["width_um"] / dims[1],
+        )
         raw_path = self.db.main_folder / self.acquisitions["raw_path"].iloc[0]
         step = max(1, round(1 / frame_fraction))
 
@@ -1362,18 +1368,18 @@ class Group(CallRecorder):
         # Get the total number of frames in consideration
         # np.unique because frame_acq to not get repeated acq_ids
         acq_ids = np.unique(frame_acq)
-        loops = self.loops.loc[self.acquisitions.loc[acq_ids, "loop_id"]]
-        frames_in = int(loops["frames_per_slice"].sum())
+        experiments = self.experiments.loc[self.acquisitions.loc[acq_ids, "exp_id"]]
+        frames_in = int(experiments["frames_per_slice"].sum())
 
         # Speed relative to real-time is more informative than downsample_ratio
         # when viewing the movie. However, the latter is a better control of
         # how long this function will take to run, so we keep it as an parameter.
-        speed = frame_rate * frames_in / (loops["frame_rate"].mean() * len(movie))
+        speed = frame_rate * frames_in / (experiments["frame_rate"].mean() * len(movie))
 
         # Groups are assumed to have only one um/px, so we use only the first
-        # loop to compute the ratio. Ratio can be direction-dependent, so
+        # experiment to compute the ratio. Ratio can be direction-dependent, so
         # we use width_um / width_px because the scale bar is horizontal.
-        first = self.loops.iloc[0]
+        first = self.experiments.iloc[0]
         um_per_px = float(first["width_um"]) / int(first["width_px"])
 
         _write_preview_movie(
@@ -1573,13 +1579,13 @@ class Group(CallRecorder):
         - `use_last_parameters`: Use parameters from last run as the defaults
         - `is_test`: Whether to run on a few acquisitions only
         - `test_acqs`: how many acquisitions to use in a test. (Ignored if
-        `is_test == False`.) Picks will be evenly spread over the loop and
+        `is_test == False`.) Picks will be evenly spread over the experiment and
         centered on its middle. All acquisitions in both test and final motion
         corrections are aligned to the same template.
 
         *Reference*
         - `reference_acqs`: how many acquisitions, spread around the middle of
-        the loop, the reference image is built from. Every acquisition is
+        the experiment, the reference image is built from. Every acquisition is
         aligned to that one image (saved as `reference_group_<id>.tif` in the
         `processed/mcor` folder of the first). `0` leaves it to caiman, which
         aligns each acquisition to the template of the one before, starting
@@ -1639,8 +1645,8 @@ class Group(CallRecorder):
         acquisitions_slice = self.acquisitions.iloc[positions]
 
         # max_shift_um has to less than size of image (in μm / 4)
-        height_um = self.loops["height_um"].min()
-        width_um = self.loops["width_um"].min()
+        height_um = self.experiments["height_um"].min()
+        width_um = self.experiments["width_um"].min()
         max_shift_um = [
             clamp(max_shift_um[0], 0, height_um / 4),
             clamp(max_shift_um[1], 0, width_um / 4),
@@ -1668,8 +1674,8 @@ class Group(CallRecorder):
 
         # CaImAn only uses pixels as units, so we make the conversion
         factor = [
-            height_um / self.loops["height_px"].min(),
-            width_um / self.loops["width_px"].min(),
+            height_um / self.experiments["height_px"].min(),
+            width_um / self.experiments["width_px"].min(),
         ]
 
         settings = {
@@ -1799,9 +1805,9 @@ class Group(CallRecorder):
         ```
 
         Runs `run_motion_correction` as a rigid test on `test_acqs`
-        acquisitions spread over the loop, all aligned to the loop's
+        acquisitions spread over the experiment, all aligned to the experiment's
         reference, then writes into
-        `cache/mcor-tests/<loop>_g<group>/` (in the files folder): the
+        `cache/mcor-tests/<experiment>_g<group>/` (in the files folder): the
         reference, a mean image per acquisition (raw and corrected, and side
         by side), a summary and a plot of the shifts (see
         `odyn.mcor_report`), and, with `movie`, the raw | test preview
@@ -1831,7 +1837,7 @@ class Group(CallRecorder):
         acquisitions = self.acquisitions
         positions = spread_acquisitions(len(acquisitions), test_acqs)
         acq_ids = [int(i) for i in acquisitions.index[positions]]
-        name = f"{self.loop_names.iloc[0]}_g{self.group_id}"
+        name = f"{self.exp_names.iloc[0]}_g{self.group_id}"
         folder = self.db.files_folder / CACHE_FOLDER / MCOR_TESTS_FOLDER / name
 
         logger.info(f"Writing the test's report to {folder}")
@@ -1923,7 +1929,7 @@ class Group(CallRecorder):
         All other cases lead to dropping all `mcor_files` entries for this
         group and the addition of the valid mcor files that where found.
 
-        Each loop must be on only one "motion correction" group, and
+        Each experiment must be on only one "motion correction" group, and
         this function SHOULD ONLY BE CALLED ON THAT GROUP. Calling it from
         another group raises an error, and says which group to use instead.
 
@@ -1953,7 +1959,7 @@ class Group(CallRecorder):
         folder, suffix = MCOR_LAYOUT[mcor_source]
 
         acquisitions = self.acquisitions
-        loops = self.loops
+        experiments = self.experiments
         existing = self.mcor_files
 
         # Nothing is read from disk in this case, which matters over the network
@@ -1981,11 +1987,13 @@ class Group(CallRecorder):
             mcor_folder = self.db.main_folder / raw_path.parent.parent / folder
 
             mcor_path = mcor_folder / (raw_path.stem + suffix)
-            loop = loops.loc[acquisition["loop_id"]]
-            expected = (int(loop["height_px"]), int(loop["width_px"]))
+            experiment = experiments.loc[acquisition["exp_id"]]
+            expected = (int(experiment["height_px"]), int(experiment["width_px"]))
 
             try:
-                shape, frames = _tiff_shape(mcor_path, int(loop["frames_per_slice"]))
+                shape, frames = _tiff_shape(
+                    mcor_path, int(experiment["frames_per_slice"])
+                )
 
             except FileNotFoundError:
                 report["file_not_found"].append(acq_id)
@@ -2004,10 +2012,10 @@ class Group(CallRecorder):
                 report["wrong_shape"].append(acq_id)
                 continue
 
-            if frames != int(loop["frames_per_slice"]):
+            if frames != int(experiment["frames_per_slice"]):
                 logger.warning(
                     f"  '{mcor_path.name}' has {frames} frames, "
-                    f"expected {loop['frames_per_slice']}."
+                    f"expected {experiment['frames_per_slice']}."
                 )
                 report["wrong_frame_count"].append(acq_id)
                 continue
@@ -2154,9 +2162,9 @@ class Group(CallRecorder):
         """
         Stop or warn, depending on what changing these mcor files disturbs.
 
-        Each loop is motion corrected by exactly one group: its own
+        Each experiment is motion corrected by exactly one group: its own
         singleton, or the group made for a field of view that got split into
-        several loops. Every other group holding that loop is for analysis.
+        several experiments. Every other group holding that experiment is for analysis.
 
         This method stops you from changing records from a group that is
         not the "motion correcting" one (unless you pass `change_mcor_group`).
@@ -2205,7 +2213,7 @@ class Group(CallRecorder):
                 SELECT DISTINCT gl.group_id
                     FROM mcor_files   AS m
                     JOIN acquisitions AS a  ON a.acq_id = m.acq_id
-                    JOIN group_loops  AS gl ON gl.loop_id = a.loop_id
+                    JOIN group_experiments  AS gl ON gl.exp_id = a.exp_id
                     WHERE m.acq_id IN ({marks}) AND gl.group_id != ?;
                 """,
                 [*acq_ids, self.group_id],
@@ -2263,17 +2271,17 @@ class Group(CallRecorder):
         if not len(acquisitions):
             raise RuntimeError(
                 "Found no mcor files with an odor onset. Process the sync file "
-                "in '<loop>/sync/' first (`db.process_sync`)."
+                "in '<experiment>/sync/' first (`db.process_sync`)."
             )
 
         elif len(acquisitions) < len(usable):
             no_odor = len(usable) - len(acquisitions)
             logger.warning(f"{no_odor} acquisitions don't have odor onsets!")
 
-        loops = self.loops.loc[acquisitions["loop_id"]]
+        experiments = self.experiments.loc[acquisitions["exp_id"]]
 
-        frame_rates = loops["frame_rate"].to_numpy()
-        frame_counts = loops["frames_per_slice"].to_numpy()
+        frame_rates = experiments["frame_rate"].to_numpy()
+        frame_counts = experiments["frames_per_slice"].to_numpy()
 
         # Measured on the DAQ, where the frame clock and the valve share one
         # recording, so no arithmetic between two computers' clocks is needed.
@@ -2315,7 +2323,7 @@ class Group(CallRecorder):
         if pd.isna(onset_frame):
             raise RuntimeError(
                 f"Acquisition {acq_id} has no odor onset, so it cannot be "
-                f"aligned. Process the sync file in '<loop>/sync/' first."
+                f"aligned. Process the sync file in '<experiment>/sync/' first."
             )
 
         onset_frame = int(onset_frame)

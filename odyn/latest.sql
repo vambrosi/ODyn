@@ -1,20 +1,18 @@
--- NO MIGRATION v4 -> v5
+-- NO MIGRATION v5 -> v6
 --
--- v5 is a rebuild, not a migration, so this file holds no statements and
+-- v6 is a rebuild, not a migration, so this file holds no statements and
 -- `migrate.py` refuses (`MIGRATES_FROM = None`) before it would be read.
 --
 -- The previous migration is still in the history:
 --     git log -p odyn/latest.sql
 --
 -- WHY THERE IS NO MIGRATION:
--- - `sessions`, `users`, `streams`, `sync_blocks`, the odor panel tables and
---   the annotation tables are new, and what would fill them (which recordings
---   share a day, who ran a call, which vials were loaded) is not in a v4 file.
--- - `experiments` is split into `loops`, `grabs` and `zstacks`, which lose
---   `mouse_id` and the rig-setting columns and gain `session_id` and a
---   required `objective`; `acquisitions` loses its sync-derived columns to
---   `sync_blocks`, which need the sync H5 re-read.
+-- No v5 database was ever in use: `main-sync` held test data only. v6
+-- renames `loops` to `experiments` (`loop_id` to `exp_id`, `group_loops` to
+-- `group_experiments`, `loop_vials` to `experiment_vials`, the `loop`
+-- annotation target to `experiment`).
 --
 -- WHAT TO DO INSTEAD:
--- Start a new project database, `Database(main_folder, project="main-sync")`,
--- and ingest into it. The v4 database stays readable with the tagged release.
+-- Start the database again from `create.sql`
+-- (`Database(main_folder, project="main-sync", can_create=True)`) and add the
+-- users and panels back.

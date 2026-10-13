@@ -16,23 +16,23 @@ def db(tmp_path):
     db.add_session(mouse_id=1, session_date="2026-01-01")
 
     with db._writing() as cur:
-        for loop_id in (1, 2):
+        for exp_id in (1, 2):
             cur.execute(
                 """
-                INSERT INTO loops
-                    ( loop_id, session_id, loop_number, loop_path, loop_start
+                INSERT INTO experiments
+                    ( exp_id, session_id, exp_number, exp_path, exp_start
                     , height_px, width_px, height_um, width_um, frames_per_slice
                     , frame_rate, objective
                     ) VALUES (?, 1, ?, ?, ?, 1, 1, 1, 1, 1, 1, 20);
                 """,
-                [loop_id, loop_id, f"e{loop_id}", f"2026-01-01 1{loop_id}:00:00"],
+                [exp_id, exp_id, f"e{exp_id}", f"2026-01-01 1{exp_id}:00:00"],
             )
 
     return db
 
 
 def annotate(db, target_id, **values):
-    db.add_annotations(target_type="loop", target_id=target_id, values=values)
+    db.add_annotations(target_type="experiment", target_id=target_id, values=values)
 
 
 # --------------------------------------------------------------------------- #
@@ -51,7 +51,7 @@ def test_values_are_coerced_to_their_declared_type(db):
         treatment="fine",
     )
 
-    current = db.annotations_for("loop").loc[1]
+    current = db.annotations_for("experiment").loc[1]
     assert current["block_iti_s"] == 70.0
     assert current["laser_power_920"] == 40
     assert current["flag"] is True
@@ -78,7 +78,7 @@ def test_wrong_values_are_refused_before_anything_is_written(db, values, message
 
 
 def test_a_missing_target_is_refused(db):
-    with pytest.raises(ValueError, match="no loop 9"):
+    with pytest.raises(ValueError, match="no experiment 9"):
         annotate(db, 9, treatment="x")
 
     with pytest.raises(ValueError, match="Cannot annotate"):
@@ -87,7 +87,7 @@ def test_a_missing_target_is_refused(db):
 
 def test_dates_are_validated_and_read_back_as_dates(db):
     db.add_annotation_key(
-        applies_to="loop",
+        applies_to="experiment",
         key="checked_on",
         label="Checked on",
         value_type="date",
@@ -95,7 +95,9 @@ def test_dates_are_validated_and_read_back_as_dates(db):
     )
     annotate(db, 1, checked_on="2026-02-03")
 
-    assert db.annotations_for("loop").loc[1, "checked_on"] == pd.Timestamp("2026-02-03")
+    assert db.annotations_for("experiment").loc[1, "checked_on"] == pd.Timestamp(
+        "2026-02-03"
+    )
 
     with pytest.raises(ValueError, match="Not a date"):
         annotate(db, 1, checked_on="soon")
@@ -110,16 +112,16 @@ def test_the_latest_value_wins_and_the_history_stays(db):
     annotate(db, 1, block_iti_s=70)
     annotate(db, 1, block_iti_s=75)
 
-    assert db.annotations_for("loop").loc[1, "block_iti_s"] == 75
+    assert db.annotations_for("experiment").loc[1, "block_iti_s"] == 75
     assert list(db.annotations["value"]) == [70, 75]
 
 
 def test_none_clears_a_key(db):
-    db.update_annotation_key(applies_to="loop", key="block_iti_s", required=True)
+    db.update_annotation_key(applies_to="experiment", key="block_iti_s", required=True)
     annotate(db, 1, block_iti_s=70, treatment="x")
     annotate(db, 1, block_iti_s=None)
 
-    current = db.annotations_for("loop")
+    current = db.annotations_for("experiment")
     assert pd.isna(current.loc[1, "block_iti_s"])
     assert current.loc[1, "treatment"] == "x"
 
@@ -131,8 +133,8 @@ def test_the_pivot_has_one_row_per_target_and_typed_columns(db):
     annotate(db, 1, block_iti_s=70, pmt_gain=20)
     annotate(db, 2, block_iti_s=200)
 
-    frame = db.annotations_for("loop")
-    assert frame.index.name == "loop_id"
+    frame = db.annotations_for("experiment")
+    assert frame.index.name == "exp_id"
     assert list(frame.index) == [1, 2]
     assert frame["block_iti_s"].dtype.kind == "f"
     assert pd.isna(frame.loc[2, "pmt_gain"])
@@ -156,7 +158,7 @@ def test_nothing_annotated_is_an_empty_frame(db):
 
 def test_keys_are_registered_updated_and_retired(db):
     db.add_annotation_key(
-        applies_to="loop",
+        applies_to="experiment",
         key="cohort",
         label="Cohort",
         value_type="enum",
@@ -164,47 +166,49 @@ def test_keys_are_registered_updated_and_retired(db):
         description="Which cohort.",
         source="user",
     )
-    key = db.annotation_keys.loc[("loop", "cohort")]
+    key = db.annotation_keys.loc[("experiment", "cohort")]
     assert key["allowed_values"] == ["a", "b"]  # parsed, on every pandas
     assert key["source"] == "user"
 
     db.update_annotation_key(
-        applies_to="loop", key="cohort", add_values=["c"], label="Cohort name"
+        applies_to="experiment", key="cohort", add_values=["c"], label="Cohort name"
     )
-    key = db.annotation_keys.loc[("loop", "cohort")]
+    key = db.annotation_keys.loc[("experiment", "cohort")]
     assert key["allowed_values"] == ["a", "b", "c"]
     assert key["label"] == "Cohort name"
 
     annotate(db, 1, cohort="c")
 
-    db.retire_annotation_key(applies_to="loop", key="cohort")
+    db.retire_annotation_key(applies_to="experiment", key="cohort")
 
     with pytest.raises(ValueError, match="retired"):
         annotate(db, 2, cohort="a")
 
     # What was written stays readable
-    assert db.annotations_for("loop").loc[1, "cohort"] == "c"
+    assert db.annotations_for("experiment").loc[1, "cohort"] == "c"
 
-    db.retire_annotation_key(applies_to="loop", key="cohort", retired=False)
+    db.retire_annotation_key(applies_to="experiment", key="cohort", retired=False)
     annotate(db, 2, cohort="a")
 
     with pytest.raises(ValueError, match="not an enum"):
-        db.update_annotation_key(applies_to="loop", key="treatment", add_values=["x"])
+        db.update_annotation_key(
+            applies_to="experiment", key="treatment", add_values=["x"]
+        )
 
     with pytest.raises(ValueError, match="No annotation key"):
-        db.retire_annotation_key(applies_to="loop", key="nope")
+        db.retire_annotation_key(applies_to="experiment", key="nope")
 
 
 def test_required_keys_are_nagged_until_filled(db):
     assert len(db.missing_annotations()) == 0  # nothing is required out of the box
 
-    db.update_annotation_key(applies_to="loop", key="block_iti_s", required=True)
+    db.update_annotation_key(applies_to="experiment", key="block_iti_s", required=True)
     db.update_annotation_key(applies_to="session", key="mouse_weight_g", required=True)
     missing = db.missing_annotations()
 
     assert set(zip(missing["target_type"], missing["target_id"], missing["key"])) == {
-        ("loop", 1, "block_iti_s"),
-        ("loop", 2, "block_iti_s"),
+        ("experiment", 1, "block_iti_s"),
+        ("experiment", 2, "block_iti_s"),
         ("session", 1, "mouse_weight_g"),
     }
 
@@ -217,7 +221,7 @@ def test_required_keys_are_nagged_until_filled(db):
     assert list(zip(missing["target_id"], missing["key"])) == [(2, "block_iti_s")]
 
     # A retired key stops being demanded
-    db.retire_annotation_key(applies_to="loop", key="block_iti_s")
+    db.retire_annotation_key(applies_to="experiment", key="block_iti_s")
     assert len(db.missing_annotations()) == 0
 
 

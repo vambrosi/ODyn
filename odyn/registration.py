@@ -1,10 +1,11 @@
 """
-A reference image for motion correction: one image a whole loop is aligned to.
+A reference image for motion correction: one image a whole experiment is
+aligned to.
 
 Left to itself, caiman aligns each TIFF to the template the previous TIFF
 produced, starting from the first one. Slow drift is then followed rather than
 corrected, and a bad first acquisition (common) seeds everything. A reference
-built here from the middle of the loop is passed to caiman instead, so every
+built here from the middle of the experiment is passed to caiman instead, so every
 acquisition is aligned to the same image.
 
 It is built the way suite2p builds its own: the most mutually correlated
@@ -36,11 +37,11 @@ PASSES = 3
 
 def reference_acquisitions(count: int, wanted: int = 4) -> list[int]:
     """
-    The positions (0-based, in time order) of the acquisitions a loop's
+    The positions (0-based, in time order) of the acquisitions an experiment's
     reference is built from: `wanted` of them spread over its middle third.
 
     The first acquisitions are often bad, and so is the first one of each
-    later block, which in a two-block loop is the exact middle; spreading the
+    later block, which in a two-block experiment is the exact middle; spreading the
     picks around the middle third avoids both.
 
     **EXAMPLE**
@@ -64,10 +65,10 @@ def reference_acquisitions(count: int, wanted: int = 4) -> list[int]:
 def spread_acquisitions(count: int, wanted: int) -> list[int]:
     """
     The positions (0-based, in time order) of `wanted` acquisitions evenly
-    spaced over a loop of `count` and centered on its middle, so the first and
-    last are within half a step of the loop's ends. All of them when the loop
-    has no more than `wanted`. This is the subset a test motion correction
-    runs on.
+    spaced over an experiment of `count` and centered on its middle, so the
+    first and last are within half a step of the experiment's ends. All of them
+    when the experiment has no more than `wanted`. This is the subset a test
+    motion correction runs on.
 
     **EXAMPLE**
     ```python

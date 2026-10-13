@@ -1,5 +1,5 @@
 """
-`Database.add_loop`, `add_grabs` and `add_zstacks`: what lands where when a
+`Database.add_experiment`, `add_grabs` and `add_zstacks`: what lands where when a
 recording folder is added to a session.
 """
 
@@ -43,7 +43,9 @@ def db(recording):
 
 
 def add(db, **kwargs):
-    return db.add_loop(session_id=1, loop_path="20260101/m1/e1", objective=20, **kwargs)
+    return db.add_experiment(
+        session_id=1, exp_path="20260101/m1/e1", objective=20, **kwargs
+    )
 
 
 def a_day(tmp_path, folder: str, count: int = 2, **options) -> tuple[Database, int]:
@@ -71,35 +73,35 @@ def a_day(tmp_path, folder: str, count: int = 2, **options) -> tuple[Database, i
 
 
 def test_the_loop_points_at_its_session(db):
-    loop_id = add(db)
+    exp_id = add(db)
 
-    loop = db.loops.loc[loop_id]
-    assert loop["session_id"] == 1
-    assert loop["loop_number"] == 1
-    assert loop["loop_path"] == "20260101/m1/e1"
-    assert loop["loop_start"] == EXP_START
-    assert loop["objective"] == 20
-    assert loop["frames_per_slice"] == 56
-    assert loop["z_um"] == -120.5
+    experiment = db.experiments.loc[exp_id]
+    assert experiment["session_id"] == 1
+    assert experiment["exp_number"] == 1
+    assert experiment["exp_path"] == "20260101/m1/e1"
+    assert experiment["exp_start"] == EXP_START
+    assert experiment["objective"] == 20
+    assert experiment["frames_per_slice"] == 56
+    assert experiment["z_um"] == -120.5
 
-    assert db.loop_for(1, 1) == loop_id
-    assert db.loop_for(1, 2) is None
+    assert db.experiment_for(1, 1) == exp_id
+    assert db.experiment_for(1, 2) is None
 
 
 def test_the_field_of_view_is_stored_in_real_microns(db):
-    loop_id = add(db)
+    exp_id = add(db)
 
-    # ScanImage's microns assume 20x, so a 20x loop keeps them as they are
-    loop = db.loops.loc[loop_id]
-    assert loop["width_um"] == pytest.approx(40 * UM_PER_PX)
-    assert loop["height_um"] == pytest.approx(32 * UM_PER_PX)
-    assert db.latest_calls("add_loop").iloc[0]["input_um_scale"] == 1.0
+    # ScanImage's microns assume 20x, so a 20x experiment keeps them as they are
+    experiment = db.experiments.loc[exp_id]
+    assert experiment["width_um"] == pytest.approx(40 * UM_PER_PX)
+    assert experiment["height_um"] == pytest.approx(32 * UM_PER_PX)
+    assert db.latest_calls("add_experiment").iloc[0]["input_um_scale"] == 1.0
 
 
 def test_every_raw_tiff_becomes_an_acquisition(db):
-    loop_id = add(db)
+    exp_id = add(db)
 
-    acquisitions = db.acquisitions[db.acquisitions["loop_id"] == loop_id]
+    acquisitions = db.acquisitions[db.acquisitions["exp_id"] == exp_id]
     assert len(acquisitions) == 3
     assert list(acquisitions["raw_path"].str.endswith(".tif")) == [True] * 3
 
@@ -109,39 +111,39 @@ def test_every_raw_tiff_becomes_an_acquisition(db):
 
 
 def test_rig_settings_became_annotations(db):
-    loop_id = add(db)
+    exp_id = add(db)
 
-    settings = db.annotations_for("loop").loc[loop_id]
+    settings = db.annotations_for("experiment").loc[exp_id]
     assert settings["laser_power_920"] == 10
     assert settings["laser_power_1040"] == 0
     assert settings["loop_acq_interval_s"] == 10.0
 
     # ...written by the same call that added the loop
     (call_id,) = set(db.annotations["method_call_id"])
-    assert db.method_calls.loc[call_id, "method_name"] == "Database.add_loop"
+    assert db.method_calls.loc[call_id, "method_name"] == "Database.add_experiment"
 
 
 def test_the_loop_gets_a_group_of_its_own(db):
-    loop_id = add(db)
+    exp_id = add(db)
 
-    (group_id,) = db.group_loops[db.group_loops["loop_id"] == loop_id].index
+    (group_id,) = db.group_experiments[db.group_experiments["exp_id"] == exp_id].index
     group = db.groups[group_id]
 
-    assert list(group.loops.index) == [loop_id]
-    assert list(group.loop_names) == ["20260101_m1_e1"]
+    assert list(group.experiments.index) == [exp_id]
+    assert list(group.exp_names) == ["20260101_m1_e1"]
     assert len(group.acquisitions) == 3
     assert len(group.sessions) == 1
     assert len(group.sync_blocks) == 0
 
 
 def test_the_call_is_recorded_with_its_output(db):
-    loop_id = add(db)
+    exp_id = add(db)
 
-    call = db.latest_calls("add_loop").iloc[0]
+    call = db.latest_calls("add_experiment").iloc[0]
     assert call["user"] == "tester"
-    assert call["input_loop_path"] == "20260101/m1/e1"
+    assert call["input_exp_path"] == "20260101/m1/e1"
     assert call["input_objective"] == 20
-    assert call["output_loop_ids"] == [loop_id]
+    assert call["output_exp_ids"] == [exp_id]
     assert call["call_flag"] == 0
 
 
@@ -150,12 +152,12 @@ def test_the_number_comes_from_the_folder_unless_given(db, recording):
 
     try:
         with pytest.raises(ValueError, match="not named eN"):
-            db.add_loop(session_id=1, loop_path="20260101/m1/odd", objective=20)
+            db.add_experiment(session_id=1, exp_path="20260101/m1/odd", objective=20)
 
-        loop_id = db.add_loop(
-            session_id=1, loop_path="20260101/m1/odd", objective=20, loop_number=4
+        exp_id = db.add_experiment(
+            session_id=1, exp_path="20260101/m1/odd", objective=20, exp_number=4
         )
-        assert db.loops.loc[loop_id, "loop_number"] == 4
+        assert db.experiments.loc[exp_id, "exp_number"] == 4
 
     finally:
         (recording / "20260101/m1/odd").rename(recording / "20260101/m1/e1")
@@ -170,8 +172,11 @@ def test_nothing_is_inserted_twice(db):
     first = add(db)
     assert add(db) is None
 
-    assert list(db.loops.index) == [first]
-    assert db.latest_calls("add_loop").iloc[0]["call_flag"] == IngestFlag.ALREADY_IN_DB
+    assert list(db.experiments.index) == [first]
+    assert (
+        db.latest_calls("add_experiment").iloc[0]["call_flag"]
+        == IngestFlag.ALREADY_IN_DB
+    )
 
 
 def test_the_files_must_agree_with_the_session(db):
@@ -179,22 +184,25 @@ def test_the_files_must_agree_with_the_session(db):
     other = db.add_session(mouse_id=2, session_date="2026-01-01")
 
     with pytest.raises(RuntimeError, match="but the session is m2 on 2026-01-01"):
-        db.add_loop(session_id=other, loop_path="20260101/m1/e1", objective=20)
+        db.add_experiment(session_id=other, exp_path="20260101/m1/e1", objective=20)
 
-    assert len(db.loops) == 0
-    assert db.latest_calls("add_loop").iloc[0]["call_flag"] & IngestFlag.NOT_THE_SESSION
+    assert len(db.experiments) == 0
+    assert (
+        db.latest_calls("add_experiment").iloc[0]["call_flag"]
+        & IngestFlag.NOT_THE_SESSION
+    )
 
 
 def test_a_session_that_does_not_exist_is_refused(db):
     with pytest.raises(ValueError, match="no session 9"):
-        db.add_loop(session_id=9, loop_path="20260101/m1/e1", objective=20)
+        db.add_experiment(session_id=9, exp_path="20260101/m1/e1", objective=20)
 
 
 def test_an_objective_without_a_scale_is_refused(db):
     with pytest.raises(ValueError, match="No micron scale for objective 16"):
-        db.add_loop(session_id=1, loop_path="20260101/m1/e1", objective=16)
+        db.add_experiment(session_id=1, exp_path="20260101/m1/e1", objective=16)
 
-    assert len(db.loops) == 0
+    assert len(db.experiments) == 0
 
 
 def test_a_loop_is_not_a_grab(db):
@@ -213,10 +221,12 @@ def test_a_loop_of_z_stacks_is_refused_for_now(tmp_path):
     db.add_session(mouse_id=1, session_date="2026-01-01")
 
     with pytest.raises(RuntimeError, match="z-stack loop with 21 slices"):
-        db.add_loop(session_id=1, loop_path="20260101/m1/e1", objective=20)
+        db.add_experiment(session_id=1, exp_path="20260101/m1/e1", objective=20)
 
-    assert db.latest_calls("add_loop").iloc[0]["call_flag"] & IngestFlag.STACK_LOOP
-    assert len(db.loops) == 0
+    assert (
+        db.latest_calls("add_experiment").iloc[0]["call_flag"] & IngestFlag.STACK_LOOP
+    )
+    assert len(db.experiments) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -273,7 +283,7 @@ def test_a_zstack_keeps_its_stack_and_the_powers_at_both_ends(tmp_path):
     assert stack["z_step_um"] == 5
     assert stack["frames_per_slice"] == 56
     assert (stack["z_start_um"], stack["z_end_um"]) == (-5.7, -105.7)
-    assert pd.isna(stack["loop_id"])  # until it is set for one
+    assert pd.isna(stack["exp_id"])  # until it is set for one
 
     # What the lab aims at (30% near the top, more below), from the header
     powers = db.annotations_for("zstack").loc[added]
@@ -301,19 +311,19 @@ def test_a_zstack_is_for_a_loop_of_its_own_session(tmp_path):
         width=40,
         start=datetime(2026, 3, 4, 10, 0, 0),
     )
-    loop_id = db.add_loop(
-        session_id=session_id, loop_path="20260304/m1/e1", objective=20
+    exp_id = db.add_experiment(
+        session_id=session_id, exp_path="20260304/m1/e1", objective=20
     )
 
-    db.set_zstack_loop(zstack_id=zstack_id, loop_id=loop_id)
-    assert db.zstacks.loc[zstack_id, "loop_id"] == loop_id
+    db.set_zstack_experiment(zstack_id=zstack_id, exp_id=exp_id)
+    assert db.zstacks.loc[zstack_id, "exp_id"] == exp_id
 
     db.set_mouse(mouse_id=2)
     other = db.add_session(mouse_id=2, session_date="2026-03-04")
 
     with db._writing() as cur:
         cur.execute(
-            "INSERT INTO loops (session_id, loop_number, loop_path, loop_start, "
+            "INSERT INTO experiments (session_id, exp_number, exp_path, exp_start, "
             "height_px, width_px, height_um, width_um, frames_per_slice, frame_rate, "
             "objective) VALUES (?, 1, 'x', '2026-03-04 12:00:00', 1, 1, 1, 1, 1, "
             "1, 20);",
@@ -322,10 +332,10 @@ def test_a_zstack_is_for_a_loop_of_its_own_session(tmp_path):
         foreign = cur.lastrowid
 
     with pytest.raises(ValueError, match="not from the same session"):
-        db.set_zstack_loop(zstack_id=zstack_id, loop_id=foreign)
+        db.set_zstack_experiment(zstack_id=zstack_id, exp_id=foreign)
 
-    db.set_zstack_loop(zstack_id=zstack_id, loop_id=None)
-    assert db.zstacks["loop_id"].isna().all()
+    db.set_zstack_experiment(zstack_id=zstack_id, exp_id=None)
+    assert db.zstacks["exp_id"].isna().all()
 
 
 # --------------------------------------------------------------------------- #

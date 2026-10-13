@@ -4,9 +4,9 @@ The QC tab: what is waiting on the person using the app.
 Three lists. The drafts this user submitted that the cluster has not added
 yet (`submissions.queued`), with how far their copy got or why they failed,
 and what can be done about each: add it now, submit it again, or take it
-back to edit. The recordings (loops, grabs, z-stacks) the cluster added for
+back to edit. The recordings (experiments, grabs, z-stacks) the cluster added for
 this user, with what processing their sync file found, and a way to process a
-loop's again. And the required annotations still empty on them. Picking
+experiment's again. And the required annotations still empty on them. Picking
 motion-correction candidates from movie previews joins this tab once the
 cluster produces the previews; the pane is shaped so that becomes one more
 list, not a new tab.
@@ -41,11 +41,16 @@ from .models import FrameModel, fit_columns
 from .style import text_style
 from .submissions import add_now, queued, submit_again, take_back
 
-# The calls that add recordings, and the annotation target each adds
-INGEST_METHODS = {"add_loop": "loop", "add_grabs": "grab", "add_zstacks": "zstack"}
+# The calls that add recordings, the kind each adds, and the output key listing
+# the ids it added
+INGEST_METHODS = {
+    "add_experiment": ("experiment", "exp_ids"),
+    "add_grabs": ("grab", "grab_ids"),
+    "add_zstacks": ("zstack", "zstack_ids"),
+}
 
-# Where each kind's folder (a loop) or file (the others) is
-PATH_COLUMN = {"loop": "loop_path", "grab": "raw_path", "zstack": "raw_path"}
+# Where each kind's folder (an experiment) or file (the others) is
+PATH_COLUMN = {"experiment": "exp_path", "grab": "raw_path", "zstack": "raw_path"}
 COLUMNS = ["kind", "path", "objective", "submitted_at", "sync"]
 QUEUE_COLUMNS = ["session", "state", "progress", "submitted_at"]
 
@@ -108,7 +113,7 @@ def cluster_line(db, now: None | datetime = None) -> tuple[str, str]:
 
 def my_recordings(db, user: None | str) -> pd.DataFrame:
     """
-    One row per loop, grab or z-stack `user` submitted, newest first, with its
+    One row per experiment, grab or z-stack `user` submitted, newest first, with its
     sync flags once its sync file was processed. Indexed by `(kind, id)`, as
     annotations name their target.
     """
@@ -122,16 +127,16 @@ def my_recordings(db, user: None | str) -> pd.DataFrame:
     added: dict[tuple[str, int], pd.Timestamp] = {}
 
     for call_id, call in mine.iterrows():
-        kind = INGEST_METHODS[method[call_id]]
+        kind, key = INGEST_METHODS[method[call_id]]
         output = call["call_output"]
-        ids = output.get(f"{kind}_ids", []) if isinstance(output, dict) else []
+        ids = output.get(key, []) if isinstance(output, dict) else []
 
         for row_id in ids:
             if isinstance(row_id, int) and (kind, row_id) not in added:
                 added[(kind, row_id)] = call["called_at"]
 
-    tables = {"loop": db.loops, "grab": db.grabs, "zstack": db.zstacks}
-    flags = _loop_sync_flags(db) | _grab_sync_flags(db)
+    tables = {"experiment": db.experiments, "grab": db.grabs, "zstack": db.zstacks}
+    flags = _exp_sync_flags(db) | _grab_sync_flags(db)
     rows = []
 
     for (kind, row_id), submitted in added.items():
@@ -160,19 +165,19 @@ def my_recordings(db, user: None | str) -> pd.DataFrame:
     return frame.iloc[::-1].sort_values("submitted_at", ascending=False, kind="stable")
 
 
-def _loop_sync_flags(db) -> dict[tuple[str, int], str]:
-    """Each loop's latest `process_sync`, decoded or refused."""
+def _exp_sync_flags(db) -> dict[tuple[str, int], str]:
+    """Each experiment's latest `process_sync`, decoded or refused."""
     calls = db.latest_calls("process_sync")
     flags: dict[tuple[str, int], str] = {}
 
-    if calls.empty or "input_loop_id" not in calls:
+    if calls.empty or "input_exp_id" not in calls:
         return flags
 
     for _, call in calls.iterrows():  # newest first
-        loop_id = call["input_loop_id"]
+        exp_id = call["input_exp_id"]
 
-        if not pd.isna(loop_id) and ("loop", int(loop_id)) not in flags:
-            flags[("loop", int(loop_id))] = sync_flags(int(call["call_flag"]))
+        if not pd.isna(exp_id) and ("experiment", int(exp_id)) not in flags:
+            flags[("experiment", int(exp_id))] = sync_flags(int(call["call_flag"]))
 
     return flags
 
@@ -234,7 +239,7 @@ class QcPane(QWidget):
         self.context = context
         self.queue = pd.DataFrame(columns=[*QUEUE_COLUMNS, "path"])
         self.mine = pd.DataFrame(columns=COLUMNS)
-        self.mine_ids: list[int] = []  # each row's loop, grab or z-stack id
+        self.mine_ids: list[int] = []  # each row's experiment, grab or z-stack id
 
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
@@ -271,7 +276,7 @@ class QcPane(QWidget):
 
         self.rerun_sync = QPushButton("Rerun sync")
         self.rerun_sync.setStatusTip(
-            "Process the loop's sync file again at the cluster's next run"
+            "Process the experiment's sync file again at the cluster's next run"
         )
         self.rerun_sync.clicked.connect(self._rerun_sync)
         self.recordings_view = self._table(
@@ -373,7 +378,7 @@ class QcPane(QWidget):
         self.edit_draft.setEnabled(state is not None)
 
         added = self._selected(self.recordings_view, self.mine)
-        self.rerun_sync.setEnabled(added is not None and added["kind"] == "loop")
+        self.rerun_sync.setEnabled(added is not None and added["kind"] == "experiment")
 
     def _add_now(self) -> None:
         row = self._selected(self.queue_view, self.queue)
@@ -417,10 +422,10 @@ class QcPane(QWidget):
     def _rerun_sync(self) -> None:
         row = self._selected(self.recordings_view, self.mine)
 
-        if row is None or row["kind"] != "loop":
+        if row is None or row["kind"] != "experiment":
             return
 
-        loop_id = self.mine_ids[int(row.name)]
+        exp_id = self.mine_ids[int(row.name)]
         user, path = self.context.user, row["path"]
 
         def ask(db):
@@ -429,7 +434,7 @@ class QcPane(QWidget):
                 "process_sync",
                 project=db.project,
                 user=user,
-                loop_id=loop_id,
+                exp_id=exp_id,
             )
 
         self.context.run(

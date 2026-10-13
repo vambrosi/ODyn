@@ -72,11 +72,13 @@ def a_loop(tmp_path, user="ana") -> tuple[Database, int]:
     db = Database(tmp_path, can_create=True, user=user)
     db.set_mouse(mouse_id=1)
     session_id = db.add_session(mouse_id=1, session_date="2026-03-04")
-    loop_id = db.add_loop(
-        session_id=session_id, loop_path="20260304/m1/e1", objective=20
+    exp_id = db.add_experiment(
+        session_id=session_id, exp_path="20260304/m1/e1", objective=20
     )
 
-    return db, int(db.group_loops.index[db.group_loops["loop_id"] == loop_id][0])
+    return db, int(
+        db.group_experiments.index[db.group_experiments["exp_id"] == exp_id][0]
+    )
 
 
 def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):

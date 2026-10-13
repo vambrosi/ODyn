@@ -132,8 +132,8 @@ def build(tmp_path, truth, *, acquisitions=None, trials=None, frames_per_slice=F
     with db._writing() as cur:
         cur.execute(
             """
-            INSERT INTO loops
-                ( loop_id, session_id, loop_number, loop_path, loop_start
+            INSERT INTO experiments
+                ( exp_id, session_id, exp_number, exp_path, exp_start
                 , height_px, width_px, height_um, width_um, frames_per_slice
                 , frame_rate, objective
                 ) VALUES (1, 1, 1, '20260101/m001/e1', ?
@@ -145,7 +145,7 @@ def build(tmp_path, truth, *, acquisitions=None, trials=None, frames_per_slice=F
         for index, at in enumerate(starts):
             # ScanImage's clock runs 100 ms ahead of the olfactometer's
             cur.execute(
-                "INSERT INTO acquisitions (acq_id, loop_id, acq_start, raw_path) "
+                "INSERT INTO acquisitions (acq_id, exp_id, acq_start, raw_path) "
                 "VALUES (?, 1, ?, ?);",
                 [
                     index + 1,
@@ -155,7 +155,7 @@ def build(tmp_path, truth, *, acquisitions=None, trials=None, frames_per_slice=F
             )
 
         cur.execute(
-            "INSERT INTO programs (program_id, loop_id, program_name, program_type, "
+            "INSERT INTO programs (program_id, exp_id, program_name, program_type, "
             "program_start, program_path) VALUES (1, 1, 'p', 'passive', ?, 'events.csv');",
             [START.strftime(DT_FORMAT)],
         )
@@ -165,7 +165,7 @@ def build(tmp_path, truth, *, acquisitions=None, trials=None, frames_per_slice=F
                 """
                 INSERT INTO trials
                     ( trial_id, trial_start, trial_odor_start, trial_odor_end
-                    , odor_id, outcome, program_id, loop_id
+                    , odor_id, outcome, program_id, exp_id
                     ) VALUES (?, ?, ?, ?, 1, 'na', 1, 1);
                 """,
                 [
@@ -184,7 +184,7 @@ def test_bursts_are_matched_to_acquisitions_and_trials(tmp_path):
     truth = generate_sync(sync, acquisitions=4)
     db = build(tmp_path, truth)
 
-    db.process_sync(loop_id=1)
+    db.process_sync(exp_id=1)
 
     stream = db.streams.iloc[0]
     assert stream["file_path"] == "20260101/m001/e1/sync/m001_e1.h5"
@@ -219,8 +219,8 @@ def test_a_rerun_replaces_what_the_first_wrote(tmp_path):
     truth = generate_sync(sync, acquisitions=3)
     db = build(tmp_path, truth)
 
-    db.process_sync(loop_id=1)
-    db.process_sync(loop_id=1)
+    db.process_sync(exp_id=1)
+    db.process_sync(exp_id=1)
 
     assert len(db.streams) == 1
     assert len(db.sync_blocks) == 3
@@ -235,18 +235,18 @@ def test_the_file_is_found_or_named(tmp_path):
     db = build(tmp_path, truth)
 
     with pytest.raises(RuntimeError, match="No sync file in"):
-        db.process_sync(loop_id=1)
+        db.process_sync(exp_id=1)
 
     assert db.latest_calls("process_sync").iloc[0]["call_flag"] & SyncFlag.NO_SYNC_FILE
 
-    db.process_sync(loop_id=1, sync_path="elsewhere/rec.h5")
+    db.process_sync(exp_id=1, sync_path="elsewhere/rec.h5")
     assert len(db.sync_blocks) == 2
 
     generate_sync(tmp_path / "20260101/m001/e1/sync/a.h5", acquisitions=2)
     generate_sync(tmp_path / "20260101/m001/e1/sync/b.h5", acquisitions=2)
 
     with pytest.raises(RuntimeError, match="2 H5 files"):
-        db.process_sync(loop_id=1)
+        db.process_sync(exp_id=1)
 
 
 def test_mismatched_counts_are_refused_before_writing(tmp_path):
@@ -255,7 +255,7 @@ def test_mismatched_counts_are_refused_before_writing(tmp_path):
 
     db = build(tmp_path, truth, acquisitions=3)
     with pytest.raises(RuntimeError, match="4 frame bursts.*3 acquisitions"):
-        db.process_sync(loop_id=1)
+        db.process_sync(exp_id=1)
     assert len(db.streams) == 0
     assert (
         db.latest_calls("process_sync").iloc[0]["call_flag"]
@@ -265,7 +265,7 @@ def test_mismatched_counts_are_refused_before_writing(tmp_path):
     db.path.unlink()
     db = build(tmp_path, truth, trials=3)
     with pytest.raises(RuntimeError, match="4 bursts have an odor pulse.*3 trials"):
-        db.process_sync(loop_id=1)
+        db.process_sync(exp_id=1)
     assert (
         db.latest_calls("process_sync").iloc[0]["call_flag"]
         & SyncFlag.TRIAL_COUNT_MISMATCH
@@ -285,7 +285,7 @@ def test_what_is_off_is_flagged_but_stored(tmp_path):
     )
     db = build(tmp_path, truth, frames_per_slice=FRAMES + 1)
 
-    db.process_sync(loop_id=1)
+    db.process_sync(exp_id=1)
 
     flag = db.latest_calls("process_sync").iloc[0]["call_flag"]
     for expected in (
@@ -318,7 +318,7 @@ def test_clock_skew_is_flagged(tmp_path):
     truth = generate_sync(sync, acquisitions=2, start=START + timedelta(minutes=1))
     db = build(tmp_path, truth)
 
-    db.process_sync(loop_id=1)
+    db.process_sync(exp_id=1)
 
     assert db.latest_calls("process_sync").iloc[0]["call_flag"] & SyncFlag.CLOCK_SKEW
     assert db.sync_blocks["clock_offset_ms"].round().eq(-59900).all()
@@ -367,7 +367,7 @@ def test_grab_bursts_are_matched_by_time(tmp_path):
     )
 
     stream = db.streams.iloc[0]
-    assert stream["session_id"] == 1 and pd.isna(stream["loop_id"])
+    assert stream["session_id"] == 1 and pd.isna(stream["exp_id"])
 
     grabs = db.grabs
     assert list(grabs["sync_block"].iloc[:3]) == [0, 1, 2]

@@ -26,11 +26,11 @@ from .utils import DB_TIMEOUT_S, backup_path, database_path, logger
 # - Bump the SCHEMA_VERSION to match, and set MIGRATES_FROM;
 # - Run test_migration.py, then `python -m odyn.tools diagram`.
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Which version `latest.sql` upgrades from, or None when a version is a rebuild
 # rather than a migration: a new database is started from `create.sql` and the
-# old one stays readable with the tagged older code. v5 is such a rebuild.
+# old one stays readable with the tagged older code. v5 and v6 are rebuilds.
 MIGRATES_FROM: None | int = None
 
 # Calls running for longer than this limit are probably dead

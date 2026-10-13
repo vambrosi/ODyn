@@ -63,14 +63,14 @@ def test_a_complete_draft_is_added_once_the_copy_settles(tmp_path):
     assert process_submissions(tmp_path, now=T0) == [
         "20260101/m1: waiting for the copy to finish"
     ]
-    assert len(db.loops) == 0
+    assert len(db.experiments) == 0
 
     [line] = process_submissions(tmp_path, now=SETTLED)
     assert line == "20260101/m1: added as session 1"
 
     # Added as the person who submitted it, and moved out of the queue
-    assert len(db.loops) == 1
-    assert db.latest_calls("add_loop").iloc[0]["user"] == "ana"
+    assert len(db.experiments) == 1
+    assert db.latest_calls("add_experiment").iloc[0]["user"] == "ana"
     assert queued(tmp_path) == []
     done = queue_folder(tmp_path) / "done"
     assert (done / path.name).exists()
@@ -88,7 +88,7 @@ def test_a_loop_waits_for_all_its_tiffs(tmp_path):
         "20260101/m1: waiting: e1: 3 of 5 TIFFs"
     ]
     assert state_of(tmp_path).parts == {"e1": "3 of 5 TIFFs"}
-    assert len(db.loops) == 0
+    assert len(db.experiments) == 0
 
 
 def test_a_loop_stopped_early_is_complete_with_its_bursts(tmp_path):
@@ -149,7 +149,7 @@ def test_a_dry_run_changes_nothing(tmp_path):
 
     assert not path.with_name(f"{path.stem}.state.json").exists()
     assert state_of(tmp_path).state == "waiting"
-    assert len(db.loops) == 0
+    assert len(db.experiments) == 0
 
 
 def test_the_tick_looks_at_the_queue(tmp_path):
@@ -246,7 +246,7 @@ def test_the_tick_tests_each_loop_it_adds_once(tmp_path, slurm):
 def test_the_tick_can_leave_the_tests_out(tmp_path, slurm):
     a_day(tmp_path)
     add_now(next(iter(queued(tmp_path)))[0])
-    (tmp_path / ".odyn" / "cluster.json").write_text('{"test_new_loops": false}')
+    (tmp_path / ".odyn" / "cluster.json").write_text('{"test_new_experiments": false}')
 
     assert tick(tmp_path).tests == []
     assert not (cluster_folder(tmp_path) / "mcor").exists()

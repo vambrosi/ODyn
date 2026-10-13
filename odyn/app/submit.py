@@ -75,7 +75,7 @@ class Written:
     """What one submit put in the database."""
 
     session_id: None | int = None
-    loops: dict[str, int] = field(default_factory=dict)  # by folder name
+    experiments: dict[str, int] = field(default_factory=dict)  # by folder name
     grabs: dict[str, int] = field(default_factory=dict)  # by TIFF name
     zstacks: dict[str, int] = field(default_factory=dict)  # by TIFF name
     annotations: int = 0
@@ -229,7 +229,7 @@ def check(
             )
         )
 
-    loop_fields = form_fields(db, "loop")
+    loop_fields = form_fields(db, "experiment")
     loops = {str(e["name"]) for e in draft.parts if e.get("kind") == "loop"}
 
     for entry in draft.parts:
@@ -807,48 +807,48 @@ def _submit(db, draft: Draft, written: Written) -> None:
 def _submit_loop(db, draft: Draft, entry: dict, session_id: int, written) -> None:
     """Ingest one loop, annotate it, record its vials and process its sync file."""
     name = str(entry["name"])
-    loop_path = f"{draft.folder}/{name}"
-    loop_id = entry.get("submitted_id")
+    exp_path = f"{draft.folder}/{name}"
+    exp_id = entry.get("submitted_id")
 
-    if loop_id is None:
-        loop_id = db.add_loop(
+    if exp_id is None:
+        exp_id = db.add_experiment(
             session_id=session_id,
-            loop_path=loop_path,
+            exp_path=exp_path,
             objective=int(entry["objective"]),
         )
 
-    if loop_id is None:
+    if exp_id is None:
         # Already in the database (an earlier attempt, or someone else's)
         rows = db.from_query(
-            "SELECT loop_id FROM loops WHERE session_id = ? AND loop_path = ?;",
-            [session_id, loop_path],
+            "SELECT exp_id FROM experiments WHERE session_id = ? AND exp_path = ?;",
+            [session_id, exp_path],
         )
-        loop_id = None if rows.empty else int(rows["loop_id"].iloc[0])
+        exp_id = None if rows.empty else int(rows["exp_id"].iloc[0])
 
-    if loop_id is None:
+    if exp_id is None:
         written.skipped.append(name)
         return
 
-    draft.set_part(name, submitted_id=int(loop_id))
-    written.loops[name] = int(loop_id)
+    draft.set_part(name, submitted_id=int(exp_id))
+    written.experiments[name] = int(exp_id)
 
-    values = _annotation_values(db, "loop", entry)
+    values = _annotation_values(db, "experiment", entry)
 
     if values:
-        db.add_annotations(target_type="loop", target_id=loop_id, values=values)
+        db.add_annotations(target_type="experiment", target_id=exp_id, values=values)
         written.annotations += len(values)
 
-    written.annotations += _write_conditions(db, draft, name, loop_id, entry)
+    written.annotations += _write_conditions(db, draft, name, exp_id, entry)
 
     if draft.vial_ids:
-        db.set_loop_vials(loop_id=loop_id, vial_ids=draft.vial_ids)
+        db.set_experiment_vials(exp_id=exp_id, vial_ids=draft.vial_ids)
 
-    if _has_sync(db, loop_path):
+    if _has_sync(db, exp_path):
         # The loop is in either way; a sync file that is refused (a burst count
         # that does not match, say) is reported and can be rerun once the
         # file is sorted out.
         try:
-            db.process_sync(loop_id=loop_id)
+            db.process_sync(exp_id=exp_id)
             written.processed.append(name)
 
         except Exception as error:
@@ -889,8 +889,8 @@ def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> No
 
         loop = noted.get("loop")
 
-        if kind == "zstack" and loop is not None and loop in written.loops:
-            db.set_zstack_loop(zstack_id=row_id, loop_id=written.loops[loop])
+        if kind == "zstack" and loop is not None and loop in written.experiments:
+            db.set_zstack_experiment(zstack_id=row_id, exp_id=written.experiments[loop])
 
         draft.set_file(name, file, submitted_id=row_id)
 
@@ -910,7 +910,7 @@ def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> No
             written.process_failed[f"{name}/{record['file']}"] = described(error)
 
 
-def _write_conditions(db, draft: Draft, name: str, loop_id: int, entry: dict) -> int:
+def _write_conditions(db, draft: Draft, name: str, exp_id: int, entry: dict) -> int:
     """
     Each acquisition in a condition's range gets it as an annotation. Only
     when the conditions changed since the last submit, so a resubmit does
@@ -922,7 +922,7 @@ def _write_conditions(db, draft: Draft, name: str, loop_id: int, entry: dict) ->
         return 0
 
     rows = db.from_query(
-        "SELECT acq_id, raw_path FROM acquisitions WHERE loop_id = ?;", [int(loop_id)]
+        "SELECT acq_id, raw_path FROM acquisitions WHERE exp_id = ?;", [int(exp_id)]
     )
     acq_ids = {
         acquisition_number(path): int(acq_id)
@@ -962,8 +962,8 @@ def _annotation_values(db, applies_to: str, values: dict) -> dict:
     return parsed
 
 
-def _has_sync(db, loop_path: str) -> bool:
-    folder = Path(db.main_folder) / loop_path / SYNC_FOLDER
+def _has_sync(db, exp_path: str) -> bool:
+    folder = Path(db.main_folder) / exp_path / SYNC_FOLDER
 
     return folder.is_dir() and any(
         p for p in folder.glob("*.h5") if not p.name.startswith(".")

@@ -86,7 +86,7 @@ class Submission:
     - `parts`: the progress of each experiment or z-stack ("45 of 160 TIFFs")
     - `files`: what the draft's folders looked like at `last_change_at`
     - `retry_on_change`: a failure the files caused, tried again once they change
-    - `written`: the database ids `ingest` made (session, loops, ...)
+    - `written`: the database ids `ingest` made (session, experiments, ...)
     """
 
     state: str = "waiting"
@@ -307,7 +307,7 @@ def _ingest(
     state.state = "done"
     state.written = {
         "session_id": written.session_id,
-        "loops": written.loops,
+        "experiments": written.experiments,
         "grabs": written.grabs,
         "zstacks": written.zstacks,
     }

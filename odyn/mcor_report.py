@@ -36,7 +36,7 @@ edges). A 90th percentile far above the median means part of the field
 moves on its own. What a rigid correction leaves is mostly non-rigid motion, so this
 says whether piecewise rigid would help.
 - **Crispness** (`metrics.json`): the mean squared gradient of the average of
-all means, divided by its variance, so it compares across loops and
+all means, divided by its variance, so it compares across experiments and
 brightness (NoRMCorre's is the unscaled norm of the gradient). Drift blurs
 the average and lowers it.
 
@@ -344,7 +344,7 @@ def plot_shifts(
     axes[3].set_ylim(bottom=0)
     axes[3].set_ylabel("motion left in the\ntest mean (px)")
     axes[3].legend(loc="upper right", fontsize=8)
-    axes[3].set_xlabel("acquisition position in the loop")
+    axes[3].set_xlabel("acquisition position in the experiment")
 
     fig.savefig(path, dpi=120)
     plt.close(fig)

@@ -6,8 +6,8 @@ Workstations cannot start cluster jobs (logging in takes a password and Duo),
 so anything that has to run there is left as a request file on the share,
 and a short `tick` on the cluster applies it. A tick also adds the submitted
 drafts whose recordings finished copying (`odyn.app.submissions`), submits a
-test motion correction of each loop it added (`submit_mcor_test`), processes
-the sync files that arrived since their loop or grabs were added, writes a
+test motion correction of each experiment it added (`submit_mcor_test`), processes
+the sync files that arrived since their experiment or grabs were added, writes a
 heartbeat, and (as a chain) submits the next tick. Everything a tick does is
 safe to repeat, so a tick that ran twice, or not at all for a day, only
 delays work.
@@ -36,7 +36,7 @@ python -m odyn.cluster <main_folder> [--project NAME] tick [--dry-run]
 python -m odyn.cluster <main_folder> start [--every MINUTES] [--dry-run]
 python -m odyn.cluster <main_folder> stop
 python -m odyn.cluster <main_folder> status
-python -m odyn.cluster <main_folder> request process_sync loop_id=12
+python -m odyn.cluster <main_folder> request process_sync exp_id=12
 python -m odyn.cluster <main_folder> mcor-test --group 7 [--dry-run]
 ```
 
@@ -44,7 +44,7 @@ python -m odyn.cluster <main_folder> mcor-test --group 7 [--dry-run]
 ```python
 from odyn.cluster import send_request, tick
 
-send_request(main_folder, "process_sync", project="main-sync", loop_id=12)
+send_request(main_folder, "process_sync", project="main-sync", exp_id=12)
 report = tick(main_folder, project="main-sync")
 ```
 """
@@ -124,7 +124,8 @@ class ClusterConfig:
     conda_sh: str = "$HOME/miniforge3/etc/profile.d/conda.sh"
     conda_env: str = "caiman"
     every_minutes: int = 30
-    test_new_loops: bool = True  # the tick submits a test of each loop it adds
+    # The tick submits a test motion correction of each experiment it adds
+    test_new_experiments: bool = True
     tick_cpus: int = 1
     tick_memory: str = "8G"
     tick_time: str = "0:30:00"
@@ -173,7 +174,7 @@ def send_request(
 
     **EXAMPLE**
     ```python
-    send_request(main_folder, "process_sync", project="main-sync", loop_id=12)
+    send_request(main_folder, "process_sync", project="main-sync", exp_id=12)
     ```
 
     Raises `ValueError` for a method that cannot be requested (see
@@ -321,8 +322,8 @@ def tick(
     """
     One round of the cluster's work: apply the waiting requests, add the
     submitted drafts whose recordings are complete (see
-    `odyn.app.submissions`), submit a test motion correction of each loop
-    they added (unless `test_new_loops` is off in `ClusterConfig`), process
+    `odyn.app.submissions`), submit a test motion correction of each experiment
+    they added (unless `test_new_experiments` is off in `ClusterConfig`), process
     the sync files that arrived (or changed) since they were last processed,
     write the heartbeat and, with `chain`, submit the next tick.
 
@@ -356,7 +357,7 @@ def tick(
 
     db = Database(main_folder, project=project)
 
-    if config.test_new_loops:
+    if config.test_new_experiments:
         _submit_tests(db, project, report, dry_run)
 
     seen = _read_seen(folder)
@@ -396,7 +397,7 @@ def tick(
 def _submit_tests(
     db: Database, project: None | str, report: TickReport, dry_run: bool
 ) -> None:
-    """Submit a test motion correction of each loop the queue added untested."""
+    """Submit a test motion correction of each experiment the queue added untested."""
     for group_id, where in _untested_groups(db, project):
         if dry_run:
             report.tests.append(f"{where}: would submit a test (group {group_id})")
@@ -416,43 +417,43 @@ def _submit_tests(
 
 def _untested_groups(db: Database, project: None | str) -> list[tuple[int, str]]:
     """
-    The loops the queue added (`odyn.app.submissions.added`) that no test was
-    submitted for: the group each loop started as, and the loop's path.
+    The experiments the queue added (`odyn.app.submissions.added`) that no test was
+    submitted for: the group each experiment started as, and the experiment's path.
     """
     # Imported here: the queue belongs to the app (no Qt in it)
     from .app.submissions import added
 
-    loop_ids = {
-        int(loop_id)
+    exp_ids = {
+        int(exp_id)
         for _, state in added(db.main_folder, project)
-        for loop_id in state.written.get("loops", {}).values()
+        for exp_id in state.written.get("experiments", {}).values()
     }
 
-    if not loop_ids:
+    if not exp_ids:
         return []
 
     sent = cluster_folder(db.main_folder, project) / MCOR_FOLDER
-    links = db.group_loops
+    links = db.group_experiments
     sizes = links.index.value_counts()
-    paths = db.loops["loop_path"]
+    paths = db.experiments["exp_path"]
     found = {}
 
-    for group_id, loop_id in sorted(zip(links.index, links["loop_id"])):
-        loop_id = int(loop_id)
+    for group_id, exp_id in sorted(zip(links.index, links["exp_id"])):
+        exp_id = int(exp_id)
 
-        if loop_id in loop_ids and sizes[group_id] == 1 and loop_id not in found:
-            found[loop_id] = int(group_id)
+        if exp_id in exp_ids and sizes[group_id] == 1 and exp_id not in found:
+            found[exp_id] = int(group_id)
 
     return [
-        (group_id, str(paths.loc[loop_id]))
-        for loop_id, group_id in sorted(found.items())
+        (group_id, str(paths.loc[exp_id]))
+        for exp_id, group_id in sorted(found.items())
         if not (sent / f"{group_id}.json").exists()
     ]
 
 
 def _sync_work(db: Database, settle_s: float, seen: dict[str, str]) -> list[Work]:
     """
-    The sync files waiting to be processed. A loop's or a grabs file's turn
+    The sync files waiting to be processed. An experiment's or a grabs file's turn
     comes when it was never processed, when it changed since its last
     processing, or when that processing found no file (or too many) and the
     folder has changed since. `seen` holds what each folder looked like when
@@ -462,17 +463,17 @@ def _sync_work(db: Database, settle_s: float, seen: dict[str, str]) -> list[Work
     now = time.time()
     work: list[Work] = []
     retry = int(SyncFlag.NO_SYNC_FILE) | int(SyncFlag.MULTIPLE_SYNC_FILES)
-    loop_calls = _last_calls(db, "process_sync", "input_loop_id")
+    exp_calls = _last_calls(db, "process_sync", "input_exp_id")
 
-    for loop_id, loop in db.loops.iterrows():
-        files = _sync_files(db.main_folder / str(loop["loop_path"]) / SYNC_FOLDER)
+    for exp_id, experiment in db.experiments.iterrows():
+        files = _sync_files(db.main_folder / str(experiment["exp_path"]) / SYNC_FOLDER)
 
         if not files or any(now - p.stat().st_mtime < settle_s for p in files):
             continue
 
-        key = f"loop {int(loop_id)}"
+        key = f"experiment {int(exp_id)}"
         state = _state(files)
-        last = loop_calls.get(int(loop_id))
+        last = exp_calls.get(int(exp_id))
 
         if seen.get(key) == state:
             continue
@@ -486,7 +487,7 @@ def _sync_work(db: Database, settle_s: float, seen: dict[str, str]) -> list[Work
 
         what = files[0].relative_to(db.main_folder).as_posix()
         work.append(
-            Work(what, key, state, lambda i=int(loop_id): db.process_sync(loop_id=i))
+            Work(what, key, state, lambda i=int(exp_id): db.process_sync(exp_id=i))
         )
 
     grab_calls = _last_calls(db, "process_grabs_sync", "input_sync_path")
@@ -781,12 +782,12 @@ def submit_mcor_test(
     """
     Submit a test motion correction of `group_id` (`Group.test_motion_correction`)
     as its own job, recorded as `user`'s: by default whoever added the group's
-    loop. Writes the script to `jobs/` and what was submitted to
+    experiment. Writes the script to `jobs/` and what was submitted to
     `mcor/<group_id>.json`. Returns the job id (`None` in a dry run, which only
     writes and shows the script).
     """
     if user is None:
-        user = loop_owner(Database(main_folder, project=project), group_id)
+        user = experiment_owner(Database(main_folder, project=project), group_id)
 
     config = ClusterConfig.read(main_folder)
     folder = cluster_folder(main_folder, project)
@@ -833,21 +834,23 @@ def run_mcor_test(
     return db.groups[group_id].test_motion_correction()
 
 
-def loop_owner(db: Database, group_id: int) -> str:
+def experiment_owner(db: Database, group_id: int) -> str:
     """
-    Who added the loop of `group_id` (the user of its `add_loop` call), which
-    is who its tests and their QC belong to.
+    Who added the experiment of `group_id` (the user of its `add_experiment`
+    call), which is who its tests and their QC belong to.
     """
-    loop_ids = set(db.group_loops.loc[[group_id], "loop_id"].astype(int))
-    calls = db.latest_calls("add_loop")
+    exp_ids = set(db.group_experiments.loc[[group_id], "exp_id"].astype(int))
+    calls = db.latest_calls("add_experiment")
 
     for _, call in calls.iterrows():  # newest first
-        added = call.get("output_loop_ids")
+        added = call.get("output_exp_ids")
 
-        if isinstance(added, list) and loop_ids & {int(i) for i in added}:
+        if isinstance(added, list) and exp_ids & {int(i) for i in added}:
             return str(call["user"])
 
-    raise ValueError(f"No add_loop call added the loop of group {group_id}.")
+    raise ValueError(
+        f"No add_experiment call added the experiment of group {group_id}."
+    )
 
 
 def mcor_tests(main_folder: str | Path, project: None | str = None) -> list[dict]:
@@ -1071,7 +1074,7 @@ def main(argv: None | list[str] = None) -> int:
         "mcor-test", help="submit a test motion correction of a group as a job"
     )
     test.add_argument("--group", type=int, required=True)
-    test.add_argument("--user", help="whose it is (default: who added the loop)")
+    test.add_argument("--user", help="whose it is (default: who added the experiment)")
     test.add_argument("--dry-run", action="store_true", help="only show the job")
 
     job = commands.add_parser("run-mcor-test", help="what the mcor-test job runs")

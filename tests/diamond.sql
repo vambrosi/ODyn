@@ -1,15 +1,15 @@
 -- Diamond integrity check (expected to FAIL with a FOREIGN KEY error).
 --
--- A trial's program must belong to the trial's loop. Here program 1 is
--- on loop 2, but the trial claims loop 1, so the composite
--- FOREIGN KEY (program_id, loop_id) -> programs must reject it.
+-- A trial's program must belong to the trial's experiment. Here program 1 is
+-- on experiment 2, but the trial claims experiment 1, so the composite
+-- FOREIGN KEY (program_id, exp_id) -> programs must reject it.
 PRAGMA foreign_keys = ON;
 
 INSERT INTO mice (mouse_id) VALUES (1);
 INSERT INTO sessions (session_id, mouse_id, session_date) VALUES (1, 1, '2025-01-01');
 
-INSERT INTO loops
-    ( session_id, loop_number, loop_path, loop_start
+INSERT INTO experiments
+    ( session_id, exp_number, exp_path, exp_start
     , height_px, width_px, height_um, width_um
     , frames_per_slice, frame_rate, objective
     ) VALUES
@@ -22,15 +22,15 @@ INSERT INTO loops
         , 30, 60, 20
         );
 
--- acquisition on loop 1 -> acq_id 1
-INSERT INTO acquisitions (loop_id, acq_start, raw_path)
+-- acquisition on experiment 1 -> acq_id 1
+INSERT INTO acquisitions (exp_id, acq_start, raw_path)
     VALUES (1, '2025-01-01 00:00:00', 'raw1');
 
--- program on loop 2 -> program_id 1
-INSERT INTO programs (loop_id, program_name, program_type, program_start, program_path)
+-- program on experiment 2 -> program_id 1
+INSERT INTO programs (exp_id, program_name, program_type, program_start, program_path)
     VALUES (2, 'p', 'passive', '2025-01-01 01:00:00', 'path');
 
--- trial on loop 1 with program 1 (loop 2): the composite foreign
+-- trial on experiment 1 with program 1 (experiment 2): the composite foreign
 -- key cannot be satisfied, so this insert must fail.
 INSERT INTO trials
     ( trial_start
@@ -38,7 +38,7 @@ INSERT INTO trials
     , trial_odor_end
     , odor_id, outcome
     , acq_id
-    , program_id, loop_id
+    , program_id, exp_id
     ) VALUES
         ( '2025-01-01 00:00:00'
         , '2025-01-01 00:00:01'

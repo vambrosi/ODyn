@@ -13,7 +13,7 @@ import tifffile
 from odyn import Database
 from odyn.groups import MCOR_LAYOUT, McorFlag, McorSource, _tiff_shape
 
-LOOP_DIR = "20260101/m001/e1"
+EXP_DIR = "20260101/m001/e1"
 STEM = "20260101_m001_e1"
 
 # Over 4 frames on purpose: tifffile folds a leading axis of 4 or less into a
@@ -38,32 +38,32 @@ def build(tmp_path, acquisitions=3):
         )
         con.execute(
             """
-            INSERT INTO loops
-                ( loop_id, session_id, loop_number, loop_path, loop_start
+            INSERT INTO experiments
+                ( exp_id, session_id, exp_number, exp_path, exp_start
                 , height_px, width_px, height_um, width_um, frames_per_slice, frame_rate
                 , objective
                 ) VALUES ( 1, 1, 1, ?, '2026-01-01 10:00:00'
                          , ?, ?, ?, ?, ?
                          , 14.0, 20);
             """,
-            [LOOP_DIR, HEIGHT, WIDTH, float(HEIGHT), float(WIDTH), FRAMES],
+            [EXP_DIR, HEIGHT, WIDTH, float(HEIGHT), float(WIDTH), FRAMES],
         )
 
         for index in range(acquisitions):
             con.execute(
                 """
-                INSERT INTO acquisitions (acq_id, loop_id, acq_start, raw_path)
+                INSERT INTO acquisitions (acq_id, exp_id, acq_start, raw_path)
                     VALUES (?, 1, ?, ?);
                 """,
                 [
                     index + 1,
                     f"2026-01-01 10:0{index}:00",
-                    f"{LOOP_DIR}/raw/{STEM}_{index + 1:05d}.tif",
+                    f"{EXP_DIR}/raw/{STEM}_{index + 1:05d}.tif",
                 ],
             )
 
         con.execute("INSERT INTO groups (group_id) VALUES (1);")
-        con.execute("INSERT INTO group_loops (group_id, loop_id) VALUES (1, 1);")
+        con.execute("INSERT INTO group_experiments (group_id, exp_id) VALUES (1, 1);")
 
     return db, db.groups[1]
 
@@ -81,7 +81,7 @@ def write_mcor(
 ):
     """Put a plausible motion corrected file where the group will look."""
     folder, suffix = MCOR_LAYOUT[source]
-    path = tmp_path / LOOP_DIR / folder / f"{STEM}_{index:05d}{suffix}"
+    path = tmp_path / EXP_DIR / folder / f"{STEM}_{index:05d}{suffix}"
     path.parent.mkdir(parents=True, exist_ok=True)
 
     tifffile.imwrite(path, np.zeros((frames, height, width), dtype), **kwargs)
@@ -167,7 +167,7 @@ def test_files_are_found_beside_the_raw_files(tmp_path):
     rows = stored(db)
 
     assert set(rows) == {1, 2, 3}
-    assert rows[1] == (f"{LOOP_DIR}/processed/mcor/{STEM}_00001_mcor.tif", "caiman")
+    assert rows[1] == (f"{EXP_DIR}/processed/mcor/{STEM}_00001_mcor.tif", "caiman")
 
 
 def test_paths_are_stored_posix_style(tmp_path):
@@ -375,7 +375,7 @@ def share_loop(db):
     """A second group over the same loop, as happens in the real data."""
     with db._locked() as con, con:
         con.execute("INSERT INTO groups (group_id) VALUES (2);")
-        con.execute("INSERT INTO group_loops (group_id, loop_id) VALUES (2, 1);")
+        con.execute("INSERT INTO group_experiments (group_id, exp_id) VALUES (2, 1);")
 
     return db.groups[2]
 

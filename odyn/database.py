@@ -31,13 +31,13 @@ from .utils import (
     DB_TIMEOUT_S,
     EVENTS,
     GRABS,
-    GROUP_LOOPS,
+    GROUP_EXPERIMENTS,
     INFO_FOLDER,
     MCOR_FILES,
     METHOD_CALLS,
     LINES,
-    LOOP_VIALS,
-    LOOPS,
+    EXPERIMENT_VIALS,
+    EXPERIMENTS,
     MICE,
     MOUSE_LINES,
     MOUSE_VIRUSES,
@@ -84,7 +84,7 @@ WHOLE_TOLERANCE = 0.01
 # dict as the columns so the across-TIFF consistency check still sees it.
 RIG_ANNOTATIONS = ("laser_power_920", "laser_power_1040", "loop_acq_interval_s")
 
-# The columns every recording table (loops, grabs, z-stacks) takes from a TIFF
+# The columns every recording table (experiments, grabs, z-stacks) takes from a TIFF
 CONTRACT = (
     "height_px",
     "width_px",
@@ -101,14 +101,14 @@ CONTRACT = (
 # stored in real microns; an objective missing here cannot be ingested.
 OBJECTIVE_SCALE = {20: 1.0, 10: 100 / 45}
 
-# Where the app copies the olfactometer's own files a loop needs, inside the
-# loop folder: `config/` (its settings, `Program.config` among them), `log/`
+# Where the app copies the olfactometer's own files an experiment needs, inside
+# its folder: `config/` (its settings, `Program.config` among them), `log/`
 # (the day's `Program_<yyyymmdd>.txt`) and `data/` (one folder per program
 # run, with its Events file)
 OLFACTOMETER_FOLDER = "olfactometer"
 
-# Where the sync H5 of a loop lives, inside the loop folder (and of the grabs,
-# inside the grabs folder)
+# Where the sync H5 of an experiment lives, inside its folder (and of the
+# grabs, inside the grabs folder)
 SYNC_FOLDER = "sync"
 
 # TODO: Make program types part of the database
@@ -125,7 +125,7 @@ PROGRAM_TYPES = [
 
 class IngestFlag(IntFlag):
     """
-    call_flag bits for `Database.add_loop`, `add_grabs` and `add_zstacks` (bit
+    call_flag bits for `Database.add_experiment`, `add_grabs` and `add_zstacks` (bit
     0 reserved by `CallFlag.RAISED`).
     """
 
@@ -144,7 +144,7 @@ class SyncFlag(IntFlag):
     reserved by `CallFlag.RAISED`).
     """
 
-    NO_SYNC_FILE = 1 << 1  # nothing to process in <loop>/sync/
+    NO_SYNC_FILE = 1 << 1  # nothing to process in <experiment>/sync/
     MULTIPLE_SYNC_FILES = 1 << 2  # more than one H5 there and none was named
     INTERRUPTED = 1 << 3  # the recording was not stopped properly
     FRAGMENTS = 1 << 4  # short bursts were set aside
@@ -152,11 +152,11 @@ class SyncFlag(IntFlag):
     TRIAL_COUNT_MISMATCH = 1 << 6  # odor bursts and trials do not pair up
     ODOR_PULSES = (
         1 << 7
-    )  # a loop burst without exactly one valve pulse, a grab's with any
+    )  # an experiment's burst without exactly one valve pulse, a grab's with any
     CLOCK_SKEW = 1 << 8  # the two computers disagree beyond `max_skew_s`
     NO_CAMERA = 1 << 9  # an acquisition without camera strobes (no pupil)
     FRAME_COUNT = 1 << 10  # frames in a burst differ from the ScanImage setting
-    NO_TRIALS = 1 << 11  # the loop has no trials to match the odor bursts to
+    NO_TRIALS = 1 << 11  # the experiment has no trials to match the odor bursts to
 
 
 class TrialPhase(IntEnum):
@@ -186,20 +186,20 @@ class Database(CallRecorder):
     ```python
         db.groups             # `List` of `Group`s for processing/analysis
 
-        db.mice               # `DataFrame` per table: mice, sessions, loops,
-        db.loops              #   grabs, zstacks, acquisitions, streams,
+        db.mice               # `DataFrame` per table: mice, sessions,
+        db.experiments        #   experiments, grabs, zstacks, acquisitions, streams,
         db.acquisitions       #   sync_blocks, programs, trials, events, odors,
-        db.annotations        #   panels, vials, vial_odors, loop_vials,
+        db.annotations        #   panels, vials, vial_odors, experiment_vials,
         db.method_calls       #   annotation_keys, annotations, method_calls,
                               #   outputs, users, mcor_files
     ```
 
     **RELEVANT METHODS**
     ```python
-        db.add_loop(...)                # Add a loop folder to a session
+        db.add_experiment(...)          # Add an experiment folder to a session
         db.add_grabs(...)               # ... or its grabs, or its z-stacks
         db.add_annotations(...)         # Record facts about a row
-        db.annotations_for("loop")      # One column per annotation key
+        db.annotations_for("experiment")  # One column per annotation key
         db.latest_calls(method_name)    # `DataFrame` with `method_name` calls
         db.from_query(sql)              # `DataFrame` from a SQL `SELECT`
     ```
@@ -226,7 +226,7 @@ class Database(CallRecorder):
 
         **ALERT**
         Projects do not see each other. Two of them can hold the same
-        loop and neither will know, so use one when work should be kept
+        experiment and neither will know, so use one when work should be kept
         apart, not to split work that has to be compared later.
         """
         # Resolved so that every path built from it is absolute and symlink
@@ -439,14 +439,14 @@ class Database(CallRecorder):
         return self._table(SESSIONS)
 
     @property
-    def loops(self) -> pd.DataFrame:
-        """`DataFrame` with loop metadata"""
-        return self._table(LOOPS)
+    def experiments(self) -> pd.DataFrame:
+        """`DataFrame` with experiment metadata"""
+        return self._table(EXPERIMENTS)
 
     @property
-    def group_loops(self) -> pd.DataFrame:
-        """`DataFrame` with both group and loop data"""
-        return self._table(GROUP_LOOPS)
+    def group_experiments(self) -> pd.DataFrame:
+        """`DataFrame` with both group and experiment data"""
+        return self._table(GROUP_EXPERIMENTS)
 
     @property
     def grabs(self) -> pd.DataFrame:
@@ -469,7 +469,7 @@ class Database(CallRecorder):
         `DataFrame` with acquisition metadata
 
         The `sync_*` columns come from the processed sync file and are empty
-        until `process_sync` has run for the loop.
+        until `process_sync` has run for the experiment.
         """
         return self._table(ACQUISITIONS)
 
@@ -550,9 +550,9 @@ class Database(CallRecorder):
         return self._table(VIAL_ODORS)
 
     @property
-    def loop_vials(self) -> pd.DataFrame:
-        """`DataFrame` with which vials each loop ran"""
-        return self._table(LOOP_VIALS)
+    def experiment_vials(self) -> pd.DataFrame:
+        """`DataFrame` with which vials each experiment ran"""
+        return self._table(EXPERIMENT_VIALS)
 
     @property
     def annotation_keys(self) -> pd.DataFrame:
@@ -598,12 +598,14 @@ class Database(CallRecorder):
 
     def annotations_for(self, target_type: str) -> pd.DataFrame:
         """
-        One row per annotated `session`/`loop`/`grab`/... , one column per key.
+        One row per annotated `session`/`experiment`/`grab`/... , one column per
+        key.
 
         **EXAMPLE**
         ```python
-        superficial = db.annotations_for("loop").query("depth_goal == 'superficial'")
-        db.loops.join(superficial, how="inner")
+        annotations = db.annotations_for("experiment")
+        superficial = annotations.query("depth_goal == 'superficial'")
+        db.experiments.join(superficial, how="inner")
         ```
 
         Every key holds one value, so each column is a plain number, string or
@@ -724,22 +726,23 @@ class Database(CallRecorder):
 
         return None if row is None else int(row["session_id"])
 
-    def loop_for(self, session_id: int, loop_number: int) -> None | int:
+    def experiment_for(self, session_id: int, exp_number: int) -> None | int:
         """
-        The `loop_id` of a session's loop by number (`eN`), or `None`.
+        The `exp_id` of a session's experiment by number (`eN`), or `None`.
 
         **EXAMPLE**
         ```python
-        db.loop_for(db.session_for("m442", "2026-07-08"), 2)
+        db.experiment_for(db.session_for("m442", "2026-07-08"), 2)
         ```
         """
         with self._locked() as con:
             row = con.execute(
-                "SELECT loop_id FROM loops WHERE session_id = ? AND loop_number = ?;",
-                [int(session_id), int(loop_number)],
+                "SELECT exp_id FROM experiments "
+                "WHERE session_id = ? AND exp_number = ?;",
+                [int(session_id), int(exp_number)],
             ).fetchone()
 
-        return None if row is None else int(row["loop_id"])
+        return None if row is None else int(row["exp_id"])
 
     # ----------------------------------------------------------------------- #
     # Private Methods
@@ -794,31 +797,32 @@ class Database(CallRecorder):
     # Database Queries
     # ----------------------------------------------------------------------- #
 
-    def add_group(self, loop_ids: list[int]) -> Group:
+    def add_group(self, exp_ids: list[int]) -> Group:
         """
-        Add a group with the loops listed and return it.
+        Add a group with the experiments listed and return it.
 
         **EXAMPLE**
         ```python
         group = db.add_group([3, 10, 12])
         ```
 
-        Every loop already has a group of its own; this makes one that
-        processes several together (a field of view imaged in several loops).
-        An existing group with exactly these loops is returned instead.
+        Every experiment already has a group of its own; this creates one that
+        processes several together (a field of view imaged in several
+        experiments). An existing group with exactly these experiments is
+        returned instead.
         """
-        missing = set(int(i) for i in loop_ids) - set(self.loops.index)
+        missing = set(int(i) for i in exp_ids) - set(self.experiments.index)
 
         if missing:
-            raise ValueError(f"No loops with ids: {sorted(missing)}")
+            raise ValueError(f"No experiments with ids: {sorted(missing)}")
 
-        target = frozenset(int(i) for i in loop_ids)
+        target = frozenset(int(i) for i in exp_ids)
 
-        # Check if there is a group with exactly those loops
+        # Check if there is a group with exactly those experiments
         members: dict[int, set[int]] = {}
 
-        for group_id, loop_id in self.group_loops["loop_id"].items():
-            members.setdefault(group_id, set()).add(int(loop_id))
+        for group_id, exp_id in self.group_experiments["exp_id"].items():
+            members.setdefault(group_id, set()).add(int(exp_id))
 
         for group_id, member_ids in members.items():
             if member_ids == set(target):
@@ -832,8 +836,8 @@ class Database(CallRecorder):
             group_id = cur.lastrowid
 
             cur.executemany(
-                "INSERT INTO group_loops (group_id, loop_id) VALUES (?, ?);",
-                [(group_id, loop_id) for loop_id in target],
+                "INSERT INTO group_experiments (group_id, exp_id) VALUES (?, ?);",
+                [(group_id, exp_id) for exp_id in target],
             )
 
         assert group_id is not None
@@ -852,7 +856,7 @@ class Database(CallRecorder):
 
         **EXAMPLE**
         ```python
-        db.from_query("SELECT loop_id, loop_path FROM loops;")
+        db.from_query("SELECT exp_id, exp_path FROM experiments;")
         ```
         """
         with self._locked() as con:
@@ -1232,7 +1236,7 @@ class Database(CallRecorder):
         Correct what is recorded about an odor. Only what is passed changes.
 
         The number, the name and what a mix is made of never change. The
-        number is the olfactometer's, and the trials, vials and loop
+        number is the olfactometer's, and the trials, vials and experiment
         ingestion go by the number and name together. A wrong one is a new
         odor. `retired=True` takes the odor out of the dropdown menus.
         """
@@ -1391,7 +1395,7 @@ class Database(CallRecorder):
         defaults to today, since vials are usually recorded as they are made
 
         Remaking vials is a new call, for some of the panel's positions or all
-        of them. A vial a loop has used is never edited, so what was in
+        of them. A vial an experiment has used is never edited, so what was in
         the olfactometer stays on record.
         """
         day = _date_string(datetime.now() if made_on is None else made_on)
@@ -1433,13 +1437,13 @@ class Database(CallRecorder):
         return vial_ids
 
     @record_call
-    def set_loop_vials(self, *, loop_id: int, vial_ids: list[int]) -> None:
+    def set_experiment_vials(self, *, exp_id: int, vial_ids: list[int]) -> None:
         """
-        Record which vials were in the olfactometer for a loop.
+        Record which vials were in the olfactometer for an experiment.
 
         **USAGE**
         ```python
-        db.set_loop_vials(loop_id=12, vial_ids=[1, 2, 3, 4])
+        db.set_experiment_vials(exp_id=12, vial_ids=[1, 2, 3, 4])
         ```
 
         Replaces the whole set: a rack is only true as a whole. The vials must
@@ -1460,19 +1464,19 @@ class Database(CallRecorder):
                 raise ValueError(f"No vials with ids {sorted(missing)}.")
 
             if len({row["panel_id"] for row in rows}) > 1:
-                raise ValueError("A loop runs vials from one panel only.")
+                raise ValueError("An experiment runs vials from one panel only.")
 
             positions = [row["vial_position"] for row in rows]
             if len(positions) != len(set(positions)):
                 raise ValueError("Two of these vials sit in the same position.")
 
-            cur.execute("DELETE FROM loop_vials WHERE loop_id = ?;", [int(loop_id)])
+            cur.execute("DELETE FROM experiment_vials WHERE exp_id = ?;", [int(exp_id)])
             cur.executemany(
-                "INSERT INTO loop_vials (loop_id, vial_id) VALUES (?, ?);",
-                [(int(loop_id), vial_id) for vial_id in ids],
+                "INSERT INTO experiment_vials (exp_id, vial_id) VALUES (?, ?);",
+                [(int(exp_id), vial_id) for vial_id in ids],
             )
 
-        logger.info(f"Loop {loop_id} ran vials {ids}. {CHECK}")
+        logger.info(f"Experiment {exp_id} ran vials {ids}. {CHECK}")
 
     # ----------------------------------------------------------------------- #
     # Annotations
@@ -1483,11 +1487,11 @@ class Database(CallRecorder):
         self, *, target_type: str, target_id: int, values: dict[str, Value]
     ) -> None:
         """
-        Record things about a loop, session, mouse, program, etc.
+        Record things about an experiment, session, mouse, program, etc.
 
         **PARAMETERS**
         - `target_type` is what this is about: `'mouse'`, `'session'`,
-        `'loop'`, `'grab'`, `'zstack'`, `'program'`, `'acquisition'` or
+        `'experiment'`, `'grab'`, `'zstack'`, `'program'`, `'acquisition'` or
         `'group'`.
         - `target_id` is that row's id (on the target_type table)
         - `values` maps keys from `db.annotation_keys` to their values, which
@@ -1497,7 +1501,7 @@ class Database(CallRecorder):
         **EXAMPLE**
         ```python
         db.add_annotations(
-            target_type="loop",
+            target_type="experiment",
             target_id=12,
             values={
                 "z_landmark": "surface of right bulb",
@@ -1549,7 +1553,7 @@ class Database(CallRecorder):
         Register something new that can be annotated in this project.
 
         **PARAMETERS**
-        - `applies_to` is `'mouse'`, `'session'`, `'loop'`, `'grab'`,
+        - `applies_to` is `'mouse'`, `'session'`, `'experiment'`, `'grab'`,
         `'zstack'`, `'program'`, `'acquisition'` or `'group'`
         - `key` is what `add_annotations` will be called with
         - `value_type` is `'text'`, `'long_text'`, `'integer'`, `'real'`,
@@ -1563,7 +1567,7 @@ class Database(CallRecorder):
         **EXAMPLE**
         ```python
         db.add_annotation_key(
-            applies_to="loop",
+            applies_to="experiment",
             key="uses_odor_batch",
             label="Odor batch used",
             value_type="text",
@@ -1615,7 +1619,7 @@ class Database(CallRecorder):
         **USAGE**
         ```python
         db.update_annotation_key(
-            applies_to="loop",
+            applies_to="experiment",
             key="depth_class",
             add_values=["intermediate"],
         )
@@ -1672,9 +1676,9 @@ class Database(CallRecorder):
 
         **USAGE**
         ```python
-        db.retire_annotation_key(applies_to="loop", key="cohort")
+        db.retire_annotation_key(applies_to="experiment", key="cohort")
         db.retire_annotation_key(
-            applies_to="loop",
+            applies_to="experiment",
             key="cohort",
             retired=False,
         )
@@ -1712,61 +1716,61 @@ class Database(CallRecorder):
     # ----------------------------------------------------------------------- #
 
     @record_call
-    def add_loop(
+    def add_experiment(
         self,
         *,
         session_id: int,
-        loop_path: str,
+        exp_path: str,
         objective: int,
-        loop_number: None | int = None,
+        exp_number: None | int = None,
         rel_raw_paths: None | list[str] = None,
     ) -> None | int:
         """
-        Add a loop folder to a session. Returns its `loop_id`.
+        Add an experiment folder to a session. Returns its `exp_id`.
 
         **PARAMETERS**
-        - `session_id` is the session (mouse and day) the loop belongs to
-        - `loop_path` is the loop folder, relative to the `main_folder`
+        - `session_id` is the session (mouse and day) the experiment belongs to
+        - `exp_path` is the experiment folder, relative to the `main_folder`
         - `objective` is the objective it was imaged through (10, 20, ...)
-        - `loop_number` is the loop's number in the session. Left out, it is
+        - `exp_number` is the experiment's number in the session. Left out, it is
         the N of a folder named `eN`
         - `rel_raw_paths` is the raw files list (if None it searches the raw folder)
 
         **EXAMPLE**
         ```python
-        db.add_loop(session_id=3, loop_path="20260623/m462/e2", objective=20)
+        db.add_experiment(session_id=3, exp_path="20260623/m462/e2", objective=20)
         ```
 
         Reads the TIFFs, the olfactometer event files and the program
-        definitions in `<loop_path>/olfactometer/`, and inserts the loop, its
+        definitions in `<exp_path>/olfactometer/`, and inserts the experiment, its
         acquisitions, programs, trials and events in one transaction. The
         sync file is processed separately (`process_sync`).
 
-        Returns `None` when nothing was added: the loop was already in
+        Returns `None` when nothing was added: the experiment was already in
         the database, or the files did not pass the checks (see the log).
         """
-        logger.info("Adding a loop to the database...")
+        logger.info("Adding an experiment to the database...")
         scale = self._um_scale(objective)
 
-        if loop_number is None:
-            match = re.fullmatch(r"e(\d+)", Path(loop_path).name)
+        if exp_number is None:
+            match = re.fullmatch(r"e(\d+)", Path(exp_path).name)
 
             if match is None:
                 raise ValueError(
-                    f"'{Path(loop_path).name}' is not named eN: give `loop_number`."
+                    f"'{Path(exp_path).name}' is not named eN: give `exp_number`."
                 )
 
-            loop_number = int(match.group(1))
+            exp_number = int(match.group(1))
 
         folder, session, tiffs = self._recordings_folder(
-            session_id, loop_path, rel_raw_paths
+            session_id, exp_path, rel_raw_paths
         )
 
         # ----------------------------------------------------------------- #
         # Phase 1: Load
         # ----------------------------------------------------------------- #
 
-        loop: None | Object = None
+        experiment: None | Object = None
         acquisitions: list[Object] = []
         checks_failed = 0
 
@@ -1778,10 +1782,10 @@ class Database(CallRecorder):
 
             recording, acquisition = read
 
-            if loop is None:
-                loop = recording
+            if experiment is None:
+                experiment = recording
 
-            elif recording != loop:
+            elif recording != experiment:
                 checks_failed += 1
                 logger.warning(
                     f"'{path.relative_to(self.main_folder)}' metadata"
@@ -1796,25 +1800,26 @@ class Database(CallRecorder):
                 f"folder. {CROSS}"
             )
             logger.info("Are there multiple loops in the same folder?")
-            logger.error("The loop will not be added to the DB.")
+            logger.error("The experiment will not be added to the DB.")
             self.add_flag(IngestFlag.METADATA_CHANGED)
             return None
 
-        if loop is None:
+        if experiment is None:
             logger.error(f"No loop TIFF with the expected metadata found. {CROSS}")
             return None
 
-        if loop["stack"] is not None:
+        if experiment["stack"] is not None:
             self.fail(
                 IngestFlag.STACK_LOOP,
-                f"'{loop_path}' is a z-stack loop with {loop['stack']['slice_count']} "
-                "slices (odyn cannot process it yet).",
+                f"'{exp_path}' is a z-stack loop with "
+                f"{experiment['stack']['slice_count']} slices (odyn cannot process "
+                "it yet).",
             )
 
         # The session is given, not read off the files; but the file names say
         # which mouse and day ScanImage was told, and a disagreement means the
         # folder is not what the caller thinks it is.
-        _check_session(loop, session, self)
+        _check_session(experiment, session, self)
 
         logger.info(f"Passed all TIFF metadata checks! {CHECK}")
 
@@ -1824,40 +1829,40 @@ class Database(CallRecorder):
         # Phase 2: Insert
         # ----------------------------------------------------------------- #
 
-        rig_settings = {key: loop[key] for key in RIG_ANNOTATIONS}
-        loop_start = _dt_string(loop["start"])
+        rig_settings = {key: experiment[key] for key in RIG_ANNOTATIONS}
+        exp_start = _dt_string(experiment["start"])
 
         with self._writing() as cur:
             exists = cur.execute(
-                "SELECT EXISTS(SELECT 1 FROM loops WHERE loop_start = ?);",
-                [loop_start],
+                "SELECT EXISTS(SELECT 1 FROM experiments WHERE exp_start = ?);",
+                [exp_start],
             ).fetchone()[0]
 
             if exists:
-                logger.info(f"'{loop_path}' already in DB.")
+                logger.info(f"'{exp_path}' already in DB.")
                 self.add_flag(IngestFlag.ALREADY_IN_DB)
                 return None
 
-            loop_id = _db_insert(
+            exp_id = _db_insert(
                 cur,
-                "loops",
+                "experiments",
                 {
-                    **_contract(loop, scale),
+                    **_contract(experiment, scale),
                     "session_id": session_id,
-                    "loop_number": int(loop_number),
-                    "loop_path": folder.resolve()
+                    "exp_number": int(exp_number),
+                    "exp_path": folder.resolve()
                     .relative_to(self.main_folder)
                     .as_posix(),
-                    "loop_start": loop_start,
+                    "exp_start": exp_start,
                     "objective": int(objective),
                 },
             )
 
-            # Every loop starts as a group of its own
+            # Every experiment starts as a group of its own
             cur.execute("INSERT INTO groups DEFAULT VALUES;")
             cur.execute(
-                "INSERT INTO group_loops (group_id, loop_id) VALUES (?, ?);",
-                [cur.lastrowid, loop_id],
+                "INSERT INTO group_experiments (group_id, exp_id) VALUES (?, ?);",
+                [cur.lastrowid, exp_id],
             )
 
             for acquisition in acquisitions:
@@ -1866,7 +1871,7 @@ class Database(CallRecorder):
                     "acquisitions",
                     {
                         **acquisition,
-                        "loop_id": loop_id,
+                        "exp_id": exp_id,
                         "acq_start": _dt_string(acquisition["acq_start"]),
                     },
                 )
@@ -1874,20 +1879,20 @@ class Database(CallRecorder):
             for key, value in rig_settings.items():
                 _db_annotate(
                     cur,
-                    target_type="loop",
-                    target_id=loop_id,
+                    target_type="experiment",
+                    target_id=exp_id,
                     key=key,
                     value=value,
                     method_call_id=self.current_call_id,
                 )
 
             for program_data in programs_data:
-                _insert_program(cur, loop_id, program_data)
+                _insert_program(cur, exp_id, program_data)
 
-        self.set_output({"loop_ids": [loop_id]})
-        logger.info(f"Added '{loop_path}' (loop_id = {loop_id}). {CHECK}")
+        self.set_output({"exp_ids": [exp_id]})
+        logger.info(f"Added '{exp_path}' (exp_id = {exp_id}). {CHECK}")
 
-        return loop_id
+        return exp_id
 
     @record_call
     def add_grabs(
@@ -1943,22 +1948,22 @@ class Database(CallRecorder):
 
         The stack (slices, step, z range) is read from each TIFF, and the laser
         power at its shallowest and deepest slices stored as annotations. Files
-        already in the database are skipped. Which loop a z-stack was taken for
-        is set with `set_zstack_loop`.
+        already in the database are skipped. Which experiment a z-stack was taken for
+        is set with `set_zstack_experiment`.
         """
         return self._add_singles("zstack", session_id, folder, objective, rel_raw_paths)
 
     @record_call
-    def set_zstack_loop(self, *, zstack_id: int, loop_id: None | int) -> None:
+    def set_zstack_experiment(self, *, zstack_id: int, exp_id: None | int) -> None:
         """
-        Say which loop a z-stack was taken for (`None`: none).
+        Say which experiment a z-stack was taken for (`None`: none).
 
         **EXAMPLE**
         ```python
-        db.set_zstack_loop(zstack_id=4, loop_id=12)
+        db.set_zstack_experiment(zstack_id=4, exp_id=12)
         ```
 
-        The loop must be from the z-stack's session.
+        The experiment must be from the z-stack's session.
         """
         with self._writing() as cur:
             row = cur.execute(
@@ -1968,26 +1973,29 @@ class Database(CallRecorder):
             if row is None:
                 raise ValueError(f"There is no z-stack {zstack_id}.")
 
-            if loop_id is not None:
-                loop = cur.execute(
-                    "SELECT session_id FROM loops WHERE loop_id = ?;", [int(loop_id)]
+            if exp_id is not None:
+                experiment = cur.execute(
+                    "SELECT session_id FROM experiments WHERE exp_id = ?;",
+                    [int(exp_id)],
                 ).fetchone()
 
-                if loop is None:
-                    raise ValueError(f"There is no loop {loop_id}.")
+                if experiment is None:
+                    raise ValueError(f"There is no experiment {exp_id}.")
 
-                if loop["session_id"] != row["session_id"]:
+                if experiment["session_id"] != row["session_id"]:
                     raise ValueError(
-                        f"Loop {loop_id} is not from the same session as z-stack "
+                        f"Experiment {exp_id} is not from the same session as z-stack "
                         f"{zstack_id}."
                     )
 
             cur.execute(
-                "UPDATE zstacks SET loop_id = ? WHERE zstack_id = ?;",
-                [None if loop_id is None else int(loop_id), int(zstack_id)],
+                "UPDATE zstacks SET exp_id = ? WHERE zstack_id = ?;",
+                [None if exp_id is None else int(exp_id), int(zstack_id)],
             )
 
-        logger.info(f"Z-stack {zstack_id} is associated with loop {loop_id}. {CHECK}")
+        logger.info(
+            f"Z-stack {zstack_id} is associated with experiment {exp_id}. {CHECK}"
+        )
 
     def _recordings_folder(
         self, session_id: int, folder_path: str, rel_raw_paths: None | list[str]
@@ -2156,54 +2164,54 @@ class Database(CallRecorder):
     def process_sync(
         self,
         *,
-        loop_id: int,
+        exp_id: int,
         sync_path: None | str = None,
         max_skew_s: float = 5.0,
     ) -> None:
         """
-        Process a loop's sync file into `streams` and `sync_blocks`.
+        Process an experiment's sync file into `streams` and `sync_blocks`.
 
         **PARAMETERS**
-        - `loop_id` is the loop the file was recorded for
+        - `exp_id` is the experiment the file was recorded for
         - `sync_path` is the H5 file, relative to the `main_folder`. Left out,
-        it is the one file in `<loop>/sync/`
+        it is the one file in `<experiment>/sync/`
         - `max_skew_s` is how far the ScanImage and olfactometer clocks may
         disagree before the call is flagged (the match itself is by order, so
         this is a sanity check, not a tolerance)
 
         **EXAMPLE**
         ```python
-        db.process_sync(loop_id=12)
+        db.process_sync(exp_id=12)
         ```
 
-        Frame-clock bursts are matched to the loop's acquisitions in
+        Frame-clock bursts are matched to the experiment's acquisitions in
         order, and the bursts with an odor pulse to its trials in order, which
         fills `trials.acq_id`. Running it again replaces what the earlier run
         wrote, so a sync file copied late or a corrected one is not a problem.
         """
         with self._locked() as con:
-            loop = con.execute(
-                "SELECT session_id, loop_path, frames_per_slice FROM loops "
-                "WHERE loop_id = ?;",
-                [int(loop_id)],
+            experiment = con.execute(
+                "SELECT session_id, exp_path, frames_per_slice FROM experiments "
+                "WHERE exp_id = ?;",
+                [int(exp_id)],
             ).fetchone()
 
-            if loop is None:
-                raise ValueError(f"There is no loop {loop_id}.")
+            if experiment is None:
+                raise ValueError(f"There is no experiment {exp_id}.")
 
             acquisitions = con.execute(
                 "SELECT acq_id, acq_start FROM acquisitions "
-                "WHERE loop_id = ? ORDER BY acq_start;",
-                [int(loop_id)],
+                "WHERE exp_id = ? ORDER BY acq_start;",
+                [int(exp_id)],
             ).fetchall()
 
             trials = con.execute(
                 "SELECT trial_id, trial_odor_start FROM trials "
-                "WHERE loop_id = ? ORDER BY trial_start;",
-                [int(loop_id)],
+                "WHERE exp_id = ? ORDER BY trial_start;",
+                [int(exp_id)],
             ).fetchall()
 
-        path = self._sync_file(loop["loop_path"], sync_path)
+        path = self._sync_file(experiment["exp_path"], sync_path)
         rel_path = path.relative_to(self.main_folder).as_posix()
 
         logger.info(f"Processing '{rel_path}'")
@@ -2211,7 +2219,7 @@ class Database(CallRecorder):
         # Read without the lock: a file is hundreds of megabytes
         decoded = decode(path)
 
-        self._check_sync(decoded, acquisitions, trials, loop["frames_per_slice"])
+        self._check_sync(decoded, acquisitions, trials, experiment["frames_per_slice"])
 
         blocks = decoded.blocks
         acq_ids = [row["acq_id"] for row in acquisitions]
@@ -2262,15 +2270,15 @@ class Database(CallRecorder):
         with self._writing() as cur:
             # Replaced as a whole: the rows of one file are one call
             cur.execute(
-                "DELETE FROM streams WHERE loop_id = ? AND stream_type = 'sync';",
-                [int(loop_id)],
+                "DELETE FROM streams WHERE exp_id = ? AND stream_type = 'sync';",
+                [int(exp_id)],
             )
             cur.execute(
-                "UPDATE trials SET acq_id = NULL WHERE loop_id = ?;", [int(loop_id)]
+                "UPDATE trials SET acq_id = NULL WHERE exp_id = ?;", [int(exp_id)]
             )
 
             stream_id = self._insert_stream(
-                cur, decoded, rel_path, loop["session_id"], int(loop_id)
+                cur, decoded, rel_path, experiment["session_id"], int(exp_id)
             )
             self._insert_blocks(
                 cur,
@@ -2436,7 +2444,7 @@ class Database(CallRecorder):
         decoded: DecodedSync,
         rel_path: str,
         session_id: int,
-        loop_id: None | int,
+        exp_id: None | int,
     ) -> int:
         header = decoded.header
 
@@ -2445,7 +2453,7 @@ class Database(CallRecorder):
             "streams",
             {
                 "session_id": session_id,
-                "loop_id": loop_id,
+                "exp_id": exp_id,
                 "stream_type": "sync",
                 "file_path": rel_path,
                 "rate_hz": header.rate_hz,
@@ -2543,7 +2551,7 @@ class Database(CallRecorder):
         if len(blocks) != len(acquisitions):
             self.fail(
                 SyncFlag.BLOCK_COUNT_MISMATCH,
-                f"The sync file has {len(blocks)} frame bursts but the loop "
+                f"The sync file has {len(blocks)} frame bursts but the experiment "
                 f"has {len(acquisitions)} acquisitions, so they cannot be matched "
                 "by order.",
             )
@@ -2561,14 +2569,14 @@ class Database(CallRecorder):
         if not trials:
             self.add_flag(SyncFlag.NO_TRIALS)
             logger.warning(
-                "The loop has no trials (no olfactometer Events file was "
+                "The experiment has no trials (no olfactometer Events file was "
                 "processed), so the odor bursts are stored without matches."
             )
 
         elif with_odor != len(trials):
             self.fail(
                 SyncFlag.TRIAL_COUNT_MISMATCH,
-                f"{with_odor} bursts have an odor pulse but the loop has "
+                f"{with_odor} bursts have an odor pulse but the experiment has "
                 f"{len(trials)} trials, so they cannot be matched by order.",
             )
 
@@ -2588,7 +2596,7 @@ class Database(CallRecorder):
             logger.warning(f"No camera strobes during bursts {no_camera} (no pupil).")
 
     def _load_programs(self, folder: Path) -> list[dict]:
-        """Parse the olfactometer event files of a loop folder."""
+        """Parse the olfactometer event files of an experiment folder."""
         event_files = sorted(
             folder.rglob("[!.]?*Events.csv"), key=lambda x: x.stat().st_mtime
         )
@@ -2886,7 +2894,7 @@ def _check_session(recording: Object, session: sqlite3.Row, db: Database) -> Non
         )
 
 
-def _insert_program(cur: Cursor, loop_id: int, program_data: dict) -> int:
+def _insert_program(cur: Cursor, exp_id: int, program_data: dict) -> int:
     """Insert one program with its trials and events."""
     metadata = program_data["metadata"]
     assert isinstance(metadata["program_start"], datetime)
@@ -2896,7 +2904,7 @@ def _insert_program(cur: Cursor, loop_id: int, program_data: dict) -> int:
         "programs",
         {
             **metadata,
-            "loop_id": loop_id,
+            "exp_id": exp_id,
             "program_start": metadata["program_start"].strftime(DT_FORMAT),
         },
     )
@@ -2916,7 +2924,7 @@ def _insert_program(cur: Cursor, loop_id: int, program_data: dict) -> int:
                 "outcome": trial["outcome"],
                 "acq_id": None,
                 "program_id": program_id,
-                "loop_id": loop_id,
+                "exp_id": exp_id,
             },
         )
 
@@ -2934,7 +2942,7 @@ def _insert_program(cur: Cursor, loop_id: int, program_data: dict) -> int:
 def _program_configs(folder: Path) -> dict[str, str]:
     """
     The program definitions in the olfactometer's `Program.config`, copied
-    into `folder` (a loop's `olfactometer/config`), keyed by program name as
+    into `folder` (an experiment's `olfactometer/config`), keyed by program name as
     JSON text ready to store.
 
     The file is a tree of folders and programs. A name used by programs that
@@ -3438,7 +3446,7 @@ def _load_event_data(
     Parse all event files into structured program/trial/event dicts.
 
     Returns a list of program dicts, each containing:
-        "metadata": fields for the programs table (no loop_id yet)
+        "metadata": fields for the programs table (no exp_id yet)
         "trials":   list of trial dicts (no events key)
         "events":   list of (trial_idx, event_record) in timeline order.
                     trial_idx is the index into "trials" for that event's trial,
@@ -3506,7 +3514,7 @@ def _load_event_data(
 
                 except ValueError as e:
                     logger.error(f"Unexpected event: {event_name}")
-                    logger.error("The loop will not be added to the DB.")
+                    logger.error("The experiment will not be added to the DB.")
                     raise e
 
                 current_trial_idx = len(trials)
@@ -3621,17 +3629,17 @@ def _parse_event_file(path: Path, program_start: datetime) -> pd.DataFrame:
 
 
 def _parse_program_starts(
-    db: Database, start: datetime, loop_folder: Path
+    db: Database, start: datetime, exp_folder: Path
 ) -> list[tuple[datetime, str]]:
     """
     The programs started on `start`'s day from `start` on (1 s earlier, for
     rounding), read from the olfactometer's log for that day. That is the
-    copy in the loop's `olfactometer/log/`, or else the one in the main
-    folder's `.odyn/olfactometer/Log/Info/` (where older loops left it).
+    copy in the experiment's `olfactometer/log/`, or else the one in the main
+    folder's `.odyn/olfactometer/Log/Info/` (where older experiments left it).
     """
     name = f"Program_{start.date().strftime('%Y%m%d')}.txt"
     candidates = [
-        loop_folder / OLFACTOMETER_FOLDER / "log" / name,
+        exp_folder / OLFACTOMETER_FOLDER / "log" / name,
         db.main_folder / INFO_FOLDER / start.date().strftime("%Y%m") / name,
     ]
     log_path = next((path for path in candidates if path.is_file()), None)
@@ -3639,7 +3647,7 @@ def _parse_program_starts(
     if log_path is None:
         raise FileNotFoundError(
             f"No olfactometer log for {start.date()} ({name} in "
-            f"'{loop_folder.name}/{OLFACTOMETER_FOLDER}/log' or "
+            f"'{exp_folder.name}/{OLFACTOMETER_FOLDER}/log' or "
             f"'{INFO_FOLDER}/{start.date():%Y%m}')."
         )
 

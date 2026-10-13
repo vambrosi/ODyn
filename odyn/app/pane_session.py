@@ -294,9 +294,9 @@ class LoopForm(QWidget):
 
     def refresh_status(self) -> None:
         entry = self.draft.part(self.name) or {}
-        loop_id = entry.get("submitted_id")
+        exp_id = entry.get("submitted_id")
         self.submitted.setText(
-            "" if loop_id is None else f"Already in the database as loop_id {loop_id}"
+            "" if exp_id is None else f"Already in the database as exp_id {exp_id}"
         )
 
     def _set(self, **fields) -> None:
@@ -813,7 +813,7 @@ class Sessions(QObject):
 
             return (
                 form_fields(db, "session"),
-                (form_fields(db, "loop"), conditions),
+                (form_fields(db, "experiment"), conditions),
                 {kind: form_fields(db, kind) for kind in FOLDER_OF},
                 [int(m) for m in db.mice.index],
                 (panels, current_vials(vials)),

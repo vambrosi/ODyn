@@ -820,8 +820,8 @@ def test_qc_asks_the_cluster_to_process_a_sync_file_again(window, tmp_path):
     db = Database(main, user="tester")
     db.set_mouse(mouse_id=1)
     session_id = db.add_session(mouse_id=1, session_date="2026-03-04")
-    loop_id = db.add_loop(
-        session_id=session_id, loop_path="20260304/m1/e1", objective=20
+    exp_id = db.add_experiment(
+        session_id=session_id, exp_path="20260304/m1/e1", objective=20
     )
 
     window.context.set_user("tester")
@@ -836,7 +836,7 @@ def test_qc_asks_the_cluster_to_process_a_sync_file_again(window, tmp_path):
 
     [request] = pending_requests(main)
     sent = json.loads(request.read_text())
-    assert sent["method"] == "process_sync" and sent["kwargs"] == {"loop_id": loop_id}
+    assert sent["method"] == "process_sync" and sent["kwargs"] == {"exp_id": exp_id}
     assert sent["user"] == "tester"
 
 
@@ -853,28 +853,31 @@ def test_qc_lists_every_kind_of_recording_this_user_submitted(tmp_path):
     db = Database(tmp_path, can_create=True, user="ana")
     db.set_mouse(mouse_id=1)
     session_id = db.add_session(mouse_id=1, session_date="2026-03-04")
-    loop_id = db.add_loop(
-        session_id=session_id, loop_path="20260304/m1/e1", objective=20
+    exp_id = db.add_experiment(
+        session_id=session_id, exp_path="20260304/m1/e1", objective=20
     )
     (grab_id,) = db.add_grabs(
         session_id=session_id, folder="20260304/m1/grabs", objective=10
     )
 
     mine = my_recordings(db, "ana")
-    assert list(mine.index) == [("grab", grab_id), ("loop", loop_id)]  # newest first
+    assert list(mine.index) == [
+        ("grab", grab_id),
+        ("experiment", exp_id),
+    ]  # newest first
     assert mine.loc[("grab", grab_id), "path"].endswith("_grabs_00001.tif")
-    assert mine.loc[("loop", loop_id), "path"] == "20260304/m1/e1"
+    assert mine.loc[("experiment", exp_id), "path"] == "20260304/m1/e1"
     assert set(mine["sync"]) == {"not processed"}
     assert my_recordings(db, "someone else").empty
 
     # A key made required afterwards asks for it on what is already in, in
     # the order of the submissions
-    db.update_annotation_key(applies_to="loop", key="goal", required=True)
+    db.update_annotation_key(applies_to="experiment", key="goal", required=True)
     db.update_annotation_key(applies_to="grab", key="goal", required=True)
     missing = my_missing(db, mine)
     assert list(zip(missing["target_type"], missing["target_id"])) == [
         ("grab", grab_id),
-        ("loop", loop_id),
+        ("experiment", exp_id),
     ]
 
 
@@ -888,7 +891,7 @@ def test_qc_says_when_the_cluster_last_ran(tmp_path):
     assert cluster_line(db) == ("The cluster has not run yet", "computed")
 
     tick(tmp_path)
-    send_request(tmp_path, "process_sync", loop_id=1)
+    send_request(tmp_path, "process_sync", exp_id=1)
     text, kind = cluster_line(db)
     assert text.startswith("The cluster last ran at") and kind == "computed"
     assert text.endswith("(0 min ago), 1 request waiting")
