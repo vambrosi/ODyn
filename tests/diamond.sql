@@ -11,15 +11,15 @@ INSERT INTO sessions (session_id, mouse_id, session_date) VALUES (1, 1, '2025-01
 INSERT INTO experiments
     ( session_id, exp_number, exp_path, exp_start
     , height_px, width_px, height_um, width_um
-    , frames_per_slice, frame_rate, objective
+    , frames_per_slice, frame_rate, objective, exp_type
     ) VALUES
         ( 1, 1, '20250101/m1/e1', '2025-01-01 00:00:00'
         , 100, 200, 300, 400
-        , 30, 60, 20
+        , 30, 60, 20, 'loop'
         ),
         ( 1, 2, '20250101/m1/e2', '2025-01-01 01:00:00'
         , 100, 200, 300, 400
-        , 30, 60, 20
+        , 30, 60, 20, 'loop'
         );
 
 -- acquisition on experiment 1 -> acq_id 1

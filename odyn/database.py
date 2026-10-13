@@ -30,7 +30,6 @@ from .utils import (
     CROSS,
     DB_TIMEOUT_S,
     EVENTS,
-    GRABS,
     GROUP_EXPERIMENTS,
     INFO_FOLDER,
     MCOR_FILES,
@@ -84,7 +83,7 @@ WHOLE_TOLERANCE = 0.01
 # dict as the columns so the across-TIFF consistency check still sees it.
 RIG_ANNOTATIONS = ("laser_power_920", "laser_power_1040", "loop_acq_interval_s")
 
-# The columns every recording table (experiments, grabs, z-stacks) takes from a TIFF
+# The columns every recording table (experiments, z-stacks) takes from a TIFF
 CONTRACT = (
     "height_px",
     "width_px",
@@ -94,6 +93,9 @@ CONTRACT = (
     "frame_rate",
     "z_um",
 )
+
+# What an experiment can be: what ScanImage was set to (`SI.acqState`)
+EXP_TYPES = ("loop", "grab")
 
 # Real microns per micron ScanImage writes, by objective. ScanImage computes
 # the field of view as if every recording were taken at 20x, so on 10x a real
@@ -107,8 +109,7 @@ OBJECTIVE_SCALE = {20: 1.0, 10: 100 / 45}
 # run, with its Events file)
 OLFACTOMETER_FOLDER = "olfactometer"
 
-# Where the sync H5 of an experiment lives, inside its folder (and of the
-# grabs, inside the grabs folder)
+# Where the sync H5 of an experiment lives, inside its folder
 SYNC_FOLDER = "sync"
 
 # TODO: Make program types part of the database
@@ -125,8 +126,8 @@ PROGRAM_TYPES = [
 
 class IngestFlag(IntFlag):
     """
-    call_flag bits for `Database.add_experiment`, `add_grabs` and `add_zstacks` (bit
-    0 reserved by `CallFlag.RAISED`).
+    call_flag bits for `Database.add_experiment` and `add_zstacks` (bit 0
+    reserved by `CallFlag.RAISED`).
     """
 
     ALREADY_IN_DB = 1 << 1  # recording already present, nothing inserted
@@ -136,23 +137,23 @@ class IngestFlag(IntFlag):
     WRONG_ACQ_STATE = 1 << 7  # a TIFF is not the kind asked for (loop/grab/z-stack)
     NO_PROGRAM_CONFIG = 1 << 8  # a program has no olfactometer definition
     STACK_LOOP = 1 << 9  # a loop of z-stacks, which cannot be processed yet
+    SPLIT_GRAB = 1 << 10  # a grab saved in several files, which cannot be added yet
 
 
 class SyncFlag(IntFlag):
     """
-    call_flag bits for `Database.process_sync` and `process_grabs_sync` (bit 0
-    reserved by `CallFlag.RAISED`).
+    call_flag bits for `Database.process_sync` (bit 0 reserved by
+    `CallFlag.RAISED`).
     """
 
     NO_SYNC_FILE = 1 << 1  # nothing to process in <experiment>/sync/
     MULTIPLE_SYNC_FILES = 1 << 2  # more than one H5 there and none was named
     INTERRUPTED = 1 << 3  # the recording was not stopped properly
     FRAGMENTS = 1 << 4  # short bursts were set aside
-    BLOCK_COUNT_MISMATCH = 1 << 5  # bursts and acquisitions (or grabs) do not pair up
+    BLOCK_COUNT_MISMATCH = 1 << 5  # bursts and acquisitions do not pair up
     TRIAL_COUNT_MISMATCH = 1 << 6  # odor bursts and trials do not pair up
-    ODOR_PULSES = (
-        1 << 7
-    )  # an experiment's burst without exactly one valve pulse, a grab's with any
+    # A loop's burst without exactly one valve pulse, or a grab's with any
+    ODOR_PULSES = 1 << 7
     CLOCK_SKEW = 1 << 8  # the two computers disagree beyond `max_skew_s`
     NO_CAMERA = 1 << 9  # an acquisition without camera strobes (no pupil)
     FRAME_COUNT = 1 << 10  # frames in a burst differ from the ScanImage setting
@@ -187,7 +188,7 @@ class Database(CallRecorder):
         db.groups             # `List` of `Group`s for processing/analysis
 
         db.mice               # `DataFrame` per table: mice, sessions,
-        db.experiments        #   experiments, grabs, zstacks, acquisitions, streams,
+        db.experiments        #   experiments, zstacks, acquisitions, streams,
         db.acquisitions       #   sync_blocks, programs, trials, events, odors,
         db.annotations        #   panels, vials, vial_odors, experiment_vials,
         db.method_calls       #   annotation_keys, annotations, method_calls,
@@ -197,7 +198,7 @@ class Database(CallRecorder):
     **RELEVANT METHODS**
     ```python
         db.add_experiment(...)          # Add an experiment folder to a session
-        db.add_grabs(...)               # ... or its grabs, or its z-stacks
+        db.add_zstacks(...)             # ... or its z-stacks
         db.add_annotations(...)         # Record facts about a row
         db.annotations_for("experiment")  # One column per annotation key
         db.latest_calls(method_name)    # `DataFrame` with `method_name` calls
@@ -449,16 +450,6 @@ class Database(CallRecorder):
         return self._table(GROUP_EXPERIMENTS)
 
     @property
-    def grabs(self) -> pd.DataFrame:
-        """
-        `DataFrame` with grab metadata
-
-        The `sync_*` columns come from the processed sync file and are empty
-        until `process_grabs_sync` has run for its recording.
-        """
-        return self._table(GRABS)
-
-    @property
     def zstacks(self) -> pd.DataFrame:
         """`DataFrame` with z-stack metadata"""
         return self._table(ZSTACKS)
@@ -598,7 +589,7 @@ class Database(CallRecorder):
 
     def annotations_for(self, target_type: str) -> pd.DataFrame:
         """
-        One row per annotated `session`/`experiment`/`grab`/... , one column per
+        One row per annotated `session`/`experiment`/`zstack`/... , one column per
         key.
 
         **EXAMPLE**
@@ -1491,7 +1482,7 @@ class Database(CallRecorder):
 
         **PARAMETERS**
         - `target_type` is what this is about: `'mouse'`, `'session'`,
-        `'experiment'`, `'grab'`, `'zstack'`, `'program'`, `'acquisition'` or
+        `'experiment'`, `'zstack'`, `'program'`, `'acquisition'` or
         `'group'`.
         - `target_id` is that row's id (on the target_type table)
         - `values` maps keys from `db.annotation_keys` to their values, which
@@ -1553,7 +1544,7 @@ class Database(CallRecorder):
         Register something new that can be annotated in this project.
 
         **PARAMETERS**
-        - `applies_to` is `'mouse'`, `'session'`, `'experiment'`, `'grab'`,
+        - `applies_to` is `'mouse'`, `'session'`, `'experiment'`,
         `'zstack'`, `'program'`, `'acquisition'` or `'group'`
         - `key` is what `add_annotations` will be called with
         - `value_type` is `'text'`, `'long_text'`, `'integer'`, `'real'`,
@@ -1722,6 +1713,7 @@ class Database(CallRecorder):
         session_id: int,
         exp_path: str,
         objective: int,
+        exp_type: str = "loop",
         exp_number: None | int = None,
         rel_raw_paths: None | list[str] = None,
     ) -> None | int:
@@ -1732,6 +1724,8 @@ class Database(CallRecorder):
         - `session_id` is the session (mouse and day) the experiment belongs to
         - `exp_path` is the experiment folder, relative to the `main_folder`
         - `objective` is the objective it was imaged through (10, 20, ...)
+        - `exp_type` is `"loop"` or `"grab"`, what ScanImage was set to (each
+        TIFF is checked against it)
         - `exp_number` is the experiment's number in the session. Left out, it is
         the N of a folder named `eN`
         - `rel_raw_paths` is the raw files list (if None it searches the raw folder)
@@ -1741,15 +1735,19 @@ class Database(CallRecorder):
         db.add_experiment(session_id=3, exp_path="20260623/m462/e2", objective=20)
         ```
 
-        Reads the TIFFs, the olfactometer event files and the program
-        definitions in `<exp_path>/olfactometer/`, and inserts the experiment, its
-        acquisitions, programs, trials and events in one transaction. The
-        sync file is processed separately (`process_sync`).
+        Reads the TIFFs and, for a loop, the olfactometer event files and the
+        program definitions in `<exp_path>/olfactometer/`, and inserts the
+        experiment, its acquisitions, programs, trials and events in one
+        transaction. A grab is one TIFF, one acquisition. The sync file is
+        processed separately (`process_sync`).
 
         Returns `None` when nothing was added: the experiment was already in
         the database, or the files did not pass the checks (see the log).
         """
-        logger.info("Adding an experiment to the database...")
+        if exp_type not in EXP_TYPES:
+            raise ValueError(f"exp_type must be one of {', '.join(EXP_TYPES)}.")
+
+        logger.info(f"Adding a {exp_type} to the database...")
         scale = self._um_scale(objective)
 
         if exp_number is None:
@@ -1775,7 +1773,7 @@ class Database(CallRecorder):
         checks_failed = 0
 
         for path in tqdm(tiffs, desc="Loading TIFF Metadata"):
-            read = self._read_kind(path, "loop")
+            read = self._read_kind(path, exp_type)
 
             if read is None:
                 continue
@@ -1799,13 +1797,15 @@ class Database(CallRecorder):
                 f"TIFF metadata changed {checks_failed} or more times in the raw "
                 f"folder. {CROSS}"
             )
-            logger.info("Are there multiple loops in the same folder?")
+            logger.info("Are there several loops or grabs in the same folder?")
             logger.error("The experiment will not be added to the DB.")
             self.add_flag(IngestFlag.METADATA_CHANGED)
             return None
 
         if experiment is None:
-            logger.error(f"No loop TIFF with the expected metadata found. {CROSS}")
+            logger.error(
+                f"No {exp_type} TIFF with the expected metadata found. {CROSS}"
+            )
             return None
 
         if experiment["stack"] is not None:
@@ -1816,6 +1816,21 @@ class Database(CallRecorder):
                 "it yet).",
             )
 
+        # Several grabs in one folder have different starts, so they are refused
+        # above. Several TIFFs of one start are a grab ScanImage split into
+        # files ("frames per file"), never done in the lab so far. To add one:
+        # each file an acquisition (same start), `acquisitions.frame_count`
+        # from `SI.hScan2D.logFramesPerFile` (the last file the rest), the sync
+        # burst split at the file boundaries in `process_sync` (one
+        # `sync_blocks` row per file), and the queue (`odyn.app.submissions`)
+        # waiting for ceil(framesPerSlice / logFramesPerFile) files.
+        if exp_type == "grab" and len(acquisitions) > 1:
+            self.fail(
+                IngestFlag.SPLIT_GRAB,
+                f"'{exp_path}' holds a grab split into {len(acquisitions)} files "
+                "(odyn cannot add it yet).",
+            )
+
         # The session is given, not read off the files; but the file names say
         # which mouse and day ScanImage was told, and a disagreement means the
         # folder is not what the caller thinks it is.
@@ -1823,13 +1838,19 @@ class Database(CallRecorder):
 
         logger.info(f"Passed all TIFF metadata checks! {CHECK}")
 
-        programs_data = self._load_programs(folder)
+        # A grab never runs with the olfactometer
+        programs_data = self._load_programs(folder) if exp_type == "loop" else []
 
         # ----------------------------------------------------------------- #
         # Phase 2: Insert
         # ----------------------------------------------------------------- #
 
-        rig_settings = {key: experiment[key] for key in RIG_ANNOTATIONS}
+        # A grab's TIFFs still say the loop interval last set: not a grab's
+        rig_settings = {
+            key: experiment[key]
+            for key in RIG_ANNOTATIONS
+            if exp_type == "loop" or key != "loop_acq_interval_s"
+        }
         exp_start = _dt_string(experiment["start"])
 
         with self._writing() as cur:
@@ -1853,6 +1874,7 @@ class Database(CallRecorder):
                     "exp_path": folder.resolve()
                     .relative_to(self.main_folder)
                     .as_posix(),
+                    "exp_type": exp_type,
                     "exp_start": exp_start,
                     "objective": int(objective),
                 },
@@ -1893,35 +1915,6 @@ class Database(CallRecorder):
         logger.info(f"Added '{exp_path}' (exp_id = {exp_id}). {CHECK}")
 
         return exp_id
-
-    @record_call
-    def add_grabs(
-        self,
-        *,
-        session_id: int,
-        folder: str,
-        objective: int,
-        rel_raw_paths: None | list[str] = None,
-    ) -> list[int]:
-        """
-        Add a session's grabs, one per TIFF. Returns the `grab_id`s added.
-
-        **PARAMETERS**
-        - `session_id` is the session (mouse and day) the grabs belong to
-        - `folder` is the grabs folder relative to the `main_folder`
-        - `objective` is the objective they were imaged through
-        - `rel_raw_paths` is the raw files list (if None it searches the raw folder)
-
-        **EXAMPLE**
-        ```python
-        db.add_grabs(session_id=3, folder="20260623/m462/grabs", objective=20)
-        ```
-
-        Files already in the database are skipped, so running this again after
-        more grabs were taken only adds the new ones. Their sync recordings are
-        processed separately (`process_grabs_sync`).
-        """
-        return self._add_singles("grab", session_id, folder, objective, rel_raw_paths)
 
     @record_call
     def add_zstacks(
@@ -2075,12 +2068,12 @@ class Database(CallRecorder):
         rel_raw_paths: None | list[str],
     ) -> list[int]:
         """
-        Shared body of `add_grabs` and `add_zstacks`: one row per TIFF.
+        The body of `add_zstacks`: one row per TIFF.
 
         One transaction per file, so a folder that fails on one file keeps the
         others.
         """
-        what = "grab" if kind == "grab" else "z-stack"
+        what = "z-stack"
         logger.info(f"Adding {what}s to the database...")
         scale = self._um_scale(objective)
         _, session, tiffs = self._recordings_folder(
@@ -2108,26 +2101,19 @@ class Database(CallRecorder):
                 "objective": int(objective),
             }
 
-            if kind == "grab":
-                notes = {
-                    key: recording[key]
-                    for key in ("laser_power_920", "laser_power_1040")
-                }
-
-            else:
-                stack = recording["stack"]
-                row.pop("z_um")
-                row.update(
-                    slice_count=stack["slice_count"],
-                    z_step_um=stack["z_step_um"],
-                    z_start_um=stack["z_start_um"],
-                    z_end_um=stack["z_end_um"],
-                )
-                notes = {
-                    key: stack[key]
-                    for key in ("power_start_pct", "power_end_pct", "power_length_um")
-                    if stack[key] is not None
-                }
+            stack = recording["stack"]
+            row.pop("z_um")
+            row.update(
+                slice_count=stack["slice_count"],
+                z_step_um=stack["z_step_um"],
+                z_start_um=stack["z_start_um"],
+                z_end_um=stack["z_end_um"],
+            )
+            notes = {
+                key: stack[key]
+                for key in ("power_start_pct", "power_end_pct", "power_length_um")
+                if stack[key] is not None
+            }
 
             with self._writing() as cur:
                 exists = cur.execute(
@@ -2185,13 +2171,14 @@ class Database(CallRecorder):
         ```
 
         Frame-clock bursts are matched to the experiment's acquisitions in
-        order, and the bursts with an odor pulse to its trials in order, which
-        fills `trials.acq_id`. Running it again replaces what the earlier run
+        order and, for a loop, the bursts with an odor pulse to its trials in
+        order, which fills `trials.acq_id` (a grab has one acquisition, so one
+        burst, and no odor). Running it again replaces what the earlier run
         wrote, so a sync file copied late or a corrected one is not a problem.
         """
         with self._locked() as con:
             experiment = con.execute(
-                "SELECT session_id, exp_path, frames_per_slice FROM experiments "
+                "SELECT exp_path, exp_type, frames_per_slice FROM experiments "
                 "WHERE exp_id = ?;",
                 [int(exp_id)],
             ).fetchone()
@@ -2219,7 +2206,13 @@ class Database(CallRecorder):
         # Read without the lock: a file is hundreds of megabytes
         decoded = decode(path)
 
-        self._check_sync(decoded, acquisitions, trials, experiment["frames_per_slice"])
+        self._check_sync(
+            decoded,
+            acquisitions,
+            trials,
+            experiment["frames_per_slice"],
+            experiment["exp_type"],
+        )
 
         blocks = decoded.blocks
         acq_ids = [row["acq_id"] for row in acquisitions]
@@ -2277,9 +2270,7 @@ class Database(CallRecorder):
                 "UPDATE trials SET acq_id = NULL WHERE exp_id = ?;", [int(exp_id)]
             )
 
-            stream_id = self._insert_stream(
-                cur, decoded, rel_path, experiment["session_id"], int(exp_id)
-            )
+            stream_id = self._insert_stream(cur, decoded, rel_path, int(exp_id))
             self._insert_blocks(
                 cur,
                 stream_id,
@@ -2312,139 +2303,12 @@ class Database(CallRecorder):
             f"trials. {CHECK}"
         )
 
-    @record_call
-    def process_grabs_sync(
-        self,
-        *,
-        session_id: int,
-        sync_path: str,
-        max_skew_s: float = 5.0,
-    ) -> None:
-        """
-        Process a sync file recorded during a session's grabs.
-
-        **PARAMETERS**
-        - `session_id` is the session the grabs belong to
-        - `sync_path` is the H5 file, relative to the `main_folder` (one in
-        `<session>/grabs/sync/`)
-        - `max_skew_s` is how far a burst may start from a grab's first frame,
-        the ScanImage and olfactometer clocks included
-
-        **EXAMPLE**
-        ```python
-        db.process_grabs_sync(
-            session_id=3,
-            sync_path="20260623/m462/grabs/sync/m462_grabs_2026-06-23_14-02-11.h5",
-        )
-        ```
-
-        Grabs are taken whenever needed, so a file may hold any of them: each
-        frame-clock burst is matched to the grab whose first frame is nearest
-        in time, within `max_skew_s`, and bursts with no grab are left out.
-        Running it again replaces what the earlier run of the same file wrote.
-        """
-        with self._locked() as con:
-            grabs = con.execute(
-                "SELECT grab_id, grab_start, frames_per_slice FROM grabs "
-                "WHERE session_id = ? ORDER BY grab_start;",
-                [int(session_id)],
-            ).fetchall()
-
-        path = self._sync_file("", sync_path)
-        rel_path = path.relative_to(self.main_folder).as_posix()
-        logger.info(f"Processing '{rel_path}'")
-        decoded = decode(path)
-
-        if decoded.header.interrupted:
-            self.add_flag(SyncFlag.INTERRUPTED)
-            logger.warning("The recording was not stopped properly (no stop time).")
-
-        if decoded.header.start_time is None:
-            self.fail(
-                SyncFlag.BLOCK_COUNT_MISMATCH,
-                "Cannot compute the bursts' start times (the file has no start time).",
-            )
-
-        # Grabs vary in length, so a short burst is as likely a grab as not
-        bursts = sorted(decoded.blocks + decoded.fragments, key=lambda b: b.sync_block)
-        free = {row["grab_id"]: row for row in grabs}
-        matched: list[tuple] = []
-
-        for block in bursts:
-            started = decoded.time_at(block.start_sample)
-            assert started is not None
-            nearest = min(
-                free.values(),
-                key=lambda row: abs(_parse_dt(row["grab_start"]) - started),
-                default=None,
-            )
-
-            if nearest is None:
-                break
-
-            skew = (_parse_dt(nearest["grab_start"]) - started).total_seconds()
-
-            if abs(skew) > max_skew_s:
-                continue
-
-            del free[nearest["grab_id"]]
-            matched.append((block, {"grab_id": nearest["grab_id"]}, skew * 1000))
-
-            if block.frame_count != nearest["frames_per_slice"]:
-                self.add_flag(SyncFlag.FRAME_COUNT)
-                logger.warning(
-                    f"Burst {block.sync_block} has {block.frame_count} frames, but "
-                    f"grab {nearest['grab_id']} has {nearest['frames_per_slice']}."
-                )
-
-            if block.odor_pulses:
-                self.add_flag(SyncFlag.ODOR_PULSES)
-                logger.warning(f"Burst {block.sync_block} has an odor presentation.")
-
-            if not block.camera_frames:
-                self.add_flag(SyncFlag.NO_CAMERA)
-                logger.warning(
-                    f"No camera strobes during burst {block.sync_block} (no pupil)."
-                )
-
-        if not matched:
-            self.fail(
-                SyncFlag.BLOCK_COUNT_MISMATCH,
-                f"None of the {len(bursts)} frame bursts in '{path.name}' starts "
-                f"within {max_skew_s:g} s of one of the session's {len(grabs)} "
-                "grabs.",
-            )
-
-        with self._writing() as cur:
-            # Replaced as a whole: the rows of one file are one call
-            cur.execute("DELETE FROM streams WHERE file_path = ?;", [rel_path])
-            cur.executemany(
-                "DELETE FROM sync_blocks WHERE grab_id = ?;",
-                [(ids["grab_id"],) for _, ids, _ in matched],
-            )
-            stream_id = self._insert_stream(
-                cur, decoded, rel_path, int(session_id), None
-            )
-            self._insert_blocks(cur, stream_id, decoded, matched)
-
-        self.set_output(
-            {
-                **summary(decoded),
-                "stream_id": stream_id,
-                "matched_grabs": len(matched),
-                "unmatched_bursts": len(bursts) - len(matched),
-            }
-        )
-
-        logger.info(f"Matched {len(matched)} of {len(bursts)} bursts to grabs. {CHECK}")
-
     def _insert_stream(
         self,
         cur: Cursor,
         decoded: DecodedSync,
         rel_path: str,
-        session_id: int,
-        exp_id: None | int,
+        exp_id: int,
     ) -> int:
         header = decoded.header
 
@@ -2452,7 +2316,6 @@ class Database(CallRecorder):
             cur,
             "streams",
             {
-                "session_id": session_id,
                 "exp_id": exp_id,
                 "stream_type": "sync",
                 "file_path": rel_path,
@@ -2468,7 +2331,7 @@ class Database(CallRecorder):
     def _insert_blocks(
         self, cur: Cursor, stream_id: int, decoded: DecodedSync, pairs: list[tuple]
     ) -> None:
-        """One `sync_blocks` row per `(block, {acq_id or grab_id}, skew_ms)`."""
+        """One `sync_blocks` row per `(block, {"acq_id": ...}, skew_ms)`."""
         for block, target, skew in pairs:
             _db_insert(
                 cur,
@@ -2535,9 +2398,11 @@ class Database(CallRecorder):
         acquisitions: list,
         trials: list,
         frames_per_slice: int,
+        exp_type: str,
     ) -> None:
         """Flag what is off about a sync file, and refuse what cannot be matched."""
         blocks = decoded.blocks
+        loop = exp_type == "loop"
 
         if decoded.header.interrupted:
             self.add_flag(SyncFlag.INTERRUPTED)
@@ -2556,27 +2421,30 @@ class Database(CallRecorder):
                 "by order.",
             )
 
-        odd = [b.sync_block for b in blocks if b.odor_pulses != 1]
+        # A loop presents one odor per acquisition, a grab none
+        odd = [b.sync_block for b in blocks if b.odor_pulses != int(loop)]
 
         if odd:
             self.add_flag(SyncFlag.ODOR_PULSES)
             logger.warning(
                 f"Bursts {odd} have more or less than one odor presentation."
+                if loop
+                else f"Bursts {odd} have an odor presentation (a grab has none)."
             )
 
         with_odor = sum(1 for b in blocks if b.odor_pulses)
 
-        if not trials:
+        if loop and not trials:
             self.add_flag(SyncFlag.NO_TRIALS)
             logger.warning(
-                "The experiment has no trials (no olfactometer Events file was "
+                "The loop has no trials (no olfactometer Events file was "
                 "processed), so the odor bursts are stored without matches."
             )
 
-        elif with_odor != len(trials):
+        elif loop and with_odor != len(trials):
             self.fail(
                 SyncFlag.TRIAL_COUNT_MISMATCH,
-                f"{with_odor} bursts have an odor pulse but the experiment has "
+                f"{with_odor} bursts have an odor pulse but the loop has "
                 f"{len(trials)} trials, so they cannot be matched by order.",
             )
 

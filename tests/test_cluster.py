@@ -24,10 +24,9 @@ from odyn.cluster import (
     tick,
 )
 from generate_sync import generate_sync
-from test_decode_sync import build, grabs_day
+from test_decode_sync import build
 
 SYNC = "20260101/m001/e1/sync/m001_e1.h5"
-GRABS_SYNC = "20260101/m001/grabs/sync/m001_grabs.h5"
 HOUR_AGO = time.time() - 3600
 
 
@@ -117,29 +116,9 @@ def test_a_file_that_does_not_match_is_tried_once(tmp_path):
     assert len(db.latest_calls("process_sync")) == 1
 
 
-def test_a_grabs_file_is_processed_and_again_when_it_changes(tmp_path):
-    truth = generate_sync(
-        tmp_path / GRABS_SYNC, acquisitions=3, missing_pulse_in=(0, 1, 2)
-    )
-    os.utime(tmp_path / GRABS_SYNC, (HOUR_AGO, HOUR_AGO))
-    db = grabs_day(tmp_path, truth)
-
-    with db._writing() as cur:
-        cur.execute(
-            "UPDATE grabs SET raw_path = '20260101/m001/grabs/raw/' || raw_path;"
-        )
-
-    assert tick(tmp_path).processed == [GRABS_SYNC]
-    assert db.grabs["sync_block"].notna().sum() == 3
-    assert tick(tmp_path).processed == []
-
-    os.utime(tmp_path / GRABS_SYNC)  # changed (no wait for it to settle)
-    assert tick(tmp_path, settle_s=0).processed == [GRABS_SYNC]
-
-
 def test_a_dry_run_changes_nothing(tmp_path):
     db = a_loop(tmp_path)
-    send_request(tmp_path, "process_grabs_sync", session_id=1, sync_path="x.h5")
+    send_request(tmp_path, "process_sync", exp_id=1)
 
     report = tick(tmp_path, dry_run=True)
 

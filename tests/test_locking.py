@@ -241,7 +241,6 @@ def test_ingestion_and_reads_run_under_the_lock(tmp_path):
         "annotation_keys",
         "annotations",
         "events",
-        "grabs",
         "group_experiments",
         "lines",
         "experiment_vials",

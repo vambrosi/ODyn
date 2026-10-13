@@ -696,29 +696,29 @@ def a_day(tmp_path):
     return db, draft
 
 
-def test_grabs_and_zstacks_notes_are_checked(a_day):
+def test_zstacks_notes_are_checked_and_grabs_refused_for_now(a_day):
     db, draft = a_day
     draft.set_file("zstacks", "20260304_m1_zstacks_00001.tif", loop="e9")
-    draft.set_file("grabs", "late_00009.tif", pmt_gain="high")
+    draft.set_file("zstacks", "late_00009.tif", z_landmark="x")
 
     messages = [str(p) for p in check(db, draft) + check_files(db, draft)]
     assert (
         "zstacks/20260304_m1_zstacks_00001.tif: the z-stack loop e9 is not listed"
         in messages
     )
-    assert any(
-        "grabs/late_00009.tif: PMT gain should be a number" in m for m in messages
-    )
     assert (
-        "grabs/late_00009.tif: not in the server's folder. (Not required to submit.)"
-        in messages
+        "zstacks/late_00009.tif: not in the server's folder. (Not required to "
+        "submit.)" in messages
     )
 
+    # A grab is an experiment of its own now, which the app does not record yet
+    assert "grabs: grabs can't be submitted for now" in messages
 
-def test_ingest_adds_the_grabs_and_zstacks_with_their_notes(a_day):
+
+def test_ingest_adds_the_zstacks_with_their_notes(a_day):
     db, draft = a_day
-    grab, stack = "20260304_m1_grabs_00002.tif", "20260304_m1_zstacks_00001.tif"
-    draft.set_file("grabs", grab, goal="reference", condition="ket/xyl")
+    stack = "20260304_m1_zstacks_00001.tif"
+    draft.remove_part("grabs")
     draft.set_file("zstacks", stack, loop="e1", z_landmark="surface of right bulb")
 
     assert not any(p.blocking for p in check(db, draft))
@@ -727,27 +727,20 @@ def test_ingest_adds_the_grabs_and_zstacks_with_their_notes(a_day):
 
     written = result.written
     assert list(written.experiments) == ["e1"]
-    assert sorted(written.grabs) == ["20260304_m1_grabs_00001.tif", grab]
     assert list(written.zstacks) == [stack]
 
-    grab_id, stack_id = written.grabs[grab], written.zstacks[stack]
-    notes = db.annotations_for("grab").loc[grab_id]
-    assert (notes["goal"], notes["condition"]) == ("reference", "ket/xyl")
+    stack_id = written.zstacks[stack]
     assert db.zstacks.loc[stack_id, "exp_id"] == written.experiments["e1"]
     assert (
         db.annotations_for("zstack").loc[stack_id, "z_landmark"]
         == "surface of right bulb"
     )
-    assert draft.files("grabs")[grab]["submitted_id"] == grab_id
-
-    # the grabs' sync file, matched by time
-    assert written.processed == ["grabs/m1_grabs.h5"]
-    assert db.grabs["sync_block"].tolist() == [0, 1]
+    assert draft.files("zstacks")[stack]["submitted_id"] == stack_id
 
     # a second ingest adds nothing new
     again = Draft.load(draft.path)
     assert ingest(db, again, force=True).submitted
-    assert len(db.grabs) == 2 and len(db.zstacks) == 1
+    assert len(db.zstacks) == 1
 
 
 def test_an_error_reads_as_odyn_wrote_it():

@@ -12,9 +12,9 @@ sync files, the acquisition numbers the conditions name).
 
 `ingest` runs both, then does the day's work in order: the session row, its
 annotations, each loop (ingested, annotated, its vials recorded, its sync file
-processed), then the grabs and z-stacks (each TIFF ingested and annotated, the
-grabs' sync files processed, each z-stack linked to its loop). The cluster
-runs it once the recordings are on the share (`odyn.app.submissions`).
+processed), then the z-stacks (each TIFF ingested and annotated, and linked to
+its loop). The cluster runs it once the recordings are on the share
+(`odyn.app.submissions`).
 
 `submit` is the app's part: it copies the files only this computer has, runs
 `check`, puts the draft in the cluster's queue, and moves it aside. It writes
@@ -76,7 +76,6 @@ class Written:
 
     session_id: None | int = None
     experiments: dict[str, int] = field(default_factory=dict)  # by folder name
-    grabs: dict[str, int] = field(default_factory=dict)  # by TIFF name
     zstacks: dict[str, int] = field(default_factory=dict)  # by TIFF name
     annotations: int = 0
     processed: list[str] = field(default_factory=list)
@@ -243,6 +242,11 @@ def check(
 
         if kind not in KINDS:
             problems.append(Problem(where, f"kind must be one of {', '.join(KINDS)}"))
+
+        # The database now keeps a grab as an experiment of its own (`eN`),
+        # which the app does not record yet
+        if kind == "grab":
+            problems.append(Problem(where, "grabs can't be submitted for now"))
 
         if entry.get("objective") in (None, ""):
             problems.append(Problem(where, "didn't pick an objective"))
@@ -696,7 +700,7 @@ def ingest(
     Refuses while `check` or `check_files` finds a blocking problem, unless
     `force`.
     Otherwise creates (or finds) the session, writes its annotations, then
-    each loop and the grabs and z-stacks (see the module's description).
+    each loop and the z-stacks (see the module's description).
     Steps already done by an earlier attempt are skipped, so the call is safe
     to repeat after fixing what stopped it. Leaves the draft file where it is.
     """
@@ -794,7 +798,7 @@ def _submit(db, draft: Draft, written: Written) -> None:
         written.annotations += len(values)
 
     loops = [e for e in draft.parts if e.get("kind", "loop") == "loop"]
-    others = [e for e in draft.parts if e.get("kind") in ("grab", "zstack")]
+    others = [e for e in draft.parts if e.get("kind") == "zstack"]
 
     for entry in loops:
         _submit_loop(db, draft, entry, session_id, written)
@@ -858,22 +862,21 @@ def _submit_loop(db, draft: Draft, entry: dict, session_id: int, written) -> Non
 
 def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> None:
     """
-    Ingest every TIFF of the grabs or z-stacks folder (those already in are
-    skipped), annotate the ones with notes, link each z-stack to its loop,
-    and process the grabs' sync files.
+    Ingest every TIFF of the z-stacks folder (those already in are skipped),
+    annotate the ones with notes, and link each z-stack to its loop.
     """
     name, kind = str(entry["name"]), entry["kind"]
     folder = f"{draft.folder}/{name}"
-    add = db.add_grabs if kind == "grab" else db.add_zstacks
-    add(session_id=session_id, folder=folder, objective=int(entry["objective"]))
+    db.add_zstacks(
+        session_id=session_id, folder=folder, objective=int(entry["objective"])
+    )
 
     rows = db.from_query(
         f"SELECT {kind}_id AS id, raw_path FROM {kind}s WHERE session_id = ?;",
         [session_id],
     )
     ids = {Path(path).name: int(i) for i, path in zip(rows["id"], rows["raw_path"])}
-    found = written.grabs if kind == "grab" else written.zstacks
-    found.update(ids)
+    written.zstacks.update(ids)
     notes = draft.files(name)
 
     for file, noted in notes.items():
@@ -893,21 +896,6 @@ def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> No
             db.set_zstack_experiment(zstack_id=row_id, exp_id=written.experiments[loop])
 
         draft.set_file(name, file, submitted_id=row_id)
-
-    if kind != "grab":
-        return
-
-    for record in entry.get("recordings", []):
-        if not record.get("copied") or record.get("replaced"):
-            continue
-
-        try:
-            db.process_grabs_sync(session_id=session_id, sync_path=record["share"])
-            written.processed.append(f"{name}/{record['file']}")
-
-        except Exception as error:
-            logger.exception(f"Processing {record['file']} failed")
-            written.process_failed[f"{name}/{record['file']}"] = described(error)
 
 
 def _write_conditions(db, draft: Draft, name: str, exp_id: int, entry: dict) -> int:

@@ -2,7 +2,7 @@
 Schema-integrity checks for create.sql.
 
 The composite foreign keys must keep a trial's program and acquisition tied to
-the same loop (the "diamond"), and a consistent loop ->
+the same experiment (the "diamond"), and a consistent experiment ->
 program/acquisition -> trial -> event chain must insert cleanly.
 """
 
@@ -26,7 +26,7 @@ def _fresh_db() -> sqlite3.Connection:
 
 
 def test_diamond_constraint_rejected():
-    """A trial mixing a program and acquisition from different loops must
+    """A trial mixing a program and acquisition from different experiments must
     violate the composite foreign keys."""
     con = _fresh_db()
     try:
@@ -37,7 +37,7 @@ def test_diamond_constraint_rejected():
 
 
 def test_valid_chain_inserts():
-    """A consistent loop -> program/acquisition -> trial -> event chain
+    """A consistent experiment -> program/acquisition -> trial -> event chain
     inserts without error."""
     con = _fresh_db()
     try:
@@ -58,7 +58,7 @@ def _with_two_sessions() -> sqlite3.Connection:
     return con
 
 
-def test_a_zstack_is_only_for_a_loop_of_its_own_session():
+def test_a_zstack_is_only_for_an_experiment_of_its_own_session():
     con = _with_two_sessions()
 
     with pytest.raises(sqlite3.IntegrityError):
@@ -67,20 +67,10 @@ def test_a_zstack_is_only_for_a_loop_of_its_own_session():
     con.close()
 
 
-def test_a_sync_block_is_an_acquisitions_or_a_grabs_not_both():
+def test_an_experiment_is_a_loop_or_a_grab():
     con = _with_two_sessions()
-    con.execute("UPDATE sync_blocks SET grab_id = NULL WHERE grab_id = 1;")
 
     with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
-        con.execute("UPDATE sync_blocks SET grab_id = 1 WHERE acq_id = 1;")
-
-    con.close()
-
-
-def test_a_loops_stream_is_its_sessions():
-    con = _with_two_sessions()
-
-    with pytest.raises(sqlite3.IntegrityError):
-        con.execute("UPDATE streams SET session_id = 2 WHERE exp_id = 1;")
+        con.execute("UPDATE experiments SET exp_type = 'zstack' WHERE exp_id = 2;")
 
     con.close()

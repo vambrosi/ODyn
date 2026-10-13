@@ -83,8 +83,8 @@ def test_a_group_view_is_the_same_reader_restricted(db):
                 INSERT INTO experiments
                     ( exp_id, session_id, exp_number, exp_path, exp_start
                     , height_px, width_px, height_um, width_um, frames_per_slice
-                    , frame_rate, objective
-                    ) VALUES (?, 1, ?, ?, ?, 1, 1, 1, 1, 1, 1, 20);
+                    , frame_rate, objective, exp_type
+                    ) VALUES (?, 1, ?, ?, ?, 1, 1, 1, 1, 1, 1, 20, 'loop');
                 """,
                 [exp_id, exp_id, f"p{exp_id}", f"2026-01-01 1{exp_id}:00:00"],
             )

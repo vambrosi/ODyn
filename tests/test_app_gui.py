@@ -847,36 +847,58 @@ def test_qc_lists_every_kind_of_recording_this_user_submitted(tmp_path):
 
     from odyn.app.pane_qc import my_missing, my_recordings
 
-    day = dict(frames=56, height=32, width=40, start=datetime(2026, 3, 4, 9))
-    generate(tmp_path, acquisitions=2, **day)
-    generate(tmp_path, acquisitions=1, exp="grabs", acq_state="grab", **day)
+    size = dict(frames=56, height=32, width=40)
+    generate(tmp_path, acquisitions=2, start=datetime(2026, 3, 4, 9), **size)
+    generate(
+        tmp_path,
+        acquisitions=1,
+        exp="e2",
+        acq_state="grab",
+        start=datetime(2026, 3, 4, 10),
+        **size,
+    )
+    generate(
+        tmp_path,
+        acquisitions=1,
+        exp="zstacks",
+        acq_state="grab",
+        start=datetime(2026, 3, 4, 11),
+        **size,
+        zstack=dict(
+            slices=3, step_um=5, top_um=-10, power=30, length_um=-300, reference_um=-15
+        ),
+    )
     db = Database(tmp_path, can_create=True, user="ana")
     db.set_mouse(mouse_id=1)
     session_id = db.add_session(mouse_id=1, session_date="2026-03-04")
     exp_id = db.add_experiment(
         session_id=session_id, exp_path="20260304/m1/e1", objective=20
     )
-    (grab_id,) = db.add_grabs(
-        session_id=session_id, folder="20260304/m1/grabs", objective=10
+    grab_id = db.add_experiment(
+        session_id=session_id, exp_path="20260304/m1/e2", objective=10, exp_type="grab"
+    )
+    (stack_id,) = db.add_zstacks(
+        session_id=session_id, folder="20260304/m1/zstacks", objective=10
     )
 
     mine = my_recordings(db, "ana")
     assert list(mine.index) == [
-        ("grab", grab_id),
+        ("zstack", stack_id),
+        ("experiment", grab_id),
         ("experiment", exp_id),
     ]  # newest first
-    assert mine.loc[("grab", grab_id), "path"].endswith("_grabs_00001.tif")
+    assert mine.loc[("zstack", stack_id), "path"].endswith("_zstacks_00001.tif")
+    assert mine.loc[("experiment", grab_id), "path"] == "20260304/m1/e2"
     assert mine.loc[("experiment", exp_id), "path"] == "20260304/m1/e1"
-    assert set(mine["sync"]) == {"not processed"}
+    assert mine.loc[("zstack", stack_id), "sync"] == ""
     assert my_recordings(db, "someone else").empty
 
     # A key made required afterwards asks for it on what is already in, in
     # the order of the submissions
     db.update_annotation_key(applies_to="experiment", key="goal", required=True)
-    db.update_annotation_key(applies_to="grab", key="goal", required=True)
     missing = my_missing(db, mine)
     assert list(zip(missing["target_type"], missing["target_id"])) == [
-        ("grab", grab_id),
+        ("experiment", grab_id),
         ("experiment", exp_id),
     ]
 
@@ -1465,28 +1487,25 @@ def test_the_grabs_page_lists_the_tiffs_and_keeps_notes_per_file(window, tmp_pat
     assert list(frame["z_um"]) == [-80, -80] and list(frame["frames"]) == [56, 56]
     assert "2 TIFFs in" in form.found.text()
 
-    # picking a file shows its notes; what is typed goes to the draft
-    form.table.selectRow(1)
-    assert form.notes.title() == "20260304_m1_grabs_00002.tif"
-    form.file_form.rows["goal"].editor.setText("reference")
-    form.file_form.rows["goal"].editor.editingFinished.emit()
-    assert draft.files("grabs") == {
-        "20260304_m1_grabs_00002.tif": {"goal": "reference"}
-    }
-    assert form.model.frame["notes"].tolist() == ["", "yes"]
-
     form.form.rows["objective"].editor.setCurrentText("10")
     assert draft.part("grabs")["objective"] == 10
 
-    # a z-stack also names its loop
+    # picking a file shows its notes; what is typed goes to the draft, and a
+    # z-stack also names its loop
     sessions.add_zstacks()
     settle(window.context)
     form = sessions.part_page.shown
     assert list(form.model.frame["slices"]) == [3]
     assert list(form.model.frame["z_start_um"]) == [-10]
     form.table.selectRow(0)
+    assert form.notes.title() == "20260304_m1_zstacks_00001.tif"
+    form.file_form.rows["z_landmark"].editor.setText("surface")
+    form.file_form.rows["z_landmark"].editor.editingFinished.emit()
     form.loop.setCurrentText("e1")
-    assert draft.files("zstacks") == {"20260304_m1_zstacks_00001.tif": {"loop": "e1"}}
+    assert draft.files("zstacks") == {
+        "20260304_m1_zstacks_00001.tif": {"z_landmark": "surface", "loop": "e1"}
+    }
+    assert form.model.frame["notes"].tolist() == ["yes"]
 
 
 def test_the_grabs_recordings_add_up_and_zstacks_are_not_recorded(window):

@@ -41,10 +41,10 @@ def build(tmp_path, acquisitions=3):
             INSERT INTO experiments
                 ( exp_id, session_id, exp_number, exp_path, exp_start
                 , height_px, width_px, height_um, width_um, frames_per_slice, frame_rate
-                , objective
+                , objective, exp_type
                 ) VALUES ( 1, 1, 1, ?, '2026-01-01 10:00:00'
                          , ?, ?, ?, ?, ?
-                         , 14.0, 20);
+                         , 14.0, 20, 'loop');
             """,
             [EXP_DIR, HEIGHT, WIDTH, float(HEIGHT), float(WIDTH), FRAMES],
         )

@@ -235,17 +235,6 @@ GROUP_EXPERIMENTS = TableSpec(
     f"SELECT g.group_id, e.* {_GROUP_EXPERIMENTS} WHERE g.group_id != 0;",
     dates=("exp_start", "added_to_db_at"),
 )
-GRABS = TableSpec(
-    "grabs",
-    "grab_id",
-    f"""
-    SELECT x.*
-         {_SYNC_COLUMNS}
-        FROM grabs AS x
-        LEFT JOIN sync_blocks AS s ON s.grab_id = x.grab_id;
-    """,
-    dates=("grab_start", "added_to_db_at", "sync_odor_start", "sync_odor_end"),
-)
 ZSTACKS = _simple("zstacks", "zstack_id", dates=["zstack_start", "added_to_db_at"])
 ACQUISITIONS = TableSpec(
     "acquisitions",
@@ -410,7 +399,6 @@ ANNOTATION_TARGETS: dict[str, TableSpec] = {
     "mouse": MICE,
     "session": SESSIONS,
     "experiment": EXPERIMENTS,
-    "grab": GRABS,
     "zstack": ZSTACKS,
     "program": PROGRAMS,
     "acquisition": ACQUISITIONS,

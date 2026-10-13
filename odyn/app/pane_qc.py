@@ -4,8 +4,8 @@ The QC tab: what is waiting on the person using the app.
 Three lists. The drafts this user submitted that the cluster has not added
 yet (`submissions.queued`), with how far their copy got or why they failed,
 and what can be done about each: add it now, submit it again, or take it
-back to edit. The recordings (experiments, grabs, z-stacks) the cluster added for
-this user, with what processing their sync file found, and a way to process a
+back to edit. The recordings (experiments, z-stacks) the cluster added for
+this user, with what processing their sync file found, and a way to process an
 experiment's again. And the required annotations still empty on them. Picking
 motion-correction candidates from movie previews joins this tab once the
 cluster produces the previews; the pane is shaped so that becomes one more
@@ -45,12 +45,11 @@ from .submissions import add_now, queued, submit_again, take_back
 # the ids it added
 INGEST_METHODS = {
     "add_experiment": ("experiment", "exp_ids"),
-    "add_grabs": ("grab", "grab_ids"),
     "add_zstacks": ("zstack", "zstack_ids"),
 }
 
 # Where each kind's folder (an experiment) or file (the others) is
-PATH_COLUMN = {"experiment": "exp_path", "grab": "raw_path", "zstack": "raw_path"}
+PATH_COLUMN = {"experiment": "exp_path", "zstack": "raw_path"}
 COLUMNS = ["kind", "path", "objective", "submitted_at", "sync"]
 QUEUE_COLUMNS = ["session", "state", "progress", "submitted_at"]
 
@@ -113,7 +112,7 @@ def cluster_line(db, now: None | datetime = None) -> tuple[str, str]:
 
 def my_recordings(db, user: None | str) -> pd.DataFrame:
     """
-    One row per experiment, grab or z-stack `user` submitted, newest first, with its
+    One row per experiment or z-stack `user` submitted, newest first, with its
     sync flags once its sync file was processed. Indexed by `(kind, id)`, as
     annotations name their target.
     """
@@ -135,8 +134,8 @@ def my_recordings(db, user: None | str) -> pd.DataFrame:
             if isinstance(row_id, int) and (kind, row_id) not in added:
                 added[(kind, row_id)] = call["called_at"]
 
-    tables = {"experiment": db.experiments, "grab": db.grabs, "zstack": db.zstacks}
-    flags = _exp_sync_flags(db) | _grab_sync_flags(db)
+    tables = {"experiment": db.experiments, "zstack": db.zstacks}
+    flags = _exp_sync_flags(db)
     rows = []
 
     for (kind, row_id), submitted in added.items():
@@ -182,20 +181,6 @@ def _exp_sync_flags(db) -> dict[tuple[str, int], str]:
     return flags
 
 
-def _grab_sync_flags(db) -> dict[tuple[str, int], str]:
-    """Each matched grab's processing: the call that wrote its `sync_blocks` row."""
-    rows = db.from_query(
-        "SELECT b.grab_id, c.call_flag FROM sync_blocks AS b "
-        "JOIN method_calls AS c ON c.method_call_id = b.method_call_id "
-        "WHERE b.grab_id IS NOT NULL;"
-    )
-
-    return {
-        ("grab", int(row["grab_id"])): sync_flags(int(row["call_flag"]))
-        for _, row in rows.iterrows()
-    }
-
-
 def sync_flags(call_flag: int) -> str:
     """The names of the bits set on a `process_sync` call, or `succeeded`."""
     names = [flag.name for flag in SyncFlag if call_flag & int(flag) and flag.name]
@@ -239,7 +224,7 @@ class QcPane(QWidget):
         self.context = context
         self.queue = pd.DataFrame(columns=[*QUEUE_COLUMNS, "path"])
         self.mine = pd.DataFrame(columns=COLUMNS)
-        self.mine_ids: list[int] = []  # each row's experiment, grab or z-stack id
+        self.mine_ids: list[int] = []  # each row's experiment or z-stack id
 
         layout = QVBoxLayout(self)
         top = QHBoxLayout()

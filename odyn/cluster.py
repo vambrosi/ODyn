@@ -6,10 +6,10 @@ Workstations cannot start cluster jobs (logging in takes a password and Duo),
 so anything that has to run there is left as a request file on the share,
 and a short `tick` on the cluster applies it. A tick also adds the submitted
 drafts whose recordings finished copying (`odyn.app.submissions`), submits a
-test motion correction of each experiment it added (`submit_mcor_test`), processes
-the sync files that arrived since their experiment or grabs were added, writes a
-heartbeat, and (as a chain) submits the next tick. Everything a tick does is
-safe to repeat, so a tick that ran twice, or not at all for a day, only
+test motion correction of each experiment it added (`submit_mcor_test`),
+processes the sync files that arrived since their experiment was added,
+writes a heartbeat, and (as a chain) submits the next tick. Everything a tick
+does is safe to repeat, so a tick that ran twice, or not at all for a day, only
 delays work.
 
 Files, per database (`main` or the project's name), in
@@ -87,7 +87,7 @@ MCOR_FOLDER = "mcor"
 
 # What a request may ask for. A request is executed by name, so this list is
 # the whole of what another computer can make the cluster do.
-REQUESTABLE = ("process_sync", "process_grabs_sync")
+REQUESTABLE = ("process_sync",)
 
 # A sync file this recent may still be arriving (one copied by hand has no
 # temporary name), so it waits for the next tick
@@ -453,8 +453,8 @@ def _untested_groups(db: Database, project: None | str) -> list[tuple[int, str]]
 
 def _sync_work(db: Database, settle_s: float, seen: dict[str, str]) -> list[Work]:
     """
-    The sync files waiting to be processed. An experiment's or a grabs file's turn
-    comes when it was never processed, when it changed since its last
+    The sync files waiting to be processed. An experiment's file's turn comes
+    when it was never processed, when it changed since its last
     processing, or when that processing found no file (or too many) and the
     folder has changed since. `seen` holds what each folder looked like when
     a tick last tried it, so one state is never tried twice. Files modified in
@@ -489,39 +489,6 @@ def _sync_work(db: Database, settle_s: float, seen: dict[str, str]) -> list[Work
         work.append(
             Work(what, key, state, lambda i=int(exp_id): db.process_sync(exp_id=i))
         )
-
-    grab_calls = _last_calls(db, "process_grabs_sync", "input_sync_path")
-    grabs = db.grabs
-    folders = {
-        (int(row["session_id"]), Path(str(row["raw_path"])).parent.parent)
-        for _, row in grabs.iterrows()
-    }
-
-    for session_id, grabs_folder in sorted(folders):
-        for path in _sync_files(db.main_folder / grabs_folder / SYNC_FOLDER):
-            if now - path.stat().st_mtime < settle_s:
-                continue
-
-            rel = path.relative_to(db.main_folder).as_posix()
-            key, state = f"grabs {rel}", _state([path])
-            last = grab_calls.get(rel)
-
-            if seen.get(key) == state:
-                continue
-
-            if last is not None and not _modified_after(path, last[0]):
-                continue
-
-            work.append(
-                Work(
-                    rel,
-                    key,
-                    state,
-                    lambda s=session_id, r=rel: db.process_grabs_sync(
-                        session_id=s, sync_path=r
-                    ),
-                )
-            )
 
     return work
 

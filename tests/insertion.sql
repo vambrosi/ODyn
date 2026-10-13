@@ -2,8 +2,8 @@
 --
 -- A consistent mouse -> session -> experiment -> program / acquisition -> trial
 -- -> event chain, all on the same experiment, must insert without error, and so
--- must a sync block, a panel and an annotation hanging off it, and the
--- session's grabs and z-stacks (one for that experiment).
+-- must a sync block, a panel and an annotation hanging off it, a grab with its
+-- sync block, and a z-stack (for that experiment).
 PRAGMA foreign_keys = ON;
 
 INSERT INTO users (user_name, display_name) VALUES ('someone', 'Someone');
@@ -13,11 +13,11 @@ INSERT INTO sessions (session_id, mouse_id, session_date) VALUES (1, 1, '2025-02
 INSERT INTO experiments
     ( session_id, exp_number, exp_path, exp_start
     , height_px, width_px, height_um, width_um
-    , frames_per_slice, frame_rate, objective, z_um
+    , frames_per_slice, frame_rate, objective, z_um, exp_type
     ) VALUES
         ( 1, 1, '20250201/m1/e1', '2025-02-01 00:00:00'
         , 100, 200, 300, 400
-        , 30, 60, 20, -120
+        , 30, 60, 20, -120, 'loop'
         );
 
 INSERT INTO programs (exp_id, program_name, program_type, program_start, program_path)
@@ -49,31 +49,34 @@ INSERT INTO method_calls
     ( group_id, user, method_name, module, code, parameter_inputs, parameters_used )
     VALUES (0, 'someone', 'Database.process_sync', 'odyn.database', '{}', '{}', '{}');
 
-INSERT INTO streams (session_id, exp_id, stream_type, file_path, rate_hz, method_call_id)
-    VALUES (1, 1, 'sync', '20250201/m1/e1/sync/m1_e1.h5', 5000, 1);
+INSERT INTO streams (exp_id, stream_type, file_path, rate_hz, method_call_id)
+    VALUES (1, 'sync', '20250201/m1/e1/sync/m1_e1.h5', 5000, 1);
 
 INSERT INTO sync_blocks
     ( stream_id, sync_block, acq_id, sync_start_sample, sync_frame_count
     , sync_frame_period_s, sync_odor_pulses, sync_odor_on_frame, method_call_id
     ) VALUES (1, 0, 1, 100, 30, 0.0166, 1, 5, 1);
 
-INSERT INTO grabs
-    ( session_id, raw_path, grab_start
+INSERT INTO experiments
+    ( session_id, exp_number, exp_path, exp_start
     , height_px, width_px, height_um, width_um
-    , frames_per_slice, frame_rate, objective, z_um
+    , frames_per_slice, frame_rate, objective, z_um, exp_type
     ) VALUES
-        ( 1, '20250201/m1/grabs/raw/g_00001.tif', '2025-02-01 02:00:00'
+        ( 1, 2, '20250201/m1/e2', '2025-02-01 02:00:00'
         , 100, 200, 300, 400
-        , 300, 60, 20, -80
+        , 300, 60, 20, -80, 'grab'
         );
 
-INSERT INTO streams (session_id, exp_id, stream_type, file_path, rate_hz, method_call_id)
-    VALUES (1, NULL, 'sync', '20250201/m1/grabs/sync/m1_grabs.h5', 5000, 1);
+INSERT INTO acquisitions (exp_id, acq_start, raw_path)
+    VALUES (2, '2025-02-01 02:00:00', '20250201/m1/e2/raw/20250201_m1_e2_00001.tif');
+
+INSERT INTO streams (exp_id, stream_type, file_path, rate_hz, method_call_id)
+    VALUES (2, 'sync', '20250201/m1/e2/sync/m1_e2.h5', 5000, 1);
 
 INSERT INTO sync_blocks
-    ( stream_id, sync_block, grab_id, sync_start_sample, sync_frame_count
+    ( stream_id, sync_block, acq_id, sync_start_sample, sync_frame_count
     , sync_frame_period_s, sync_odor_pulses, method_call_id
-    ) VALUES (2, 0, 1, 100, 300, 0.0166, 0, 1);
+    ) VALUES (2, 0, 2, 100, 300, 0.0166, 0, 1);
 
 INSERT INTO zstacks
     ( session_id, exp_id, raw_path, zstack_start

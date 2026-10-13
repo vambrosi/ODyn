@@ -308,7 +308,6 @@ def _ingest(
     state.written = {
         "session_id": written.session_id,
         "experiments": written.experiments,
-        "grabs": written.grabs,
         "zstacks": written.zstacks,
     }
     refused = [

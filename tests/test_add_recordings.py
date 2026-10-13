@@ -1,6 +1,6 @@
 """
-`Database.add_experiment`, `add_grabs` and `add_zstacks`: what lands where when a
-recording folder is added to a session.
+`Database.add_experiment` (loops and grabs) and `add_zstacks`: what lands where
+when a recording folder is added to a session.
 """
 
 import json
@@ -49,7 +49,7 @@ def add(db, **kwargs):
 
 
 def a_day(tmp_path, folder: str, count: int = 2, **options) -> tuple[Database, int]:
-    """`count` grabs (or z-stacks) of m1 on 2026-03-04, and their session."""
+    """`count` grabs (or z-stacks) of m1 on 2026-03-04 in `folder`, and their session."""
     generate(
         tmp_path,
         acquisitions=count,
@@ -206,12 +206,17 @@ def test_an_objective_without_a_scale_is_refused(db):
 
 
 def test_a_loop_is_not_a_grab(db):
-    added = db.add_grabs(session_id=1, folder="20260101/m1/e1", objective=20)
-
-    assert added == []
+    assert add(db, exp_type="grab") is None
+    assert len(db.experiments) == 0
     assert (
-        db.latest_calls("add_grabs").iloc[0]["call_flag"] & IngestFlag.WRONG_ACQ_STATE
+        db.latest_calls("add_experiment").iloc[0]["call_flag"]
+        & IngestFlag.WRONG_ACQ_STATE
     )
+
+
+def test_an_experiment_is_a_loop_or_a_grab(db):
+    with pytest.raises(ValueError, match="exp_type must be one of loop, grab"):
+        add(db, exp_type="zstack")
 
 
 def test_a_loop_of_z_stacks_is_refused_for_now(tmp_path):
@@ -234,41 +239,85 @@ def test_a_loop_of_z_stacks_is_refused_for_now(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_each_grab_is_a_row_of_its_own(tmp_path):
-    db, session_id = a_day(tmp_path, "grabs", z_um=-80)
+def test_a_grab_is_an_experiment_of_one_acquisition(tmp_path):
+    db, session_id = a_day(tmp_path, "e2", count=1, z_um=-80)
 
-    added = db.add_grabs(
-        session_id=session_id, folder="20260304/m1/grabs", objective=10
+    exp_id = db.add_experiment(
+        session_id=session_id, exp_path="20260304/m1/e2", objective=10, exp_type="grab"
     )
-    assert len(added) == 2
+    grab = db.experiments.loc[exp_id]
 
-    grabs = db.grabs.loc[added]
-    assert list(grabs["raw_path"]) == [
-        "20260304/m1/grabs/raw/20260304_m1_grabs_00001.tif",
-        "20260304/m1/grabs/raw/20260304_m1_grabs_00002.tif",
+    assert grab["exp_type"] == "grab"
+    assert (grab["exp_number"], grab["exp_path"]) == (2, "20260304/m1/e2")
+    assert (grab["z_um"], grab["objective"], grab["frames_per_slice"]) == (-80, 10, 56)
+    assert grab["width_um"] == pytest.approx(40 * UM_PER_PX * OBJECTIVE_SCALE[10])
+    assert list(db.acquisitions["raw_path"]) == [
+        "20260304/m1/e2/raw/20260304_m1_e2_00001.tif"
     ]
-    assert set(grabs["session_id"]) == {session_id}
-    assert set(grabs["z_um"]) == {-80}
-    assert set(grabs["objective"]) == {10}
-    assert grabs["width_um"].tolist() == pytest.approx(
-        [40 * UM_PER_PX * OBJECTIVE_SCALE[10]] * 2
-    )
-    assert db.latest_calls("add_grabs").iloc[0]["input_um_scale"] == OBJECTIVE_SCALE[10]
-    assert grabs["sync_frame_count"].isna().all()  # until a sync file is processed
+    assert list(db.group_experiments["exp_id"]) == [exp_id]  # a group of its own
 
-    assert db.annotations_for("grab").loc[added[0], "laser_power_920"] == 10
+    # The rig settings, but not the loop interval its header still has
+    settings = db.annotations_for("experiment").loc[exp_id]
+    assert settings["laser_power_920"] == 10
+    assert pd.isna(settings.get("loop_acq_interval_s"))
+    assert db.programs.empty
 
-    # Running it again only reports what is already there
+    # Running it again adds nothing...
     assert (
-        db.add_grabs(session_id=session_id, folder="20260304/m1/grabs", objective=10)
+        db.add_experiment(
+            session_id=session_id,
+            exp_path="20260304/m1/e2",
+            objective=10,
+            exp_type="grab",
+        )
+        is None
+    )
+
+    # ...and a grab is neither a loop nor a z-stack
+    assert (
+        db.add_experiment(
+            session_id=session_id, exp_path="20260304/m1/e2", objective=10
+        )
+        is None
+    )
+    assert (
+        db.add_zstacks(session_id=session_id, folder="20260304/m1/e2", objective=10)
         == []
     )
 
-    # ...and a grab is not a z-stack
-    assert (
-        db.add_zstacks(session_id=session_id, folder="20260304/m1/grabs", objective=10)
-        == []
+
+def test_two_grabs_in_one_folder_are_refused(tmp_path):
+    db, session_id = a_day(tmp_path, "e1", count=2)
+
+    exp_id = db.add_experiment(
+        session_id=session_id, exp_path="20260304/m1/e1", objective=20, exp_type="grab"
     )
+
+    assert exp_id is None and len(db.experiments) == 0
+    assert (
+        db.latest_calls("add_experiment").iloc[0]["call_flag"]
+        & IngestFlag.METADATA_CHANGED
+    )
+
+
+def test_a_grab_split_into_files_is_refused_for_now(tmp_path):
+    db, session_id = a_day(tmp_path, "e1", count=1)
+    tiff = "20260304/m1/e1/raw/20260304_m1_e1_00001.tif"
+
+    # Two files of one start, as ScanImage's "frames per file" would write them
+    with pytest.raises(RuntimeError, match="a grab split into 2 files"):
+        db.add_experiment(
+            session_id=session_id,
+            exp_path="20260304/m1/e1",
+            objective=20,
+            exp_type="grab",
+            rel_raw_paths=[tiff, tiff],
+        )
+
+    assert (
+        db.latest_calls("add_experiment").iloc[0]["call_flag"] & IngestFlag.SPLIT_GRAB
+    )
+    assert len(db.experiments) == 0
 
 
 def test_a_zstack_keeps_its_stack_and_the_powers_at_both_ends(tmp_path):
@@ -293,8 +342,14 @@ def test_a_zstack_keeps_its_stack_and_the_powers_at_both_ends(tmp_path):
 
     # A z-stack is not a grab either
     assert (
-        db.add_grabs(session_id=session_id, folder="20260304/m1/zstacks", objective=20)
-        == []
+        db.add_experiment(
+            session_id=session_id,
+            exp_path="20260304/m1/zstacks",
+            exp_number=9,
+            objective=20,
+            exp_type="grab",
+        )
+        is None
     )
 
 
@@ -325,8 +380,8 @@ def test_a_zstack_is_for_a_loop_of_its_own_session(tmp_path):
         cur.execute(
             "INSERT INTO experiments (session_id, exp_number, exp_path, exp_start, "
             "height_px, width_px, height_um, width_um, frames_per_slice, frame_rate, "
-            "objective) VALUES (?, 1, 'x', '2026-03-04 12:00:00', 1, 1, 1, 1, 1, "
-            "1, 20);",
+            "objective, exp_type) VALUES (?, 1, 'x', '2026-03-04 12:00:00', 1, 1, "
+            "1, 1, 1, 1, 20, 'loop');",
             [other],
         )
         foreign = cur.lastrowid
