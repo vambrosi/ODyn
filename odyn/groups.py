@@ -1279,7 +1279,7 @@ class Group(CallRecorder):
         downsample_type: str = "skip",
         save_folder: str = r"./movies",
         frame_rate: float = 30,
-        q_min: float = 0.0,
+        q_min: float = 1.0,
         q_max: float = 99.5,
         codec: str = "MJPG",
         extension: str = "avi",
@@ -3005,7 +3005,7 @@ def _write_preview_movie(
     frame_acq: np.ndarray | None = None,
     speed: float | None = None,
     um_per_px: float | None = None,
-    q_min: float = 0.0,
+    q_min: float = 1.0,
     q_max: float = 99.5,
     codec: str = "MJPG",
 ) -> None:
@@ -3022,6 +3022,8 @@ def _write_preview_movie(
 
     # Percentiles over every frame, so brightness does not drift as it plays.
     # On the whole array at once because it is already downsampled and in RAM.
+    # Black at a low percentile, not the minimum: a few very dark pixels (the
+    # PMT offset, a copied border) would otherwise leave the background gray.
     low, high = np.percentile(movie, [q_min, q_max])
     spread = max(float(high - low), 1e-9)
 
