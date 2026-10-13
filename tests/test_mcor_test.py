@@ -17,7 +17,14 @@ import pytest
 import tifffile
 
 from odyn import Database
-from odyn.cluster import cluster_folder, run_mcor_test, submit_mcor_test
+from odyn.cluster import (
+    cluster_folder,
+    run_mcor_sweep,
+    run_mcor_test,
+    submit_mcor_sweep,
+    submit_mcor_test,
+    sweep_runs,
+)
 from odyn.registration import spread_acquisitions
 from generate_data import generate
 
@@ -273,3 +280,104 @@ def test_the_job_records_the_test_as_the_owners(tmp_path, monkeypatch):
 
     assert run_mcor_test(tmp_path, None, group_id, "ana") == tmp_path
     assert seen == [(group_id, "ana")]
+
+
+# --------------------------------------------------------------------------- #
+# A sweep
+# --------------------------------------------------------------------------- #
+
+GRID = {
+    "test_acqs": 4,
+    "max_shift_um": [20, 20],
+    "runs": [
+        {"strides_um": [128, 128], "overlap_um": [64, 64], "max_deviation_um": 6},
+        {"strides_um": [128, 96], "overlap_um": [32, 32], "max_deviation_um": 2.5},
+        {
+            "strides_um": [64, 64],
+            "overlap_um": [32, 32],
+            "max_deviation_um": 3,
+            "run": "small",
+        },
+    ],
+}
+
+
+def test_runs_are_named_from_their_settings():
+    assert [run["run"] for run in sweep_runs(GRID)] == [
+        "s128_o64_d6",
+        "s128x96_o32_d2.5",
+        "small",
+    ]
+
+
+@pytest.mark.parametrize(
+    "runs, message",
+    [
+        ([], "no runs"),
+        ([{**GRID["runs"][0], "gSig_filt": 3}], "Unknown run settings gSig_filt"),
+        ([{"strides_um": [64, 64], "overlap_um": [32, 32]}], "no max_deviation_um"),
+        ([GRID["runs"][0], GRID["runs"][0]], "s128_o64_d6"),
+        ([{**GRID["runs"][0], "run": "rigid"}], "not be 'rigid'"),
+    ],
+)
+def test_a_grid_that_cannot_run_is_refused(runs, message):
+    with pytest.raises(ValueError, match=message):
+        sweep_runs({"runs": runs})
+
+
+def test_a_sweep_is_a_baseline_then_every_run_at_once(tmp_path, slurm):
+    _, group_id = a_loop(tmp_path, user="ana")
+
+    assert submit_mcor_sweep(tmp_path, None, group_id, GRID) == ("4242", "4242")
+
+    baseline, array = [
+        line for line in slurm.read_text().splitlines() if line.startswith("sbatch")
+    ]
+    assert "--array" not in baseline
+    assert "--array=1-3 --dependency=afterok:4242" in array
+    assert "%x-%A_%a.out" in array
+    assert "%" not in array.replace("%x-%A_%a", "")  # no throttle
+
+    folder = cluster_folder(tmp_path)
+    script = (folder / "jobs" / f"mcor-sweep-g{group_id}.sh").read_text()
+    assert 'CAIMAN_TEMP="/mnt/scratch/${SLURM_JOB_ID}"' in script
+    assert '--task "${SLURM_ARRAY_TASK_ID:-0}"' in script
+
+    sweep = json.loads((folder / "sweeps" / f"g{group_id}.json").read_text())
+    assert (sweep["user"], sweep["baseline_job"], sweep["array_job"]) == (
+        "ana",
+        "4242",
+        "4242",
+    )
+    assert sweep["runs"][0]["run"] == "s128_o64_d6"
+
+
+def test_the_runs_take_the_baselines_reference_and_levels(tmp_path, slurm, monkeypatch):
+    from odyn.groups import Group
+
+    db, group_id = a_loop(tmp_path, user="ana")
+    submit_mcor_sweep(tmp_path, None, group_id, GRID)
+    sweep = cluster_folder(tmp_path) / "sweeps" / f"g{group_id}.json"
+    asked = []
+    monkeypatch.setattr(
+        Group,
+        "test_motion_correction",
+        lambda self, **kwargs: asked.append((self.db.user, kwargs)) or tmp_path,
+    )
+
+    run_mcor_sweep(sweep, 0)
+    baseline = db.groups[group_id].mcor_test_folder("rigid")
+    baseline.mkdir(parents=True)
+    (baseline / "metrics.json").write_text(json.dumps({"movie_levels": [10, 90]}))
+    run_mcor_sweep(sweep, 2)
+
+    (user, first), (_, second) = asked
+    assert user == "ana"
+    assert first["run"] == "rigid" and "pw_rigid" not in first
+    assert first["movies"] == ("raw", "test", "raw_test")
+    assert first["side_by_side"] is False
+    assert second["run"] == "s128x96_o32_d2.5"
+    assert second["pw_rigid"] is True and second["reuse_reference"] is True
+    assert second["strides_um"] == [128, 96]
+    assert (second["movies"], second["levels"]) == (("test",), [10, 90])
+    assert (second["test_acqs"], second["max_shift_um"]) == (4, [20, 20])

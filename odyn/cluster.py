@@ -25,6 +25,8 @@ state, and `submissions/done/` the ones added;
 - `mcor/` has a file per group whose test motion correction was submitted
 (`<group_id>.json`: the job, who it is for, when), so no group is tested twice
 by the tick;
+- `sweeps/` has a file per group whose sweep of test motion corrections was
+submitted (`g<group_id>.json`: its runs and jobs, see `submit_mcor_sweep`);
 - `STOP` stops the chain (the running tick does not submit the next one).
 
 The cluster's own settings (partition, conda environment, chain interval) are
@@ -38,6 +40,7 @@ python -m odyn.cluster <main_folder> stop
 python -m odyn.cluster <main_folder> status
 python -m odyn.cluster <main_folder> request process_sync exp_id=12
 python -m odyn.cluster <main_folder> mcor-test --group 7 [--dry-run]
+python -m odyn.cluster <main_folder> mcor-sweep --group 7 --grid grid.json
 ```
 
 **PYTHON**
@@ -84,6 +87,10 @@ LOG_FILE = "tick.log"
 STOP_FILE = "STOP"
 SEEN_FILE = "seen.json"
 MCOR_FOLDER = "mcor"
+SWEEPS_FOLDER = "sweeps"
+# The run of a sweep every other run is compared with, and takes the
+# reference and the movie levels from
+BASELINE_RUN = "rigid"
 
 # What a request may ask for. A request is executed by name, so this list is
 # the whole of what another computer can make the cluster do.
@@ -553,6 +560,24 @@ def _read_seen(folder: Path) -> dict[str, str]:
     return seen if isinstance(seen, dict) else {}
 
 
+def _sbatch(arguments: list[str], dry_run: bool) -> None | str:
+    """Run `sbatch` with `arguments`; the job id (`None` in a dry run)."""
+    command = ["sbatch", "--parsable", *arguments]
+
+    if dry_run:
+        logger.info(f"Would run: {shlex.join(command)}")
+        return None
+
+    done = subprocess.run(command, capture_output=True, text=True)
+
+    if done.returncode != 0:
+        raise RuntimeError(
+            f"sbatch failed: {done.stderr.strip() or done.stdout.strip()}"
+        )
+
+    return done.stdout.strip().split(";")[0]
+
+
 def _write_json(path: Path, content: Any) -> None:
     """Write `content` under a hidden name, then rename (readers see all or none)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -655,27 +680,19 @@ def submit_tick(
     jobs.mkdir(parents=True, exist_ok=True)
     script = jobs / "tick.sh"
     script.write_text(tick_script(main_folder, project, config))
-    command = [
-        "sbatch",
-        "--parsable",
-        "--dependency=singleton",
-        *([f"--begin=now+{delay_minutes}minutes"] if delay_minutes else []),
-        str(script),
-    ]
+    job_id = _sbatch(
+        [
+            "--dependency=singleton",
+            *([f"--begin=now+{delay_minutes}minutes"] if delay_minutes else []),
+            str(script),
+        ],
+        dry_run,
+    )
 
-    if dry_run:
-        logger.info(f"Would run: {shlex.join(command)}")
+    if job_id is None:
         print(script.read_text())
         return None
 
-    done = subprocess.run(command, capture_output=True, text=True)
-
-    if done.returncode != 0:
-        raise RuntimeError(
-            f"sbatch failed: {done.stderr.strip() or done.stdout.strip()}"
-        )
-
-    job_id = done.stdout.strip().split(";")[0]
     logger.info(f"Submitted the tick as job {job_id}.")
 
     return job_id
@@ -689,14 +706,8 @@ def mcor_test_script(
     config: ClusterConfig,
 ) -> str:
     """The job script of one test motion correction (see `submit_mcor_test`)."""
-    main_folder = Path(main_folder).resolve()
-    logs = cluster_folder(main_folder, project) / JOBS_FOLDER
     command = [
-        "python",
-        "-m",
-        "odyn.cluster",
-        str(main_folder),
-        *(["--project", project] if project else []),
+        *_odyn_command(main_folder, project),
         "run-mcor-test",
         "--group",
         str(group_id),
@@ -704,18 +715,53 @@ def mcor_test_script(
         user,
     ]
 
+    return _mcor_script(
+        main_folder,
+        project,
+        config,
+        name=f"odyn-mcor-{project or 'main'}-g{group_id}",
+        about=f"A test motion correction of group {group_id}, for {user}.",
+        command=shlex.join(command),
+        time=config.mcor_time,
+    )
+
+
+def _odyn_command(main_folder: str | Path, project: None | str) -> list[str]:
+    return [
+        "python",
+        "-m",
+        "odyn.cluster",
+        str(Path(main_folder).resolve()),
+        *(["--project", project] if project else []),
+    ]
+
+
+def _mcor_script(
+    main_folder: str | Path,
+    project: None | str,
+    config: ClusterConfig,
+    *,
+    name: str,
+    about: str,
+    command: str,
+    time: str,
+) -> str:
+    """A job script that runs `command` with caiman's files on scratch."""
+    logs = cluster_folder(Path(main_folder).resolve(), project) / JOBS_FOLDER
+
     return f"""#!/bin/bash
 #SBATCH --partition={config.partition}
-#SBATCH --job-name=odyn-mcor-{project or 'main'}-g{group_id}
+#SBATCH --job-name={name}
 #SBATCH --output={logs}/%x-%j.out
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={config.mcor_cpus}
 #SBATCH --mem={config.mcor_memory}
-#SBATCH --time={config.mcor_time}
+#SBATCH --time={time}
 #SBATCH --gres=disk:{config.mcor_disk_gb}
 
-# A test motion correction of group {group_id}, for {user}. caiman's temporary
-# files go to the node's scratch disk, removed however the job ends.
+# {about}
+# caiman's temporary files go to the node's scratch disk, removed however the
+# job ends.
 
 set -euo pipefail
 
@@ -730,10 +776,10 @@ set +u
 conda activate {config.conda_env}
 set -u
 
-echo "mcor test of group {group_id} as job ${{SLURM_JOB_ID:-none}} on $(hostname)"
+echo "{name} as job ${{SLURM_JOB_ID:-none}} on $(hostname)"
 echo "cores    ${{SLURM_CPUS_PER_TASK:-?}}, temporary files in $CAIMAN_TEMP"
 echo "started  $(date --iso-8601=seconds)"
-{shlex.join(command)}
+{command}
 echo "finished $(date --iso-8601=seconds)"
 """
 
@@ -761,21 +807,12 @@ def submit_mcor_test(
     script = folder / JOBS_FOLDER / f"mcor-test-g{group_id}.sh"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(mcor_test_script(main_folder, project, group_id, user, config))
-    command = ["sbatch", "--parsable", str(script)]
+    job_id = _sbatch([str(script)], dry_run)
 
-    if dry_run:
-        logger.info(f"Would run: {shlex.join(command)}")
+    if job_id is None:
         print(script.read_text())
         return None
 
-    done = subprocess.run(command, capture_output=True, text=True)
-
-    if done.returncode != 0:
-        raise RuntimeError(
-            f"sbatch failed: {done.stderr.strip() or done.stdout.strip()}"
-        )
-
-    job_id = done.stdout.strip().split(";")[0]
     _write_json(
         folder / MCOR_FOLDER / f"{group_id}.json",
         {
@@ -799,6 +836,200 @@ def run_mcor_test(
     db = Database(main_folder, project=project, user=user)
 
     return db.groups[group_id].test_motion_correction()
+
+
+def submit_mcor_sweep(
+    main_folder: str | Path,
+    project: None | str,
+    group_id: int,
+    grid: dict[str, Any],
+    *,
+    user: None | str = None,
+    time: None | str = None,
+    dry_run: bool = False,
+) -> None | tuple[str, str]:
+    """
+    Submit a sweep of test motion corrections of `group_id`, to compare
+    piecewise rigid settings: a rigid baseline run (named "rigid") as one job,
+    then every piecewise run of `grid` at once as an array job that starts
+    when the baseline ends well. Slurm runs as many as it allows and keeps the
+    rest waiting.
+
+    The baseline builds and saves the reference, which the piecewise runs
+    reuse, and writes the raw, test and raw | test videos; the piecewise runs
+    write only their test video, with the baseline's black and white, so all
+    the videos compare. No run writes `side_by_side.tif`. Each run has its
+    folder in the experiment's test folder (`Group.mcor_test_folder`).
+
+    `grid` is (as a JSON file for the command line):
+    ```json
+    {"test_acqs": 24, "max_shift_um": [80, 80],
+     "runs": [{"strides_um": [128, 128], "overlap_um": [64, 64],
+               "max_deviation_um": 6}, ...]}
+    ```
+    A run is named from its settings (`s128_o64_d6`), or by its own `"run"`.
+
+    Writes the job script to `jobs/` and the sweep to `sweeps/g<group>.json`,
+    which the jobs read. Returns the two job ids (`None` in a dry run).
+    """
+    runs = sweep_runs(grid)
+    db = Database(main_folder, project=project)
+
+    if user is None:
+        user = experiment_owner(db, group_id)
+
+    config = ClusterConfig.read(main_folder)
+    folder = cluster_folder(main_folder, project)
+    sweep = folder / SWEEPS_FOLDER / f"g{group_id}.json"
+    content = {
+        "main_folder": str(Path(main_folder).resolve()),
+        "project": project,
+        "group_id": group_id,
+        "user": user,
+        "test_acqs": int(grid.get("test_acqs", 24)),
+        "max_shift_um": list(grid.get("max_shift_um", [80, 80])),
+        "runs": runs,
+    }
+    _write_json(sweep, content)
+
+    name = f"odyn-sweep-{project or 'main'}-g{group_id}"
+    command = [
+        *_odyn_command(main_folder, project),
+        "run-mcor-sweep",
+        "--sweep",
+        str(sweep.resolve()),
+    ]
+    script = folder / JOBS_FOLDER / f"mcor-sweep-g{group_id}.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        _mcor_script(
+            main_folder,
+            project,
+            config,
+            name=name,
+            about=f"One run of the sweep of group {group_id}, for {user}.",
+            # Task 0 is the baseline, the array's tasks the piecewise runs
+            command=shlex.join(command) + ' --task "${SLURM_ARRAY_TASK_ID:-0}"',
+            time=time or config.mcor_time,
+        )
+    )
+
+    logs = folder.resolve() / JOBS_FOLDER
+    baseline = _sbatch([str(script)], dry_run)
+    array = _sbatch(
+        [
+            f"--array=1-{len(runs)}",
+            f"--dependency=afterok:{baseline or '<baseline>'}",
+            f"--output={logs}/%x-%A_%a.out",
+            str(script),
+        ],
+        dry_run,
+    )
+
+    if baseline is None or array is None:
+        print(script.read_text())
+        return None
+
+    content |= {
+        "baseline_job": baseline,
+        "array_job": array,
+        "submitted_at": datetime.now().strftime(TIME_FORMAT),
+    }
+    _write_json(sweep, content)
+    logger.info(
+        f"Submitted the sweep of group {group_id}: the baseline as job "
+        f"{baseline}, then {len(runs)} piecewise runs as job {array}."
+    )
+
+    return baseline, array
+
+
+def sweep_runs(grid: dict[str, Any]) -> list[dict[str, Any]]:
+    """The piecewise runs of a sweep's `grid`, each with its name, checked."""
+    known = {"run", "strides_um", "overlap_um", "max_deviation_um"}
+    runs = []
+
+    for given in grid.get("runs", []):
+        unknown = sorted(set(given) - known)
+
+        if unknown:
+            raise ValueError(
+                f"Unknown run settings {', '.join(unknown)}. The known ones are "
+                f"{', '.join(sorted(known))}."
+            )
+
+        missing = sorted(known - {"run"} - set(given))
+
+        if missing:
+            raise ValueError(f"A run has no {', '.join(missing)}: {given}.")
+
+        run = {
+            "strides_um": list(given["strides_um"]),
+            "overlap_um": list(given["overlap_um"]),
+            "max_deviation_um": given["max_deviation_um"],
+        }
+        run["run"] = given.get("run") or (
+            f"s{_short(run['strides_um'])}_o{_short(run['overlap_um'])}"
+            f"_d{_short([run['max_deviation_um']])}"
+        )
+        runs.append(run)
+
+    if not runs:
+        raise ValueError("The grid has no runs.")
+
+    names = [run["run"] for run in runs]
+    repeated = sorted(
+        {n for n in names if names.count(n) > 1} | {BASELINE_RUN} & set(names)
+    )
+
+    if repeated:
+        raise ValueError(
+            f"Run names must differ, and not be {BASELINE_RUN!r}: "
+            f"{', '.join(repeated)}."
+        )
+
+    return runs
+
+
+def _short(values: list[float]) -> str:
+    """`[128, 128]` as "128", `[128, 96]` as "128x96", `[2.5]` as "2.5"."""
+    text = [f"{v:g}" for v in values]
+
+    return text[0] if len(set(text)) == 1 else "x".join(text)
+
+
+def run_mcor_sweep(sweep: str | Path, task: int) -> Path:
+    """
+    What a sweep's job runs: run `task` of the sweep in `sweep` (0 is the
+    baseline), recorded as the sweep's user. Returns its folder.
+    """
+    content = json.loads(Path(sweep).read_text())
+    db = Database(
+        content["main_folder"], project=content["project"], user=content["user"]
+    )
+    group = db.groups[int(content["group_id"])]
+    common = {
+        "test_acqs": content["test_acqs"],
+        "max_shift_um": content["max_shift_um"],
+        "side_by_side": False,
+    }
+
+    if task == 0:
+        return group.test_motion_correction(
+            **common, run=BASELINE_RUN, movies=("raw", "test", "raw_test")
+        )
+
+    metrics = group.mcor_test_folder(BASELINE_RUN) / "metrics.json"
+    levels = json.loads(metrics.read_text())["movie_levels"]
+
+    return group.test_motion_correction(
+        **common,
+        **content["runs"][task - 1],
+        pw_rigid=True,
+        reuse_reference=True,
+        movies=("test",),
+        levels=levels,
+    )
 
 
 def experiment_owner(db: Database, group_id: int) -> str:
@@ -1053,6 +1284,19 @@ def main(argv: None | list[str] = None) -> int:
     job.add_argument("--group", type=int, required=True)
     job.add_argument("--user", required=True)
 
+    sweep = commands.add_parser(
+        "mcor-sweep", help="submit a sweep of test motion corrections of a group"
+    )
+    sweep.add_argument("--group", type=int, required=True)
+    sweep.add_argument("--grid", type=Path, required=True, help="the runs (JSON)")
+    sweep.add_argument("--user", help="whose it is (default: who added the experiment)")
+    sweep.add_argument("--time", help="the time limit of each run (default: mcor_time)")
+    sweep.add_argument("--dry-run", action="store_true", help="only show the jobs")
+
+    one = commands.add_parser("run-mcor-sweep", help="what a sweep's jobs run")
+    one.add_argument("--sweep", type=Path, required=True)
+    one.add_argument("--task", type=int, required=True)
+
     ask = commands.add_parser("request", help="leave a request for the next tick")
     ask.add_argument("method", choices=REQUESTABLE)
     ask.add_argument("arguments", nargs="*", help="key=value")
@@ -1094,6 +1338,21 @@ def main(argv: None | list[str] = None) -> int:
             user=args.user,
             dry_run=args.dry_run,
         )
+
+    elif args.command == "mcor-sweep":
+        submit_mcor_sweep(
+            args.main_folder,
+            args.project,
+            args.group,
+            json.loads(args.grid.read_text()),
+            user=args.user,
+            time=args.time,
+            dry_run=args.dry_run,
+        )
+
+    elif args.command == "run-mcor-sweep":
+        folder = run_mcor_sweep(args.sweep, args.task)
+        print(f"Wrote {folder}")
 
     elif args.command == "run-mcor-test":
         folder = run_mcor_test(args.main_folder, args.project, args.group, args.user)

@@ -1910,11 +1910,7 @@ class Group(CallRecorder):
         acquisitions = self.acquisitions
         positions = spread_acquisitions(len(acquisitions), test_acqs)
         acq_ids = [int(i) for i in acquisitions.index[positions]]
-        name = f"{self.exp_names.iloc[0]}_g{self.group_id}"
-        folder = self.db.files_folder / CACHE_FOLDER / MCOR_TESTS_FOLDER / name
-
-        if run is not None:
-            folder = folder / run
+        folder = self.mcor_test_folder(run)
 
         settings = {
             "run": run,
@@ -1984,6 +1980,16 @@ class Group(CallRecorder):
         )
 
         return folder
+
+    def mcor_test_folder(self, run: None | str = None) -> Path:
+        """
+        Where `test_motion_correction` writes a test (`run`'s, when given):
+        `cache/mcor-tests/<experiment>_g<group>[/<run>]` in the files folder.
+        """
+        name = f"{self.exp_names.iloc[0]}_g{self.group_id}"
+        folder = self.db.files_folder / CACHE_FOLDER / MCOR_TESTS_FOLDER / name
+
+        return folder if run is None else folder / run
 
     def _reference_template(self, wanted: int, max_shifts) -> np.ndarray:
         """
