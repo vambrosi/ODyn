@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import re
 import sqlite3
 
@@ -1871,7 +1872,7 @@ class Database(CallRecorder):
                     **_contract(experiment, scale),
                     "session_id": session_id,
                     "exp_number": int(exp_number),
-                    "exp_path": folder.resolve()
+                    "exp_path": _absolute(folder)
                     .relative_to(self.main_folder)
                     .as_posix(),
                     "exp_type": exp_type,
@@ -2364,7 +2365,7 @@ class Database(CallRecorder):
             if not path.is_file():
                 self.fail(SyncFlag.NO_SYNC_FILE, f"No sync file at '{path}'.")
 
-            return path.resolve()
+            return _absolute(path)
 
         folder = self.main_folder / folder_path / SYNC_FOLDER
         found = sorted(folder.glob("*.h5")) if folder.is_dir() else []
@@ -2383,7 +2384,7 @@ class Database(CallRecorder):
                 "`sync_path`.",
             )
 
-        return found[0].resolve()
+        return _absolute(found[0])
 
     def _check_sync(
         self,
@@ -3564,3 +3565,11 @@ def _whole_number(value, field: str, path: Path) -> int:
         )
 
     return nearest
+
+
+def _absolute(path: Path) -> Path:
+    """
+    `path` made absolute and without `..`, but not through links (unlike
+    `resolve`), so a linked file or folder stays inside the main folder.
+    """
+    return Path(os.path.abspath(path))

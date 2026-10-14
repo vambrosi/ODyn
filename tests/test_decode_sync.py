@@ -244,6 +244,22 @@ def test_a_rerun_replaces_what_the_first_wrote(tmp_path):
     assert (db.sync_blocks["stream_id"] == stream_id).all()
 
 
+def test_a_linked_sync_file_is_read_where_the_link_is(tmp_path):
+    # A test folder that links to the real files: the link's path is stored
+    real = tmp_path / "real" / "m001_e1.h5"
+    truth = generate_sync(real, acquisitions=2)
+    main = tmp_path / "tests"
+    db = build(main, truth)
+    link = main / "20260101/m001/e1/sync/m001_e1.h5"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(real)
+
+    db.process_sync(exp_id=1)
+
+    assert db.streams.iloc[0]["file_path"] == "20260101/m001/e1/sync/m001_e1.h5"
+    assert list(db.trials["acq_id"]) == [1, 2]
+
+
 def test_the_file_is_found_or_named(tmp_path):
     truth = generate_sync(tmp_path / "elsewhere/rec.h5", acquisitions=2)
     db = build(tmp_path, truth)
