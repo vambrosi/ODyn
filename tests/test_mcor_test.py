@@ -57,9 +57,12 @@ def caiman(monkeypatch, tmp_path):
                 self.mmap_file.append(str(path))
                 self.shifts_rig += [(0.5, -0.5)] * len(movie)
 
+            if self.pw_rigid and template is not None:
+                del self.shifts_rig  # caiman skips its rigid pass
+
             if self.pw_rigid:
                 # Four patches; two jump by 1 px every other frame
-                frames = len(self.shifts_rig)
+                frames = sum(len(np.load(p)) for p in self.mmap_file)
                 self.y_shifts_els = np.full((frames, 4), 0.5)
                 self.x_shifts_els = np.full((frames, 4), -0.5)
                 self.y_shifts_els[1::2, :2] += 1
@@ -180,6 +183,8 @@ def test_a_piecewise_run_has_its_own_folder_and_measures_the_patches(tmp_path, c
     assert metrics["patch_jitter_median_px"] == 0.5
     summary = pd.read_csv(folder / "summary.csv")
     assert (summary["test_patch_jitter_p90_px"] == 0.5).all()
+    # Without caiman's rigid pass, a frame's shift is its patches' median
+    assert summary["dy_median"].tolist() == [0.75] * 4
 
     shifts = np.load(folder / "shifts.npz")
     assert shifts["patch_dy"].shape == (4 * 56, 4)

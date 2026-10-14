@@ -7,7 +7,8 @@ For the acquisitions a test ran on, written into one folder:
 image raw | test, each column scaled on its own. Scrubbed in Fiji, drift
 shows as the picture sliding from page to page;
 - `summary.csv`: per acquisition, how its images match the reference (see
-below), and the rigid shift caiman applied;
+below), and the shift caiman applied (for piecewise rigid, the median of
+the patches' shifts);
 - `metrics.json`: the numbers for the whole test, and the settings it ran
 with when given;
 - `flow_average.tif`: how far the corrected means still are from the
@@ -40,10 +41,10 @@ the field moves on its own. What a rigid correction leaves is mostly
 non-rigid motion, so this says whether piecewise rigid would help.
 - **Patch jitter** (piecewise rigid only, `test_patch_jitter_median_px`,
 `_p90_px`; `patch_jitter_median_px` in `metrics.json`): how far each patch's
-own shift, apart from the rigid one, moves from one frame to the next, the
-median over the patches. Tissue bends slowly, so a large jitter means the
-patches follow noise (too small, or too free to deviate) rather than the
-tissue.
+own shift, apart from the frame's (the median of the patches'), moves from
+one frame to the next, the median over the patches. Tissue bends slowly, so
+a large jitter means the patches follow noise (too small, or too free to
+deviate) rather than the tissue.
 - **Crispness** (`metrics.json`): the mean squared gradient of the average of
 all means, divided by its variance, so it compares across experiments and
 brightness (NoRMCorre's is the unscaled norm of the gradient). Drift blurs
@@ -94,7 +95,8 @@ def write_report(
     and return the files. `raw_paths` and `corrected_paths` are the test's
     acquisitions in order, `load` reads a corrected one as `(frames, height,
     width)`, `shifts` holds every frame's `(dy, dx)` one acquisition after
-    the other, and `positions` and `acq_ids` say which acquisitions they were.
+    the other (for piecewise rigid, the median of the patches'), and
+    `positions` and `acq_ids` say which acquisitions they were.
     Without a `reference` (caiman's own template), the average of the
     corrected means stands in for it, and the frames are not compared.
     `patch_shifts` are piecewise rigid's `(dy, dx)` per frame and patch, each

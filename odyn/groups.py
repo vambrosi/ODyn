@@ -1929,12 +1929,17 @@ class Group(CallRecorder):
                 "max_deviation_px": float(self.mc.max_deviation_rigid),
             }
 
-        # Each patch's shift per frame, piecewise rigid only
-        patches = (
-            (np.asarray(self.mc.y_shifts_els), np.asarray(self.mc.x_shifts_els))
-            if pw_rigid
-            else None
-        )
+        # Piecewise rigid given a template skips caiman's rigid pass, so it
+        # has no `shifts_rig`: each frame's shift is the median of its patches'
+        if pw_rigid:
+            patches = (
+                np.asarray(self.mc.y_shifts_els, float),
+                np.asarray(self.mc.x_shifts_els, float),
+            )
+            shifts = np.stack([np.median(p, axis=1) for p in patches], axis=1)
+        else:
+            patches = None
+            shifts = np.asarray(self.mc.shifts_rig)
 
         logger.info(f"Writing the test's report to {folder}")
         paths = write_report(
@@ -1942,7 +1947,7 @@ class Group(CallRecorder):
             [Path(p) for p in self.mc.fname],
             list(self.mc.mmap_file),
             lambda path: np.asarray(cm.load(path)),
-            np.asarray(self.mc.shifts_rig),
+            shifts,
             self.mc_reference,
             max_shifts=list(self.mc.max_shifts),
             positions=positions,
