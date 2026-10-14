@@ -234,11 +234,11 @@ class UsersPane(QWidget):
         outer.addLayout(row)
         outer.addStretch(3)
 
-        context.changed.connect(self.reload)
+        context.follow_changes(self, self.reload)
         self.reload()
 
     def reload(self) -> None:
-        self.context.run(lambda db: db.users, self._show, "users")
+        self.context.run(lambda db: db.users, self._show, "users", one_lock=True)
 
     def _show(self, users) -> None:
         while self.names.count():
@@ -523,7 +523,7 @@ class MicePane(QWidget):
         self.table.clicked.connect(self._pick)
         self.form.changed.connect(self._typed)
         _watch_id(self.form, "mouse_id", _exists_note("Mouse"), self.stored)
-        context.changed.connect(self.reload)
+        context.follow_changes(self, self.reload)
         self.reload()
 
     def clear(self) -> None:
@@ -564,7 +564,7 @@ class MicePane(QWidget):
                 [str(name) for name in db.viruses.index],
             )
 
-        self.context.run(load, self._loaded, "mice")
+        self.context.run(load, self._loaded, "mice", one_lock=True)
 
     def _loaded(self, loaded) -> None:
         self.mice, self.carried, self.injected, lines, viruses = loaded
@@ -626,6 +626,7 @@ class MicePane(QWidget):
             return pick.values() if pick.speaks_for(mouse_id) or not stored else None
 
         lines, viruses = listed(self.line_list), listed(self.virus_list)
+        self.context.status.emit(f"Saving m{mouse_id}")
 
         self.context.run(
             lambda db: db.set_mouse(
@@ -635,9 +636,10 @@ class MicePane(QWidget):
                 lines=None if lines is None else dict(lines),
                 viruses=viruses,
             ),
-            None,
+            lambda _: self.context.status.emit(f"Saved m{mouse_id}"),
             "set_mouse",
             writes=True,
+            one_lock=True,
         )
 
 
@@ -691,7 +693,7 @@ class OdorsPane(QWidget):
         self.table.clicked.connect(self._pick)
         self.form.changed.connect(self._typed)
         _watch_id(self.form, "odor_id", _exists_note("Odor"), self.stored)
-        context.changed.connect(self.reload)
+        context.follow_changes(self, self.reload)
         self.reload()
 
     def clear(self) -> None:
@@ -725,7 +727,11 @@ class OdorsPane(QWidget):
 
             return odors, made_of, chemicals
 
-        self.context.run(load, self._loaded, "odors")
+        self.context.run(load, self._loaded, "odors", one_lock=True)
+
+    def _saved(self, odor_id: int) -> None:
+        self.added = odor_id  # loaded once the table has it
+        self.context.status.emit(f"Saved odor {odor_id}")
 
     def _loaded(self, loaded) -> None:
         self.odors, self.made_of, self.chemicals = loaded
@@ -819,9 +825,10 @@ class OdorsPane(QWidget):
                     components=components or None,
                     **facts,
                 ),
-                lambda _: setattr(self, "added", odor_id),
+                lambda _: self._saved(odor_id),
                 "add_odor",
                 writes=True,
+                one_lock=True,
             )
             return
 
@@ -840,9 +847,10 @@ class OdorsPane(QWidget):
 
         self.context.run(
             lambda db: db.update_odor(odor_id=odor_id, **facts),
-            None,
+            lambda _: self.context.status.emit(f"Saved odor {odor_id}"),
             "update_odor",
             writes=True,
+            one_lock=True,
         )
 
 
@@ -921,7 +929,7 @@ class PanelsPane(QWidget):
         self.table.clicked.connect(self._pick)
         self.form.changed.connect(self._typed)
         _watch_id(self.form, "panel_name", PANEL_NOTE, self.stored)
-        context.changed.connect(self.reload)
+        context.follow_changes(self, self.reload)
         self.reload()
 
     def reload(self) -> None:
@@ -963,7 +971,11 @@ class PanelsPane(QWidget):
                 (chemicals, made_of),
             )
 
-        self.context.run(load, self._loaded, "vials")
+        self.context.run(load, self._loaded, "vials", one_lock=True)
+
+    def _saved(self, name: str) -> None:
+        self.added = name  # loaded once the table has it
+        self.context.status.emit(f"Saved {name}")
 
     def _loaded(self, loaded) -> None:
         shown, stored, odors, (chemicals, made_of) = loaded
@@ -1146,9 +1158,10 @@ class PanelsPane(QWidget):
 
         self.context.run(
             lambda db: db.add_vials(panel_name=name, vials=batch, made_on=made_on),
-            lambda _: setattr(self, "added", name),
+            lambda _: self._saved(name),
             "add_vials",
             writes=True,
+            one_lock=True,
         )
 
     def _save_new(self, name: str, description, made_on) -> None:
@@ -1173,5 +1186,9 @@ class PanelsPane(QWidget):
             db.add_vials(panel_name=name, vials=vials, made_on=made_on)
 
         self.context.run(
-            add, lambda _: setattr(self, "added", name), "add_panel", writes=True
+            add,
+            lambda _: self._saved(name),
+            "add_panel",
+            writes=True,
+            one_lock=True,
         )

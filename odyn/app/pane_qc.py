@@ -401,7 +401,7 @@ class QcPane(QWidget):
         for view in (self.queue_view, self.recordings_view, self.tests_view):
             view.selectionModel().selectionChanged.connect(self._enable)
 
-        context.changed.connect(self.reload)
+        context.follow_changes(self, self.reload)
         context.user_changed.connect(lambda _: self.reload())
         self._enable()
         self.reload()

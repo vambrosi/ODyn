@@ -851,7 +851,7 @@ class Sessions(QObject):
                 (panels, current_vials(vials)),
             )
 
-        self.context.run(load, self._choices_loaded, "session choices")
+        self.context.run(load, self._choices_loaded, "session choices", one_lock=True)
 
     def _choices_loaded(self, loaded) -> None:
         session_fields, (exp_fields, conditions), files, mice, (panels, vials) = loaded

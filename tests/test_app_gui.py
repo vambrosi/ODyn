@@ -71,6 +71,7 @@ def settle(context) -> None:
         QApplication.processEvents()
 
         if context.worker._jobs.empty():
+            wait_until(lambda: context.pending == 0)
             return
 
     raise AssertionError("the worker never ran out of jobs")
@@ -169,6 +170,7 @@ def test_users_pane_is_a_login_screen(window, tmp_path):
 
 def test_mice_pane_registers_a_mouse(window, tmp_path):
     mice = window.mice
+    window.show_page(mice)
     mice.form.set_values({"mouse_id": "m7", "sex": "F", "dob": "2026-01-01"})
     mice._save()
     settle(window.context)
@@ -176,10 +178,71 @@ def test_mice_pane_registers_a_mouse(window, tmp_path):
     assert 7 in Database(tmp_path / "data").mice.index
 
 
+def test_saving_shows_it_is_busy_then_says_so(window, monkeypatch):
+    said = []
+    window.context.status.connect(said.append)
+    mice = window.mice
+    mice.form.set_values({"mouse_id": "m7"})
+
+    mice._save()
+    assert QApplication.overrideCursor() is not None  # busy until it is back
+    settle(window.context)
+
+    assert said[0] == "Saving m7" and "Saved m7" in said
+    assert window.context.pending == 0
+    assert QApplication.overrideCursor() is None
+
+
+def test_after_a_change_only_the_page_on_screen_reloads(window, monkeypatch):
+    from odyn.app.pane_qc import QcPane
+
+    reloads = []
+    monkeypatch.setattr(QcPane, "reload", lambda self: reloads.append("qc"))
+    # (the instance's own connection holds the method it was given; rebind)
+    window.context.follow_changes(window.qc, lambda: window.qc.reload())
+    window.show_page(window.mice)
+    settle(window.context)
+    reloads.clear()
+
+    window.mice.form.set_values({"mouse_id": "m8"})
+    window.mice._save()
+    settle(window.context)
+    assert reloads == []  # QC is hidden: it waits
+
+    window.show_page(window.qc)
+    settle(window.context)
+    assert reloads == ["qc"]  # and catches up once, when shown
+
+
+def test_a_short_job_takes_the_lock_once(window, monkeypatch):
+    from odyn.locking import DatabaseLock
+
+    taken = []
+    original = DatabaseLock._acquire_file
+    monkeypatch.setattr(
+        DatabaseLock,
+        "_acquire_file",
+        lambda self: taken.append(1) or original(self),
+    )
+
+    def reads(db):
+        return db.mice, db.mouse_lines, db.mouse_viruses, db.lines, db.viruses
+
+    window.context.run(reads, None, "reads", one_lock=True)
+    settle(window.context)
+    assert len(taken) == 1
+
+    taken.clear()
+    window.context.run(reads, None, "reads")
+    settle(window.context)
+    assert len(taken) > 1
+
+
 def test_mice_pane_loads_a_stored_mouse_and_asks_before_overwriting(
     window, tmp_path, monkeypatch
 ):
     mice = window.mice
+    window.show_page(mice)
     mice.form.set_values({"mouse_id": "m7", "sex": "F"})
     mice._save()
     settle(window.context)
@@ -266,6 +329,7 @@ def test_registry_forms_hide_and_come_back(window):
 
 def test_clear_starts_a_new_entry_and_the_id_is_checked_as_typed(window):
     mice = window.mice
+    window.show_page(mice)
     mice.form.set_values({"mouse_id": "m7", "sex": "F"})
     mice._save()
     settle(window.context)
@@ -310,6 +374,7 @@ def test_clear_starts_a_new_entry_and_the_id_is_checked_as_typed(window):
 def test_mice_pane_lists_lines_and_viruses_as_rows(window, tmp_path, monkeypatch):
     # (the lines and viruses are seeded when the database is made)
     mice = window.mice
+    window.show_page(mice)
     lines, viruses = mice.line_list, mice.virus_list
     mice.form.set_values({"mouse_id": "m7"})
     lines.add()
@@ -445,6 +510,7 @@ def test_tables_pane_reads_filters_and_shows_a_row(window):
 def test_detail_pane_annotates_a_mouse(window, tmp_path):
     db = Database(tmp_path / "data", user="tester")
     db.set_mouse(mouse_id=9, sex="M")
+    window.show_page(window.tables)
     window.context.changed.emit()
     settle(window.context)
 
@@ -1157,6 +1223,7 @@ def test_panels_pane_adds_a_panel_then_batches_of_its_vials(
     window, tmp_path, monkeypatch
 ):
     panels = window.panels
+    window.show_page(panels)
     asked = []
     monkeypatch.setattr(
         window.context, "confirm", lambda *args: asked.append(args) or True
@@ -1269,6 +1336,7 @@ def test_panel_names_are_the_same_whatever_their_case(window, tmp_path):
             }
         ],
     )
+    window.show_page(window.panels)
     window.context.changed.emit()
     settle(window.context)
 
@@ -1282,6 +1350,7 @@ def test_panel_names_are_the_same_whatever_their_case(window, tmp_path):
 
 def test_odors_pane_adds_a_mix_from_its_components(window, tmp_path):
     odors = window.odors
+    window.show_page(odors)
     composition = odors.composition
     assert composition.none.placeholderText() == "Not a mix of odors"
 
@@ -1351,10 +1420,14 @@ def test_tables_pane_lists_every_method_called(window):
     names = [tables.list.item(i).text() for i in range(tables.list.count())]
     assert "method_calls:Database.set_mouse" not in names
 
+    window.show_page(window.mice)
     window.mice.form.set_values({"mouse_id": "m3"})
     window.mice._save()
     settle(window.context)
 
+    # The Tables page catches up when it is shown
+    window.show_page(tables)
+    settle(window.context)
     names = [tables.list.item(i).text() for i in range(tables.list.count())]
     assert "method_calls:Database.set_mouse" in names
 

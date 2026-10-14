@@ -305,6 +305,22 @@ class Database(CallRecorder):
             connection.close()
 
     @contextmanager
+    def held(self) -> Generator[None]:
+        """
+        Hold the database lock across several reads or writes, so the batch
+        takes it once: over a network share, each take is a few round trips
+        (the lock file is created, written, read back and deleted). Keep it
+        short, as everyone else waits meanwhile.
+
+        ```python
+        with db.held():
+            mice, lines = db.mice, db.mouse_lines
+        ```
+        """
+        with self._locked():
+            yield
+
+    @contextmanager
     def _locked(self) -> Generator[sqlite3.Connection]:
         """
         Hold the database lock and get the connection. Nests freely.

@@ -257,7 +257,7 @@ class DetailPane(QWidget):
                 self._loaded = values
                 self.form.set_values(values)
 
-        self.context.run(load, loaded, "load annotations")
+        self.context.run(load, loaded, "load annotations", one_lock=True)
 
     def _save(self) -> None:
         if self.form is None or self.target_type is None or self.target_id is None:
@@ -287,6 +287,7 @@ class DetailPane(QWidget):
             lambda n: self.context.status.emit(f"Saved {n} annotations"),
             "save annotations",
             writes=True,
+            one_lock=True,
         )
 
 
@@ -347,12 +348,14 @@ class TablesPane(QWidget):
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
 
-        context.changed.connect(self.reload)
+        context.follow_changes(self, self.reload)
         self.list.setCurrentRow(0)
 
     def reload(self) -> None:
         """Re-read the shown table (and the annotation fields, once)."""
-        self.context.run(call_tables, self._set_call_tables, "list calls")
+        self.context.run(
+            call_tables, self._set_call_tables, "list calls", one_lock=True
+        )
 
         if not self.detail._fields:
 
@@ -362,7 +365,9 @@ class TablesPane(QWidget):
                     for target in ANNOTATION_TARGETS
                 }
 
-            self.context.run(fields, self.detail.set_fields, "load fields")
+            self.context.run(
+                fields, self.detail.set_fields, "load fields", one_lock=True
+            )
 
         if self.table_name is None:
             return
@@ -377,7 +382,7 @@ class TablesPane(QWidget):
                 self.frame = frame
                 self._apply_filter()
 
-        self.context.run(load, loaded, f"read {name}")
+        self.context.run(load, loaded, f"read {name}", one_lock=True)
 
     def _set_call_tables(self, names: list[str]) -> None:
         """Keep the per-method entries after the fixed ones, without losing the pick."""

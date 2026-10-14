@@ -519,7 +519,7 @@ def _olfactometer_problems(
 
     if not runs and not any(folder.rglob(EVENTS_PATTERN)):
         searched = olfactometer is not None and window is None
-        why = " (no recording to find its runs by)" if searched else ""
+        why = " (no sync to match with the experiment)" if searched else ""
         return [
             Problem(where, f"no olfactometer Events file found{why}", blocking=False)
         ]

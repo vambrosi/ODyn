@@ -25,6 +25,7 @@ import queue
 import traceback
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -40,10 +41,16 @@ class Job(QObject):
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, function: Callable[[Database], Any], label: str = ""):
+    def __init__(
+        self,
+        function: Callable[[Database], Any],
+        label: str = "",
+        one_lock: bool = False,
+    ):
         super().__init__()
         self.function = function
         self.label = label or getattr(function, "__name__", "job")
+        self.one_lock = one_lock
 
 
 class DatabaseWorker(QThread):
@@ -81,15 +88,19 @@ class DatabaseWorker(QThread):
         self.db: None | Database = None
         self._finished.connect(self._deliver)
 
-    def run(self, function=None, label: str = "") -> Any:  # type: ignore[override]
+    def run(  # type: ignore[override]
+        self, function=None, label: str = "", one_lock: bool = False
+    ) -> Any:
         """
-        Called with a function: queue a job and return it.
+        Called with a function: queue a job and return it. With `one_lock`,
+        the job holds the database lock from start to end (`Database.held`),
+        for short jobs of several reads or writes.
 
         Called with nothing: the thread body (Qt calls it), which opens the
         database and works through the queue until `stop`.
         """
         if function is not None:
-            job = Job(function, label)
+            job = Job(function, label, one_lock)
             self._jobs.put(job)
 
             return job
@@ -117,7 +128,8 @@ class DatabaseWorker(QThread):
                 break
 
             try:
-                result = job.function(self.db)
+                with self.db.held() if job.one_lock else nullcontext():
+                    result = job.function(self.db)
 
             except Exception as error:
                 logger.error(f"{job.label} failed:\n{traceback.format_exc()}")
