@@ -1595,6 +1595,7 @@ class Group(CallRecorder):
         max_shift_um: list[float] = DEFAULT_MAX_SHIFT_UM,
         overlap_um: list[float] = DEFAULT_OVERLAP_UM,
         strides_um: list[float] = DEFAULT_STRIDES_UM,
+        gsig_filt_um: None | float = None,
         reuse_reference: bool = False,
     ) -> None:
         """
@@ -1638,6 +1639,11 @@ class Group(CallRecorder):
         - `max_shift_um`: max allowed rigid shift
         - `overlap_um`: overlap between patches (patch = strides + overlaps)
         - `strides_um`: start a new patch every x or y um (only for pw-rigid)
+        - `gsig_filt_um`: register on frames high-pass filtered with a
+        Gaussian this wide (caiman's `gSig_filt`, here in um), so patches
+        follow cells rather than the dim background; the movie saved is not
+        filtered. The reference is filtered the same way, and caiman needs
+        `shifts_opencv`, so it is turned on
 
         **EXAMPLES**
         ```python
@@ -1675,6 +1681,11 @@ class Group(CallRecorder):
 
         # --- Validate and adjust parameters to reasonable values --- #
 
+        # caiman filters the frames, not a template it is given, and only
+        # shifts filtered piecewise runs with OpenCV
+        if gsig_filt_um is not None:
+            shifts_opencv = True
+
         positions = (
             spread_acquisitions(len(self.acquisitions), test_acqs)
             if is_test
@@ -1700,6 +1711,8 @@ class Group(CallRecorder):
                 "max_shift_um": max_shift_um,
                 "overlap_um": overlap_um,
                 "strides_um": strides_um,
+                "gsig_filt_um": gsig_filt_um,
+                "shifts_opencv": shifts_opencv,
             }
         )
 
@@ -1721,11 +1734,15 @@ class Group(CallRecorder):
             "pw_rigid": pw_rigid,
             "shifts_opencv": shifts_opencv,
             "nonneg_movie": nonneg_movie,
-            "max_deviation_rigid": int(max_deviation_um) / min(factor),
+            "max_deviation_rigid": float(max_deviation_um) / min(factor),
             "max_shifts": um_to_pixels(max_shift_um, factor),
             "overlaps": um_to_pixels(overlap_um, factor),
             "strides": um_to_pixels(strides_um, factor),
         }
+
+        if gsig_filt_um is not None:
+            width_px = max(1, round(gsig_filt_um / min(factor)))
+            settings["gSig_filt"] = [width_px, width_px]
 
         # --- Run the motion correction --- #
 
@@ -1754,7 +1771,10 @@ class Group(CallRecorder):
 
         try:
             self.mc = MotionCorrect(raw_paths, dview=dview, **settings)
-            self.mc.motion_correct(template=template, save_movie=True)
+            self.mc.motion_correct(
+                template=_filtered(template, settings.get("gSig_filt")),
+                save_movie=True,
+            )
 
             # What it was aligned to (None: caiman's own), for test reports
             self.mc_reference = template
@@ -1844,6 +1864,8 @@ class Group(CallRecorder):
         strides_um: list[float] = DEFAULT_STRIDES_UM,
         overlap_um: list[float] = DEFAULT_OVERLAP_UM,
         max_deviation_um: float = DEFAULT_MAX_DEVIATION_UM,
+        gsig_filt_um: None | float = None,
+        shifts_opencv: bool = False,
         run: None | str = None,
         movies: Sequence[str] = ("raw_test",),
         levels: None | Sequence[float] = None,
@@ -1879,6 +1901,7 @@ class Group(CallRecorder):
         - `max_shift_um`: max allowed rigid shift
         - `pw_rigid`, `strides_um`, `overlap_um`, `max_deviation_um`:
         piecewise rigid and its patches (see `run_motion_correction`)
+        - `gsig_filt_um`, `shifts_opencv`: see `run_motion_correction`
         - `run`: the name of this test among others of the experiment (a
         sweep's), its folder and its label on the videos
         - `movies`: the preview videos, any of `"raw_test"` (side by side),
@@ -1904,6 +1927,8 @@ class Group(CallRecorder):
             strides_um=strides_um,
             overlap_um=overlap_um,
             max_deviation_um=max_deviation_um,
+            gsig_filt_um=gsig_filt_um,
+            shifts_opencv=shifts_opencv,
             reuse_reference=reuse_reference,
         )
 
@@ -1917,7 +1942,14 @@ class Group(CallRecorder):
             "pw_rigid": pw_rigid,
             "max_shift_um": list(max_shift_um),
             "max_shifts_px": [int(v) for v in self.mc.max_shifts],
+            "shifts_opencv": bool(self.mc.shifts_opencv),
         }
+
+        if gsig_filt_um is not None:
+            settings |= {
+                "gsig_filt_um": gsig_filt_um,
+                "gsig_filt_px": [int(v) for v in self.mc.gSig_filt],
+            }
 
         if pw_rigid:
             settings |= {
@@ -3302,3 +3334,13 @@ def _add_to_json(path: Path, values: dict) -> None:
     content = json.loads(path.read_text()) if path.is_file() else {}
     content.update(values)
     path.write_text(json.dumps(content, indent=2))
+
+
+def _filtered(template: None | np.ndarray, gsig_filt: None | list[int]):
+    """`template` high-pass filtered as caiman filters the frames, if asked."""
+    if template is None or gsig_filt is None:
+        return template
+
+    from caiman.motion_correction import high_pass_filter_space
+
+    return high_pass_filter_space(template, gsig_filt)

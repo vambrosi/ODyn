@@ -44,6 +44,8 @@ def caiman(monkeypatch, tmp_path):
             self.strides = settings.get("strides")
             self.overlaps = settings.get("overlaps")
             self.max_deviation_rigid = settings.get("max_deviation_rigid")
+            self.shifts_opencv = settings["shifts_opencv"]
+            self.gSig_filt = settings.get("gSig_filt")
             seen["settings"] = settings
 
         def motion_correct(self, template=None, save_movie=False):
@@ -73,6 +75,8 @@ def caiman(monkeypatch, tmp_path):
     module.load = lambda path: np.load(path)
     motion = types.ModuleType("caiman.motion_correction")
     motion.MotionCorrect = MotionCorrect
+    # A stand-in high-pass filter, recognizable in what caiman is given
+    motion.high_pass_filter_space = lambda image, width: image - image.mean()
     module.motion_correction = motion
     monkeypatch.setitem(sys.modules, "caiman", module)
     monkeypatch.setitem(sys.modules, "caiman.motion_correction", motion)
@@ -188,6 +192,40 @@ def test_a_piecewise_run_has_its_own_folder_and_measures_the_patches(tmp_path, c
 
     shifts = np.load(folder / "shifts.npz")
     assert shifts["patch_dy"].shape == (4 * 56, 4)
+
+
+def test_a_filtered_run_filters_the_reference_too(tmp_path, caiman):
+    db, group_id = a_loop(tmp_path)
+    group = db.groups[group_id]
+    base = group.test_motion_correction(test_acqs=4, movies=())
+    reference = tifffile.imread(base / "reference.tif")
+
+    folder = group.test_motion_correction(
+        test_acqs=4,
+        pw_rigid=True,
+        strides_um=[24, 24],
+        overlap_um=[12, 12],
+        max_deviation_um=3,
+        gsig_filt_um=4,
+        run="s24_o12_d3_g4",
+        movies=(),
+        side_by_side=False,
+        reuse_reference=True,
+    )
+
+    # caiman filters the frames itself; the reference it gets is filtered
+    # here, and its shifts are OpenCV's (it refuses the filter otherwise)
+    settings = caiman["settings"]
+    assert settings["shifts_opencv"] is True
+    assert settings["gSig_filt"][0] == settings["gSig_filt"][1] >= 1
+    np.testing.assert_allclose(caiman["template"], reference - reference.mean())
+
+    recorded = json.loads((folder / "metrics.json").read_text())["settings"]
+    assert recorded["gsig_filt_um"] == 4 and recorded["shifts_opencv"] is True
+    assert recorded["gsig_filt_px"] == settings["gSig_filt"]
+
+    # The report compares with the reference itself, not the filtered one
+    np.testing.assert_array_equal(tifffile.imread(folder / "reference.tif"), reference)
 
 
 def test_the_videos_of_a_run_share_their_levels(tmp_path, caiman, monkeypatch):
@@ -313,6 +351,23 @@ def test_runs_are_named_from_their_settings():
         "s128x96_o32_d2.5",
         "small",
     ]
+
+    patches = GRID["runs"][0]
+    filtered = sweep_runs(
+        {
+            "runs": [
+                {**patches, "gsig_filt_um": 4},
+                {**patches, "shifts_opencv": True},
+                {**patches, "gsig_filt_um": 2.5, "shifts_opencv": True},
+            ]
+        }
+    )
+    assert [run["run"] for run in filtered] == [
+        "s128_o64_d6_g4",
+        "s128_o64_d6_cv",
+        "s128_o64_d6_g2.5",  # the filter implies OpenCV shifts
+    ]
+    assert filtered[0]["gsig_filt_um"] == 4 and "shifts_opencv" not in filtered[0]
 
 
 @pytest.mark.parametrize(

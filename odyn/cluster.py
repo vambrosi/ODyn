@@ -945,8 +945,13 @@ def submit_mcor_sweep(
 
 
 def sweep_runs(grid: dict[str, Any]) -> list[dict[str, Any]]:
-    """The piecewise runs of a sweep's `grid`, each with its name, checked."""
-    known = {"run", "strides_um", "overlap_um", "max_deviation_um"}
+    """
+    The piecewise runs of a sweep's `grid`, each with its name, checked. A
+    run needs its patches (`strides_um`, `overlap_um`, `max_deviation_um`)
+    and may add `gsig_filt_um` (named `_g<um>`) or `shifts_opencv` (`_cv`).
+    """
+    required = {"strides_um", "overlap_um", "max_deviation_um"}
+    known = required | {"run", "gsig_filt_um", "shifts_opencv"}
     runs = []
 
     for given in grid.get("runs", []):
@@ -958,7 +963,7 @@ def sweep_runs(grid: dict[str, Any]) -> list[dict[str, Any]]:
                 f"{', '.join(sorted(known))}."
             )
 
-        missing = sorted(known - {"run"} - set(given))
+        missing = sorted(required - set(given))
 
         if missing:
             raise ValueError(f"A run has no {', '.join(missing)}: {given}.")
@@ -968,10 +973,19 @@ def sweep_runs(grid: dict[str, Any]) -> list[dict[str, Any]]:
             "overlap_um": list(given["overlap_um"]),
             "max_deviation_um": given["max_deviation_um"],
         }
-        run["run"] = given.get("run") or (
+        name = (
             f"s{_short(run['strides_um'])}_o{_short(run['overlap_um'])}"
             f"_d{_short([run['max_deviation_um']])}"
         )
+
+        if given.get("gsig_filt_um") is not None:
+            run["gsig_filt_um"] = given["gsig_filt_um"]
+            name += f"_g{_short([run['gsig_filt_um']])}"
+        elif given.get("shifts_opencv"):
+            run["shifts_opencv"] = True
+            name += "_cv"
+
+        run["run"] = given.get("run") or name
         runs.append(run)
 
     if not runs:

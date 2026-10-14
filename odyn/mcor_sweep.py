@@ -19,8 +19,8 @@ python -m odyn.mcor_sweep <test folder> tile --where stride=128 overlap=64
 python -m odyn.mcor_sweep <test folder> tile --all --scale 0.5
 ```
 `--where` takes the runs with these settings (any of `stride`, `overlap`,
-`deviation`, in µm), ordered by the others, after raw and rigid: one setting
-left free shows what it changes.
+`deviation`, `gsig`, in µm), ordered by the others, after raw and rigid: one
+setting left free shows what it changes.
 
 **PYTHON**
 ```python
@@ -55,6 +55,7 @@ SETTINGS = {
     "stride": "stride_um",
     "overlap": "overlap_um",
     "deviation": "max_deviation_um",
+    "gsig": "gsig_filt_um",
 }
 
 # The whole-test numbers of metrics.json kept in the table
@@ -85,8 +86,15 @@ def collect(folder: str | Path) -> pd.DataFrame:
     table["baseline"] = table["run"] == BASELINE_RUN
     table = (
         table.sort_values(
-            ["baseline", "stride_um", "overlap_um", "max_deviation_um"],
-            ascending=[False, True, True, True],
+            [
+                "baseline",
+                "stride_um",
+                "overlap_um",
+                "max_deviation_um",
+                "gsig_filt_um",
+                "shifts_opencv",
+            ],
+            ascending=[False, True, True, True, True, True],
             na_position="first",
         )
         .drop(columns="baseline")
@@ -113,6 +121,8 @@ def run_numbers(folder: str | Path) -> dict:
         "stride_um": _first(settings.get("strides_um")),
         "overlap_um": _first(settings.get("overlap_um")),
         "max_deviation_um": settings.get("max_deviation_um"),
+        "gsig_filt_um": settings.get("gsig_filt_um"),
+        "shifts_opencv": bool(settings.get("shifts_opencv", False)),
         "max_shift_um": _first(settings.get("max_shift_um")),
     }
     row |= {key: metrics.get(key) for key in METRICS}
@@ -166,7 +176,7 @@ def select(table: pd.DataFrame, **where: float) -> list[str]:
         raise ValueError(f"No run has {_describe(where)}.")
 
     free = [column for key, column in SETTINGS.items() if key not in where]
-    chosen = chosen.sort_values(free)
+    chosen = chosen.sort_values([*free, "shifts_opencv"], na_position="first")
 
     return [RAW, BASELINE_RUN, *chosen["run"]]
 
