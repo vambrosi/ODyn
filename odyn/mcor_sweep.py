@@ -76,32 +76,7 @@ def collect(folder: str | Path) -> pd.DataFrame:
     deviation. Written to `sweep.csv` in `folder` too.
     """
     folder = Path(folder)
-    rows = []
-
-    for metrics_path in sorted(folder.glob("*/metrics.json")):
-        metrics = json.loads(metrics_path.read_text())
-        settings = metrics.get("settings") or {}
-        run = settings.get("run") or metrics_path.parent.name
-        row = {
-            "run": run,
-            "pw_rigid": bool(settings.get("pw_rigid", False)),
-            "stride_um": _first(settings.get("strides_um")),
-            "overlap_um": _first(settings.get("overlap_um")),
-            "max_deviation_um": settings.get("max_deviation_um"),
-            "max_shift_um": _first(settings.get("max_shift_um")),
-        }
-        row |= {key: metrics.get(key) for key in METRICS}
-
-        summary = pd.read_csv(metrics_path.parent / "summary.csv")
-        numbers = summary.drop(
-            columns=["position", "acq_id", "file"], errors="ignore"
-        ).select_dtypes("number")
-        row["acquisitions"] = len(summary)
-        row |= {
-            f"{name}_median": round(float(numbers[name].median()), 4)
-            for name in numbers
-        }
-        rows.append(row)
+    rows = [run_numbers(path.parent) for path in sorted(folder.glob("*/metrics.json"))]
 
     if not rows:
         raise FileNotFoundError(f"No runs (folders with metrics.json) in '{folder}'.")
@@ -121,6 +96,52 @@ def collect(folder: str | Path) -> pd.DataFrame:
     logger.info(f"Wrote {len(table)} runs to {folder / TABLE_FILE}")
 
     return table
+
+
+def run_numbers(folder: str | Path) -> dict:
+    """
+    One run's row of `collect`, from its folder: its settings, the numbers of
+    its `metrics.json` and the median over the acquisitions of its
+    `summary.csv`.
+    """
+    folder = Path(folder)
+    metrics = json.loads((folder / "metrics.json").read_text())
+    settings = metrics.get("settings") or {}
+    row = {
+        "run": settings.get("run") or folder.name,
+        "pw_rigid": bool(settings.get("pw_rigid", False)),
+        "stride_um": _first(settings.get("strides_um")),
+        "overlap_um": _first(settings.get("overlap_um")),
+        "max_deviation_um": settings.get("max_deviation_um"),
+        "max_shift_um": _first(settings.get("max_shift_um")),
+    }
+    row |= {key: metrics.get(key) for key in METRICS}
+
+    summary = pd.read_csv(folder / "summary.csv")
+    numbers = summary.drop(
+        columns=["position", "acq_id", "file"], errors="ignore"
+    ).select_dtypes("number")
+    row["acquisitions"] = len(summary)
+    row |= {
+        f"{name}_median": round(float(numbers[name].median()), 4) for name in numbers
+    }
+
+    return row
+
+
+def run_video(folder: str | Path) -> None | Path:
+    """
+    The video to judge a run by, in its folder: raw | test when there is one
+    (a test or a sweep's baseline), else the test alone. `None` without one.
+    """
+    videos = [
+        path
+        for path in sorted(Path(folder).glob("*_test.*"))
+        if path.suffix in (".avi", ".mp4")
+    ]
+    both = [path for path in videos if path.stem.endswith("_raw_test")]
+
+    return (both or videos or [None])[0]
 
 
 def select(table: pd.DataFrame, **where: float) -> list[str]:

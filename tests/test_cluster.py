@@ -200,3 +200,16 @@ def test_the_command_line(tmp_path, capsys):
     assert main([str(tmp_path), "tick"]) == 0
     assert "process_sync(exp_id=1)" in capsys.readouterr().out
     assert len(db.streams) == 1
+
+
+def test_an_arrays_waiting_tasks_are_found_in_squeues_list():
+    from odyn.cluster import _queued
+
+    queue = {"21_1": "RUNNING", "21_[2-5,9%4]": "PENDING", "30": "RUNNING"}
+
+    assert _queued("21_1", queue) == "RUNNING"
+    assert _queued("21_3", queue) == "PENDING"
+    assert _queued("21_9", queue) == "PENDING"
+    assert _queued("21_7", queue) is None
+    assert _queued("30", queue) == "RUNNING"
+    assert _queued("31", queue) is None

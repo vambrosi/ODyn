@@ -18,7 +18,10 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 
 
 class FrameModel(QAbstractTableModel):
-    """A DataFrame as a table, with the index as its first column."""
+    """
+    A DataFrame as a table, with the index as its first column, unless it is
+    only the rows' order (unnamed 0, 1, 2...), which the row numbers show.
+    """
 
     def __init__(self, frame: None | pd.DataFrame = None, parent=None):
         super().__init__(parent)
@@ -32,7 +35,8 @@ class FrameModel(QAbstractTableModel):
     def set_frame(self, frame: pd.DataFrame) -> None:
         self.beginResetModel()
         self._frame = frame
-        shown = frame.reset_index()
+        order_only = frame.index.name is None and isinstance(frame.index, pd.RangeIndex)
+        shown = frame.reset_index(drop=order_only)
         self._columns = [str(c) for c in shown.columns]
         self._rows = shown.values.tolist()
         self.endResetModel()

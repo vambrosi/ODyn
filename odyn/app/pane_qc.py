@@ -1,15 +1,15 @@
 """
 The QC tab: what is waiting on the person using the app.
 
-Three lists. The drafts this user submitted that the cluster has not added
+Four lists. The drafts this user submitted that the cluster has not added
 yet (`submissions.queued`), with how far their copy got or why they failed,
 and what can be done about each: add it now, submit it again, or take it
 back to edit. The recordings (experiments, z-stacks) the cluster added for
 this user, with what processing their sync file found, and a way to process an
-experiment's again. And the required annotations still empty on them. Picking
-motion-correction candidates from movie previews joins this tab once the
-cluster produces the previews; the pane is shaped so that becomes one more
-list, not a new tab.
+experiment's again. The required annotations still empty on them. And the
+test motion corrections of their experiments (the cluster's own test, and the
+runs of a sweep), with a few numbers from each report and a way to open its
+folder, video and plot.
 """
 
 from __future__ import annotations
@@ -29,12 +29,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 
 from datetime import datetime
 
-from ..cluster import ClusterConfig, heartbeat, pending_requests, send_request
+from ..cluster import (
+    ClusterConfig,
+    heartbeat,
+    mcor_sweep_runs,
+    mcor_tests,
+    pending_requests,
+    send_request,
+)
 from ..database import SyncFlag
+from ..mcor_sweep import run_numbers, run_video
 from .context import Context
 from .draft import Draft
 from .models import FrameModel, fit_columns
@@ -50,8 +59,32 @@ INGEST_METHODS = {
 
 # Where each kind's folder (an experiment) or file (the others) is
 PATH_COLUMN = {"experiment": "exp_path", "zstack": "raw_path"}
-COLUMNS = ["kind", "path", "objective", "submitted_at", "sync"]
-QUEUE_COLUMNS = ["session", "state", "progress", "submitted_at"]
+COLUMNS = ["submitted_at", "kind", "path", "objective", "sync"]
+QUEUE_COLUMNS = ["submitted_at", "session", "state", "progress"]
+TEST_COLUMNS = [
+    "submitted_at",
+    "path",
+    "run",
+    "state",
+    "corr_with_ref",
+    "flow_px",
+    "jitter_px",
+    "at_limit",
+    "finished_at",
+]
+
+# The numbers shown for a test, from `mcor_sweep.run_numbers`: medians over
+# the acquisitions, or the whole test's
+TEST_NUMBERS = {
+    "corr_with_ref": "test_corr_with_ref_median",
+    "flow_px": "test_flow_median_px_median",
+    "jitter_px": "patch_jitter_median_px",
+    "at_limit": "frames_at_limit",
+}
+
+# A job's state in words for the page ("unknown": no `squeue` here, so the
+# job is either still in the cluster's queue or ended without finishing)
+TEST_STATES = {"pending": "waiting", "unknown": "not finished"}
 
 
 def my_queue(main_folder: Path, project: None | str, user: str) -> pd.DataFrame:
@@ -156,7 +189,7 @@ def my_recordings(db, user: None | str) -> pd.DataFrame:
             }
         )
 
-    frame = pd.DataFrame(rows, columns=["kind", "id", *COLUMNS[1:]])
+    frame = pd.DataFrame(rows, columns=["id", *COLUMNS])
     frame = frame.set_index(["kind", "id"], drop=False).drop(columns="id")
 
     # Newest first: the rows are in the order of the calls (and of the ids
@@ -191,15 +224,84 @@ def sync_flags(call_flag: int) -> str:
     return ", ".join(names) or "succeeded"
 
 
+def my_tests(db, user: None | str, mine: pd.DataFrame) -> pd.DataFrame:
+    """
+    The test motion corrections of `user`'s experiments, the newest submitted
+    first (as in `mine`, from `my_recordings`): the cluster's test of each
+    ("test") and the runs of each sweep (the baseline first), with the job's
+    state and, once a report is there, a few of its numbers. `folder` is
+    where the report is.
+    """
+    jobs = [
+        {**test, "run": None}
+        for test in mcor_tests(db.main_folder, db.project)
+        if test["user"] == user
+    ] + [
+        run
+        for run in mcor_sweep_runs(db.main_folder, db.project)
+        if run["user"] == user
+    ]
+    jobs.sort(key=lambda job: job["submitted_at"], reverse=True)  # stable
+    submitted = {
+        int(row_id): when
+        for (kind, row_id), when in mine["submitted_at"].items()
+        if kind == "experiment"
+    }
+    links = db.group_experiments
+    paths = db.experiments["exp_path"]
+    rows = []
+
+    for job in jobs:
+        group_id = int(job["group_id"])
+
+        if group_id not in links.index:
+            continue
+
+        exp_ids = links.loc[[group_id], "exp_id"].astype(int)
+        folder = db.groups[group_id].mcor_test_folder(job["run"])
+        times = [submitted[i] for i in exp_ids if i in submitted]
+        row = {
+            "submitted_at": max(times) if times else None,
+            "path": ", ".join(str(paths.get(i, i)) for i in exp_ids),
+            "run": job["run"] or "test",
+            "state": TEST_STATES.get(job["state"], job["state"]),
+            **dict.fromkeys(TEST_NUMBERS),
+            "finished_at": "",
+            "folder": str(folder),
+        }
+
+        if job["state"] == "finished" and (folder / "metrics.json").is_file():
+            try:
+                numbers = run_numbers(folder)
+            except (OSError, ValueError):
+                numbers = {}
+
+            row |= {key: numbers.get(name) for key, name in TEST_NUMBERS.items()}
+            written = (folder / "metrics.json").stat().st_mtime
+            row["finished_at"] = datetime.fromtimestamp(written).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+
+        rows.append(row)
+
+    # By experiment, newest first, keeping the jobs' order within one (stable)
+    rows.sort(key=lambda row: str(row["submitted_at"] or ""), reverse=True)
+
+    return pd.DataFrame(rows, columns=[*TEST_COLUMNS, "folder"])
+
+
 def my_missing(db, mine: pd.DataFrame) -> pd.DataFrame:
     """
     The required annotations still empty on `mine`'s recordings, in the order
-    of `mine` (newest first).
+    of `mine` (newest first), each with `waiting_since`: when its recording
+    was submitted.
     """
     missing = db.missing_annotations()
 
     if missing.empty or mine.empty:
-        return missing.iloc[0:0]
+        return missing.iloc[0:0].assign(waiting_since=None)[
+            ["waiting_since", *missing.columns]
+        ]
 
     rank = {target: position for position, target in enumerate(mine.index)}
     order = [
@@ -207,8 +309,15 @@ def my_missing(db, mine: pd.DataFrame) -> pd.DataFrame:
         for kind, row_id in zip(missing["target_type"], missing["target_id"])
     ]
     missing = missing.assign(_rank=order).dropna(subset="_rank")
+    missing = missing.sort_values("_rank", kind="stable").drop(columns="_rank")
+    since = [
+        mine["submitted_at"].get((kind, int(row_id)))
+        for kind, row_id in zip(missing["target_type"], missing["target_id"])
+    ]
 
-    return missing.sort_values("_rank", kind="stable").drop(columns="_rank")
+    return missing.reset_index(drop=True).assign(waiting_since=since)[
+        ["waiting_since", *missing.columns]
+    ]
 
 
 class QcPane(QWidget):
@@ -225,6 +334,7 @@ class QcPane(QWidget):
         self.queue = pd.DataFrame(columns=[*QUEUE_COLUMNS, "path"])
         self.mine = pd.DataFrame(columns=COLUMNS)
         self.mine_ids: list[int] = []  # each row's experiment or z-stack id
+        self.tests = pd.DataFrame(columns=[*TEST_COLUMNS, "folder"])
 
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
@@ -270,9 +380,25 @@ class QcPane(QWidget):
         self.missing_view = self._table(
             "Required annotations that were not filled", splitter
         )
-        splitter.addWidget(QLabel("Motion-correction (pick the best test run)"))
 
-        for view in (self.queue_view, self.recordings_view):
+        self.show_folder = QPushButton("Show folder")
+        self.show_folder.setStatusTip("Open the folder with the test's files")
+        self.show_folder.clicked.connect(lambda: self._open_test("folder"))
+        self.play_movie = QPushButton("Play movie")
+        self.play_movie.setStatusTip(
+            "Play the test's video (raw | test when there is one)"
+        )
+        self.play_movie.clicked.connect(lambda: self._open_test("movie"))
+        self.show_report = QPushButton("Show report")
+        self.show_report.setStatusTip("Open the test's plot of shifts and matches")
+        self.show_report.clicked.connect(lambda: self._open_test("report"))
+        self.tests_view = self._table(
+            "Motion correction tests",
+            splitter,
+            [self.show_folder, self.play_movie, self.show_report],
+        )
+
+        for view in (self.queue_view, self.recordings_view, self.tests_view):
             view.selectionModel().selectionChanged.connect(self._enable)
 
         context.changed.connect(self.reload)
@@ -322,10 +448,17 @@ class QcPane(QWidget):
             name = str(named.iloc[0]) if len(named) else user
             queue = my_queue(db.main_folder, db.project, user)
 
-            return name, queue, mine, my_missing(db, mine), cluster_line(db)
+            return (
+                name,
+                queue,
+                mine,
+                my_missing(db, mine),
+                my_tests(db, user, mine),
+                cluster_line(db),
+            )
 
         def loaded(result):
-            name, queue, mine, missing, (cluster, kind) = result
+            name, queue, mine, missing, tests, (cluster, kind) = result
 
             if user:
                 self.who.setText(f"To-do list for {name}")
@@ -339,6 +472,8 @@ class QcPane(QWidget):
             self._model(self.queue_view).set_frame(self.queue[QUEUE_COLUMNS])
             self._model(self.recordings_view).set_frame(self.mine)
             self._model(self.missing_view).set_frame(missing)
+            self.tests = tests.reset_index(drop=True)
+            self._model(self.tests_view).set_frame(self.tests[TEST_COLUMNS])
             self._enable()
 
         self.context.run(load, loaded, "load QC")
@@ -364,6 +499,37 @@ class QcPane(QWidget):
 
         added = self._selected(self.recordings_view, self.mine)
         self.rerun_sync.setEnabled(added is not None and added["kind"] == "experiment")
+
+        test = self._selected(self.tests_view, self.tests)
+
+        for button in (self.show_folder, self.play_movie, self.show_report):
+            button.setEnabled(test is not None)
+
+    def _open_test(self, what: str) -> None:
+        """Open the selected test's folder, video or plot in this computer's app."""
+        row = self._selected(self.tests_view, self.tests)
+
+        if row is None:
+            return
+
+        folder = Path(row["folder"])
+        path = {
+            "folder": folder if folder.is_dir() else None,
+            "movie": run_video(folder) if folder.is_dir() else None,
+            "report": folder / "shifts.png",
+        }[what]
+        missing = {
+            "folder": "folder",
+            "movie": "video",
+            "report": "plot of shifts",
+        }[what]
+
+        if path is None or not path.exists():
+            self.context.status.emit(
+                f"The {missing} of {row['path']} ({row['run']}) is not there yet"
+            )
+        elif not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            self.context.status.emit(f"Could not open {path}")
 
     def _add_now(self) -> None:
         row = self._selected(self.queue_view, self.queue)

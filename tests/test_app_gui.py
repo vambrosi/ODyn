@@ -900,6 +900,12 @@ def test_qc_lists_every_kind_of_recording_this_user_submitted(tmp_path):
         ("experiment", grab_id),
         ("experiment", exp_id),
     ]
+    assert missing.columns[0] == "waiting_since"
+    assert missing["waiting_since"].tolist() == [
+        mine.loc[("experiment", grab_id), "submitted_at"],
+        mine.loc[("experiment", exp_id), "submitted_at"],
+    ]
+    assert my_missing(db, mine.iloc[0:0]).columns[0] == "waiting_since"
 
 
 def test_qc_says_when_the_cluster_last_ran(tmp_path):
@@ -919,6 +925,166 @@ def test_qc_says_when_the_cluster_last_ran(tmp_path):
 
     text, kind = cluster_line(db, now=datetime.now() + timedelta(hours=3))
     assert "(3 h ago)" in text and "may have stopped" in text and kind == "warning"
+
+
+def a_tested_experiment(main, user="tester") -> tuple[Database, int]:
+    """
+    An experiment of `user`'s with the cluster's test finished, and a sweep
+    whose baseline finished and whose one piecewise run did not.
+    """
+    import json
+    from datetime import datetime
+
+    import pandas as pd
+    from generate_data import generate
+
+    from odyn.cluster import cluster_folder
+
+    generate(
+        main,
+        acquisitions=2,
+        frames=56,
+        height=32,
+        width=40,
+        start=datetime(2026, 3, 4, 9),
+    )
+    db = Database(main, can_create=True, user=user)
+    db.set_mouse(mouse_id=1)
+    session_id = db.add_session(mouse_id=1, session_date="2026-03-04")
+    exp_id = db.add_experiment(
+        session_id=session_id, exp_path="20260304/m1/e1", objective=20
+    )
+    links = db.group_experiments
+    group_id = int(links.index[links["exp_id"] == exp_id][0])
+    group = db.groups[group_id]
+    cluster = cluster_folder(main)
+    jobs = cluster / "jobs"
+    jobs.mkdir(parents=True)
+
+    def report(folder, corr, **metrics):
+        folder.mkdir(parents=True)
+        (folder / "metrics.json").write_text(
+            json.dumps({"frames_at_limit": 0.0, **metrics})
+        )
+        pd.DataFrame(
+            {
+                "acq_id": [1, 2],
+                "test_corr_with_ref": [corr, corr],
+                "test_flow_median_px": [0.5, 0.7],
+            }
+        ).to_csv(folder / "summary.csv", index=False)
+        (folder / "shifts.png").write_bytes(b"png")
+        (folder / "Group_1_e1_raw_test.avi").write_bytes(b"avi")
+
+    # The cluster's test, and someone else's (not listed)
+    (cluster / "mcor").mkdir()
+    for group, job_id, who in [(group_id, "11", user), (999, "12", "someone")]:
+        (cluster / "mcor" / f"{group}.json").write_text(
+            json.dumps(
+                {
+                    "group_id": group,
+                    "job_id": job_id,
+                    "user": who,
+                    "submitted_at": "2026-10-13 09:00:00",
+                }
+            )
+        )
+    (jobs / f"odyn-mcor-main-g{group_id}-11.out").write_text("...\nfinished now\n")
+    report(db.groups[group_id].mcor_test_folder(), 0.9)
+
+    # A sweep, submitted later
+    (cluster / "sweeps").mkdir()
+    (cluster / "sweeps" / f"g{group_id}.json").write_text(
+        json.dumps(
+            {
+                "group_id": group_id,
+                "user": user,
+                "baseline_job": "20",
+                "array_job": "21",
+                "submitted_at": "2026-10-13 10:00:00",
+                "runs": [{"run": "s128_o64_d6"}],
+            }
+        )
+    )
+    name = f"odyn-sweep-main-g{group_id}"
+    (jobs / f"{name}-20.out").write_text("finished now\n")
+    (jobs / f"{name}-21_1.out").write_text("started  ...\n")
+    report(db.groups[group_id].mcor_test_folder("rigid"), 0.8)
+
+    return db, group_id
+
+
+def test_qc_lists_the_tests_of_this_users_experiments(tmp_path, monkeypatch):
+    from odyn.app.pane_qc import my_tests
+
+    monkeypatch.setenv("PATH", "")  # no squeue: off the cluster
+    db, group_id = a_tested_experiment(tmp_path)
+
+    from odyn.app.pane_qc import my_recordings
+
+    tests = my_tests(db, "tester", my_recordings(db, "tester"))
+
+    # Newest first, the sweep's baseline before its runs
+    assert tests[["path", "run", "state"]].values.tolist() == [
+        ["20260304/m1/e1", "rigid", "finished"],
+        ["20260304/m1/e1", "s128_o64_d6", "not finished"],
+        ["20260304/m1/e1", "test", "finished"],
+    ]
+    assert tests["corr_with_ref"].tolist()[0] == 0.8
+    assert tests["flow_px"].tolist()[2] == 0.6
+    assert pd_isna(tests["corr_with_ref"].tolist()[1])
+    assert tests["finished_at"].tolist()[1] == ""
+    assert my_tests(db, "someone else", my_recordings(db, "someone else")).empty
+
+    # Each test shows when its experiment was submitted, as the list above it
+    submitted = my_recordings(db, "tester")["submitted_at"].iloc[0]
+    assert (tests["submitted_at"] == submitted).all()
+
+
+def pd_isna(value) -> bool:
+    import pandas as pd
+
+    return bool(pd.isna(value))
+
+
+def test_qc_opens_a_tests_files(window, tmp_path, monkeypatch):
+    from PySide6.QtGui import QDesktopServices
+
+    import gc
+
+    a_tested_experiment(tmp_path / "data")
+    gc.collect()  # its database (a cycle with its groups) closes in this thread
+    opened = []
+    monkeypatch.setattr(
+        QDesktopServices, "openUrl", lambda url: opened.append(url) or True
+    )
+
+    window.context.set_user("tester")
+    qc = window.qc
+    qc.reload()
+    settle(window.context)
+    assert len(qc.tests) == 3
+
+    # The rows' order is not shown twice: the date comes first
+    headers = [
+        qc.tests_view.model().headerData(i, Qt.Orientation.Horizontal)
+        for i in range(qc.tests_view.model().columnCount())
+    ]
+    assert headers[:2] == ["submitted_at", "path"]
+    assert not qc.show_folder.isEnabled()
+
+    qc.tests_view.selectRow(0)  # the sweep's baseline
+    qc.show_folder.click()
+    qc.play_movie.click()
+    qc.show_report.click()
+
+    names = [Path(url.toLocalFile()).name for url in opened]
+    assert names == ["rigid", "Group_1_e1_raw_test.avi", "shifts.png"]
+
+    # A run without its files yet says so instead
+    qc.tests_view.selectRow(1)
+    qc.play_movie.click()
+    assert len(opened) == 3
 
 
 def test_worker_runs_jobs_in_order(app, tmp_path):

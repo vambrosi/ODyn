@@ -1075,19 +1075,92 @@ def mcor_tests(main_folder: str | Path, project: None | str = None) -> list[dict
         name = f"odyn-mcor-{project or 'main'}-g{test['group_id']}"
         log = folder / JOBS_FOLDER / f"{name}-{test['job_id']}.out"
         test["log"] = log if log.is_file() else None
-
-        if in_queue is not None and str(test["job_id"]) in in_queue:
-            test["state"] = in_queue[str(test["job_id"])].lower()
-        elif test["log"] is not None and _last_line(log).startswith("finished"):
-            test["state"] = "finished"
-        elif in_queue is None:
-            test["state"] = "unknown"
-        else:
-            test["state"] = "stopped"
-
+        test["state"] = _job_state(str(test["job_id"]), test["log"], in_queue)
         tests.append(test)
 
     return sorted(tests, key=lambda t: t["submitted_at"], reverse=True)
+
+
+def mcor_sweep_runs(main_folder: str | Path, project: None | str = None) -> list[dict]:
+    """
+    Every run of the submitted sweeps (`sweeps/g<group_id>.json`), newest
+    sweep first and its baseline first, each with the sweep's `group_id`,
+    `user` and `submitted_at`, its `run`, `job_id` (`<array>_<task>` for
+    the piecewise runs), and `log` and `state` as `mcor_tests` has them.
+    """
+    folder = cluster_folder(main_folder, project)
+    in_queue = _slurm_jobs()
+    sweeps = []
+
+    for path in (folder / SWEEPS_FOLDER).glob("g*.json"):
+        sweep = json.loads(path.read_text())
+
+        if "baseline_job" in sweep:  # not a dry run
+            sweeps.append(sweep)
+
+    runs = []
+
+    for sweep in sorted(sweeps, key=lambda s: s["submitted_at"], reverse=True):
+        name = f"odyn-sweep-{project or 'main'}-g{sweep['group_id']}"
+        jobs = [(BASELINE_RUN, str(sweep["baseline_job"]))] + [
+            (run["run"], f"{sweep['array_job']}_{task}")
+            for task, run in enumerate(sweep["runs"], start=1)
+        ]
+
+        for run, job_id in jobs:
+            log = folder / JOBS_FOLDER / f"{name}-{job_id}.out"
+            log = log if log.is_file() else None
+            runs.append(
+                {
+                    "group_id": int(sweep["group_id"]),
+                    "user": sweep["user"],
+                    "submitted_at": sweep["submitted_at"],
+                    "run": run,
+                    "job_id": job_id,
+                    "log": log,
+                    "state": _job_state(job_id, log, in_queue),
+                }
+            )
+
+    return runs
+
+
+def _job_state(job_id: str, log: None | Path, in_queue: None | dict[str, str]) -> str:
+    """A job's state for `mcor_tests` (`<array>_<task>` for an array's task)."""
+    queued = None if in_queue is None else _queued(job_id, in_queue)
+
+    if queued is not None:
+        return queued.lower()
+
+    if log is not None and _last_line(log).startswith("finished"):
+        return "finished"
+
+    return "unknown" if in_queue is None else "stopped"
+
+
+def _queued(job_id: str, in_queue: dict[str, str]) -> None | str:
+    """
+    The state of `job_id` in `squeue`'s list, which shows an array's waiting
+    tasks together (`123_[4-17]`, `123_[4,6-9%4]`).
+    """
+    if job_id in in_queue:
+        return in_queue[job_id]
+
+    array, _, task = job_id.partition("_")
+
+    for key, state in in_queue.items():
+        head, _, spans = key.partition("_[")
+
+        if not task or head != array or not spans:
+            continue
+
+        for span in spans.rstrip("]").split("%")[0].split(","):
+            first, _, last = span.partition("-")
+
+            if int(first) <= int(task) <= int(last or first):
+                return state
+
+    return None
 
 
 def _slurm_jobs() -> None | dict[str, str]:
