@@ -1269,6 +1269,15 @@ def test_panels_pane_adds_a_panel_then_batches_of_its_vials(
     # the table shows each position's newest vial
     shown = panels.table.model().frame
     assert list(shown["vial_position"]) == [1, 2, 3]
+
+    # What goes into the olfactometer first, no database ids
+    model = panels.table.model()
+    headers = [
+        model.headerData(i, Qt.Orientation.Horizontal)
+        for i in range(model.columnCount())
+    ]
+    assert headers[:4] == ["vial_position", "odor_id", "odor_name", "panel_name"]
+    assert "vial_id" not in headers and "panel_id" not in headers
     assert [str(d)[:10] for d in shown["made_on"]] == [
         "2026-08-06",
         "2026-10-06",

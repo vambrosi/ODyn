@@ -936,10 +936,13 @@ class PanelsPane(QWidget):
         def load(db):
             vials = db.vials.join(db.panels["panel_name"], on="panel_id")
             vials = vials.join(db.odors["odor_name"], on="odor_id")
+            # What is typed into the olfactometer first; the ids that only
+            # the database uses (vial_id, panel_id) are left out
             columns = [
-                "panel_name",
                 "vial_position",
+                "odor_id",
                 "odor_name",
+                "panel_name",
                 "made_on",
                 "vial_sccm",
                 "total_sccm",
@@ -965,7 +968,11 @@ class PanelsPane(QWidget):
                 made_of.setdefault(int(odor_id), []).append(int(component_id))
 
             return (
-                current_vials(vials)[columns] if not vials.empty else vials,
+                (
+                    current_vials(vials)[columns].reset_index(drop=True)
+                    if not vials.empty
+                    else vials
+                ),
                 (db.panels, db.panel_positions, db.vials, db.vial_odors),
                 odors,
                 (chemicals, made_of),
