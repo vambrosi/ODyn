@@ -1784,6 +1784,11 @@ def test_quick_maths_warns_when_imaging_outlasts_the_trial(app):
     assert not form.overrun.isVisibleTo(form)
     assert form.outputs["frames"].text() == "258"
     assert form.outputs["camera_rate"].text() == "12.86 Hz"
+    # One program (56 min) and 15 s: the camera is stopped between them
+    assert form.outputs["camera_frames"].text() == "43403"
+    form.camera_extra.setValue(60)
+    assert form.outputs["camera_frames"].text() == "43982"
+    assert "camera_extra" not in str(form.values())  # not one of the loop's
 
     # a shown value is as tall as the boxes it follows from
     heights = {line.minimumHeight() for line in form.outputs.values()}
@@ -2167,7 +2172,9 @@ def test_grab_quick_maths(app):
 
     assert form.outputs["frames"].text() == "450"
     assert form.outputs["camera_rate"].text() == "15 Hz"
-    assert form.outputs["camera_frames"].text() == "1350"  # and a minute more
+    assert form.outputs["camera_frames"].text() == "675"  # and 15 s more
+    form.camera_extra.setValue(60)
+    assert form.outputs["camera_frames"].text() == "1350"
 
 
 def test_expired_odors_are_named_by_id():

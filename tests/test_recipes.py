@@ -136,12 +136,13 @@ def test_an_acquisition_longer_than_its_trial_is_flagged():
         )
 
 
-def test_camera_frames_cover_the_loop_and_a_minute():
+def test_camera_frames_cover_the_run_and_a_little_more():
     from odyn.recipes import camera_frames
 
-    # a 101 min loop at 20 Hz: (101 * 60 + 60) * 20
-    assert camera_frames(101, 20) == 122400
-    assert camera_frames(0, 20) == 1200
+    # a 101 min program at 20 Hz: (101 * 60 + 15) * 20
+    assert camera_frames(101, 20) == 121500
+    assert camera_frames(0, 20) == 300
+    assert camera_frames(1, 20, margin_s=60) == 2400
 
     with pytest.raises(ValueError):
         camera_frames(10, 0)

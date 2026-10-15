@@ -207,21 +207,22 @@ def block_timing(
     )
 
 
-# The camera keeps rolling a little past the loop, so the last acquisition
-# and the pause after it are covered
-CAMERA_MARGIN_S = 60.0
+# The camera keeps rolling a little past its run, so the last acquisition
+# and the pause after it are covered (the quick maths lets it be changed)
+CAMERA_MARGIN_S = 15.0
 
 
 def camera_frames(
-    loop_min: float, camera_rate_hz: float, margin_s: float = CAMERA_MARGIN_S
+    run_min: float, camera_rate_hz: float, margin_s: float = CAMERA_MARGIN_S
 ) -> int:
     """
-    How many frames to tell Micromanager to record: the whole loop plus a
-    minute, at the camera's frame rate.
+    How many frames to tell Micromanager to record for one run of the
+    camera (one program, or one grab) lasting `run_min`: the run plus
+    `margin_s`, at the camera's frame rate.
     """
-    if loop_min < 0 or camera_rate_hz <= 0:
+    if run_min < 0 or camera_rate_hz <= 0:
         raise ValueError(
             "The loop cannot be negative and the camera rate must be positive."
         )
 
-    return math.ceil((loop_min * 60 + margin_s) * camera_rate_hz - 1e-9)
+    return math.ceil((run_min * 60 + margin_s) * camera_rate_hz - 1e-9)

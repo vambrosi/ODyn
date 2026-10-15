@@ -42,7 +42,13 @@ from PySide6.QtWidgets import (
 )
 
 from .style import ROW_SPACING_PX, required_label, text_style
-from ..recipes import block_timing, camera_frames, solvent_volume_ml, vial_recipe
+from ..recipes import (
+    CAMERA_MARGIN_S,
+    block_timing,
+    camera_frames,
+    solvent_volume_ml,
+    vial_recipe,
+)
 from .fields import BOOLEAN, ENUM, LONG_TEXT, Field
 from .submit import number_spans
 
@@ -667,7 +673,7 @@ class TimingForm(QGroupBox):
     )
     MICROMANAGER = (
         ("camera_rate", "Frame rate"),
-        ("camera_frames", "Camera frame count"),
+        ("camera_frames", "Camera frames per program"),
     )
     FYIS = (
         ("acquisition_s", "Acquisition duration"),
@@ -741,8 +747,11 @@ class TimingForm(QGroupBox):
         form.addRow("Frame rate (Hz)", self.frame_rate)
         output_rows(self.SCANIMAGE)
 
-        # The camera runs at the imaging rate; shown again so it is typed right
+        # The camera runs at the imaging rate; shown again so it is typed right.
+        # Its extra time is not one of the loop's values (not stored)
         _heading(form, "Micromanager")
+        self.camera_extra = _camera_extra(self.recompute)
+        form.addRow("Extra time (s)", self.camera_extra)
         output_rows(self.MICROMANAGER)
 
         _heading(form, "FYIs")
@@ -786,7 +795,15 @@ class TimingForm(QGroupBox):
             "program_min": f"{timing.program_min:.0f} min",
             "loop_min": f"{timing.loop_min:.0f} min",
             "camera_rate": f"{self.frame_rate.value():g} Hz",
-            "camera_frames": f"{camera_frames(timing.loop_min, self.frame_rate.value())}",
+            # The camera is stopped between programs (for the anesthesia), so
+            # each one is its own run
+            "camera_frames": str(
+                camera_frames(
+                    timing.program_min,
+                    self.frame_rate.value(),
+                    self.camera_extra.value(),
+                )
+            ),
         }
 
         for key, text in shown.items():
@@ -834,6 +851,15 @@ class TimingForm(QGroupBox):
             self.n_trials.setValue(int(values["block_n_trials"]))
 
 
+def _camera_extra(recompute) -> QDoubleSpinBox:
+    """How long the camera records past its run, in s (`CAMERA_MARGIN_S`)."""
+    box = _spin(0, 600, CAMERA_MARGIN_S, 0)
+    box.setToolTip("How long Micromanager keeps recording after the run")
+    box.valueChanged.connect(lambda _: recompute())
+
+    return box
+
+
 class GrabTimingForm(QGroupBox):
     """
     How long a grab should run, and what that means for ScanImage and for
@@ -869,6 +895,8 @@ class GrabTimingForm(QGroupBox):
 
         # The camera runs at the imaging rate; shown again so it is typed right
         _heading(form, "Micromanager")
+        self.camera_extra = _camera_extra(self.recompute)
+        form.addRow("Extra time (s)", self.camera_extra)
         output_row("camera_rate", "Frame rate")
         output_row("camera_frames", "Camera frame count")
 
@@ -879,7 +907,10 @@ class GrabTimingForm(QGroupBox):
         duration, rate = self.duration.value(), self.frame_rate.value()
         self.outputs["frames"].setText(f"{math.ceil(duration * rate - 1e-9)}")
         self.outputs["camera_rate"].setText(f"{rate:g} Hz")
-        self.outputs["camera_frames"].setText(f"{camera_frames(duration / 60, rate)}")
+        extra = self.camera_extra.value()
+        self.outputs["camera_frames"].setText(
+            f"{camera_frames(duration / 60, rate, extra)}"
+        )
 
 
 def expired_note(
