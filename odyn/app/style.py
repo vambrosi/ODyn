@@ -97,6 +97,10 @@ QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabl
     color: palette(text);
     background: palette(window);
 }}
+QLineEdit#locked, QPlainTextEdit#locked {{
+    /* read-only, looking like a locked field, but its text can be copied */
+    background: palette(window);
+}}
 QComboBox::drop-down {{
     subcontrol-origin: padding;
     subcontrol-position: center right;

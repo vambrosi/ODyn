@@ -20,7 +20,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # on a bare machine.
 try:
     from PySide6.QtCore import QEventLoop, Qt
-    from PySide6.QtWidgets import QApplication, QFormLayout, QWidget
+    from PySide6.QtWidgets import QApplication, QFormLayout, QPlainTextEdit, QWidget
 
 except ImportError as error:  # a missing shared library is not a missing module
     pytest.skip(f"Qt cannot load here: {error}", allow_module_level=True)
@@ -487,11 +487,7 @@ def test_mice_form_rows_keep_one_spacing(window, app):
 
 def test_tables_pane_reads_filters_and_shows_a_row(window):
     tables = window.tables
-    tables.list.setCurrentRow(
-        list(tables.list.item(i).text() for i in range(tables.list.count())).index(
-            "odors"
-        )
-    )
+    tables.picker.setCurrentText("odors")
     settle(window.context)
 
     model = tables.view.model()
@@ -504,6 +500,11 @@ def test_tables_pane_reads_filters_and_shows_a_row(window):
     tables._row_clicked(tables.view.model().index(0, 0))
     assert tables.detail.title.text().startswith("odors: ")
     assert not tables.detail.annotate_box.isVisible()  # odors are not annotated
+    assert not tables.detail.save.isVisible()
+
+    # Every column is shown locked, as the registry forms show what is fixed
+    name = tables.detail.values["odor_name"]
+    assert name.isReadOnly() and "eugenol" in name.text().lower()
 
 
 def test_detail_pane_annotates_a_mouse(window, tmp_path):
@@ -514,15 +515,14 @@ def test_detail_pane_annotates_a_mouse(window, tmp_path):
     settle(window.context)
 
     tables = window.tables
-    names = [tables.list.item(i).text() for i in range(tables.list.count())]
-    tables.list.setCurrentRow(names.index("mice"))
+    tables.picker.setCurrentText("mice")
     settle(window.context)
 
     tables._row_clicked(tables.view.model().index(0, 0))
     settle(window.context)
     detail = tables.detail
     assert detail.target_type == "mouse" and detail.target_id == 9
-    assert detail.form is not None
+    assert detail.form is not None and detail.save.isVisible()
 
     detail.form.rows["note"].set_value("lost a whisker")
     detail._save()
@@ -1439,7 +1439,7 @@ def test_odors_pane_never_renames_a_stored_odor(window, tmp_path, monkeypatch):
 
 def test_tables_pane_lists_every_method_called(window):
     tables = window.tables
-    names = [tables.list.item(i).text() for i in range(tables.list.count())]
+    names = [tables.picker.itemText(i) for i in range(tables.picker.count())]
     assert "method_calls:Database.set_mouse" not in names
 
     window.show_page(window.mice)
@@ -1450,19 +1450,19 @@ def test_tables_pane_lists_every_method_called(window):
     # The Tables page catches up when it is shown
     window.show_page(tables)
     settle(window.context)
-    names = [tables.list.item(i).text() for i in range(tables.list.count())]
+    names = [tables.picker.itemText(i) for i in range(tables.picker.count())]
     assert "method_calls:Database.set_mouse" in names
 
-    tables.list.setCurrentRow(names.index("method_calls:Database.set_mouse"))
+    tables.picker.setCurrentText("method_calls:Database.set_mouse")
     settle(window.context)
     frame = tables.view.model().frame
     assert list(frame["input_mouse_id"]) == [3]  # read as typed: 'm3' is 3
 
-    # the row detail lays the JSON out and wraps
+    # the row detail lays the JSON out in a box that wraps
     tables._row_clicked(tables.view.model().index(0, 0))
-    shown = tables.detail.row_view.model().frame
-    assert "\n" in shown.loc["environment", "value"]
-    assert tables.detail.row_view.wordWrap()
+    shown = tables.detail.values["environment"]
+    assert isinstance(shown, QPlainTextEdit) and shown.isReadOnly()
+    assert "\n" in shown.toPlainText()
 
 
 def test_a_boolean_field_is_a_box_that_starts_unchecked(app):

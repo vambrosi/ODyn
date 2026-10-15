@@ -1,6 +1,7 @@
 """
-The tables, as they are: pick one on the left, filter it, click a row to see
-it whole (and its annotations, when it is something that can be annotated).
+The tables, as they are: pick one from the list at the top, filter it, click
+a row to see it whole in the side panel (and its annotations, when it is
+something that can be annotated), as the registry pages show theirs.
 
 Nothing here writes. The one thing it offers beyond looking is annotating the
 selected row, for the once-a-day and after-the-fact facts (a mouse's weight
@@ -15,15 +16,15 @@ from typing import Any
 
 import pandas as pd
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
+    QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
-    QListWidget,
+    QPlainTextEdit,
     QPushButton,
-    QSplitter,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -34,6 +35,8 @@ from .context import Context
 from .fields import Field, annotation_fields
 from .forms import Form
 from .models import FrameModel, fit_columns, show, sortable
+from .pane_registry import FORM_MARGINS_PX, TableAndForm
+from .style import ROW_SPACING_PX
 
 # The tables offered, in the order they are listed. `annotations_for:<target>`
 # entries are the pivoted views, one column per key.
@@ -139,8 +142,43 @@ def _plain(value: Any) -> Any:
     return value
 
 
+# A value longer than this, or over several lines, gets a box that wraps
+LONG_VALUE = 60
+
+# The most lines a long value's box shows before it scrolls
+LONG_LINES = 12
+
+
+def locked_value(text: str) -> QWidget:
+    """
+    A value that is shown, not typed: read-only, looking like a locked field,
+    and its text can still be copied. A long one wraps over a few lines.
+    """
+    if "\n" not in text and len(text) <= LONG_VALUE:
+        line = QLineEdit(text)
+        line.setObjectName("locked")
+        line.setReadOnly(True)
+        line.setCursorPosition(0)
+
+        return line
+
+    box = QPlainTextEdit(text)
+    box.setObjectName("locked")
+    box.setReadOnly(True)
+    box.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+    lines = sum(1 + len(part) // LONG_VALUE for part in text.split("\n"))
+    spacing = box.fontMetrics().lineSpacing()
+    margin = int(2 * box.document().documentMargin())
+    box.setFixedHeight(min(lines, LONG_LINES) * spacing + margin + 16)
+
+    return box
+
+
 class DetailPane(QWidget):
-    """One row as key/value lines, and its annotations if it has any."""
+    """
+    One row as a form of locked fields, and its annotations if it has any,
+    for the side panel of the Tables page. `buttons` go at the panel's foot.
+    """
 
     def __init__(self, context: Context, parent=None):
         super().__init__(parent)
@@ -148,43 +186,41 @@ class DetailPane(QWidget):
         self.target_type: None | str = None
         self.target_id: None | int = None
         self.form: None | Form = None
+        self.values: dict[str, QWidget] = {}  # each column's shown value
 
         layout = QVBoxLayout(self)
-        self.title = QLabel("Pick a row")
-        self.title.setStyleSheet("font-weight: bold")
+        layout.setContentsMargins(*FORM_MARGINS_PX)
+        self.title = QLabel("Pick a row in the table")
+        self.title.setStyleSheet("font-weight: bold;")
         layout.addWidget(self.title)
 
-        # One column of values that wrap, so a note or a JSON reads whole
-        self.row_view = QTableView()
-        self.row_view.setModel(FrameModel())
-        self.row_view.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
-        self.row_view.setWordWrap(True)
-        self.row_view.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Interactive
+        values = QWidget()
+        self.rows = QFormLayout(values)
+        self.rows.setContentsMargins(0, 0, 0, 0)
+        self.rows.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
         )
-        self.row_view.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Stretch
-        )
-        self.row_view.horizontalHeader().sectionResized.connect(
-            lambda *_: self.row_view.resizeRowsToContents()
-        )
-        layout.addWidget(self.row_view, stretch=2)
+        self.rows.setVerticalSpacing(ROW_SPACING_PX)
+        layout.addWidget(values)
 
         self.annotate_box = QWidget()
         annotate = QVBoxLayout(self.annotate_box)
-        annotate.setContentsMargins(0, 0, 0, 0)
+        annotate.setContentsMargins(0, 12, 0, 0)
         self.annotate_title = QLabel("Annotations")
+        self.annotate_title.setStyleSheet("font-weight: bold;")
         annotate.addWidget(self.annotate_title)
         self.form_holder = QVBoxLayout()
         annotate.addLayout(self.form_holder)
-        buttons = QHBoxLayout()
+        layout.addWidget(self.annotate_box)
+        layout.addStretch(1)
+        self.annotate_box.hide()
+
         self.save = QPushButton("Save annotations")
         self.save.clicked.connect(self._save)
-        buttons.addStretch()
-        buttons.addWidget(self.save)
-        annotate.addLayout(buttons)
-        layout.addWidget(self.annotate_box, stretch=3)
-        self.annotate_box.hide()
+        self.save.hide()
+        self.buttons = QHBoxLayout()
+        self.buttons.addStretch(1)
+        self.buttons.addWidget(self.save)
 
         self._fields: dict[str, list[Field]] = {}
         self._loaded: dict[str, Any] = {}
@@ -196,20 +232,15 @@ class DetailPane(QWidget):
         """Show one row; `values` includes the index column."""
         self.title.setText(f"{table}: {show(index_value)}")
 
-        frame = pd.DataFrame(
-            {"value": [show(v, pretty=True) for v in values.values()]},
-            index=pd.Index(list(values.keys()), name="column"),
-        )
-        model = self.row_view.model()
-        assert isinstance(model, FrameModel)
-        model.set_frame(frame)
+        while self.rows.rowCount():
+            self.rows.removeRow(0)
 
-        # The column names never wrap: the name column is as wide as the
-        # widest of them, the value column takes the rest
-        metrics = self.row_view.fontMetrics()
-        widest = max(metrics.horizontalAdvance(str(k)) for k in values) + 24
-        self.row_view.setColumnWidth(0, widest)
-        self.row_view.resizeRowsToContents()
+        self.values = {}
+
+        for key, value in values.items():
+            shown = locked_value(show(value, pretty=True))
+            self.values[str(key)] = shown
+            self.rows.addRow(QLabel(str(key)), shown)
 
         target = TARGET_OF.get(table)
 
@@ -219,6 +250,7 @@ class DetailPane(QWidget):
             or not isinstance(index_value, numbers.Number)
         ):
             self.annotate_box.hide()
+            self.save.hide()
             self.target_type = self.target_id = None
             return
 
@@ -228,6 +260,7 @@ class DetailPane(QWidget):
         self._loaded = {}
         self._rebuild_form()
         self.annotate_box.show()
+        self.save.show()
         self._load_current()
 
     def _rebuild_form(self) -> None:
@@ -292,7 +325,10 @@ class DetailPane(QWidget):
 
 
 class TablesPane(QWidget):
-    """The table browser."""
+    """
+    The table browser, laid out like the registry pages: the table on the
+    left under its picker and filter, the picked row in the side panel.
+    """
 
     def __init__(self, context: Context, parent=None):
         super().__init__(parent)
@@ -300,31 +336,31 @@ class TablesPane(QWidget):
         self.table_name: None | str = None
         self.frame: pd.DataFrame = pd.DataFrame()
 
-        layout = QHBoxLayout(self)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter = splitter
-        layout.addWidget(splitter)
-
-        self.list = QListWidget()
-        self.list.addItems(TABLES)
-        self.list.currentTextChanged.connect(self._pick)
-        splitter.addWidget(self.list)
-
-        middle = QWidget()
-        middle_layout = QVBoxLayout(middle)
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
         top = QHBoxLayout()
+        top.setContentsMargins(8, 8, 8, 8)
+        top.setSpacing(8)
+        self.picker = QComboBox()
+        self.picker.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.picker.addItems(TABLES)
+        self.picker.currentTextChanged.connect(self._pick)
         self.filter = QLineEdit()
         self.filter.setPlaceholderText("filter rows")
         self.filter.textChanged.connect(self._apply_filter)
         self.count = QLabel("")
         self.reload_button = QPushButton("Reload")
         self.reload_button.clicked.connect(self.reload)
+        top.addWidget(self.picker)
         top.addWidget(self.filter, stretch=1)
         top.addWidget(self.count)
         top.addWidget(self.reload_button)
-        middle_layout.addLayout(top)
+        left_layout.addLayout(top)
 
         self.view = QTableView()
+        self.view.setObjectName("registryTable")
         self.view.setModel(FrameModel())
         self.view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         self.view.setSelectionMode(QTableView.SelectionMode.SingleSelection)
@@ -336,20 +372,16 @@ class TablesPane(QWidget):
         self.view.clicked.connect(self._row_clicked)
         fit_columns(self.view)
         sortable(self.view)
-        middle_layout.addWidget(self.view)
-        splitter.addWidget(middle)
+        left_layout.addWidget(self.view)
 
         self.detail = DetailPane(context)
-        splitter.addWidget(self.detail)
-        # Fixed start widths: the list fits its longest name, the table is the
-        # only pane that grows with the window
-        splitter.setSizes([330, 760, 400])
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 0)
+        self.split = TableAndForm(left, self.detail, self.detail.buttons)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.split)
 
         context.follow_changes(self, self.reload)
-        self.list.setCurrentRow(0)
+        self._pick(self.picker.currentText())
 
     def reload(self) -> None:
         """Re-read the shown table (and the annotation fields, once)."""
@@ -386,22 +418,21 @@ class TablesPane(QWidget):
 
     def _set_call_tables(self, names: list[str]) -> None:
         """Keep the per-method entries after the fixed ones, without losing the pick."""
-        current = self.list.currentItem()
-        picked = current.text() if current else None
+        picked = self.picker.currentText()
         wanted = [*TABLES, *names]
-        shown = [self.list.item(i).text() for i in range(self.list.count())]
+        shown = [self.picker.itemText(i) for i in range(self.picker.count())]
 
         if shown == wanted:
             return
 
-        self.list.blockSignals(True)
-        self.list.clear()
-        self.list.addItems(wanted)
+        self.picker.blockSignals(True)
+        self.picker.clear()
+        self.picker.addItems(wanted)
 
         if picked in wanted:
-            self.list.setCurrentRow(wanted.index(picked))
+            self.picker.setCurrentText(picked)
 
-        self.list.blockSignals(False)
+        self.picker.blockSignals(False)
 
     def _pick(self, name: str) -> None:
         self.table_name = name or None
