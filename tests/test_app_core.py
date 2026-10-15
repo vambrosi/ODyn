@@ -235,6 +235,25 @@ def test_problems_are_listed_one_block_per_page():
         " RESULT  ready",
     ]
 
+    # After a submit: where each part's TIFFs go, the part in red
+    text = report(
+        "m3 2026-10-07",
+        [],
+        ["e1", "zstacks"],
+        "sent to the cluster",
+        [
+            ("e1", "copy TIFF files to 20261007/m3/e1/raw"),
+            ("zstacks", "copy TIFF files to 20261007/m3/zstacks/raw"),
+        ],
+    )
+    assert ANSI.sub("", text).split("\n")[-4:] == [
+        " RESULT  sent to the cluster",
+        "",
+        "     e1  copy TIFF files to 20261007/m3/e1/raw",
+        "zstacks  copy TIFF files to 20261007/m3/zstacks/raw",
+    ]
+    assert "\033[1;31m     e1" in text and "\033[1;31mzstacks" in text
+
 
 def test_check_lists_what_is_wrong(share):
     db, draft = share

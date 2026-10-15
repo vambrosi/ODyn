@@ -1136,9 +1136,15 @@ class Sessions(QObject):
             writes=True,
         )
 
-    def _report(self, draft: Draft, problems: list[Problem], result: str) -> None:
+    def _report(
+        self,
+        draft: Draft,
+        problems: list[Problem],
+        result: str,
+        to_do: list[tuple[str, str]] = (),
+    ) -> None:
         parts = [str(p["name"]) for p in draft.parts]
-        self.reported.emit(report(draft.label, problems, parts, result))
+        self.reported.emit(report(draft.label, problems, parts, result, to_do))
 
     def _submitted(self, draft: Draft, result) -> None:
         if result.error:
@@ -1150,7 +1156,17 @@ class Sessions(QObject):
         else:
             outcome = f"sent to the cluster (the QC page shows its progress) {CHECK}"
 
-        self._report(draft, list(result.problems), outcome)
+        # The cluster adds the session once every part's TIFFs are on the
+        # server, so say where each goes
+        to_do = (
+            [
+                (name, f"copy TIFF files to {draft.folder}/{name}/raw")
+                for name in (str(p["name"]) for p in draft.parts)
+            ]
+            if result.submitted
+            else []
+        )
+        self._report(draft, list(result.problems), outcome, to_do)
 
         if result.submitted:
             self.reload_drafts()

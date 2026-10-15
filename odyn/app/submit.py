@@ -116,12 +116,19 @@ RED, YELLOW, BLUE, RESET = "\033[1;31m", "\033[1;33m", "\033[1;34m", "\033[0m"
 LABEL_WIDTH = 7
 
 
-def report(session: str, problems: list[Problem], parts: list[str], result: str) -> str:
+def report(
+    session: str,
+    problems: list[Problem],
+    parts: list[str],
+    result: str,
+    to_do: list[tuple[str, str]] = (),
+) -> str:
     """
     The Check tab's report on `session`: a header counting errors (problems
     that stop a submit) and warnings, then the problems in one block per page
     (the user's, the session's with `vials`, then each experiment in the order of
-    `parts`), then `result` on the last line.
+    `parts`), then `result`, then, after a blank line, `to_do`: what the user
+    still has to do for each part, `(part, text)`, the part in red.
 
     **USAGE**
     ```python
@@ -138,7 +145,13 @@ def report(session: str, problems: list[Problem], parts: list[str], result: str)
     groups = sorted(
         blocks, key=lambda group: order.index(group) if group in order else len(order)
     )
-    width = max([LABEL_WIDTH, *(len(p.where.split("/")[0]) for p in problems)])
+    width = max(
+        [
+            LABEL_WIDTH,
+            *(len(p.where.split("/")[0]) for p in problems),
+            *(len(part) for part, _ in to_do),
+        ]
+    )
 
     def line(label: str, color: str, text: str) -> str:
         return f"{color}{label:>{width}}{RESET}  {text}"
@@ -160,6 +173,10 @@ def report(session: str, problems: list[Problem], parts: list[str], result: str)
         lines.append("")
 
     lines.append(line("RESULT", BLUE, result))
+
+    if to_do:
+        lines.append("")
+        lines += [line(part, RED, text) for part, text in to_do]
 
     return "\n".join(lines)
 

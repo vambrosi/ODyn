@@ -1928,6 +1928,8 @@ def test_the_submit_report_ends_with_where_the_draft_went(window, tmp_path):
         "     e1  no olfactometer Events file found",
         "",
         " RESULT  sent to the cluster (the QC page shows its progress) ✔",
+        "",
+        "     e1  copy TIFF files to 20261007/m3/e1/raw",
     ]
 
     # A queue that cannot be written stops it
