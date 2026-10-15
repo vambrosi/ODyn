@@ -662,7 +662,7 @@ def test_a_version_3_draft_is_read_with_parts(tmp_path):
     # its undo entry still applies
     restored, part = Removals(tmp_path).undo()
     assert part == "e2" and restored.part("e2") is not None
-    assert json.loads(path.read_text())["version"] == 5
+    assert json.loads(path.read_text())["version"] == 6
 
 
 def test_a_version_4_draft_has_experiments_and_no_grabs(tmp_path):
@@ -692,7 +692,58 @@ def test_a_version_4_draft_has_experiments_and_no_grabs(tmp_path):
     assert [e["name"] for e in draft.parts] == ["e1", "zstacks"]
     assert draft.part("e1")["kind"] == "experiment"
     assert draft.part("e1")["exp_type"] == "loop"
-    assert draft.files("zstacks") == {"z_00001.tif": {"experiment": "e1", "note": "x"}}
+    # Notes kept by TIFF name are z-stacks now, each keeping its TIFF
+    assert draft.stacks("zstacks") == [
+        {"experiment": "e1", "note": "x", "file": "z_00001.tif"}
+    ]
+
+
+def test_a_version_5_draft_lists_its_zstacks_in_the_order_of_their_files(tmp_path):
+    path = tmp_path / "20261001-090000.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 5,
+                "mouse_id": 442,
+                "date": "2026-10-01",
+                "session": {},
+                "parts": [
+                    {
+                        "name": "zstacks",
+                        "kind": "zstack",
+                        "files": {
+                            "z_00002.tif": {"note": "second"},
+                            "z_00001.tif": {"note": "first", "experiment": "e1"},
+                        },
+                    },
+                ],
+                "vial_ids": [],
+            }
+        )
+    )
+
+    stacks = Draft.load(path).stacks("zstacks")
+    assert [(s["file"], s["note"]) for s in stacks] == [
+        ("z_00001.tif", "first"),
+        ("z_00002.tif", "second"),
+    ]
+
+
+def test_zstacks_take_their_tiffs_by_number():
+    from odyn.app.submit import match_stacks
+
+    files = ["a_00010.tif", "a_00002.tif", "a_00001.tif"]
+
+    # In order of the number at the end, not of the name
+    assert match_stacks([{}, {}], files) == (
+        ["a_00001.tif", "a_00002.tif"],
+        ["a_00010.tif"],
+    )
+    # One that names its TIFF keeps it; the others take the rest in order
+    assert match_stacks([{}, {"file": "a_00001.tif"}, {}, {}], files) == (
+        ["a_00002.tif", "a_00001.tif", "a_00010.tif", None],
+        [],
+    )
 
 
 # The 2026-08-11 z-stack of m357, as its header has it
@@ -755,17 +806,17 @@ def a_day(tmp_path):
 
 def test_zstacks_notes_are_checked(a_day):
     db, draft = a_day
-    draft.set_file("zstacks", "20260304_m1_zstacks_00001.tif", experiment="e9")
-    draft.set_file("zstacks", "late_00009.tif", z_landmark="x")
+    draft.add_stack("zstacks").add_stack("zstacks")
+    draft.set_stack("zstacks", 0, experiment="e9")
+    draft.set_stack("zstacks", 1, z_landmark="x")
 
     messages = [str(p) for p in check(db, draft) + check_files(db, draft)]
+    assert "zstacks/z-stack 1: the z-stack's experiment e9 is not listed" in messages
+
+    # One TIFF on the share for two z-stacks: the second has none (yet)
     assert (
-        "zstacks/20260304_m1_zstacks_00001.tif: the z-stack's experiment e9 is "
-        "not listed" in messages
-    )
-    assert (
-        "zstacks/late_00009.tif: not in the server's folder. (Not required to "
-        "submit.)" in messages
+        "zstacks/z-stack 2: no TIFF for it on the server (its notes are left "
+        "out). (Not required to submit.)" in messages
     )
 
     # A grab needs neither olfactometer files nor a sync file
@@ -790,9 +841,8 @@ def test_ingest_adds_the_grab_and_zstacks_with_their_notes(a_day):
         conditions=[{"start": 1, "end": 1, "condition": "ket/xyl"}],
         block_iti_s=10,
     )
-    draft.set_file(
-        "zstacks", stack, experiment="e2", z_landmark="surface of right bulb"
-    )
+    draft.add_stack("zstacks")
+    draft.set_stack("zstacks", 0, experiment="e2", z_landmark="surface of right bulb")
 
     assert not any(p.blocking for p in check(db, draft))
     result = ingest(db, draft)
@@ -820,7 +870,8 @@ def test_ingest_adds_the_grab_and_zstacks_with_their_notes(a_day):
         db.annotations_for("zstack").loc[stack_id, "z_landmark"]
         == "surface of right bulb"
     )
-    assert draft.files("zstacks")[stack]["submitted_id"] == stack_id
+    assert draft.stacks("zstacks")[0]["submitted_id"] == stack_id
+    assert draft.stacks("zstacks")[0]["file"] == stack
 
     # a second ingest adds nothing new
     again = Draft.load(draft.path)

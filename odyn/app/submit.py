@@ -12,9 +12,10 @@ sync files, the acquisition numbers the conditions name).
 
 `ingest` runs both, then does the day's work in order: the session row, its
 annotations, each experiment (ingested, annotated, its sync file processed,
-and a loop's vials recorded), then the z-stacks (each TIFF ingested and
-annotated, and linked to its experiment). The cluster runs it once the
-recordings are on the share (`odyn.app.submissions`).
+and a loop's vials recorded), then the z-stacks (each TIFF ingested, and the
+notes of each z-stack listed given to its TIFF by order, `match_stacks`, then
+linked to its experiment). The cluster runs it once the recordings are on the
+share (`odyn.app.submissions`).
 
 `submit` is the app's part: it copies the files only this computer has, runs
 `check`, puts the draft in the cluster's queue, and moves it aside. It writes
@@ -43,11 +44,9 @@ from collections.abc import Container
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import pandas as pd
-
 from ..database import OLFACTOMETER_FOLDER, SYNC_FOLDER, read_tiff
 from ..utils import INFO_FOLDER, logger
-from .draft import EXP_TYPES, FILE_SETTINGS, KINDS, PART_SETTINGS, Draft
+from .draft import EXP_TYPES, KINDS, PART_SETTINGS, STACK_SETTINGS, Draft
 from .fields import annotation_fields, form_fields, missing_required
 from .olfactometer import OlfactometerFolders, copy_for_loop, loop_window
 from .recordings import pending, sync_pending
@@ -273,7 +272,7 @@ def check(
             problems += _condition_problems(where, entry)
 
         else:
-            problems += _file_problems(db, entry, experiments)
+            problems += _stack_problems(db, entry, experiments)
 
         if kind == "experiment" and entry.get("submitted_id") is not None:
             continue  # already in the database; the files were checked then
@@ -343,17 +342,23 @@ def _field_problems(where: str, fields, values: dict) -> list[Problem]:
     return problems
 
 
-def _file_problems(db, entry: dict, experiments: set[str]) -> list[Problem]:
+def _stack_problems(db, entry: dict, experiments: set[str]) -> list[Problem]:
     """
-    What is wrong with the notes on the z-stacks' TIFFs: values that do not
-    read as their type, and an experiment that is not in the draft.
+    What is wrong with the notes on the z-stacks: values that do not read as
+    their type, and an experiment that is not in the draft.
     """
     name, kind = str(entry["name"]), entry["kind"]
     fields = annotation_fields(db, kind)
+    stacks = entry.get("stacks", [])
     problems = []
 
-    for file, noted in entry.get("files", {}).items():
-        where = f"{name}/{file}"
+    if not stacks:
+        problems.append(
+            Problem(name, "no z-stacks listed (Add z-stack)", blocking=False)
+        )
+
+    for number, noted in enumerate(stacks, start=1):
+        where = f"{name}/z-stack {number}"
         problems += _field_problems(where, fields, noted)
         experiment = noted.get("experiment")
 
@@ -365,59 +370,36 @@ def _file_problems(db, entry: dict, experiments: set[str]) -> list[Problem]:
     return problems
 
 
-def list_tiffs(main_folder: Path, folder: str, kind: str) -> pd.DataFrame:
+def match_stacks(
+    stacks: list[dict], files: list[str]
+) -> tuple[list[None | str], list[str]]:
     """
-    The TIFFs in a z-stacks folder's `raw/`, one row each with what its header
-    says: when it started, its stack, frames per slice and powers. Empty when
-    the folder is not there.
+    The TIFF each z-stack goes with (`None` for one with no TIFF yet), and the
+    TIFFs left over. A z-stack that names its `file` (matched before, or kept
+    from an older draft) gets it; the others take the rest in the order of
+    their numbers (`..._00001.tif` first).
     """
-    columns = {
-        "zstack": [
-            "file",
-            "started",
-            "slices",
-            "frames_per_slice",
-            "z_start_um",
-            "z_end_um",
-            "power_start_pct",
-            "power_end_pct",
-        ],
-    }[kind]
-    raw = Path(main_folder) / folder / RAW_FOLDER
-    rows = []
+    order = sorted(
+        files,
+        key=lambda file: (
+            acquisition_number(file) is None,
+            acquisition_number(file) or 0,
+            file,
+        ),
+    )
+    named = {str(s["file"]) for s in stacks if s.get("file") in files}
+    free = [file for file in order if file not in named]
+    matched: list[None | str] = []
 
-    try:
-        paths = sorted(raw.glob("[!.]?*.tif"))
-    except OSError:
-        paths = []
+    for noted in stacks:
+        file = noted.get("file")
 
-    for path in paths:
-        row = {"file": path.name}
+        if file in files:
+            matched.append(str(file))
+        else:
+            matched.append(free.pop(0) if free else None)
 
-        try:
-            read = read_tiff(path, Path(main_folder))
-        except Exception as error:  # a file still being copied, say
-            logger.warning(f"Could not read '{path.name}': {error}")
-            read = None
-
-        if read is not None:
-            recording, tiff = read
-            stack = recording["stack"] or {}
-            row.update(
-                started=tiff["acq_start"].strftime("%H:%M:%S"),
-                frames=recording["frames_per_slice"],
-                frames_per_slice=recording["frames_per_slice"],
-                z_um=recording["z_um"],
-                slices=stack.get("slice_count"),
-                z_start_um=stack.get("z_start_um"),
-                z_end_um=stack.get("z_end_um"),
-                power_start_pct=stack.get("power_start_pct"),
-                power_end_pct=stack.get("power_end_pct"),
-            )
-
-        rows.append(row)
-
-    return pd.DataFrame(rows, columns=columns)
+    return matched, free
 
 
 def acquisition_number(path: str | Path) -> None | int:
@@ -557,6 +539,37 @@ def _olfactometer_problems(
     return []
 
 
+def _stack_count_problems(
+    name: str, stacks: list[dict], files: list[str]
+) -> list[Problem]:
+    """The z-stacks with no TIFF, and the TIFFs with no z-stack."""
+    if not stacks:
+        return []
+
+    matched, extra = match_stacks(stacks, files)
+    problems = [
+        Problem(
+            f"{name}/z-stack {number}",
+            "no TIFF for it on the server (its notes are left out)",
+            blocking=False,
+        )
+        for number, file in enumerate(matched, start=1)
+        if file is None
+    ]
+
+    if extra:
+        problems.append(
+            Problem(
+                name,
+                f"{len(extra)} more TIFF{'' if len(extra) == 1 else 's'} than "
+                f"z-stacks listed, added without notes ({', '.join(extra)})",
+                blocking=False,
+            )
+        )
+
+    return problems
+
+
 def _folder_problems(where: str, folder: Path, entry: dict) -> list[Problem]:
     """What a part folder on the share is missing, or has too many of."""
     problems = []
@@ -664,12 +677,8 @@ def check_files(db, draft: Draft) -> list[Problem]:
             problems += _type_problems(name, entry, part, db.main_folder)
 
         else:
-            on_share = {p.name for p in (part / RAW_FOLDER).glob("[!.]?*.tif")}
-            problems += [
-                Problem(f"{name}/{file}", "not in the server's folder", blocking=False)
-                for file in entry.get("files", {})
-                if file not in on_share
-            ]
+            on_share = [p.name for p in (part / RAW_FOLDER).glob("[!.]?*.tif")]
+            problems += _stack_count_problems(name, entry.get("stacks", []), on_share)
 
     problems.sort(key=lambda problem: not problem.blocking)
 
@@ -929,7 +938,8 @@ def _submit_experiment(db, draft: Draft, entry: dict, session_id: int, written) 
 def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> None:
     """
     Ingest every TIFF of the z-stacks folder (those already in are skipped),
-    annotate the ones with notes, and link each z-stack to its experiment.
+    give each z-stack listed its TIFF (`match_stacks`), annotate it and link
+    it to its experiment.
     """
     name, kind = str(entry["name"]), entry["kind"]
     folder = f"{draft.folder}/{name}"
@@ -943,11 +953,12 @@ def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> No
     )
     ids = {Path(path).name: int(i) for i, path in zip(rows["id"], rows["raw_path"])}
     written.zstacks.update(ids)
-    notes = draft.files(name)
+    stacks = draft.stacks(name)
+    matched, _ = match_stacks(stacks, list(ids))
 
-    for file, noted in notes.items():
-        if file not in ids:
-            continue  # not on the share (check said so)
+    for index, (noted, file) in enumerate(zip(stacks, matched)):
+        if file is None:
+            continue  # no TIFF for it (check_files said so)
 
         row_id = ids[file]
         values = _annotation_values(db, kind, noted)
@@ -963,7 +974,7 @@ def _submit_files(db, draft: Draft, entry: dict, session_id: int, written) -> No
                 zstack_id=row_id, exp_id=written.experiments[experiment]
             )
 
-        draft.set_file(name, file, submitted_id=row_id)
+        draft.set_stack(name, index, submitted_id=row_id, file=file)
 
 
 def _write_conditions(db, draft: Draft, name: str, exp_id: int, entry: dict) -> int:
@@ -1006,7 +1017,7 @@ def _annotation_values(db, applies_to: str, values: dict) -> dict:
     parsed = {}
 
     for field_ in form_fields(db, applies_to):
-        if field_.key in (*PART_SETTINGS, *FILE_SETTINGS) or not field_.editable:
+        if field_.key in (*PART_SETTINGS, *STACK_SETTINGS) or not field_.editable:
             continue
 
         if field_.key in ("mouse_id", "session_date", "objective"):

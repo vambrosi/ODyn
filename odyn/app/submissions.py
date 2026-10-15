@@ -9,9 +9,10 @@ database itself. A tick on the cluster then looks at each queued draft
 - **waiting** while the TIFFs are still arriving. A loop is complete when it
 has as many TIFFs as ScanImage was set to take (`SI.acqsPerLoop`, from the
 first TIFF's header), or as many as its sync file has bursts if that is fewer
-(the loop was stopped early). A grab and the z-stacks are complete once they
-have TIFFs. Then nothing may change for `SETTLE_S` (a TIFF may be half
-copied), and the newest TIFF must read.
+(the loop was stopped early). A grab is complete once it has TIFFs, and
+the z-stacks once they have a TIFF per z-stack listed (one at least). Then
+nothing may change for `SETTLE_S` (a TIFF may be half copied), and the newest
+TIFF must read.
 - **failed** when nothing changed for `GIVE_UP_S` before the draft was
 complete (a copy that broke, a share that ran out of space), or when
 `ingest` refused it or stopped. A failure the files caused is tried again
@@ -372,6 +373,13 @@ def _progress(main_folder: Path, draft: Draft) -> tuple[bool, dict[str, str], st
         if not tiffs:
             parts[name] = "no TIFFs yet"
             complete = False
+            continue
+
+        # The z-stacks wait for one TIFF per z-stack listed
+        if kind == "zstack":
+            wanted = max(1, len(entry.get("stacks", [])))
+            parts[name] = f"{len(tiffs)} of {wanted} TIFFs"
+            complete = complete and len(tiffs) >= wanted and _reads(tiffs[-1])
             continue
 
         # A grab's TIFFs still say the loop length last set, so only a loop

@@ -32,7 +32,8 @@ draft.set_part("e1", conditions=[
     {"start": 41, "end": 80, "condition": "ket/xyl"},     # their TIFF number
 ])
 draft.set_part("zstacks", objective=20)
-draft.set_file("zstacks", "20260914_m442_zstack_00001.tif", experiment="e1")
+draft.add_stack("zstacks")                  # Z-stack 1, Z-stack 2, ...
+draft.set_stack("zstacks", 0, experiment="e1", z_landmark="surface")
 draft.set_vials([1, 2, 3, 4])
 
 Draft.pending(drafts_folder())   # everything not yet submitted or removed
@@ -69,7 +70,7 @@ from typing import Any
 # Bumped when the stored shape changes in a way a reader must notice.
 # A draft written by a newer app is refused rather than half-read; an older
 # one is brought up to date as it is read (`_upgrade`).
-DRAFT_VERSION = 5
+DRAFT_VERSION = 6
 
 FOLDER_NAME = ".odyn"
 DRAFTS = "drafts"
@@ -89,12 +90,14 @@ PART_SETTINGS = (
     "recordings",
     "conditions",
     "conditions_submitted",
-    "files",
+    "stacks",
     "folder_made",
 )
 
-# The keys of a file's entry (in the z-stacks part) that are not annotations
-FILE_SETTINGS = ("experiment", "submitted_id")
+# The keys of a z-stack's entry (in the z-stacks part) that are not
+# annotations: the experiment it was taken for, its id once in the database,
+# and its TIFF (once matched, or kept from a version 5 draft)
+STACK_SETTINGS = ("experiment", "submitted_id", "file")
 
 # The kinds of part (experiments `e1`, `e2`, ..., and the session's z-stacks),
 # and the folder of the one a session has one of
@@ -426,11 +429,14 @@ class Draft:
 
         return f"{KIND_WORDS.get(word, 'experiment')} {self.where}/{name}"
 
-    def files(self, name: str) -> dict[str, dict[str, Any]]:
-        """What was noted per TIFF of part `name` (z-stacks), by file name."""
+    def stacks(self, name: str) -> list[dict[str, Any]]:
+        """
+        What was noted per z-stack of part `name` (z-stacks), in the order
+        they were taken: the first goes with the TIFF numbered lowest.
+        """
         entry = self.part(name)
 
-        return {} if entry is None else entry.get("files", {})
+        return [] if entry is None else entry.get("stacks", [])
 
     def next_experiment(self, taken: tuple[int, ...] = ()) -> str:
         """
@@ -520,20 +526,34 @@ class Draft:
 
         return self.save()
 
-    def set_file(self, name: str, file: str, **fields: Any) -> Draft:
+    def add_stack(self, name: str) -> Draft:
+        """Add a z-stack to part `name` (z-stacks), after the others."""
+        self._stacks_of(name).append({})
+
+        return self.save()
+
+    def set_stack(self, name: str, index: int, **fields: Any) -> Draft:
         """
-        Set fields on one TIFF of part `name` (z-stacks): its annotations,
-        and the `experiment` it was taken for.
+        Set fields on z-stack `index` (from 0) of part `name`: its
+        annotations, and the `experiment` it was taken for.
         """
+        _merge(self._stacks_of(name)[index], fields)
+
+        return self.save()
+
+    def remove_stack(self, name: str, index: int) -> Draft:
+        """Take z-stack `index` out of part `name`; the next ones move up."""
+        del self._stacks_of(name)[index]
+
+        return self.save()
+
+    def _stacks_of(self, name: str) -> list[dict[str, Any]]:
         entry = self.part(name)
 
         if entry is None:
             raise ValueError(f"There is no part '{name}'.")
 
-        noted = entry.setdefault("files", {}).setdefault(file, {})
-        _merge(noted, fields)
-
-        return self.save()
+        return entry.setdefault("stacks", [])
 
     def add_recording(self, name: str, record: dict[str, Any]) -> Draft:
         """
@@ -818,6 +838,9 @@ def _upgrade(data: dict[str, Any]) -> dict[str, Any]:
     folder for all of them) and its z-stacks, which named the loop they were
     taken for (`loop`). Loops become experiments of type loop; the grabs part
     is left out, since a grab is now an experiment of its own.
+    - Version 5 kept the z-stacks' notes by TIFF name (`files`). They become
+    z-stacks in the order of the names, each keeping its `file`, so it still
+    goes with that TIFF.
     """
     version = data.get("version", DRAFT_VERSION)
 
@@ -851,6 +874,10 @@ def _upgrade(data: dict[str, Any]) -> dict[str, Any]:
         for noted in entry.get("files", {}).values():
             if "loop" in noted:
                 noted["experiment"] = noted.pop("loop")
+
+        if "files" in entry:
+            files = entry.pop("files")
+            entry["stacks"] = [{**files[file], "file": file} for file in sorted(files)]
 
         kept.append(entry)
 

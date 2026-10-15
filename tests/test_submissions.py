@@ -175,6 +175,39 @@ def test_add_now_does_not_wait_for_the_tiffs(tmp_path):
     assert not (queue_folder(tmp_path) / f"{path.stem}.now").exists()
 
 
+def test_the_zstacks_wait_for_a_tiff_per_zstack_listed(tmp_path):
+    stack = dict(slices=3, step_um=5, top_um=-10, power=30, length_um=-300)
+    generate(
+        tmp_path,
+        acquisitions=1,
+        exp="zstacks",
+        acq_state="grab",
+        frames=56,
+        height=32,
+        width=40,
+        start=datetime(2026, 1, 1, 12),
+        zstack={**stack, "reference_um": -15},
+    )
+    db, draft, path = a_day(tmp_path)
+    draft = Draft.load(path)
+    draft.set_part("zstacks", objective=20)
+    draft.add_stack("zstacks").add_stack("zstacks")
+    draft.set_stack("zstacks", 0, z_landmark="surface")
+    draft.set_stack("zstacks", 1, z_landmark="deeper")
+
+    assert process_submissions(tmp_path, now=SETTLED) == [
+        "20260101/m1: waiting: e1: 3 of 3 TIFFs, zstacks: 1 of 2 TIFFs"
+    ]
+
+    # Added now, the first z-stack gets the one TIFF and its notes
+    add_now(path)
+    [line] = process_submissions(tmp_path, now=SETTLED + timedelta(minutes=1))
+    assert line.endswith("added as session 1")
+    assert len(db.zstacks) == 1
+    notes = db.annotations_for("zstack")
+    assert notes["z_landmark"].tolist() == ["surface"]
+
+
 def test_submit_again_starts_a_failed_draft_over(tmp_path):
     db, _, path = a_day(tmp_path)
     (tmp_path / "20260101/m1/e1/sync/extra.h5").write_bytes(b"")

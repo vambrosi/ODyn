@@ -16,36 +16,37 @@ from __future__ import annotations
 
 import re
 
-import pandas as pd
-
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
     QScrollArea,
     QSpinBox,
-    QTableView,
     QVBoxLayout,
     QWidget,
 )
 
 from ..utils import CHECK, CROSS
 from .context import Context
-from .draft import EXP_TYPES, FILE_SETTINGS, FOLDER_OF, PART_SETTINGS, Draft, Removals
+from .draft import (
+    EXP_TYPES,
+    FOLDER_OF,
+    PART_SETTINGS,
+    STACK_SETTINGS,
+    Draft,
+    Removals,
+)
 from .fields import Field, annotation_fields, form_fields
 from .forms import Form, FormRows, GrabTimingForm, PanelPicker, TimingForm, fit_row
-from .models import FrameModel, fit_columns, sortable
 from .pane_registry import current_vials
 from .recordings import make_part_folders
 from .style import COMBO_EXTRA_PX, PAGE_MAX_PX, required_label, text_style
-from .submit import Problem, check, list_tiffs, report, running, submit
+from .submit import Problem, check, report, running, submit
 
 TIMING_KEYS = (
     "block_baseline_s",
@@ -340,17 +341,13 @@ class ExperimentForm(QWidget):
         self._set(conditions=value)
 
 
-# The rows a TIFF table shows before it scrolls
-TIFF_ROWS = 8
-
-
-class FilesForm(QWidget):
+class ZStacksForm(QWidget):
     """
-    A session's z-stacks: the objective they were recorded with, and each TIFF
-    found in the folder on the share, with what its header says and what is
-    noted about it, the experiment it was taken for among it. Notes are kept
-    per file name, so a file noted before it reached the share shows up once
-    it does.
+    A session's z-stacks: the objective they were recorded with, then one box
+    per z-stack taken, with what is noted about it, the experiment it was
+    taken for among it. Nothing here waits for the TIFFs: notes can be written
+    while a z-stack runs, and the cluster gives the first z-stack the TIFF
+    numbered lowest in `zstacks/raw`, and so on (`submit.match_stacks`).
     """
 
     def __init__(
@@ -365,19 +362,13 @@ class FilesForm(QWidget):
         self.context = context
         self.draft = draft
         self.name = name
-        self.kind = (draft.part(name) or {}).get("kind", "zstack")
-        self.file: None | str = None
-        self.file_form: None | Form = None
-        self.experiment: None | QComboBox = None
+        self.stack_fields = [f for f in fields if f.key != "objective"]
+        self.boxes: list[QGroupBox] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         objective = [f for f in fields if f.key == "objective"]
-        self.file_fields = [f for f in fields if f.key != "objective"]
-
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        layout = QVBoxLayout()
-        outer.addLayout(layout, 1)
-
         self.form = Form(objective)
         self.form.set_values({"objective": (draft.part(name) or {}).get("objective")})
         self.form.changed.connect(
@@ -385,147 +376,100 @@ class FilesForm(QWidget):
         )
         layout.addWidget(self.form)
 
-        top = QHBoxLayout()
-        self.found = QLabel()
-        self.found.setStyleSheet(text_style("computed"))
-        refresh = QPushButton("Refresh")
-        refresh.clicked.connect(self.refresh)
-        top.addWidget(self.found, 1)
-        top.addWidget(refresh)
-        layout.addLayout(top)
-
-        self.table = QTableView()
-        self.table.setModel(FrameModel())
-        self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Interactive
+        hint = QLabel(
+            "    The entries below are matched in order with the TIFFs in "
+            f"{draft.folder}/{name}/raw\n"
+            "    The TIFFs are ordered according to the numbers at the end of file their names"
         )
-        fit_columns(self.table)
-        sortable(self.table)
-        rows = self.table.verticalHeader().defaultSectionSize()
-        self.table.setFixedHeight(
-            rows * TIFF_ROWS + self.table.horizontalHeader().sizeHint().height() + 2
+        hint.setWordWrap(True)
+        hint.setStyleSheet(text_style("computed"))
+        layout.addWidget(hint)
+
+        self.stacks_layout = QVBoxLayout()
+        layout.addLayout(self.stacks_layout)
+
+        row = QHBoxLayout()
+        self.add = QPushButton("Add z-stack")
+        self.add.clicked.connect(self._add)
+        row.addWidget(self.add)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        self._build()
+
+    def _build(self) -> None:
+        """One box per z-stack, in order."""
+        for box in self.boxes:
+            box.setParent(None)
+            box.deleteLater()
+
+        self.boxes = []
+
+        for index, noted in enumerate(self.draft.stacks(self.name)):
+            box = self._box(index, noted)
+            self.boxes.append(box)
+            self.stacks_layout.addWidget(box)
+
+    def _box(self, index: int, noted: dict) -> QGroupBox:
+        title = f"Z-stack {index + 1}"
+
+        if noted.get("file"):
+            title += f" ({noted['file']})"
+
+        box = QGroupBox(title)
+        box_layout = QVBoxLayout(box)
+
+        form = Form(self.stack_fields)
+        form.set_values({k: v for k, v in noted.items() if k not in STACK_SETTINGS})
+        form.changed.connect(
+            lambda key, value: self.draft.set_stack(self.name, index, **{key: value})
         )
-        self.table.selectionModel().currentRowChanged.connect(
-            lambda current, _: self._pick(current.row())
-        )
-        layout.addWidget(self.table)
-
-        self.notes = QGroupBox("Pick a file above to write notes")
-        self.notes_layout = QVBoxLayout(self.notes)
-        layout.addWidget(self.notes)
-        self.refresh()
-
-    @property
-    def model(self) -> FrameModel:
-        model = self.table.model()
-        assert isinstance(model, FrameModel)
-
-        return model
-
-    def refresh(self) -> None:
-        """Read the folder again (on the database thread: it is on the share)."""
-        draft = self.draft
-
-        if draft.mouse_id is None:
-            return
-
-        folder = f"{draft.folder}/{self.name}"
-        self.found.setText(f"Reading {folder}/raw...")
-        self.context.run(
-            lambda db: list_tiffs(db.main_folder, folder, self.kind),
-            self._listed,
-            "list TIFFs",
-            owner=self,
-        )
-
-    def _listed(self, frame) -> None:
-        noted = set(self.draft.files(self.name))
-        missing = sorted(noted - set(frame["file"]))
-
-        if missing:
-            frame = pd.concat(
-                [
-                    frame,
-                    pd.DataFrame({"file": missing, "started": "not on the server"}),
-                ],
-                ignore_index=True,
-            )
-
-        frame["notes"] = ["yes" if f in noted else "" for f in frame["file"]]
-        count = len(frame) - len(missing)
-        self.found.setText(
-            f"{count} TIFF{'' if count == 1 else 's'} in "
-            f"{self.draft.folder}/{self.name}/raw"
-        )
-        keep = self.file
-        files = list(frame["file"])
-        self.model.set_frame(frame.set_index("file"))  # its first column
-
-        if keep in files:
-            self.table.selectRow(files.index(keep))
-
-    def _pick(self, row: int) -> None:
-        frame = self.model.frame
-
-        if row < 0 or row >= len(frame):
-            return
-
-        self.file = str(frame.index[self.model.source_row(row)])
-        self._show_notes()
-
-    def _show_notes(self) -> None:
-        if self.file_form is not None:
-            self.file_form.setParent(None)
-            self.file_form.deleteLater()
-
-        self.file_form = self.experiment = None
-        file = self.file
-
-        if file is None:
-            return
-
-        noted = self.draft.files(self.name).get(file, {})
-        self.notes.setTitle(file)
-
-        self.file_form = Form(self.file_fields)
-        self.file_form.set_values(
-            {k: v for k, v in noted.items() if k not in FILE_SETTINGS}
-        )
-        self.file_form.changed.connect(lambda key, value: self._note(**{key: value}))
 
         # The form's first row, so its label lines up with the others
         experiments = [
             str(e["name"]) for e in self.draft.parts if e.get("kind") == "experiment"
         ]
-        self.experiment = QComboBox()
-        self.experiment.addItems(["", *experiments])
-        self.experiment.setCurrentText(str(noted.get("experiment", "")))
-        self.experiment.currentTextChanged.connect(
-            lambda text: self._note(experiment=text or None)
+        experiment = QComboBox()
+        experiment.addItems(["", *experiments])
+        experiment.setCurrentText(str(noted.get("experiment", "")))
+        experiment.currentTextChanged.connect(
+            lambda text: self.draft.set_stack(self.name, index, experiment=text or None)
         )
-        layout = self.file_form.layout()
-        assert isinstance(layout, QFormLayout)
-        layout.insertRow(0, "Taken for the experiment", self.experiment)
+        form_layout = form.layout()
+        assert isinstance(form_layout, QFormLayout)
+        form_layout.insertRow(0, "Taken for the experiment", experiment)
+        box_layout.addWidget(form)
 
-        self.notes_layout.addWidget(self.file_form)
+        # One in the database stays (its notes went with it)
+        if noted.get("submitted_id") is None:
+            row = QHBoxLayout()
+            row.addStretch(1)
+            remove = QPushButton("Remove")
+            remove.setStatusTip(f"Take Z-stack {index + 1} and its notes out")
+            remove.clicked.connect(lambda: self._remove(index))
+            row.addWidget(remove)
+            box_layout.addLayout(row)
 
-    def _note(self, **fields) -> None:
-        if self.file is None:
+        return box
+
+    def _add(self) -> None:
+        self.draft.add_stack(self.name)
+        self._build()
+
+    def _remove(self, index: int) -> None:
+        if not self.context.confirm(
+            "Remove z-stack",
+            f"Remove Z-stack {index + 1} and its notes? The ones after it move up",
+            "Remove",
+        ):
             return
 
-        self.draft.set_file(self.name, self.file, **fields)
-        notes = self.model.frame
-
-        if "notes" in notes and self.file in notes.index:
-            notes.loc[self.file, "notes"] = "yes"
-            self.model.layoutChanged.emit()
+        self.draft.remove_stack(self.name, index)
+        self._build()
 
     def refresh_status(self) -> None:
-        """Nothing to say after a submit that kept the draft: the table says it."""
+        """After a submit that kept the draft: the z-stacks now in the database."""
+        self._build()
 
 
 class SessionPage(QWidget):
@@ -709,7 +653,7 @@ class PartPage(QWidget):
         self.sessions = sessions
         self.draft: None | Draft = None
         self.name: None | str = None
-        self.shown: None | ExperimentForm | FilesForm = None
+        self.shown: None | ExperimentForm | ZStacksForm = None
 
         inner = QWidget()
         layout = QVBoxLayout(inner)
@@ -756,7 +700,7 @@ class PartPage(QWidget):
             )
             self.shown.retyped.connect(lambda: self.show_part(draft, name))
         else:
-            self.shown = FilesForm(
+            self.shown = ZStacksForm(
                 self.sessions.context,
                 draft,
                 name,
@@ -1064,6 +1008,10 @@ class Sessions(QObject):
 
     def _add_part(self, draft: Draft, name: str, kind: str) -> None:
         draft.set_part(name)
+
+        # The z-stacks start with the first one listed (Add z-stack for more)
+        if kind == "zstack" and not draft.stacks(name):
+            draft.add_stack(name)
 
         try:
             make_part_folders(self.context.main_folder / draft.folder / name, kind)

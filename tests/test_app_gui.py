@@ -6,7 +6,6 @@ file where `submit` will look for it.
 """
 
 import os
-import sys
 import time
 
 from pathlib import Path
@@ -20,7 +19,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # where either is missing, which is what leaves the rest of the suite runnable
 # on a bare machine.
 try:
-    from PySide6.QtCore import QEvent, QEventLoop, Qt
+    from PySide6.QtCore import QEventLoop, Qt
     from PySide6.QtWidgets import QApplication, QFormLayout, QWidget
 
 except ImportError as error:  # a missing shared library is not a missing module
@@ -30,7 +29,7 @@ from odyn import Database  # noqa: E402
 from odyn.app.draft import Draft  # noqa: E402
 from odyn.app.models import FrameModel  # noqa: E402
 from odyn.app.pane_recorder import RecorderPane, recording_path  # noqa: E402
-from odyn.app.pane_session import ExperimentForm, FilesForm  # noqa: E402
+from odyn.app.pane_session import ExperimentForm, ZStacksForm  # noqa: E402
 from odyn.app.pane_tables import filter_frame  # noqa: E402
 from odyn.app.recorder import ReplaySource, SimulatedSource  # noqa: E402
 from odyn.app.window import MainWindow  # noqa: E402
@@ -1675,7 +1674,7 @@ def test_add_experiment_numbers_and_makes_the_folders_in_one_click(window, tmp_p
     sessions.add_experiment()
     sessions.add_zstacks()  # again: selects them, adds nothing
     assert window.context.part == "zstacks" and len(draft.parts) == 4
-    assert isinstance(sessions.part_page.shown, FilesForm)
+    assert isinstance(sessions.part_page.shown, ZStacksForm)
     assert sessions.part_page.box.title() == f"Z-stacks {draft.where}/zstacks"
 
     # the folders are named for the mouse and the day, which are now fixed
@@ -1685,44 +1684,10 @@ def test_add_experiment_numbers_and_makes_the_folders_in_one_click(window, tmp_p
         draft.identify(mouse_id=8)
 
 
-def test_a_files_page_rebuilt_before_its_listing_arrives(window, monkeypatch):
-    # The listing runs on the database thread; the page it was for can be gone
-    # by the time it comes back (the selection settling at startup, say)
-    errors = []
-    monkeypatch.setattr(sys, "excepthook", lambda *exc: errors.append(exc))
+def test_zstacks_take_notes_before_any_tiff_is_copied(window, monkeypatch):
+    from PySide6.QtWidgets import QComboBox
 
-    sessions = window.sessions
-    window._add_session()
-    draft = sessions.current
-    draft.identify(mouse_id=1, date="2026-03-04")
-    window.context.announce_draft()
-    sessions.add_zstacks()
-    first = sessions.part_page.shown
-    sessions.part_page.show_part(draft, "zstacks")  # before the listing is back
-    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-    settle(window.context)
-
-    assert errors == []
-    assert sessions.part_page.shown is not first
-    assert "TIFFs in" in sessions.part_page.shown.found.text()
-
-
-def test_the_grabs_page_lists_the_tiffs_and_keeps_notes_per_file(window, tmp_path):
-    from datetime import datetime
-
-    from generate_data import generate
-
-    share = tmp_path / "data"
-    size = dict(frames=56, height=32, width=40, start=datetime(2026, 3, 4, 9))
-    stack = dict(slices=3, step_um=5, top_um=-10, power=30, length_um=-300)
-    generate(
-        share,
-        acquisitions=1,
-        exp="zstacks",
-        acq_state="grab",
-        zstack={**stack, "reference_um": -15},
-        **size,
-    )
+    from odyn.app.forms import Form
 
     sessions = window.sessions
     window._add_session()
@@ -1731,27 +1696,31 @@ def test_the_grabs_page_lists_the_tiffs_and_keeps_notes_per_file(window, tmp_pat
     window.context.announce_draft()
     sessions.add_experiment()
     sessions.add_zstacks()
-    settle(window.context)
 
+    # One z-stack to start with, nothing on the share needed
     form = sessions.part_page.shown
-    assert isinstance(form, FilesForm)
-    assert "1 TIFF in" in form.found.text()
+    assert isinstance(form, ZStacksForm)
+    assert [box.title() for box in form.boxes] == ["Z-stack 1"]
     form.form.rows["objective"].editor.setCurrentText("10")
     assert draft.part("zstacks")["objective"] == 10
 
-    # picking a file shows its notes; what is typed goes to the draft, and a
-    # z-stack also names the experiment it was taken for
-    assert list(form.model.frame["slices"]) == [3]
-    assert list(form.model.frame["z_start_um"]) == [-10]
-    form.table.selectRow(0)
-    assert form.notes.title() == "20260304_m1_zstacks_00001.tif"
-    form.file_form.rows["z_landmark"].editor.setText("surface")
-    form.file_form.rows["z_landmark"].editor.editingFinished.emit()
-    form.experiment.setCurrentText("e1")
-    assert draft.files("zstacks") == {
-        "20260304_m1_zstacks_00001.tif": {"z_landmark": "surface", "experiment": "e1"}
-    }
-    assert form.model.frame["notes"].tolist() == ["yes"]
+    # What is typed goes to the draft; a z-stack names its experiment too
+    notes = form.boxes[0].findChild(Form)
+    notes.rows["z_landmark"].editor.setText("surface")
+    notes.rows["z_landmark"].editor.editingFinished.emit()
+    form.boxes[0].findChild(QComboBox).setCurrentText("e1")
+    assert draft.stacks("zstacks") == [{"z_landmark": "surface", "experiment": "e1"}]
+
+    # Add z-stack lists another; removing the first moves it up
+    form.add.click()
+    assert [box.title() for box in form.boxes] == ["Z-stack 1", "Z-stack 2"]
+    form.boxes[1].findChild(Form).rows["z_landmark"].editor.setText("deeper")
+    form.boxes[1].findChild(Form).rows["z_landmark"].editor.editingFinished.emit()
+
+    monkeypatch.setattr(window.context, "confirm", lambda *args: True)
+    form._remove(0)
+    assert [box.title() for box in form.boxes] == ["Z-stack 1"]
+    assert draft.stacks("zstacks") == [{"z_landmark": "deeper"}]
 
 
 def test_a_grab_is_recorded_like_a_loop_and_zstacks_are_not(window):
@@ -2077,7 +2046,7 @@ def test_adding_removed_zstacks_brings_them_back_as_they_were(window):
     window.context.announce_draft()
     sessions.add_experiment()
     sessions.add_zstacks()
-    draft.set_file("zstacks", "a.tif", note="first one")
+    draft.set_stack("zstacks", 0, note="first one")
 
     sessions.remove_part("e1")
     sessions.remove_part("zstacks")
@@ -2087,7 +2056,7 @@ def test_adding_removed_zstacks_brings_them_back_as_they_were(window):
     sessions.add_zstacks()
     assert window.context.last_report is None
     assert window.context.part == "zstacks"
-    assert draft.files("zstacks") == {"a.tif": {"note": "first one"}}
+    assert draft.stacks("zstacks") == [{"note": "first one"}]
 
     # Undo skips them and goes on to the loop removed before
     assert undo.statusTip().startswith("Undo remove (loop")
