@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 
 from collections.abc import Callable
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
@@ -43,6 +44,10 @@ from PySide6.QtWidgets import (
 from .style import ROW_SPACING_PX, required_label, text_style
 from ..recipes import block_timing, camera_frames, solvent_volume_ml, vial_recipe
 from .fields import BOOLEAN, ENUM, LONG_TEXT, Field
+from .submit import number_spans
+
+# A vial older than this is past its use (the odor in it has changed)
+EXPIRES_AFTER = timedelta(days=14)
 
 
 class WheelGuard(QObject):
@@ -877,6 +882,37 @@ class GrabTimingForm(QGroupBox):
         self.outputs["camera_frames"].setText(f"{camera_frames(duration / 60, rate)}")
 
 
+def expired_note(
+    vials, installed: list[int], today: None | date = None
+) -> tuple[str, None | str]:
+    """
+    The warning for the `installed` vials (ids into `vials`) made more than
+    `EXPIRES_AFTER` before `today`, by odor id, as `(text, style kind)`:
+    `warning` when some are, `error` when all are, `("", None)` when none.
+    A vial with no date is not counted either way.
+    """
+    if vials is None or not installed:
+        return "", None
+
+    rows = vials.loc[[v for v in installed if v in vials.index]]
+    dated = rows[rows["made_on"].notna()]
+    cutoff = pd.Timestamp(today or date.today()) - EXPIRES_AFTER
+    old = dated[pd.to_datetime(dated["made_on"]) < cutoff]
+
+    if old.empty:
+        return "", None
+
+    if len(old) == len(rows):
+        return "All odors in this panel are expired!", "error"
+
+    ids = sorted({int(i) for i in old["odor_id"]})
+
+    if len(ids) == 1:
+        return f"Odor {ids[0]} in this panel is expired!", "warning"
+
+    return f"Odors {number_spans(ids)} in this panel are expired!", "warning"
+
+
 class PanelPicker(QWidget):
     """
     The odor panel for the day: pick a panel, and its latest vials are listed
@@ -886,6 +922,9 @@ class PanelPicker(QWidget):
     `set_panels(panels, vials)` takes `(panel_id, name)` pairs and one row per
     vial with `panel_id`, `vial_position`, `odor_id`, `odor_name`, `made_on`,
     indexed by `vial_id` (the latest per position, from `current_vials`).
+
+    Under the panel, a warning names the installed vials' odors made more than
+    two weeks ago (`EXPIRES_AFTER`), in red when all of them are.
     """
 
     changed = Signal()
@@ -896,6 +935,7 @@ class PanelPicker(QWidget):
         super().__init__(parent)
         self.vials = None
         self._rows: list[int] = []  # vial_id per table row
+        self.today: None | date = None  # None: the computer's date
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -906,6 +946,14 @@ class PanelPicker(QWidget):
         self.panel.currentIndexChanged.connect(self._panel_picked)
         top.addWidget(self.panel, 1)
         layout.addLayout(top)
+
+        self.expired = QLabel("")
+        self.expired.setWordWrap(True)
+        self.expired.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self.expired.hide()
+        layout.addWidget(self.expired)
 
         self.table = QTableWidget(0, len(self.COLUMNS))
         self.table.setHorizontalHeaderLabels(self.COLUMNS)
@@ -1003,6 +1051,7 @@ class PanelPicker(QWidget):
         self.table.blockSignals(False)
         self.table.resizeRowsToContents()
         self._fit_height()
+        self._show_expired()
 
     def _fit_height(self) -> None:
         """Exactly tall enough for the header and every row."""
@@ -1018,7 +1067,15 @@ class PanelPicker(QWidget):
 
     def _box_toggled(self, item: QTableWidgetItem) -> None:
         if item.column() == 0:
+            self._show_expired()
             self.changed.emit()
+
+    def _show_expired(self) -> None:
+        """Say which installed odors are expired, if any."""
+        text, kind = expired_note(self.vials, self.checked(), self.today)
+        self.expired.setText(text)
+        self.expired.setStyleSheet(text_style(kind) if kind else "")
+        self.expired.setVisible(bool(text))
 
     def checked(self) -> list[int]:
         """The vials installed: those with their box checked."""

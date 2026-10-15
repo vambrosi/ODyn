@@ -2168,3 +2168,70 @@ def test_grab_quick_maths(app):
     assert form.outputs["frames"].text() == "450"
     assert form.outputs["camera_rate"].text() == "15 Hz"
     assert form.outputs["camera_frames"].text() == "1350"  # and a minute more
+
+
+def test_expired_odors_are_named_by_id():
+    from datetime import date
+
+    import pandas as pd
+
+    from odyn.app.forms import expired_note
+
+    vials = pd.DataFrame(
+        {
+            "panel_id": 1,
+            "vial_position": [1, 2, 3, 4, 5],
+            "odor_id": [3, 4, 5, 9, 12],
+            "odor_name": list("abcde"),
+            "made_on": ["2026-09-01", "2026-09-01", "2026-09-01", "2026-10-10", None],
+        },
+        index=pd.Index([11, 12, 13, 14, 15], name="vial_id"),
+    )
+    today = date(2026, 10, 14)
+
+    assert expired_note(vials, [11, 12, 13, 14], today) == (
+        "Odors 3-5 in this panel are expired!",
+        "warning",
+    )
+    assert expired_note(vials, [11, 14], today) == (
+        "Odor 3 in this panel is expired!",
+        "warning",
+    )
+    assert expired_note(vials, [11, 12], today) == (
+        "All odors in this panel are expired!",
+        "error",
+    )
+    # Fresh, undated or not installed: nothing to say
+    assert expired_note(vials, [14, 15], today) == ("", None)
+    assert expired_note(vials, [], today) == ("", None)
+    # Exactly two weeks old is still fine
+    assert expired_note(vials, [14], date(2026, 10, 24)) == ("", None)
+
+
+def test_the_panel_picker_warns_about_its_installed_vials(app):
+    from datetime import date
+
+    import pandas as pd
+
+    from odyn.app.forms import PanelPicker
+
+    vials = pd.DataFrame(
+        {
+            "panel_id": 1,
+            "vial_position": [1, 2],
+            "odor_id": [3, 4],
+            "odor_name": ["a", "b"],
+            "made_on": ["2026-09-01", "2026-10-10"],
+        },
+        index=pd.Index([11, 12], name="vial_id"),
+    )
+    picker = PanelPicker()
+    picker.today = date(2026, 10, 14)
+    picker.set_panels([(1, "2 Odors")], vials)
+    picker.show_vials([11, 12], 1)
+
+    assert picker.expired.text() == "Odor 3 in this panel is expired!"
+
+    # Taking the old vial out of the olfactometer clears it
+    picker.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    assert picker.expired.text() == "" and picker.expired.isHidden()

@@ -285,7 +285,9 @@ def check(
         missing = sorted(set(draft.vial_ids) - known)
 
         if missing:
-            problems.append(Problem("vials", f"no vials with ids {_spans(missing)}"))
+            problems.append(
+                Problem("vials", f"no vials with ids {number_spans(missing)}")
+            )
 
         else:
             panels = set(db.vials.loc[draft.vial_ids, "panel_id"])
@@ -477,14 +479,14 @@ def _condition_tiff_problems(
                 Problem(
                     where,
                     f"condition {span} names acquisitions with no TIFF: "
-                    f"{_spans(missing)}",
+                    f"{number_spans(missing)}",
                 )
             )
 
     return problems
 
 
-def _spans(numbers: list[int]) -> str:
+def number_spans(numbers: list[int]) -> str:
     """`[3, 4, 5, 9]` as `'3-5, 9'`."""
     spans: list[list[int]] = []
 
