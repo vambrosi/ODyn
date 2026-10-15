@@ -1,15 +1,19 @@
 """
-The QC tab: what is waiting on the person using the app.
+The QC page: what is waiting on the person using the app.
 
-Four lists. The drafts this user submitted that the cluster has not added
-yet (`submissions.queued`), with how far their copy got or why they failed,
-and what can be done about each: add it now, submit it again, or take it
-back to edit. The recordings (experiments, z-stacks) the cluster added for
+Four lists, a tab each, with how many rows each has in its name. The drafts
+this user submitted that the cluster has not added yet
+(`submissions.queued`), with how far their copy got or why they failed, and
+what can be done about each: add it now, submit it again, or take it back to
+edit. The recordings (experiments, z-stacks) the cluster added for
 this user, with what processing their sync file found, and a way to process an
 experiment's again. The required annotations still empty on them. And the
 test motion corrections of their experiments (the cluster's own test, and the
 runs of a sweep), with a few numbers from each report and a way to open its
 folder, video and plot.
+
+The page opens on the first tab with rows; once a tab is picked, reloads keep
+it until the user changes.
 """
 
 from __future__ import annotations
@@ -23,13 +27,13 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QPushButton,
-    QSplitter,
     QTableView,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 
 from datetime import datetime
@@ -335,6 +339,8 @@ class QcPane(QWidget):
         self.mine = pd.DataFrame(columns=COLUMNS)
         self.mine_ids: list[int] = []  # each row's experiment or z-stack id
         self.tests = pd.DataFrame(columns=[*TEST_COLUMNS, "folder"])
+        self.tab_names: list[str] = []
+        self.tab_picked = False  # by the user, since the user last changed
 
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
@@ -347,8 +353,10 @@ class QcPane(QWidget):
         self.cluster = QLabel("")
         layout.addWidget(self.cluster)
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        layout.addWidget(splitter)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.tabBarClicked.connect(self._tab_clicked)
+        layout.addWidget(self.tabs)
 
         self.add_now = QPushButton("Add now")
         self.add_now.setStatusTip(
@@ -364,8 +372,8 @@ class QcPane(QWidget):
         self.edit_draft.setStatusTip("Take it back from the cluster to edit it here")
         self.edit_draft.clicked.connect(self._edit_draft)
         self.queue_view = self._table(
-            "Waiting for the cluster",
-            splitter,
+            "Waiting",
+            "Submitted, waiting for the cluster to add them",
             [self.add_now, self.submit_again, self.edit_draft],
         )
 
@@ -375,10 +383,10 @@ class QcPane(QWidget):
         )
         self.rerun_sync.clicked.connect(self._rerun_sync)
         self.recordings_view = self._table(
-            "Added to the database", splitter, [self.rerun_sync]
+            "Added", "Added to the database by the cluster", [self.rerun_sync]
         )
         self.missing_view = self._table(
-            "Required annotations that were not filled", splitter
+            "Annotations", "Required annotations that were not filled"
         )
 
         self.show_folder = QPushButton("Show folder")
@@ -393,8 +401,8 @@ class QcPane(QWidget):
         self.show_report.setStatusTip("Open the test's plot of shifts and matches")
         self.show_report.clicked.connect(lambda: self._open_test("report"))
         self.tests_view = self._table(
-            "Motion correction tests",
-            splitter,
+            "Motion correction",
+            "The cluster's test motion corrections and the runs of sweeps",
             [self.show_folder, self.play_movie, self.show_report],
         )
 
@@ -402,17 +410,17 @@ class QcPane(QWidget):
             view.selectionModel().selectionChanged.connect(self._enable)
 
         context.follow_changes(self, self.reload)
-        context.user_changed.connect(lambda _: self.reload())
+        context.user_changed.connect(self._user_changed)
         self._enable()
         self.reload()
 
     def _table(
-        self, title: str, splitter: QSplitter, buttons: list[QPushButton] = ()
+        self, name: str, tip: str, buttons: list[QPushButton] = ()
     ) -> QTableView:
+        """A tab named `name` with a table and `buttons` under it."""
         box = QWidget()
         box_layout = QVBoxLayout(box)
-        box_layout.setContentsMargins(0, 0, 0, 0)
-        box_layout.addWidget(QLabel(title))
+        box_layout.setContentsMargins(0, 4, 0, 0)
         view = QTableView()
         view.setModel(FrameModel())
         view.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
@@ -433,7 +441,9 @@ class QcPane(QWidget):
 
             box_layout.addLayout(row)
 
-        splitter.addWidget(box)
+        index = self.tabs.addTab(box, name)
+        self.tabs.setTabToolTip(index, tip)
+        self.tab_names.append(name)
 
         return view
 
@@ -475,9 +485,36 @@ class QcPane(QWidget):
             self._model(self.missing_view).set_frame(missing)
             self.tests = tests.reset_index(drop=True)
             self._model(self.tests_view).set_frame(self.tests[TEST_COLUMNS])
+            self._count_tabs()
             self._enable()
 
         self.context.run(load, loaded, "load QC")
+
+    def _count_tabs(self) -> None:
+        """Each tab's name with its row count; the first with rows shown."""
+        views = (
+            self.queue_view,
+            self.recordings_view,
+            self.missing_view,
+            self.tests_view,
+        )
+        counts = [self._model(view).rowCount() for view in views]
+
+        for index, (name, count) in enumerate(zip(self.tab_names, counts)):
+            self.tabs.setTabText(index, f"{name} ({count})" if count else name)
+
+        if not self.tab_picked:
+            self.tabs.setCurrentIndex(
+                next((i for i, count in enumerate(counts) if count), 0)
+            )
+
+    def _tab_clicked(self, index: int) -> None:
+        if index >= 0:
+            self.tab_picked = True
+
+    def _user_changed(self, *_) -> None:
+        self.tab_picked = False
+        self.reload()
 
     # ----------------------------------------------------------------------- #
     # Actions

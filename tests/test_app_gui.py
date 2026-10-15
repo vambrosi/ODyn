@@ -824,6 +824,11 @@ def test_qc_pane_lists_nothing_for_a_new_user(window):
     assert qc.recordings_view.model().rowCount() == 0
     assert "tester" in qc.who.text() or "ana" in qc.who.text()
 
+    # One tab per list, no counts when empty, the first one shown
+    names = [qc.tabs.tabText(i) for i in range(qc.tabs.count())]
+    assert names == ["Waiting", "Added", "Annotations", "Motion correction"]
+    assert qc.tabs.currentIndex() == 0
+
 
 def test_qc_lists_the_drafts_waiting_for_the_cluster(window, tmp_path, monkeypatch):
     from odyn.app.submissions import enqueue
@@ -844,6 +849,15 @@ def test_qc_lists_the_drafts_waiting_for_the_cluster(window, tmp_path, monkeypat
         ["20261007/m3", "waiting", "not looked at yet"]
     ]
     assert not qc.add_now.isEnabled() and not qc.edit_draft.isEnabled()
+    assert qc.tabs.tabText(0) == "Waiting (1)" and qc.tabs.currentIndex() == 0
+
+    # A tab the user picked stays picked through reloads
+    qc.tabs.tabBarClicked.emit(3)
+    qc.tabs.setCurrentIndex(3)
+    qc.reload()
+    settle(window.context)
+    assert qc.tabs.currentIndex() == 3
+    qc.tabs.setCurrentIndex(0)
 
     qc.queue_view.selectRow(0)
     assert qc.add_now.isEnabled() and qc.edit_draft.isEnabled()
