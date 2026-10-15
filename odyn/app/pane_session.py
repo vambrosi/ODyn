@@ -41,7 +41,7 @@ from .context import Context
 from .draft import EXP_TYPES, FILE_SETTINGS, FOLDER_OF, PART_SETTINGS, Draft, Removals
 from .fields import Field, annotation_fields, form_fields
 from .forms import Form, FormRows, GrabTimingForm, PanelPicker, TimingForm, fit_row
-from .models import FrameModel, fit_columns
+from .models import FrameModel, fit_columns, sortable
 from .pane_registry import current_vials
 from .recordings import make_part_folders
 from .style import COMBO_EXTRA_PX, PAGE_MAX_PX, required_label, text_style
@@ -404,6 +404,7 @@ class FilesForm(QWidget):
             QHeaderView.ResizeMode.Interactive
         )
         fit_columns(self.table)
+        sortable(self.table)
         rows = self.table.verticalHeader().defaultSectionSize()
         self.table.setFixedHeight(
             rows * TIFF_ROWS + self.table.horizontalHeader().sizeHint().height() + 2
@@ -473,7 +474,7 @@ class FilesForm(QWidget):
         if row < 0 or row >= len(frame):
             return
 
-        self.file = str(frame.index[row])
+        self.file = str(frame.index[self.model.source_row(row)])
         self._show_notes()
 
     def _show_notes(self) -> None:

@@ -21,6 +21,7 @@ job.failed.connect(show_error)
 
 from __future__ import annotations
 
+import gc
 import queue
 import traceback
 
@@ -138,7 +139,11 @@ class DatabaseWorker(QThread):
             else:
                 self._finished.emit(job, result, None)
 
+        # SQLite closes a connection only in the thread that opened it, and the
+        # database and its groups refer to each other, so a later collection
+        # elsewhere would try; collect them here
         self.db = None
+        gc.collect()
 
     def _deliver(self, job: Job, result: Any, error: None | str) -> None:
         """On the GUI thread: hand the job its result."""

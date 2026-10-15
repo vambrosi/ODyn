@@ -3,12 +3,16 @@ A pandas DataFrame shown as a Qt table.
 
 `FrameModel` is read-only: the tables are what the database holds, and
 changing them goes through the `Database` methods, never through a cell.
+A click on a column's header sorts by it (`sortable`); `source_row` turns a
+row of the view back into the row of the frame it shows.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import math
+import numbers
 
 from typing import Any
 
@@ -28,18 +32,56 @@ class FrameModel(QAbstractTableModel):
         self._frame = pd.DataFrame()
         self._columns: list[str] = []
         self._rows: list[list[Any]] = []
+        self._unsorted: list[list[Any]] = []
+        self._order: list[int] = []  # the frame's row shown in each view row
+        self._sorted_by: None | tuple[str, Qt.SortOrder] = None
 
         if frame is not None:
             self.set_frame(frame)
 
     def set_frame(self, frame: pd.DataFrame) -> None:
+        """Show `frame`, still sorted by the column picked, if it has it."""
         self.beginResetModel()
         self._frame = frame
         order_only = frame.index.name is None and isinstance(frame.index, pd.RangeIndex)
         shown = frame.reset_index(drop=order_only)
         self._columns = [str(c) for c in shown.columns]
-        self._rows = shown.values.tolist()
+        self._unsorted = shown.values.tolist()
+        self._arrange()
         self.endResetModel()
+
+    def sort(self, column: int, order=Qt.SortOrder.AscendingOrder) -> None:
+        """
+        Sort by `column` (Qt calls this on a header click); a negative one is
+        the frame's own order. Blanks go last either way.
+        """
+        self.layoutAboutToBeChanged.emit()
+        self._sorted_by = (
+            (self._columns[column], order) if 0 <= column < len(self._columns) else None
+        )
+        self._arrange()
+        self.layoutChanged.emit()
+
+    def _arrange(self) -> None:
+        order = list(range(len(self._unsorted)))
+
+        if self._sorted_by is not None and self._sorted_by[0] in self._columns:
+            name, direction = self._sorted_by
+            column = self._columns.index(name)
+            values = [row[column] for row in self._unsorted]
+            filled = [i for i in order if not _blank(values[i])]
+            filled.sort(
+                key=lambda i: _sort_key(values[i]),
+                reverse=direction == Qt.SortOrder.DescendingOrder,
+            )
+            order = filled + [i for i in order if _blank(values[i])]
+
+        self._order = order
+        self._rows = [self._unsorted[i] for i in order]
+
+    def source_row(self, row: int) -> int:
+        """The position in `frame` of what view row `row` shows."""
+        return self._order[row]
 
     @property
     def frame(self) -> pd.DataFrame:
@@ -85,7 +127,38 @@ class FrameModel(QAbstractTableModel):
 
     def index_value(self, row: int) -> Any:
         """The DataFrame index of a table row."""
-        return self._frame.index[row]
+        return self._frame.index[self._order[row]]
+
+
+def sortable(view) -> None:
+    """
+    Let a click on a column's header sort `view` (a `FrameModel`'s), keeping
+    the frame's own order until one is clicked.
+    """
+    view.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+    view.setSortingEnabled(True)
+
+
+def _blank(value: Any) -> bool:
+    if value is None:
+        return True
+
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):  # a list or a dict in a cell
+        return False
+
+
+def _sort_key(value: Any) -> tuple:
+    """Numbers by value, then dates, then text (ignoring case)."""
+    if isinstance(value, bool):
+        return (0, int(value), "")
+    if isinstance(value, numbers.Number):
+        return (0, float(value), "")
+    if isinstance(value, (pd.Timestamp, dt.datetime, dt.date)):
+        return (1, pd.Timestamp(value).value, "")
+
+    return (2, 0, show(value).lower())
 
 
 # A column is sized to its contents up to this; JSON, logs and notes would
@@ -150,10 +223,11 @@ def show(value: Any, pretty: bool = False) -> str:
         if pd.isna(value):
             return ""
 
+        # A date (midnight) without its time; `Timestamp.min` is not midnight
         return (
-            value.strftime("%Y-%m-%d %H:%M:%S")
-            if value.time() != value.min.time()
-            else value.strftime("%Y-%m-%d")
+            value.strftime("%Y-%m-%d")
+            if value == value.normalize()
+            else value.strftime("%Y-%m-%d %H:%M:%S")
         )
 
     try:

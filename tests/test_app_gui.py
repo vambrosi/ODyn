@@ -2242,3 +2242,71 @@ def test_the_panel_picker_warns_about_its_installed_vials(app):
     # Taking the old vial out of the olfactometer clears it
     picker.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
     assert picker.expired.text() == "" and picker.expired.isHidden()
+
+
+def test_a_table_sorts_by_any_column_and_keeps_its_rows(app):
+    import pandas as pd
+
+    frame = pd.DataFrame(
+        {"name": ["b", "A", None, "c"], "n": [2.0, None, 1.0, 10.0]},
+        index=pd.Index([10, 11, 12, 13], name="mouse_id"),
+    )
+    model = FrameModel(frame)
+    column = model._columns.index
+
+    # Its own order until a header is clicked
+    assert [model.index_value(r) for r in range(4)] == [10, 11, 12, 13]
+
+    model.sort(column("n"), Qt.SortOrder.AscendingOrder)
+    assert [model.index_value(r) for r in range(4)] == [12, 10, 13, 11]  # blank last
+    assert model.row_values(0)["n"] == 1.0
+    assert [model.source_row(r) for r in range(4)] == [2, 0, 3, 1]
+
+    model.sort(column("name"), Qt.SortOrder.DescendingOrder)
+    assert [model.row_values(r)["name"] for r in range(3)] == ["c", "b", "A"]
+    assert model.index_value(3) == 12  # the blank, last either way
+
+    # A reload keeps the column picked; a negative one is the frame's order
+    model.set_frame(frame.iloc[::-1])
+    assert [model.row_values(r)["name"] for r in range(3)] == ["c", "b", "A"]
+    assert model.index_value(3) == 12  # the blank, last
+    model.sort(-1)
+    assert [model.index_value(r) for r in range(4)] == [13, 12, 11, 10]
+
+
+def test_a_sorted_qc_list_still_opens_the_row_picked(window, tmp_path, monkeypatch):
+    import gc
+
+    from PySide6.QtGui import QDesktopServices
+
+    a_tested_experiment(tmp_path / "data")
+    gc.collect()
+    opened = []
+    monkeypatch.setattr(
+        QDesktopServices, "openUrl", lambda url: opened.append(url) or True
+    )
+    window.context.set_user("tester")
+    qc = window.qc
+    window.show_page(qc)
+    qc.reload()
+    settle(window.context)
+
+    # Sorted by run name: s128_o64_d6, rigid, test (descending)
+    view = qc.tests_view
+    view.sortByColumn(qc.tests.columns.get_loc("run"), Qt.SortOrder.DescendingOrder)
+    shown = [view.model().row_values(r)["run"] for r in range(3)]
+    assert shown == ["test", "s128_o64_d6", "rigid"]
+
+    view.selectRow(2)  # rigid
+    qc.show_folder.click()
+    assert Path(opened[-1].toLocalFile()).name == "rigid"
+
+
+def test_a_date_shows_without_its_midnight_time():
+    import pandas as pd
+
+    from odyn.app.models import show
+
+    assert show(pd.Timestamp("2026-10-14")) == "2026-10-14"
+    assert show(pd.Timestamp("2026-10-14 09:30:05")) == "2026-10-14 09:30:05"
+    assert show(pd.NaT) == ""

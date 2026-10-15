@@ -46,7 +46,7 @@ from ..database import SyncFlag
 from ..mcor_sweep import run_numbers, run_video
 from .context import Context
 from .draft import Draft
-from .models import FrameModel, fit_columns
+from .models import FrameModel, fit_columns, sortable
 from .style import text_style
 from .submissions import add_now, queued, submit_again, take_back
 
@@ -421,6 +421,7 @@ class QcPane(QWidget):
         view.setAlternatingRowColors(True)
         view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         fit_columns(view)
+        sortable(view)
         box_layout.addWidget(view)
 
         if buttons:
@@ -488,7 +489,8 @@ class QcPane(QWidget):
         if not rows or rows[0].row() >= len(frame):
             return None
 
-        return frame.iloc[rows[0].row()]
+        # The view may be sorted: its row is not the frame's
+        return frame.iloc[self._model(view).source_row(rows[0].row())]
 
     def _enable(self, *_) -> None:
         queued_row = self._selected(self.queue_view, self.queue)

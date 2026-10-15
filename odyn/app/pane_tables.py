@@ -33,7 +33,7 @@ from ..utils import ANNOTATION_TARGETS
 from .context import Context
 from .fields import Field, annotation_fields
 from .forms import Form
-from .models import FrameModel, fit_columns, show
+from .models import FrameModel, fit_columns, show, sortable
 
 # The tables offered, in the order they are listed. `annotations_for:<target>`
 # entries are the pivoted views, one column per key.
@@ -330,12 +330,12 @@ class TablesPane(QWidget):
         self.view.setSelectionMode(QTableView.SelectionMode.SingleSelection)
         self.view.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         self.view.setAlternatingRowColors(True)
-        self.view.setSortingEnabled(False)
         self.view.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Interactive
         )
         self.view.clicked.connect(self._row_clicked)
         fit_columns(self.view)
+        sortable(self.view)
         middle_layout.addWidget(self.view)
         splitter.addWidget(middle)
 

@@ -33,7 +33,7 @@ from .fields import COLUMN_FIELDS, ODOR_FIELDS, PANEL_FIELDS
 from .forms import Form, FormRows, RecipeForm, fit_row
 from .style import BUTTON_SPACING_PX, COMBO_EXTRA_PX, FORM_PX, text_style
 from .symbols import icon
-from .models import FrameModel, fit_columns
+from .models import FrameModel, fit_columns, sortable
 from .panel import UNLIMITED_PX
 
 
@@ -46,6 +46,7 @@ def _table() -> QTableView:
     view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     view.setAlternatingRowColors(True)
     fit_columns(view)
+    sortable(view)
 
     return view
 
