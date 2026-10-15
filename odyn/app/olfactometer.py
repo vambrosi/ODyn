@@ -85,7 +85,11 @@ class OlfactometerFolders:
         )
 
     def runs_during(self, start: datetime, stop: datetime) -> list[Path]:
-        """The program runs (folders in `data`) that started in the window."""
+        """
+        The program runs (folders in `data`) that started in the window, or
+        up to `EARLY` before it if still going when it started: a run stopped
+        before the recording (one cancelled and started again) is not its.
+        """
         if not self.data.is_dir():
             return []
 
@@ -94,10 +98,11 @@ class OlfactometerFolders:
         for path in sorted(self.data.iterdir()):
             started = run_start(path.name)
 
-            if (
-                path.is_dir()
-                and started is not None
-                and start - EARLY <= started <= stop
+            if not path.is_dir() or started is None:
+                continue
+
+            if start <= started <= stop or (
+                start - EARLY <= started < start and _last_written(path) >= start
             ):
                 runs.append(path)
 
@@ -106,6 +111,14 @@ class OlfactometerFolders:
     def program_log(self, day: datetime) -> Path:
         """The log of when each program started on `day`."""
         return self.log / "Info" / f"{day:%Y%m}" / f"Program_{day:%Y%m%d}.txt"
+
+
+def _last_written(folder: Path) -> datetime:
+    """When anything in `folder` was last written (a run ends with its files)."""
+    times = [folder.stat().st_mtime]
+    times += [path.stat().st_mtime for path in folder.rglob("*") if path.is_file()]
+
+    return datetime.fromtimestamp(max(times))
 
 
 def run_start(name: str) -> None | datetime:

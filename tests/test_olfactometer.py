@@ -74,6 +74,27 @@ def test_runs_are_picked_by_when_they_started(tmp_path):
     assert [r.name for r in runs] == ["2026_08_11-13_00_00", "2026_08_11-13_58_59"]
 
 
+def test_a_run_stopped_before_the_recording_is_not_its(tmp_path):
+    import os
+
+    folders = olfactometer_pc(tmp_path)
+
+    # Cancelled at 12:59:40 with its recording, then both started again: the
+    # run at 13:00 is still writing when the recording starts at 13:01
+    cancelled = folders.data / "2026_08_11-12_59_10"
+    run = cancelled / f"{RUN}-Bilateral-CH1"
+    run.mkdir(parents=True)
+    events = run / f"{RUN}-2026_08_11-12_59_10-Events.csv"
+    events.write_text("Events\n")
+    stopped = datetime(2026, 8, 11, 12, 59, 40).timestamp()
+
+    for path in (events, run, cancelled):
+        os.utime(path, (stopped, stopped))
+
+    runs = folders.runs_during(datetime(2026, 8, 11, 13, 1), datetime(2026, 8, 11, 15))
+    assert [r.name for r in runs] == ["2026_08_11-13_00_00", "2026_08_11-13_58_59"]
+
+
 def test_the_window_comes_from_the_sync_file_when_it_is_here(tmp_path):
     local = tmp_path / "m1_e1.h5"
     generate_sync(local, acquisitions=2)
