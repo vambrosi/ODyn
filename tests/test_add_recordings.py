@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from odyn import Database
-from odyn.database import OBJECTIVE_SCALE, IngestFlag
+from odyn.database import OBJECTIVE_SCALE, IngestFlag, find_program_type
 from generate_data import EXP_START, UM_PER_PX, generate
 
 # The 2026-08-11 z-stack of m357, as its header has it: 21 slices 5 um apart
@@ -445,3 +445,19 @@ def test_program_definitions_are_read_by_name(tmp_path):
 
     (folder / "Program.config").write_text("{not json")
     assert _program_configs(folder) == {}
+
+
+@pytest.mark.parametrize(
+    "name, kind",
+    [
+        ("m357_passive", "passive"),
+        ("Passive_shorter", "passive"),  # "shorter" is not "short"
+        ("short_trials", "short"),
+        ("fine 1-odors", "fine 1"),
+        ("warm-up", "warm-up"),
+        ("something_else", "unknown"),
+        ("passive_short", "unknown"),  # two types: set by hand
+    ],
+)
+def test_program_type_is_read_from_whole_words(name, kind):
+    assert find_program_type(name) == kind

@@ -3327,6 +3327,29 @@ def _annotation_value(
 # --------------------------------------------------------------------------- #
 
 
+def find_program_type(program_name: str) -> str:
+    """
+    The `PROGRAM_TYPES` entry a program's name says it is, matched as whole
+    words and ignoring case: `"passive shorter"` is passive, not short.
+    `"unknown"` when none matches, or when several do (with a warning, as
+    the type then has to be set by hand).
+    """
+    name = program_name.lower()
+    found = [
+        kind
+        for kind in PROGRAM_TYPES
+        if re.search(rf"(?<![a-z0-9]){re.escape(kind)}(?![a-z0-9])", name)
+    ]
+
+    if len(found) > 1:
+        logger.warning(
+            f"Program '{program_name}' names several types ({', '.join(found)}); "
+            "its type is left as unknown."
+        )
+
+    return found[0] if len(found) == 1 else "unknown"
+
+
 def _load_event_data(
     event_files: list[Path],
     program_starts: list[tuple[datetime, str]],
@@ -3358,10 +3381,7 @@ def _load_event_data(
         if "buffer" in program_name.lower():
             continue
 
-        program_type = "unknown"
-        for t in PROGRAM_TYPES:
-            if t in program_name:
-                program_type = t
+        program_type = find_program_type(program_name)
 
         metadata = {
             "program_name": program_name,
