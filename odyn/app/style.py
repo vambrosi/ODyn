@@ -287,6 +287,30 @@ QSplitter#tableAndForm::handle:horizontal {{
         stop:0.41 {c['line']}, stop:0.6 {c['line']},
         stop:0.61 palette(window), stop:1 palette(window));
 }}
+QTabWidget::pane {{
+    border: none;
+}}
+QTabBar {{
+    /* drawn the same on every system (macOS would draw its own buttons) */
+    qproperty-drawBase: 0;
+}}
+QTabBar::tab {{
+    background: palette(window);
+    color: {c['dim']};
+    border: 1px solid {c['line']};
+    border-bottom: none;
+    border-top-left-radius: {RADIUS}px;
+    border-top-right-radius: {RADIUS}px;
+    padding: 4px 14px;
+    margin-right: 2px;
+}}
+QTabBar::tab:selected {{
+    background: palette(base);
+    color: palette(text);
+}}
+QTabBar::tab:hover:!selected {{
+    color: palette(text);
+}}
 QToolBar {{
     background: palette(window);
     border: none;

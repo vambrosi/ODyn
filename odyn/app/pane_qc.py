@@ -491,7 +491,7 @@ class QcPane(QWidget):
         """A tab named `name` with a table and `buttons` under it."""
         box = QWidget()
         box_layout = QVBoxLayout(box)
-        box_layout.setContentsMargins(0, 4, 0, 0)
+        box_layout.setContentsMargins(0, 0, 0, 0)
         view = QTableView()
         view.setModel(FrameModel())
         view.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
