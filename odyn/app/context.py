@@ -34,7 +34,9 @@ class Context(QObject):
       and follows:
       `selection_changed` fires when either is picked, `draft_changed` when
       the picked draft's contents change (mouse, date, a part added
-      or removed), so the Session and Recorder tabs never disagree.
+      or removed), so the Session and Recorder tabs never disagree;
+    - `cache_changed` fires when tests were downloaded here or deleted
+      (`cache_base` is where, beside the drafts).
     """
 
     changed = Signal()
@@ -42,6 +44,7 @@ class Context(QObject):
     status = Signal(str)
     selection_changed = Signal()
     draft_changed = Signal()
+    cache_changed = Signal()
 
     def __init__(self, worker: DatabaseWorker, main_folder: Path, drafts: Path):
         super().__init__()
@@ -79,6 +82,11 @@ class Context(QObject):
     def recordings(self) -> Path:
         """Where sync recordings are written first: beside the drafts folder."""
         return self.drafts.parent / LOCAL_FOLDER
+
+    @property
+    def cache_base(self) -> Path:
+        """Where downloaded tests go (`cache`): beside the drafts folder."""
+        return self.drafts.parent
 
     @property
     def user(self) -> None | str:

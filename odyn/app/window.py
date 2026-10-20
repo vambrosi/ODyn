@@ -16,8 +16,8 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QIcon
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from ..utils import logger
 from . import style
+from .cache import cache_folder, cache_size, human_size
 from .context import Context
 from .draft import FOLDER_OF, Draft, drafts_folder
 from .forms import WheelGuard
@@ -261,6 +262,15 @@ class MainWindow(QMainWindow):
         self.selection = QLabel()
         self.selection.setObjectName("selection")
         bar.addPermanentWidget(self.selection)
+        self.cache_label = ClickLabel()
+        self.cache_label.setContentsMargins(16, 0, 0, 0)
+        self.cache_label.setStatusTip(
+            "Tests downloaded to this computer (QC page); click to open the folder"
+        )
+        self.cache_label.clicked.connect(self._open_cache)
+        bar.addPermanentWidget(self.cache_label)
+        self.context.cache_changed.connect(self._show_cache)
+        self._show_cache()
         self.user_label = QLabel()
         self.user_label.setContentsMargins(16, 0, style.STATUS_INSET_PX, 0)
         bar.addPermanentWidget(self.user_label)
@@ -613,6 +623,15 @@ class MainWindow(QMainWindow):
     def _show_user(self, user: None | str) -> None:
         self.user_label.setText(f"user: {user}" if user else "no user picked")
 
+    def _show_cache(self) -> None:
+        size = cache_size(self.context.cache_base)
+        self.cache_label.setText(f"Local cache: {human_size(size)}")
+
+    def _open_cache(self) -> None:
+        folder = cache_folder(self.context.cache_base)
+        folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt's name)
         if self.recorder.recording is not None:
             answer = QMessageBox.question(
@@ -639,9 +658,26 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
 
+        self.qc.close_down()
         logger.removeHandler(self.log_handler)
         self.worker.stop()
         event.accept()
+
+
+class ClickLabel(QLabel):
+    """A label that can be clicked, for the status bar."""
+
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt's name)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+
+        super().mousePressEvent(event)
 
 
 def open_window(

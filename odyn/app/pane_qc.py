@@ -9,8 +9,10 @@ edit. The recordings (experiments, z-stacks) the cluster added for
 this user, with what processing their sync file found, and a way to process an
 experiment's again. The required annotations still empty on them. And the
 test motion corrections of their experiments (the cluster's own test, and the
-runs of a sweep), with a few numbers from each report and a way to open its
-folder, video and plot.
+runs of a sweep), with a few numbers from each report, and a way to download
+a test's files to this computer (`cache`) and open its folder, video and
+plot from there: played from the share, a video is slow. Nothing is
+downloaded unless asked.
 
 The page opens on the first tab with rows; once a tab is picked, reloads keep
 it until the user changes.
@@ -33,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from PySide6.QtCore import QUrl, Signal
+from PySide6.QtCore import QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 
 from datetime import datetime
@@ -48,6 +50,7 @@ from ..cluster import (
 )
 from ..database import SyncFlag
 from ..mcor_sweep import run_numbers, run_video
+from . import cache
 from .context import Context
 from .draft import Draft
 from .models import FrameModel, fit_columns, sortable
@@ -70,6 +73,7 @@ TEST_COLUMNS = [
     "path",
     "run",
     "state",
+    "local",
     "corr_with_ref",
     "flow_px",
     "jitter_px",
@@ -228,13 +232,16 @@ def sync_flags(call_flag: int) -> str:
     return ", ".join(names) or "succeeded"
 
 
-def my_tests(db, user: None | str, mine: pd.DataFrame) -> pd.DataFrame:
+def my_tests(
+    db, user: None | str, mine: pd.DataFrame, base: None | Path = None
+) -> pd.DataFrame:
     """
     The test motion corrections of `user`'s experiments, the newest submitted
     first (as in `mine`, from `my_recordings`): the cluster's test of each
     ("test") and the runs of each sweep (the baseline first), with the job's
-    state and, once a report is there, a few of its numbers. `folder` is
-    where the report is.
+    state and, once a report is there, a few of its numbers and whether it
+    is downloaded (`local`, see `cache.state`; `base` is where the cache
+    is). `folder` is where the report is, `bytes` what downloading it copies.
     """
     jobs = [
         {**test, "run": None}
@@ -269,9 +276,11 @@ def my_tests(db, user: None | str, mine: pd.DataFrame) -> pd.DataFrame:
             "path": ", ".join(str(paths.get(i, i)) for i in exp_ids),
             "run": job["run"] or "test",
             "state": TEST_STATES.get(job["state"], job["state"]),
+            "local": "",
             **dict.fromkeys(TEST_NUMBERS),
             "finished_at": "",
             "folder": str(folder),
+            "bytes": 0,
         }
 
         if job["state"] == "finished" and (folder / "metrics.json").is_file():
@@ -285,13 +294,50 @@ def my_tests(db, user: None | str, mine: pd.DataFrame) -> pd.DataFrame:
             row["finished_at"] = datetime.fromtimestamp(written).strftime(
                 "%Y-%m-%d %H:%M"
             )
+            row["local"] = cache.state(db.main_folder, folder, base)
+            row["bytes"] = cache.remote_size(folder)
 
         rows.append(row)
 
     # By experiment, newest first, keeping the jobs' order within one (stable)
     rows.sort(key=lambda row: str(row["submitted_at"] or ""), reverse=True)
 
-    return pd.DataFrame(rows, columns=[*TEST_COLUMNS, "folder"])
+    return pd.DataFrame(rows, columns=[*TEST_COLUMNS, "folder", "bytes"])
+
+
+class Downloads(QThread):
+    """
+    Downloads tests one after the other, off the database thread (a share
+    can be slow). `progress` says which, `done` how many were downloaded
+    and, if it stopped early, why.
+    """
+
+    progress = Signal(str)
+    done = Signal(int, str)
+
+    def __init__(self, main_folder: Path, tests: list[tuple[str, Path]], base: Path):
+        super().__init__()
+        self.main_folder = main_folder
+        self.tests = tests  # (what to call it, its folder)
+        self.base = base
+
+    def run(self) -> None:
+        count = len(self.tests)
+
+        for index, (label, folder) in enumerate(self.tests):
+            self.progress.emit(f"Downloading test {index + 1} of {count} ({label})")
+
+            def check(_name: str) -> None:
+                if self.isInterruptionRequested():
+                    raise InterruptedError("the app was closed")
+
+            try:
+                cache.download(self.main_folder, folder, self.base, progress=check)
+            except (OSError, InterruptedError) as error:
+                self.done.emit(index, f"{label}: {error}")
+                return
+
+        self.done.emit(count, "")
 
 
 def my_missing(db, mine: pd.DataFrame) -> pd.DataFrame:
@@ -338,7 +384,9 @@ class QcPane(QWidget):
         self.queue = pd.DataFrame(columns=[*QUEUE_COLUMNS, "path"])
         self.mine = pd.DataFrame(columns=COLUMNS)
         self.mine_ids: list[int] = []  # each row's experiment or z-stack id
-        self.tests = pd.DataFrame(columns=[*TEST_COLUMNS, "folder"])
+        self.tests = pd.DataFrame(columns=[*TEST_COLUMNS, "folder", "bytes"])
+        self.main_folder = context.main_folder  # as the database has it
+        self.downloads: None | Downloads = None
         self.tab_names: list[str] = []
         self.tab_picked = False  # by the user, since the user last changed
 
@@ -389,6 +437,21 @@ class QcPane(QWidget):
             "Annotations", "Required annotations that were not filled"
         )
 
+        self.download = QPushButton("Download")
+        self.download.setStatusTip(
+            "Copy the selected tests' files to this computer, to open them quickly"
+        )
+        self.download.clicked.connect(lambda: self._download(self._picked_tests()))
+        self.download_all = QPushButton("Download all")
+        self.download_all.setStatusTip(
+            "Copy every finished test of yours not on this computer yet"
+        )
+        self.download_all.clicked.connect(lambda: self._download(self._not_here()))
+        self.delete_local = QPushButton("Delete local copy")
+        self.delete_local.setStatusTip(
+            "Delete the selected tests' files from this computer (not the server's)"
+        )
+        self.delete_local.clicked.connect(self._delete_local)
         self.show_folder = QPushButton("Show folder")
         self.show_folder.setStatusTip("Open the folder with the test's files")
         self.show_folder.clicked.connect(lambda: self._open_test("folder"))
@@ -403,8 +466,16 @@ class QcPane(QWidget):
         self.tests_view = self._table(
             "Motion correction",
             "The cluster's test motion corrections and the runs of sweeps",
-            [self.show_folder, self.play_movie, self.show_report],
+            [
+                self.download,
+                self.download_all,
+                self.delete_local,
+                self.show_folder,
+                self.play_movie,
+                self.show_report,
+            ],
         )
+        self.tests_view.setSelectionMode(QTableView.SelectionMode.ExtendedSelection)
 
         for view in (self.queue_view, self.recordings_view, self.tests_view):
             view.selectionModel().selectionChanged.connect(self._enable)
@@ -452,6 +523,8 @@ class QcPane(QWidget):
         if not user:
             self.who.setText("Pick a user to start")
 
+        base = self.context.cache_base
+
         def load(db):
             mine = my_recordings(db, user)
             users = db.users
@@ -464,12 +537,14 @@ class QcPane(QWidget):
                 queue,
                 mine,
                 my_missing(db, mine),
-                my_tests(db, user, mine),
+                my_tests(db, user, mine, base),
                 cluster_line(db),
+                db.main_folder,
             )
 
         def loaded(result):
-            name, queue, mine, missing, tests, (cluster, kind) = result
+            name, queue, mine, missing, tests, (cluster, kind), main = result
+            self.main_folder = main
 
             if user:
                 self.who.setText(f"To-do list for {name}")
@@ -539,10 +614,36 @@ class QcPane(QWidget):
         added = self._selected(self.recordings_view, self.mine)
         self.rerun_sync.setEnabled(added is not None and added["kind"] == "experiment")
 
-        test = self._selected(self.tests_view, self.tests)
+        picked = self._picked_tests()
+        busy = self.downloads is not None
+        here = [row["local"] in (cache.HERE, cache.NEWER) for _, row in picked]
+        self.download.setEnabled(
+            not busy
+            and any(row["local"] in (cache.NOT_HERE, cache.NEWER) for _, row in picked)
+        )
+        self.delete_local.setEnabled(not busy and any(here))
 
-        for button in (self.show_folder, self.play_movie, self.show_report):
-            button.setEnabled(test is not None)
+        waiting = self._not_here()
+        size = sum(int(self.tests.loc[i, "bytes"]) for i in self._not_here_rows())
+        self.download_all.setEnabled(not busy and bool(waiting))
+        self.download_all.setText(
+            f"Download all ({len(waiting)} {'test' if len(waiting) == 1 else 'tests'}, "
+            f"{cache.human_size(size)})"
+            if waiting
+            else "Download all"
+        )
+
+        # Opened from this computer only, so a slow share is never played from
+        one = len(picked) == 1 and here[0]
+        tip = "" if one else " (download it first)"
+
+        for button, what in (
+            (self.show_folder, "Open the test's folder"),
+            (self.play_movie, "Play the test's video (raw | test when there is one)"),
+            (self.show_report, "Open the test's plot of shifts and matches"),
+        ):
+            button.setEnabled(one)
+            button.setStatusTip(what + tip)
 
     def _open_test(self, what: str) -> None:
         """Open the selected test's folder, video or plot in this computer's app."""
@@ -551,7 +652,9 @@ class QcPane(QWidget):
         if row is None:
             return
 
-        folder = Path(row["folder"])
+        folder = cache.local_folder(
+            self.main_folder, row["folder"], self.context.cache_base
+        )
         path = {
             "folder": folder if folder.is_dir() else None,
             "movie": run_video(folder) if folder.is_dir() else None,
@@ -569,6 +672,82 @@ class QcPane(QWidget):
             )
         elif not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
             self.context.status.emit(f"Could not open {path}")
+
+    def _picked_tests(self) -> list[tuple[str, pd.Series]]:
+        """The selected tests, as `(what to call it, row)`, in the view's order."""
+        model = self._model(self.tests_view)
+        rows = sorted(i.row() for i in self.tests_view.selectionModel().selectedRows())
+        picked = []
+
+        for row in rows:
+            if row < len(self.tests):
+                test = self.tests.iloc[model.source_row(row)]
+                picked.append((f"{test['path']} {test['run']}", test))
+
+        return picked
+
+    def _not_here_rows(self) -> list[int]:
+        """The finished tests not downloaded (or changed since), by row."""
+        local = self.tests["local"]
+
+        return [
+            i
+            for i in range(len(self.tests))
+            if local.iloc[i] in (cache.NOT_HERE, cache.NEWER)
+        ]
+
+    def _not_here(self) -> list[tuple[str, pd.Series]]:
+        return [
+            (f"{test['path']} {test['run']}", test)
+            for test in (self.tests.iloc[i] for i in self._not_here_rows())
+        ]
+
+    def _download(self, picked: list[tuple[str, pd.Series]]) -> None:
+        tests = [
+            (label, Path(row["folder"]))
+            for label, row in picked
+            if row["local"] in (cache.NOT_HERE, cache.NEWER)
+        ]
+
+        if not tests or self.downloads is not None:
+            return
+
+        self.downloads = Downloads(self.main_folder, tests, self.context.cache_base)
+        self.downloads.progress.connect(self.context.status.emit)
+        self.downloads.done.connect(self._downloaded)
+        self.downloads.start()
+        self._enable()
+
+    def _downloaded(self, count: int, problem: str) -> None:
+        if self.downloads is not None:
+            self.downloads.wait()
+            self.downloads.deleteLater()
+            self.downloads = None
+
+        plural = "" if count == 1 else "s"
+        self.context.status.emit(
+            f"Downloaded {count} test{plural}"
+            + (f"; stopped at {problem}" if problem else "")
+        )
+        self.context.cache_changed.emit()
+        self.reload()
+
+    def _delete_local(self) -> None:
+        freed = sum(
+            cache.delete(self.main_folder, row["folder"], self.context.cache_base)
+            for _, row in self._picked_tests()
+        )
+        self.context.status.emit(
+            f"Deleted the local copy ({cache.human_size(freed)} freed)"
+        )
+        self.context.cache_changed.emit()
+        self.reload()
+
+    def close_down(self) -> None:
+        """Stop a download (after the file it is on), before the app closes."""
+        if self.downloads is not None:
+            self.downloads.requestInterruption()
+            self.downloads.wait()
 
     def _add_now(self) -> None:
         row = self._selected(self.queue_view, self.queue)

@@ -1152,18 +1152,39 @@ def test_qc_opens_a_tests_files(window, tmp_path, monkeypatch):
     assert headers[:2] == ["submitted_at", "path"]
     assert not qc.show_folder.isEnabled()
 
+    # Nothing opens from the share: a test is downloaded first
+    assert qc.tests["local"].tolist() == ["no", "", "no"]
+    assert qc.download_all.text().startswith("Download all (2 tests, ")
     qc.tests_view.selectRow(0)  # the sweep's baseline
+    assert not qc.show_folder.isEnabled() and qc.download.isEnabled()
+    assert not qc.delete_local.isEnabled()
+    qc.download.click()
+    wait_until(lambda: qc.downloads is None)
+    settle(window.context)
+    assert qc.tests["local"].tolist() == ["yes", "", "no"]
+    assert window.cache_label.text() != "Local cache: 0 B"
+
+    qc.tests_view.selectRow(0)
     qc.show_folder.click()
     qc.play_movie.click()
     qc.show_report.click()
 
     names = [Path(url.toLocalFile()).name for url in opened]
     assert names == ["rigid", "Group_1_e1_raw_test.avi", "shifts.png"]
+    local = window.context.cache_base / "cache"
+    assert all(Path(url.toLocalFile()).is_relative_to(local) for url in opened)
 
-    # A run without its files yet says so instead
+    # A run without its files yet has nothing to download or open
     qc.tests_view.selectRow(1)
-    qc.play_movie.click()
-    assert len(opened) == 3
+    assert not qc.download.isEnabled() and not qc.play_movie.isEnabled()
+
+    # The local copy goes, the share's stays
+    qc.tests_view.selectRow(0)
+    qc.delete_local.click()
+    settle(window.context)
+    assert qc.tests["local"].tolist() == ["no", "", "no"]
+    assert window.cache_label.text() == "Local cache: 0 B"
+    assert (Path(qc.tests["folder"].iloc[0]) / "metrics.json").is_file()
 
 
 def test_worker_runs_jobs_in_order(app, tmp_path):
@@ -2274,6 +2295,9 @@ def test_a_sorted_qc_list_still_opens_the_row_picked(window, tmp_path, monkeypat
     qc = window.qc
     window.show_page(qc)
     qc.reload()
+    settle(window.context)
+    qc.download_all.click()
+    wait_until(lambda: qc.downloads is None)
     settle(window.context)
 
     # Sorted by run name: s128_o64_d6, rigid, test (descending)
