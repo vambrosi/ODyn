@@ -70,6 +70,9 @@ REFERENCE_FRAMES = 200
 # A test motion correction runs on this many acquisitions, spread over the experiment
 TEST_ACQS = 24
 
+# A test's videos are half the movies' size: a quarter of the file
+TEST_MOVIE_SIZE = 0.5
+
 # Where `test_motion_correction` writes, in the files folder: files that can
 # be made again, so the whole `cache` folder can be deleted at any time
 CACHE_FOLDER = "cache"
@@ -1301,6 +1304,7 @@ class Group(CallRecorder):
         title: None | str = None,
         codec: str = "MJPG",
         extension: str = "avi",
+        size: float = 1.0,
     ) -> Path:
         """
         Save a preview video of this group's movies, side by side
@@ -1335,6 +1339,8 @@ class Group(CallRecorder):
         videos compare (the ones used are left in `preview_levels`)
         - `title`: a label in the top right corner (a test's name, say)
         - `codec`, `extension`: how to encode
+        - `size`: the video's size from the movies' (0.5: half as wide and
+        high, a quarter of the file)
 
         **EXAMPLES**
         - Every raw movie of the group, one after the other
@@ -1419,6 +1425,7 @@ class Group(CallRecorder):
             levels=levels,
             title=title,
             codec=codec,
+            size=size,
         )
 
         # outputs table stores paths relative to main_folder, so a save_folder
@@ -1869,7 +1876,9 @@ class Group(CallRecorder):
         run: None | str = None,
         movies: Sequence[str] = ("raw_test",),
         levels: None | Sequence[float] = None,
-        side_by_side: bool = True,
+        movie_size: float = TEST_MOVIE_SIZE,
+        side_by_side: bool = False,
+        keep_patch_shifts: bool = False,
         reuse_reference: bool = False,
     ) -> Path:
         """
@@ -1910,7 +1919,11 @@ class Group(CallRecorder):
         - `levels`: the values shown as black and white in every video (as
         another test's `metrics.json` has them, so videos compare); by default
         the first video's 1st and 99.5th percentiles, used for the rest
+        - `movie_size`: the videos' size from the movies' (half by default,
+        a quarter of the file, so the app can copy and play them quickly)
         - `side_by_side`: also write `side_by_side.tif`
+        - `keep_patch_shifts`: also save every patch's shift in `shifts.npz`
+        (piecewise rigid; hundreds of megabytes at small patches)
         - `reuse_reference`: align to the reference an earlier run saved
         """
         import caiman as cm
@@ -1986,6 +1999,7 @@ class Group(CallRecorder):
             acq_ids=acq_ids,
             settings=settings,
             patch_shifts=patches,
+            keep_patch_shifts=keep_patch_shifts,
             side_by_side=side_by_side,
         )
 
@@ -1999,6 +2013,7 @@ class Group(CallRecorder):
                     save_folder=str(folder),
                     levels=levels,
                     title=titles[kind],
+                    size=movie_size,
                 )
             )
             levels = levels or self.preview_levels
@@ -3180,10 +3195,12 @@ def _write_preview_movie(
     levels: None | Sequence[float] = None,
     title: None | str = None,
     codec: str = "MJPG",
+    size: float = 1.0,
 ) -> tuple[float, float]:
     """
     Write a grayscale preview of `movie` (time, height, width), and return
-    the values shown as black and white.
+    the values shown as black and white. `size` scales the video from the
+    movie's frames (0.5: half as wide and high, a quarter of the file).
 
     Black and white are put at the `q_min` and `q_max` percentiles, so you
     cannot compare movie scales, which is the opposite of the z-score renderer;
@@ -3207,6 +3224,13 @@ def _write_preview_movie(
     spread = max(high - low, 1e-9)
 
     frames, height, width = movie.shape
+
+    if size != 1.0:
+        shape = (max(2, round(width * size)), max(2, round(height * size)))
+        width, height = shape
+
+        if um_per_px is not None:
+            um_per_px = um_per_px * movie.shape[2] / width
 
     # Frame size vary widely, so tie text size to it. These parameters are
     # more-or-less arbitrary, but seemed to produce reasonable results in
@@ -3234,6 +3258,9 @@ def _write_preview_movie(
             picture = np.ascontiguousarray(
                 np.clip((movie[frame] - low) * (255 / spread), 0, 255), dtype=np.uint8
             )
+
+            if size != 1.0:
+                picture = cv2.resize(picture, shape, interpolation=cv2.INTER_AREA)
 
             for index, name in enumerate(panels):
                 _draw_label(

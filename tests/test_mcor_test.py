@@ -109,7 +109,9 @@ def a_loop(tmp_path, user="ana") -> tuple[Database, int]:
 def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
     db, group_id = a_loop(tmp_path)
 
-    folder = db.groups[group_id].test_motion_correction(test_acqs=4, movies=())
+    folder = db.groups[group_id].test_motion_correction(
+        test_acqs=4, movies=(), side_by_side=True
+    )
 
     name = f"20260304_m1_e1_g{group_id}"
     assert folder == db.files_folder / "cache" / "mcor-tests" / name
@@ -170,7 +172,7 @@ def test_a_piecewise_run_has_its_own_folder_and_measures_the_patches(tmp_path, c
         max_deviation_um=3,
         run="s24_o12_d3",
         movies=(),
-        side_by_side=False,
+        keep_patch_shifts=True,
         reuse_reference=True,
     )
 
@@ -178,7 +180,7 @@ def test_a_piecewise_run_has_its_own_folder_and_measures_the_patches(tmp_path, c
     assert caiman["settings"]["pw_rigid"] is True
     # The saved reference, not a new one
     np.testing.assert_array_equal(caiman["template"], reference)
-    assert not (folder / "side_by_side.tif").exists()
+    assert not (folder / "side_by_side.tif").exists()  # not by default
 
     metrics = json.loads((folder / "metrics.json").read_text())
     assert metrics["settings"]["run"] == "s24_o12_d3"
@@ -192,6 +194,21 @@ def test_a_piecewise_run_has_its_own_folder_and_measures_the_patches(tmp_path, c
 
     shifts = np.load(folder / "shifts.npz")
     assert shifts["patch_dy"].shape == (4 * 56, 4)
+
+    # Without asking, the patches are measured but not kept
+    folder = group.test_motion_correction(
+        test_acqs=4,
+        pw_rigid=True,
+        strides_um=[24, 24],
+        overlap_um=[12, 12],
+        max_deviation_um=3,
+        run="lean",
+        movies=(),
+        reuse_reference=True,
+    )
+    shifts = np.load(folder / "shifts.npz")
+    assert "patch_dy" not in shifts and shifts["shifts"].shape == (4 * 56, 2)
+    assert "patch_jitter_median_px" in json.loads((folder / "metrics.json").read_text())
 
 
 def test_a_filtered_run_filters_the_reference_too(tmp_path, caiman):
@@ -270,6 +287,24 @@ def test_a_video_takes_the_levels_and_the_title_it_is_given(tmp_path):
     levels = _write_preview_movie(tmp_path / "b.avi", movie, frame_rate=10)
     assert 0 < levels[0] < levels[1] < 1000
     assert (tmp_path / "b.avi").stat().st_size > 0
+
+    # Half the size, from the same frames and levels
+    import cv2
+
+    halved = _write_preview_movie(
+        tmp_path / "c.avi", movie, frame_rate=10, um_per_px=2.0, size=0.5
+    )
+    assert halved == levels
+    video = cv2.VideoCapture(str(tmp_path / "c.avi"))
+    assert (
+        video.get(cv2.CAP_PROP_FRAME_WIDTH),
+        video.get(cv2.CAP_PROP_FRAME_HEIGHT),
+    ) == (
+        48,
+        32,
+    )
+    assert int(video.get(cv2.CAP_PROP_FRAME_COUNT)) == 6
+    video.release()
 
 
 # --------------------------------------------------------------------------- #
@@ -436,6 +471,7 @@ def test_the_runs_take_the_baselines_reference_and_levels(tmp_path, slurm, monke
     assert first["run"] == "rigid" and "pw_rigid" not in first
     assert first["movies"] == ("raw", "test", "raw_test")
     assert first["side_by_side"] is False
+    assert second["keep_patch_shifts"] is False
     assert second["run"] == "s128x96_o32_d2.5"
     assert second["pw_rigid"] is True and second["reuse_reference"] is True
     assert second["strides_um"] == [128, 96]

@@ -858,8 +858,10 @@ def submit_mcor_sweep(
     The baseline builds and saves the reference, which the piecewise runs
     reuse, and writes the raw, test and raw | test videos; the piecewise runs
     write only their test video, with the baseline's black and white, so all
-    the videos compare. No run writes `side_by_side.tif`. Each run has its
-    folder in the experiment's test folder (`Group.mcor_test_folder`).
+    the videos compare. No run writes `side_by_side.tif`, and the patches'
+    shifts are kept in `shifts.npz` only with `"keep_patch_shifts": true` (for
+    looking into the patches afterwards; large at small patches). Each run has
+    its folder in the experiment's test folder (`Group.mcor_test_folder`).
 
     `grid` is (as a JSON file for the command line):
     ```json
@@ -888,6 +890,7 @@ def submit_mcor_sweep(
         "user": user,
         "test_acqs": int(grid.get("test_acqs", 24)),
         "max_shift_um": list(grid.get("max_shift_um", [80, 80])),
+        "keep_patch_shifts": bool(grid.get("keep_patch_shifts", False)),
         "runs": runs,
     }
     _write_json(sweep, content)
@@ -1039,6 +1042,7 @@ def run_mcor_sweep(sweep: str | Path, task: int) -> Path:
     return group.test_motion_correction(
         **common,
         **content["runs"][task - 1],
+        keep_patch_shifts=bool(content.get("keep_patch_shifts", False)),
         pw_rigid=True,
         reuse_reference=True,
         movies=("test",),

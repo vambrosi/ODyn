@@ -3,7 +3,7 @@ The files a test motion correction is judged by, before the app shows it.
 
 For the acquisitions a test ran on, written into one folder:
 - `reference.tif`: the image every acquisition was aligned to;
-- `side_by_side.tif` (unless turned off): one page per acquisition, its mean
+- `side_by_side.tif` (when asked): one page per acquisition, its mean
 image raw | test, each column scaled on its own. Scrubbed in Fiji, drift
 shows as the picture sliding from page to page;
 - `summary.csv`: per acquisition, how its images match the reference (see
@@ -16,8 +16,8 @@ reference at each point, averaged over the acquisitions (in px, brighter is
 more), which shows where a rigid correction falls short (one part of the
 field moving apart from the rest, say);
 - `flow_worst.tif`: the same for the acquisition with the most of it;
-- `shifts.npz`, `shifts.png`: the shift of every frame (and of every patch,
-for piecewise rigid) and the measures below, as plots.
+- `shifts.npz`, `shifts.png`: the shift of every frame (and, when asked, of
+every patch, for piecewise rigid) and the measures below, as plots.
 
 What is measured, and why this way rather than as NoRMCorre and caiman do:
 - **Mean against the reference** (`*_corr_with_ref`): each acquisition's mean
@@ -88,7 +88,8 @@ def write_report(
     acq_ids: Sequence[int],
     settings: None | dict = None,
     patch_shifts: None | tuple[np.ndarray, np.ndarray] = None,
-    side_by_side: bool = True,
+    keep_patch_shifts: bool = False,
+    side_by_side: bool = False,
 ) -> list[Path]:
     """
     Write the report on one test into `folder` (see the module's description)
@@ -100,7 +101,10 @@ def write_report(
     Without a `reference` (caiman's own template), the average of the
     corrected means stands in for it, and the frames are not compared.
     `patch_shifts` are piecewise rigid's `(dy, dx)` per frame and patch, each
-    `(frames, patches)`; `settings` go into `metrics.json` as they are.
+    `(frames, patches)`, which the patch jitter is measured from; with
+    `keep_patch_shifts` they are saved in `shifts.npz` too (hundreds of
+    megabytes at small patches). `settings` go into `metrics.json` as they
+    are.
     """
     folder.mkdir(parents=True, exist_ok=True)
     margin = max(max_shifts) + 2
@@ -226,7 +230,7 @@ def write_report(
         acq_ids=np.array(acq_ids),
         **(
             {}
-            if patch_shifts is None
+            if patch_shifts is None or not keep_patch_shifts
             else {
                 "patch_dy": np.asarray(patch_shifts[0], np.float32),
                 "patch_dx": np.asarray(patch_shifts[1], np.float32),
