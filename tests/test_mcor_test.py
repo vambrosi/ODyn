@@ -146,7 +146,7 @@ def test_a_whole_test_saves_every_acquisition_and_reports_on_the_test_ones(
     group = db.groups[group_id]
 
     folder = group.test_motion_correction(
-        test_acqs=4, movies=(), whole=True, batch_acqs=3
+        test_acqs=4, movie=False, whole=True, batch_acqs=3
     )
 
     # Every acquisition corrected (in batches) and saved as the final
@@ -172,7 +172,7 @@ def test_a_whole_piecewise_test_reports_its_patches(tmp_path, caiman):
 
     folder = db.groups[group_id].test_motion_correction(
         test_acqs=4,
-        movies=(),
+        movie=False,
         whole=True,
         batch_acqs=5,
         pw_rigid=True,
@@ -260,7 +260,7 @@ def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
     db, group_id = a_loop(tmp_path)
 
     folder = db.groups[group_id].test_motion_correction(
-        test_acqs=4, movies=(), side_by_side=True
+        test_acqs=4, movie=False, side_by_side=True
     )
 
     name = f"20260304_m1_e1_g{group_id}"
@@ -310,7 +310,7 @@ def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
 def test_a_piecewise_run_has_its_own_folder_and_measures_the_patches(tmp_path, caiman):
     db, group_id = a_loop(tmp_path)
     group = db.groups[group_id]
-    base = group.test_motion_correction(test_acqs=4, movies=())
+    base = group.test_motion_correction(test_acqs=4, movie=False)
     reference = tifffile.imread(base / "reference.tif")
     caiman["template"] = None
 
@@ -321,7 +321,7 @@ def test_a_piecewise_run_has_its_own_folder_and_measures_the_patches(tmp_path, c
         overlap_um=[12, 12],
         max_deviation_um=3,
         run="s24_o12_d3",
-        movies=(),
+        movie=False,
         keep_patch_shifts=True,
         reuse_reference=True,
     )
@@ -353,7 +353,7 @@ def test_a_piecewise_run_has_its_own_folder_and_measures_the_patches(tmp_path, c
         overlap_um=[12, 12],
         max_deviation_um=3,
         run="lean",
-        movies=(),
+        movie=False,
         reuse_reference=True,
     )
     shifts = np.load(folder / "shifts.npz")
@@ -364,7 +364,7 @@ def test_a_piecewise_run_has_its_own_folder_and_measures_the_patches(tmp_path, c
 def test_a_filtered_run_filters_the_reference_too(tmp_path, caiman):
     db, group_id = a_loop(tmp_path)
     group = db.groups[group_id]
-    base = group.test_motion_correction(test_acqs=4, movies=())
+    base = group.test_motion_correction(test_acqs=4, movie=False)
     reference = tifffile.imread(base / "reference.tif")
 
     folder = group.test_motion_correction(
@@ -375,7 +375,7 @@ def test_a_filtered_run_filters_the_reference_too(tmp_path, caiman):
         max_deviation_um=3,
         gsig_filt_um=4,
         run="s24_o12_d3_g4",
-        movies=(),
+        movie=False,
         side_by_side=False,
         reuse_reference=True,
     )
@@ -395,7 +395,9 @@ def test_a_filtered_run_filters_the_reference_too(tmp_path, caiman):
     np.testing.assert_array_equal(tifffile.imread(folder / "reference.tif"), reference)
 
 
-def test_the_videos_of_a_run_share_their_levels(tmp_path, caiman, monkeypatch):
+def test_every_test_video_shares_the_raw_videos_frames_and_levels(
+    tmp_path, caiman, monkeypatch
+):
     from odyn.groups import Group
 
     db, group_id = a_loop(tmp_path)
@@ -404,24 +406,32 @@ def test_the_videos_of_a_run_share_their_levels(tmp_path, caiman, monkeypatch):
 
     def save_preview_movie(self, **kwargs):
         asked.append(kwargs)
-        self.preview_levels = kwargs["levels"] or (100.0, 900.0)
-        path = Path(kwargs["save_folder"]) / f"{'_'.join(kwargs['grid'])}.avi"
+        self.preview_levels = kwargs.get("levels") or (100.0, 900.0)
+        path = Path(kwargs["save_folder"]) / f"G_{'_'.join(kwargs['grid'])}.avi"
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"")
         return path
 
     monkeypatch.setattr(Group, "save_preview_movie", save_preview_movie)
 
-    folder = group.test_motion_correction(
-        test_acqs=2, run="r1", movies=("raw", "test", "raw_test")
-    )
+    first = group.test_motion_correction(test_acqs=2, run="r1")
+    group.test_motion_correction(test_acqs=2, run="r2")
 
-    # The first sets the levels and the rest use them; raw is the test's only
-    assert [a["grid"] for a in asked] == [["raw"], ["test"], ["raw", "test"]]
-    assert [a["levels"] for a in asked] == [None, (100.0, 900.0), (100.0, 900.0)]
+    # The raw video once, in raw/ of the experiment's tests; each test its own
+    raw = group.mcor_test_folder() / "raw"
+    assert [a["grid"] for a in asked] == [["raw"], ["test"], ["test"]]
+    assert asked[0]["save_folder"] == str(raw) and asked[0]["levels"] is None
+    assert [a["levels"] for a in asked[1:]] == [[100.0, 900.0]] * 2
     assert all(a["raw_of_test"] for a in asked)
-    assert [a["title"] for a in asked] == ["raw", "r1", "r1"]
-    metrics = json.loads((folder / "metrics.json").read_text())
+    assert [a["title"] for a in asked] == ["raw", "r1", "r2"]
+    saved = json.loads((raw / "levels.json").read_text())
+    assert saved["movie_levels"] == [100.0, 900.0] and len(saved["acq_ids"]) == 2
+    metrics = json.loads((first / "metrics.json").read_text())
     assert metrics["movie_levels"] == [100.0, 900.0]
+
+    # Other acquisitions: the raw video is written again for them
+    group.test_motion_correction(test_acqs=4, run="r3")
+    assert [a["grid"] for a in asked[3:]] == [["raw"], ["test"]]
 
 
 def test_a_video_takes_the_levels_and_the_title_it_is_given(tmp_path):
@@ -613,19 +623,16 @@ def test_the_runs_take_the_baselines_reference_and_levels(tmp_path, slurm, monke
     )
 
     run_mcor_sweep(sweep, 0)
-    baseline = db.groups[group_id].mcor_test_folder("rigid")
-    baseline.mkdir(parents=True)
-    (baseline / "metrics.json").write_text(json.dumps({"movie_levels": [10, 90]}))
     run_mcor_sweep(sweep, 2)
 
     (user, first), (_, second) = asked
     assert user == "ana"
     assert first["run"] == "rigid" and "pw_rigid" not in first
-    assert first["movies"] == ("raw", "test", "raw_test")
+    assert "movie" not in first and "levels" not in first  # the raw video's
     assert first["side_by_side"] is False
     assert second["keep_patch_shifts"] is False
     assert second["run"] == "s128x96_o32_d2.5"
     assert second["pw_rigid"] is True and second["reuse_reference"] is True
     assert second["strides_um"] == [128, 96]
-    assert (second["movies"], second["levels"]) == (("test",), [10, 90])
+    assert "levels" not in second
     assert (second["test_acqs"], second["max_shift_um"]) == (4, [20, 20])

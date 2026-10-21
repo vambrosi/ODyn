@@ -81,6 +81,11 @@ TEST_MOVIE_SIZE = 0.5
 # be made again, so the whole `cache` folder can be deleted at any time
 CACHE_FOLDER = "cache"
 MCOR_TESTS_FOLDER = "mcor-tests"
+
+# In an experiment's test folder: the raw video every test is compared with,
+# and the black and white its videos share
+RAW_PREVIEW_FOLDER = "raw"
+RAW_LEVELS_FILE = "levels.json"
 DEFAULT_OVERLAP_UM = [96.0, 96.0]
 DEFAULT_MAX_SHIFT_UM = [80.0, 80.0]
 DEFAULT_MAX_DEVIATION_UM = 12.0
@@ -2014,7 +2019,7 @@ class Group(CallRecorder):
         gsig_filt_um: None | float = None,
         shifts_opencv: bool = False,
         run: None | str = None,
-        movies: Sequence[str] = ("raw_test",),
+        movie: bool = True,
         levels: None | Sequence[float] = None,
         movie_size: float = TEST_MOVIE_SIZE,
         side_by_side: bool = False,
@@ -2041,8 +2046,12 @@ class Group(CallRecorder):
         then writes into `cache/mcor-tests/<experiment>_g<group>/` (in the files
         folder; in a folder `run` inside it when given): the reference, a
         summary and a plot of the shifts, the settings and the numbers for the
-        whole test (see `odyn.mcor_report`), and the preview videos. Returns
-        the folder.
+        whole test (see `odyn.mcor_report`), and its video. Returns the folder.
+
+        Every test of the experiment shows the same frames of the same
+        acquisitions, so their videos compare; the raw video of those frames is
+        written once, in `raw/` of the experiment's test folder, and every test
+        video takes its black and white (`raw/levels.json`).
 
         The corrected movies themselves are caiman's temporary files, so they
         go with them; what is written here is what judging the test needs.
@@ -2055,12 +2064,9 @@ class Group(CallRecorder):
         - `gsig_filt_um`, `shifts_opencv`: see `run_motion_correction`
         - `run`: the name of this test among others of the experiment (a
         sweep's), its folder and its label on the videos
-        - `movies`: the preview videos, any of `"raw_test"` (side by side),
-        `"raw"` and `"test"`, all of the same frames, so separate ones can be
-        put together later
-        - `levels`: the values shown as black and white in every video (as
-        another test's `metrics.json` has them, so videos compare); by default
-        the first video's 1st and 99.5th percentiles, used for the rest
+        - `movie`: write the test's video (and the raw one, if not there yet)
+        - `levels`: the values shown as black and white in the video; by
+        default the raw video's (its 1st and 99.5th percentiles)
         - `movie_size`: the videos' size from the movies' (half by default,
         a quarter of the file, so the app can copy and play them quickly)
         - `side_by_side`: also write `side_by_side.tif`
@@ -2166,22 +2172,19 @@ class Group(CallRecorder):
             side_by_side=side_by_side,
         )
 
-        titles = {"raw": "raw", "test": run, "raw_test": run}
-
-        for kind in movies:
+        if movie:
+            levels = levels or self._raw_preview(acq_ids, movie_size)
+            title = run or ("rigid (all)" if whole else "test")
             paths.append(
                 self.save_preview_movie(
-                    grid=["raw", "test"] if kind == "raw_test" else [kind],
+                    grid=["test"],
                     raw_of_test=True,
                     save_folder=str(folder),
                     levels=levels,
-                    title=titles[kind],
+                    title=title,
                     size=movie_size,
                 )
             )
-            levels = levels or self.preview_levels
-
-        if levels is not None:
             _add_to_json(folder / "metrics.json", {"movie_levels": list(levels)})
 
         if whole:
@@ -2200,6 +2203,42 @@ class Group(CallRecorder):
         )
 
         return folder
+
+    def _raw_preview(self, acq_ids: list[int], size: float) -> list[float]:
+        """
+        The raw video of a test's acquisitions (`acq_ids`, the frames every
+        test video shows) in `raw/` of the experiment's test folder, written
+        unless there for the same acquisitions, and its black and white, which
+        every test video uses.
+        """
+        folder = self.mcor_test_folder() / RAW_PREVIEW_FOLDER
+        saved = folder / RAW_LEVELS_FILE
+
+        if saved.is_file():
+            known = json.loads(saved.read_text())
+
+            if known.get("acq_ids") == acq_ids and list(folder.glob("*_raw.*")):
+                return [float(v) for v in known["movie_levels"]]
+
+        for old in folder.glob("*_raw.*"):
+            old.unlink()
+
+        path = self.save_preview_movie(
+            grid=["raw"],
+            raw_of_test=True,
+            save_folder=str(folder),
+            levels=None,  # its own 1st and 99.5th percentiles
+            title="raw",
+            size=size,
+        )
+        levels = [float(v) for v in self.preview_levels]
+        saved.write_text(json.dumps({"movie_levels": levels, "acq_ids": acq_ids}))
+        self.add_output_file(saved)
+
+        if path.is_file():
+            self.add_output_file(path)
+
+        return levels
 
     def mcor_test_folder(self, run: None | str = None) -> Path:
         """

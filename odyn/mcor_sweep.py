@@ -8,8 +8,9 @@ Every run has a folder in the experiment's test folder
 `sweep.csv` there: the whole-test numbers of `metrics.json`, and the median
 over the acquisitions of each column of `summary.csv`;
 - `tile` puts their videos side by side in one video, in a grid, each with
-its run's name in the top right corner. The runs share the baseline's black
-and white, so the tiles compare. "raw" is the baseline's raw video.
+its run's name in the top right corner. The runs share the raw video's black
+and white, so the tiles compare. "raw" is the raw video (in `raw/`; in
+folders from before it, the baseline's).
 
 **COMMAND LINE**
 ```
@@ -45,6 +46,7 @@ import numpy as np
 import pandas as pd
 
 from .cluster import BASELINE_RUN
+from .groups import RAW_PREVIEW_FOLDER
 from .utils import logger
 
 RAW = "raw"
@@ -262,18 +264,26 @@ def tile(
 
 
 def _video(folder: Path, run: str) -> Path:
-    """The test video of `run`, or the baseline's raw one for "raw"."""
-    kind, run_folder = ("raw", BASELINE_RUN) if run == RAW else ("test", run)
-    found = [
-        path
-        for path in sorted((folder / run_folder).glob(f"*_{kind}.*"))
-        if path.suffix in (".avi", ".mp4") and not path.stem.endswith("_raw_test")
-    ]
+    """
+    The test video of `run`, or the raw one for "raw" (in `raw/`, or the
+    baseline's in folders from before it).
+    """
+    if run == RAW:
+        kind, places = "raw", [RAW_PREVIEW_FOLDER, BASELINE_RUN]
+    else:
+        kind, places = "test", [run]
 
-    if not found:
-        raise FileNotFoundError(f"No {kind} video in '{folder / run_folder}'.")
+    for place in places:
+        found = [
+            path
+            for path in sorted((folder / place).glob(f"*_{kind}.*"))
+            if path.suffix in (".avi", ".mp4") and not path.stem.endswith("_raw_test")
+        ]
 
-    return found[0]
+        if found:
+            return found[0]
+
+    raise FileNotFoundError(f"No {kind} video in '{folder / places[0]}'.")
 
 
 def _fit(cv2, frame: np.ndarray, width: int, height: int) -> np.ndarray:

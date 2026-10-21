@@ -136,3 +136,14 @@ def test_the_command_line_tiles_runs_by_setting(sweep, capsys):
     path = sweep / "tiles_raw_rigid_s256_o128_d3_s256_o128_d12.avi"
     assert path.is_file()
     assert str(path) in capsys.readouterr().out
+
+
+def test_raw_is_the_experiments_raw_video_when_there_is_one(sweep):
+    from odyn.mcor_sweep import _video
+
+    # Folders from before raw/ have the baseline's
+    assert _video(sweep, "raw").parent.name == "rigid"
+
+    (sweep / "raw").mkdir()
+    a_video(sweep / "raw" / "Group_1_e1_raw.avi", frames=4, value=50)
+    assert _video(sweep, "raw") == sweep / "raw" / "Group_1_e1_raw.avi"
