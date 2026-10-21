@@ -1050,6 +1050,7 @@ def a_tested_experiment(main, user="tester") -> tuple[Database, int]:
                 "acq_id": [1, 2],
                 "test_corr_with_ref": [corr, corr],
                 "test_flow_median_px": [0.5, 0.7],
+                "test_flow_p90_px": [1.5, 2.5],
             }
         ).to_csv(folder / "summary.csv", index=False)
         (folder / "shifts.png").write_bytes(b"png")
@@ -1141,6 +1142,8 @@ def test_qc_lists_the_tests_of_this_users_experiments(tmp_path, monkeypatch):
     assert row["folders"] == [str(top), str(top / "rigid")]
     assert [run.name for run in row["finished"]] == ["test", "rigid"]
     assert row["finished"][0].corr_with_ref == 0.9
+    assert row["finished"][0].flow_worst_px == 2.5
+    assert row["finished"][0].flow_worst_acq == 2
     assert row["bytes"] == sum(
         path.stat().st_size
         for f in (top, top / "rigid")
@@ -1225,7 +1228,15 @@ def test_qc_opens_an_experiments_files(window, tmp_path, monkeypatch):
     mcor = next(iter(qc.windows.values()))
     grid = mcor.grid
     assert [tile.video.name for tile in grid.tiles] == ["raw", "test", "rigid"]
-    assert grid.tiles[1].video.numbers.startswith("corr 0.900  flow 0.60 px")
+    assert grid.tiles[1].video.numbers.startswith("corr 0.900  flow 0.60 / 2.50 px")
+
+    # A focused run's numbers in words, under the grid
+    grid.tiles[1].clicked.emit(False)
+    assert mcor.details.text() == (
+        "test: correlation with the reference 0.900, residual flow 0.60 px "
+        "typical, 2.50 px worst (acquisition 2)"
+    )
+    grid.clear_focus()
     assert all(tile.video.path.is_relative_to(local) for tile in grid.tiles)
     wait_until(lambda: grid.frame_count == 4)
     assert mcor.missing.text() == ""

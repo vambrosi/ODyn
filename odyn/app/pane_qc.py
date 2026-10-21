@@ -82,12 +82,20 @@ TEST_COLUMNS = [
     "local",
     "corr_with_ref",
     "flow_px",
+    "flow_worst_px",
     "jitter_px",
     "at_limit",
     "finished_at",
 ]
 
-TEST_HIDDEN = ["folder", "bytes", "group_id", "experiment_folder", "pick_call_id"]
+TEST_HIDDEN = [
+    "folder",
+    "bytes",
+    "group_id",
+    "experiment_folder",
+    "pick_call_id",
+    "flow_worst_acq",
+]
 EXPERIMENT_COLUMNS = ["submitted_at", "path", "status", "runs", "local copy", "size"]
 EXPERIMENT_HIDDEN = ["group_id", "folder", "folders", "bytes", "finished"]
 
@@ -104,10 +112,13 @@ PARTLY = "partly"
 TO_DOWNLOAD = (cache.NOT_HERE, PARTLY, cache.NEWER)
 
 # The numbers shown for a test, from `mcor_sweep.run_numbers`: medians over
-# the acquisitions, or the whole test's
+# the acquisitions, the whole test numbers, and the worst flow (the largest
+# 90th percentile among the acquisitions, and which one)
 TEST_NUMBERS = {
     "corr_with_ref": "test_corr_with_ref_median",
     "flow_px": "test_flow_median_px_median",
+    "flow_worst_px": "test_flow_p90_px_max",
+    "flow_worst_acq": "flow_p90_worst_acq_id",
     "jitter_px": "patch_jitter_median_px",
     "at_limit": "frames_at_limit",
 }
@@ -373,8 +384,7 @@ def my_experiments(
             Run(
                 name=str(run["run"]),
                 folder=Path(run["folder"]),
-                **{key: run[key] for key in ("corr_with_ref", "flow_px", "jitter_px")},
-                at_limit=run["at_limit"],
+                **{key: _value(run[key]) for key in TEST_NUMBERS},
             )
             for _, run in done.iterrows()
         ]
@@ -411,6 +421,11 @@ def my_experiments(
         )
 
     return pd.DataFrame(rows, columns=[*EXPERIMENT_COLUMNS, *EXPERIMENT_HIDDEN])
+
+
+def _value(value):
+    """A number of a table row, `None` when missing (NaN)."""
+    return None if value is None or pd.isna(value) else value
 
 
 def _picked_status(pick: dict, whole: pd.DataFrame) -> str:

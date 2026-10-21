@@ -112,7 +112,9 @@ def run_numbers(folder: str | Path) -> dict:
     """
     One run's row of `collect`, from its folder: its settings, the numbers of
     its `metrics.json` and the median over the acquisitions of its
-    `summary.csv`.
+    `summary.csv`. Also the worst residual flow: the largest 90th percentile
+    among the acquisitions (`test_flow_p90_px_max`), and which acquisition
+    (`flow_p90_worst_acq_id`), as a median of medians hides a bad spot.
     """
     folder = Path(folder)
     metrics = json.loads((folder / "metrics.json").read_text())
@@ -137,6 +139,15 @@ def run_numbers(folder: str | Path) -> dict:
     row |= {
         f"{name}_median": round(float(numbers[name].median()), 4) for name in numbers
     }
+
+    if "test_flow_p90_px" in numbers and numbers["test_flow_p90_px"].notna().any():
+        worst = numbers["test_flow_p90_px"].idxmax()
+        row["test_flow_p90_px_max"] = round(
+            float(numbers.loc[worst, "test_flow_p90_px"]), 4
+        )
+
+        if "acq_id" in summary:
+            row["flow_p90_worst_acq_id"] = int(summary.loc[worst, "acq_id"])
 
     return row
 

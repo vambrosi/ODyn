@@ -243,6 +243,17 @@ def test_a_runs_tile_shows_its_numbers_and_its_older_videos(tmp_path):
     assert numbers_line(Run("x", tmp_path, jitter_px=float("nan"))) == ""
     assert numbers_line(Run("x", tmp_path, at_limit=0.012)) == "at limit 1.2%"
 
+    # The flow typical and worst, and in words under the grid
+    from odyn.app.mcor_window import details_line
+
+    run = Run("s128", tmp_path, 0.91, 0.4, flow_worst_px=2.1, flow_worst_acq=17)
+    assert numbers_line(run) == "corr 0.910  flow 0.40 / 2.10 px"
+    assert details_line(run) == (
+        "s128: correlation with the reference 0.910, residual flow 0.40 px "
+        "typical, 2.10 px worst (acquisition 17)"
+    )
+    assert details_line(Run("raw", tmp_path)) == "raw"
+
     # Folders from before the raw video was apart: raw | test, and the raw
     # video in the sweep's baseline
     (tmp_path / "rigid").mkdir()

@@ -66,6 +66,8 @@ class Run:
     folder: Path
     corr_with_ref: None | float = None
     flow_px: None | float = None
+    flow_worst_px: None | float = None  # the largest 90th percentile
+    flow_worst_acq: None | int = None  # and its acquisition
     jitter_px: None | float = None
     at_limit: None | float = None
 
@@ -117,13 +119,18 @@ def _number(value) -> bool:
 
 
 def numbers_line(run: Run) -> str:
-    """A run's numbers for its tile, `corr 0.912  flow 0.52 px  jitter 0.10 px`."""
+    """
+    A run's numbers for its tile, `corr 0.912  flow 0.52 / 2.10 px  jitter
+    0.10 px`: the flow typical (median) and worst (largest 90th percentile).
+    """
     parts = []
 
     if _number(run.corr_with_ref):
         parts.append(f"corr {run.corr_with_ref:.3f}")
 
-    if _number(run.flow_px):
+    if _number(run.flow_px) and _number(run.flow_worst_px):
+        parts.append(f"flow {run.flow_px:.2f} / {run.flow_worst_px:.2f} px")
+    elif _number(run.flow_px):
         parts.append(f"flow {run.flow_px:.2f} px")
 
     if _number(run.jitter_px):
@@ -133,6 +140,33 @@ def numbers_line(run: Run) -> str:
         parts.append(f"at limit {run.at_limit:.1%}")
 
     return "  ".join(parts)
+
+
+def details_line(run: Run) -> str:
+    """A run's numbers in words, for the line under the grid."""
+    parts = []
+
+    if _number(run.corr_with_ref):
+        parts.append(f"correlation with the reference {run.corr_with_ref:.3f}")
+
+    if _number(run.flow_px):
+        parts.append(f"residual flow {run.flow_px:.2f} px typical")
+
+    if _number(run.flow_worst_px):
+        where = (
+            f" (acquisition {int(run.flow_worst_acq)})"
+            if _number(run.flow_worst_acq)
+            else ""
+        )
+        parts.append(f"{run.flow_worst_px:.2f} px worst{where}")
+
+    if _number(run.jitter_px):
+        parts.append(f"patch jitter {run.jitter_px:.2f} px")
+
+    if _number(run.at_limit) and run.at_limit > 0:
+        parts.append(f"{run.at_limit:.1%} of frames at the shift limit")
+
+    return f"{run.name}: {', '.join(parts)}" if parts else run.name
 
 
 class McorWindow(QWidget):
@@ -204,6 +238,12 @@ class McorWindow(QWidget):
         self.grid.focus_changed.connect(self._enable)
         self.grid.menu_requested.connect(self._menu)
         tests_layout.addWidget(self.grid, stretch=1)
+        self.details = QLabel("")  # the numbers of the focused runs
+        self.details.setWordWrap(True)
+        self.details.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        tests_layout.addWidget(self.details)
         self.missing = QLabel("")
         tests_layout.addWidget(self.missing)
         self.pages.addWidget(tests)
@@ -357,6 +397,13 @@ class McorWindow(QWidget):
         self.state.setText(f"Status: {text}")
 
     def _enable(self, *_) -> None:
+        self.details.setText(
+            "\n".join(
+                details_line(self.runs[video.name])
+                for video in self.grid.focused
+                if video.name in self.runs
+            )
+        )
         run = self._picked_run()
         focused = self.grid.focused
         only = self.grid.only is not None
