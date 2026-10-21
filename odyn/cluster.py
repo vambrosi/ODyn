@@ -74,6 +74,7 @@ from typing import Any
 import pandas as pd
 
 from .database import SYNC_FOLDER, Database, SyncFlag
+from .groups import candidate_settings
 from .utils import ODYN_FOLDER, database_path, get_user, logger
 
 CLUSTER_FOLDER = "cluster"
@@ -146,6 +147,7 @@ class ClusterConfig:
     # A whole correction: longer, and more scratch (a batch of 40 acquisitions
     # and the 24 the report reads, about 2.5 GB each at 1200 x 1200 px)
     whole_time: str = "6:00:00"
+    whole_pw_time: str = "12:00:00"  # piecewise rigid, slower
     whole_disk_gb: int = 200
     scratch: str = "/mnt/scratch"
 
@@ -338,9 +340,11 @@ def tick(
     submitted drafts whose recordings are complete (see
     `odyn.app.submissions`), submit a test motion correction of each experiment
     they added (unless `test_new_experiments` is off in `ClusterConfig`; a
-    whole one, which saves every acquisition, with `whole_new_experiments`), process
-    the sync files that arrived (or changed) since they were last processed,
-    write the heartbeat and, with `chain`, submit the next tick.
+    whole one, which saves every acquisition, with `whole_new_experiments`),
+    submit a whole correction with each test picked in the app
+    (`submit_picks`), process the sync files that arrived (or changed) since
+    they were last processed, write the heartbeat and, with `chain`, submit
+    the next tick.
 
     **PARAMETERS**
     - `dry_run` lists what would be done and changes nothing
@@ -374,6 +378,8 @@ def tick(
 
     if config.test_new_experiments:
         _submit_tests(db, project, report, dry_run, config.whole_new_experiments)
+
+    submit_picks(db, project, report, dry_run)
 
     seen = _read_seen(folder)
 
@@ -473,6 +479,127 @@ def _untested_groups(db: Database, project: None | str) -> list[tuple[int, str]]
         for exp_id, group_id in sorted(found.items())
         if not (sent / f"{group_id}.json").exists()
     ]
+
+
+# A job in these states is over (see `mcor_tests`)
+ENDED = ("finished", "stopped", "failed", "cancelled", "timeout")
+
+
+def latest_picks(db: Database) -> dict[int, dict]:
+    """
+    Each group's latest `pick_mcor_candidate` call: `call_id`, `user`,
+    `run`, `settings` and `correct` (whether it takes a whole correction).
+    """
+    calls = db.method_calls
+
+    if calls.empty:
+        return {}
+
+    method = calls["method_name"].map(lambda m: str(m).rsplit(".", 1)[-1])
+    picks: dict[int, dict] = {}
+
+    for call_id, call in calls[method == "pick_mcor_candidate"].iterrows():
+        output = call["call_output"]
+        inputs = call["parameter_inputs"]
+
+        if not isinstance(output, dict) or not isinstance(inputs, dict):
+            continue  # it failed
+
+        group_id = int(call["group_id"])
+
+        if group_id not in picks or int(call_id) > picks[group_id]["call_id"]:
+            picks[group_id] = {
+                "call_id": int(call_id),
+                "user": str(call["user"]),
+                "run": str(output.get("run")),
+                "settings": dict(inputs.get("settings") or {}),
+                "correct": bool(output.get("correct")),
+            }
+
+    return picks
+
+
+def pick_candidate(db: Database, group_id: int, run: str, folder: str | Path) -> bool:
+    """
+    Pick test `run` (its report in `folder`) to correct every acquisition
+    of `group_id` with, as `db`'s user (`Group.pick_mcor_candidate`); the
+    next tick submits the whole correction (`submit_picks`). Returns
+    whether it takes one. Refused while the group's last whole correction
+    has not ended: both would write the same files.
+    """
+    sent = cluster_folder(db.main_folder, db.project) / MCOR_FOLDER / f"{group_id}.json"
+
+    if sent.is_file():
+        last = next(
+            (
+                test
+                for test in mcor_tests(db.main_folder, db.project)
+                if int(test["group_id"]) == group_id
+            ),
+            None,
+        )
+
+        if last is not None and last.get("whole") and last["state"] not in ENDED:
+            raise ValueError(
+                f"The last motion correction of every acquisition of group {group_id} "
+                f"(job {last['job_id']}) has not finished yet; pick again once it has."
+            )
+
+    metrics = Path(folder) / "metrics.json"
+
+    try:
+        settings = json.loads(metrics.read_text()).get("settings") or {}
+    except (OSError, ValueError) as error:
+        raise ValueError(f"No settings of {run} to pick ({error}).") from None
+
+    return db.groups[group_id].pick_mcor_candidate(
+        run=run, settings=candidate_settings(settings)
+    )
+
+
+def submit_picks(
+    db: Database, project: None | str, report: TickReport, dry_run: bool
+) -> None:
+    """
+    Submit a whole correction for each group's latest pick (`latest_picks`)
+    that takes one and was not submitted yet, with the settings picked, as
+    the user who picked them.
+    """
+    folder = cluster_folder(db.main_folder, project) / MCOR_FOLDER
+
+    for group_id, pick in sorted(latest_picks(db).items()):
+        if not pick["correct"]:
+            continue
+
+        try:
+            sent = json.loads((folder / f"{group_id}.json").read_text())
+        except (OSError, ValueError):
+            sent = {}
+
+        if sent.get("pick_call_id") == pick["call_id"]:
+            continue
+
+        what = f"{pick['run']} (all) of group {group_id}"
+
+        if dry_run:
+            report.tests.append(f"would submit {what}")
+            continue
+
+        try:
+            job_id = submit_mcor_test(
+                db.main_folder,
+                project,
+                group_id,
+                user=pick["user"],
+                whole=True,
+                settings=pick["settings"],
+                label=f"{pick['run']} (all)",
+                pick_call_id=pick["call_id"],
+            )
+            report.tests.append(f"{what} submitted (job {job_id})")
+
+        except Exception as error:  # the next tick tries again
+            report.errors.append(f"{what}: {type(error).__name__}: {error}")
 
 
 def _sync_work(db: Database, settle_s: float, seen: dict[str, str]) -> list[Work]:
@@ -722,8 +849,11 @@ def mcor_test_script(
     user: str,
     config: ClusterConfig,
     whole: bool = False,
+    settings: None | dict = None,
+    label: None | str = None,
 ) -> str:
     """The job script of one test motion correction (see `submit_mcor_test`)."""
+    settings = settings or {}
     command = [
         *_odyn_command(main_folder, project),
         "run-mcor-test",
@@ -732,13 +862,20 @@ def mcor_test_script(
         "--user",
         user,
         *(["--whole"] if whole else []),
+        *(["--settings", json.dumps(settings)] if settings else []),
+        *(["--label", label] if label else []),
     ]
+    kind = "piecewise rigid" if settings.get("pw_rigid") else "rigid"
     about = (
-        f"A whole rigid motion correction of group {group_id} (every acquisition "
-        f"saved, the report on the test's), for {user}."
+        f"Whole {kind} motion correction of group {group_id} for {user}"
         if whole
-        else f"A test motion correction of group {group_id}, for {user}."
+        else f"Test motion correction of group {group_id} for {user}"
     )
+
+    if whole:
+        time = config.whole_pw_time if settings.get("pw_rigid") else config.whole_time
+    else:
+        time = config.mcor_time
 
     return _mcor_script(
         main_folder,
@@ -747,7 +884,7 @@ def mcor_test_script(
         name=f"odyn-mcor-{project or 'main'}-g{group_id}",
         about=about,
         command=shlex.join(command),
-        time=config.whole_time if whole else config.mcor_time,
+        time=time,
         disk_gb=config.whole_disk_gb if whole else config.mcor_disk_gb,
     )
 
@@ -821,14 +958,20 @@ def submit_mcor_test(
     *,
     user: None | str = None,
     whole: bool = False,
+    settings: None | dict = None,
+    label: None | str = None,
+    pick_call_id: None | int = None,
     dry_run: bool = False,
 ) -> None | str:
     """
     Submit a test motion correction of `group_id` (`Group.test_motion_correction`)
     as its own job, recorded as `user`'s: by default whoever added the group's
     experiment. With `whole`, the job corrects and saves every acquisition (the
-    final rigid correction, with `whole_time` and `whole_disk_gb`) and reports
-    on the test's. Writes the script to `jobs/` and what was submitted to
+    final correction, with `whole_time`, or `whole_pw_time` for piecewise
+    rigid, and `whole_disk_gb`) and reports on the test's. `settings` are
+    the test's (`CANDIDATE_SETTINGS`; rigid by default), `label` its name on
+    the report, and `pick_call_id` the `pick_mcor_candidate` call it runs.
+    Writes the script to `jobs/` and what was submitted to
     `mcor/<group_id>.json`. Returns the job id (`None` in a dry run, which only
     writes and shows the script).
     """
@@ -840,7 +983,9 @@ def submit_mcor_test(
     script = folder / JOBS_FOLDER / f"mcor-test-g{group_id}.sh"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(
-        mcor_test_script(main_folder, project, group_id, user, config, whole)
+        mcor_test_script(
+            main_folder, project, group_id, user, config, whole, settings, label
+        )
     )
     job_id = _sbatch([str(script)], dry_run)
 
@@ -855,6 +1000,9 @@ def submit_mcor_test(
             "job_id": job_id,
             "user": user,
             "whole": whole,
+            "settings": settings or {},
+            "label": label,
+            "pick_call_id": pick_call_id,
             "submitted_at": datetime.now().strftime(TIME_FORMAT),
         },
     )
@@ -872,14 +1020,21 @@ def run_mcor_test(
     group_id: int,
     user: str,
     whole: bool = False,
+    settings: None | dict = None,
+    label: None | str = None,
 ) -> Path:
     """
-    What the job runs: the test (`whole`: saving every acquisition), recorded
-    as `user`'s. Returns its folder.
+    What the job runs: the test (`whole`: saving every acquisition), with
+    `settings` (`CANDIDATE_SETTINGS`) and `label`, recorded as `user`'s.
+    Returns its folder.
     """
     db = Database(main_folder, project=project, user=user)
+    given = candidate_settings(settings) if settings else {}
 
-    return db.groups[group_id].test_motion_correction(whole=whole)
+    if label:
+        given["label"] = label
+
+    return db.groups[group_id].test_motion_correction(whole=whole, **given)
 
 
 def submit_mcor_sweep(
@@ -902,10 +1057,11 @@ def submit_mcor_sweep(
     The baseline builds and saves the reference, which the piecewise runs
     reuse. Every run writes its test video, of the same frames and with the
     same black and white as the experiment's raw video (in `raw/` of its test
-    folder, written by the first), so all the videos compare. No run writes `side_by_side.tif`, and the patches'
-    shifts are kept in `shifts.npz` only with `"keep_patch_shifts": true` (for
-    looking into the patches afterwards; large at small patches). Each run has
-    its folder in the experiment's test folder (`Group.mcor_test_folder`).
+    folder, written by the first), so all the videos compare. No run writes
+    `side_by_side.tif`, and the patches' shifts are kept in `shifts.npz` only
+    with `"keep_patch_shifts": true` (for looking into the patches afterwards;
+    large at small patches). Each run has its folder in the experiment's test
+    folder (`Group.mcor_test_folder`).
 
     `grid` is (as a JSON file for the command line):
     ```json
@@ -1417,6 +1573,8 @@ def main(argv: None | list[str] = None) -> int:
     job.add_argument("--group", type=int, required=True)
     job.add_argument("--user", required=True)
     job.add_argument("--whole", action="store_true")
+    job.add_argument("--settings", type=json.loads, help="the test's, as JSON")
+    job.add_argument("--label", help="its name on the report")
 
     sweep = commands.add_parser(
         "mcor-sweep", help="submit a sweep of test motion corrections of a group"
@@ -1491,7 +1649,13 @@ def main(argv: None | list[str] = None) -> int:
 
     elif args.command == "run-mcor-test":
         folder = run_mcor_test(
-            args.main_folder, args.project, args.group, args.user, args.whole
+            args.main_folder,
+            args.project,
+            args.group,
+            args.user,
+            args.whole,
+            args.settings,
+            args.label,
         )
         print(f"Wrote {folder}")
 

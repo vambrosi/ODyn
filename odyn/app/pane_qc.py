@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPushButton,
     QTableView,
     QTabWidget,
@@ -36,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from PySide6.QtCore import QThread, QUrl, Signal
+from PySide6.QtCore import Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 
 from datetime import datetime
@@ -44,9 +45,11 @@ from datetime import datetime
 from ..cluster import (
     ClusterConfig,
     heartbeat,
+    latest_picks,
     mcor_sweep_runs,
     mcor_tests,
     pending_requests,
+    pick_candidate,
     send_request,
 )
 from ..database import SyncFlag
@@ -84,7 +87,7 @@ TEST_COLUMNS = [
     "finished_at",
 ]
 
-TEST_HIDDEN = ["folder", "bytes", "group_id", "experiment_folder"]
+TEST_HIDDEN = ["folder", "bytes", "group_id", "experiment_folder", "pick_call_id"]
 EXPERIMENT_COLUMNS = ["submitted_at", "path", "status", "runs", "local", "size"]
 EXPERIMENT_HIDDEN = ["group_id", "folder", "folders", "bytes", "finished"]
 
@@ -92,6 +95,9 @@ EXPERIMENT_HIDDEN = ["group_id", "folder", "folders", "bytes", "finished"]
 WAITING = "waiting for the cluster"
 STOPPED = "stopped"
 READY = "ready to compare"
+CORRECTING = "correcting with {run}"
+CORRECTION_STOPPED = "correction with {run} stopped"
+FINAL_CHECK = "ready for final check"
 
 # An experiment some of whose files are downloaded (see `cache.state`)
 PARTLY = "partly"
@@ -291,7 +297,9 @@ def my_tests(
         row = {
             "submitted_at": max(times) if times else None,
             "path": ", ".join(str(paths.get(i, i)) for i in exp_ids),
-            "run": job["run"] or ("rigid (all)" if job.get("whole") else "test"),
+            "run": job["run"]
+            or job.get("label")
+            or ("rigid (all)" if job.get("whole") else "test"),
             "state": TEST_STATES.get(job["state"], job["state"]),
             "local": "",
             **dict.fromkeys(TEST_NUMBERS),
@@ -300,6 +308,7 @@ def my_tests(
             "bytes": 0,
             "group_id": group_id,
             "experiment_folder": str(db.groups[group_id].mcor_test_folder()),
+            "pick_call_id": job.get("pick_call_id"),
         }
 
         if job["state"] == "finished" and (folder / "metrics.json").is_file():
@@ -325,16 +334,21 @@ def my_tests(
 
 
 def my_experiments(
-    tests: pd.DataFrame, main_folder: Path, base: None | Path = None
+    tests: pd.DataFrame,
+    main_folder: Path,
+    base: None | Path = None,
+    picks: None | dict[int, dict] = None,
 ) -> pd.DataFrame:
     """
     One row per experiment of `tests` (from `my_tests`), in its order: its
-    status, how many of its tests finished, whether its files are downloaded
-    (`local`: "no", "yes", "partly" or "newer on server") and how much
-    downloading them copies (`size`). Hidden: `folder`, where its tests are;
-    `folders`, those with files to download (its own, `raw/`, `final/` and
-    each finished run's); `bytes`, their size; `finished`, its finished runs
-    (as `Run`s, with the share's folders), the cluster's own test first.
+    status (after a test was picked, from `picks`: see
+    `cluster.latest_picks`), how many of its tests finished, whether its
+    files are downloaded (`local`: "no", "yes", "partly" or "newer on
+    server") and how much downloading them copies (`size`). Hidden:
+    `folder`, where its tests are; `folders`, those with files to download
+    (its own, `raw/`, `final/` and each finished run's); `bytes`, their size;
+    `finished`, its finished runs (as `Run`s, with the share's folders), the
+    cluster's own test first.
     """
     rows = []
 
@@ -349,6 +363,11 @@ def my_experiments(
             status = STOPPED
         else:
             status = WAITING
+
+        pick = (picks or {}).get(int(group_id))
+
+        if pick is not None:
+            status = _picked_status(pick, runs[runs["folder"] == str(top)])
 
         finished = [
             Run(
@@ -392,6 +411,31 @@ def my_experiments(
         )
 
     return pd.DataFrame(rows, columns=[*EXPERIMENT_COLUMNS, *EXPERIMENT_HIDDEN])
+
+
+def _picked_status(pick: dict, whole: pd.DataFrame) -> str:
+    """
+    An experiment's status once a test was picked: correcting with it (the
+    whole correction submitted, `whole`'s job, or not yet), stopped, or
+    ready for the final check.
+    """
+    if not pick["correct"]:
+        return FINAL_CHECK  # the last whole correction had its settings
+
+    ran = whole[whole["pick_call_id"] == pick["call_id"]]
+
+    if ran.empty:
+        return CORRECTING.format(run=pick["run"])  # at the cluster's next run
+
+    state = ran["state"].iloc[0]
+
+    if state == "finished":
+        return FINAL_CHECK
+
+    if state in ("stopped", "failed"):
+        return CORRECTION_STOPPED.format(run=pick["run"])
+
+    return CORRECTING.format(run=pick["run"])
 
 
 class Downloads(QThread):
@@ -632,7 +676,12 @@ class QcPane(QWidget):
                 queue,
                 mine,
                 my_missing(db, mine),
-                my_experiments(my_tests(db, user, mine, base), db.main_folder, base),
+                my_experiments(
+                    my_tests(db, user, mine, base),
+                    db.main_folder,
+                    base,
+                    latest_picks(db),
+                ),
                 cluster_line(db),
                 db.main_folder,
             )
@@ -655,6 +704,10 @@ class QcPane(QWidget):
             self._model(self.missing_view).set_frame(missing)
             self.experiments = experiments.reset_index(drop=True)
             self._model(self.tests_view).set_frame(self.experiments[EXPERIMENT_COLUMNS])
+
+            for _, row in self.experiments.iterrows():
+                if str(row["folder"]) in self.windows:
+                    self.windows[str(row["folder"])].set_status(row["status"])
             self._count_tabs()
             self._enable()
 
@@ -732,7 +785,7 @@ class QcPane(QWidget):
         tip = "" if one else " (download it first)"
         self.show_folder.setEnabled(one)
         self.show_folder.setStatusTip("Open the experiment's test folder" + tip)
-        ready = one and picked[0][1]["status"] == READY
+        ready = one and bool(len(picked[0][1]["finished"]))
         self.compare.setEnabled(ready)
         self.compare.setStatusTip(
             "Compare the raw video and each test, side by side"
@@ -777,10 +830,68 @@ class QcPane(QWidget):
             replace(run, folder=cache.local_folder(self.main_folder, run.folder, base))
             for run in row["finished"]
         ]
-        window = McorWindow(label, self._local(row), runs, self.context.status.emit)
+        window = McorWindow(
+            label,
+            self._local(row),
+            runs,
+            self.context.status.emit,
+            pick=lambda run: self._pick(key, run),
+        )
+        window.set_status(row["status"])
         window.closed.connect(lambda: self.windows.pop(key, None))
         self.windows[key] = window
         window.show()
+
+    def _pick(self, key: str, run: str) -> None:
+        """
+        Pick test `run` of the experiment whose tests are in `key` to correct
+        every acquisition with (`cluster.pick_candidate`), once confirmed.
+        """
+        window = self.windows.get(key)
+        rows = self.experiments[self.experiments["folder"] == key]
+
+        if window is None or rows.empty:
+            return
+
+        row = rows.iloc[0]
+        found = [r for r in row["finished"] if r.name == run]
+
+        if not found or not self.context.confirm(
+            "Pick candidate",
+            f"Motion correct {row['path']} with {run}'s settings?\n\n"
+            "Overwrite the last run's files?",
+            "Motion correct",
+            parent=window,
+        ):
+            return
+
+        group_id, folder = int(row["group_id"]), found[0].folder
+
+        def pick(db):
+            try:
+                return pick_candidate(db, group_id, run, folder)
+            except ValueError as error:  # refused: said over the window
+                return str(error)
+
+        def picked(result):
+            if isinstance(result, str):
+                box = QMessageBox(
+                    QMessageBox.Icon.Warning, "Pick candidate", result, parent=window
+                )
+                box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+                box.open()
+            elif result:
+                self.context.status.emit(
+                    f"{row['path']} will be corrected with {run} at the cluster's "
+                    "next run"
+                )
+            else:
+                self.context.status.emit(
+                    f"The last correction of {row['path']} already used {run}'s "
+                    "settings"
+                )
+
+        self.context.run(pick, picked, "pick candidate", writes=True)
 
     def _picked(self) -> list[tuple[str, pd.Series]]:
         """The selected experiments, as `(what to call it, row)`, in view order."""

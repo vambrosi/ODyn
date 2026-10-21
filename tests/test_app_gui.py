@@ -1254,6 +1254,72 @@ def test_qc_opens_an_experiments_files(window, tmp_path, monkeypatch):
     assert (top / "metrics.json").is_file()
 
 
+def test_a_test_is_picked_from_the_window(window, tmp_path, monkeypatch):
+    import gc
+    import json
+
+    from PySide6.QtWidgets import QMessageBox
+
+    from odyn.cluster import cluster_folder
+
+    monkeypatch.setenv("PATH", "")  # no squeue: off the cluster
+    db, group_id = a_tested_experiment(tmp_path / "data")
+    del db
+    gc.collect()
+    asked = []
+    monkeypatch.setattr(
+        window.context,
+        "confirm",
+        lambda title, message, action, parent=None: asked.append(
+            (message, action, parent)
+        )
+        or True,
+    )
+
+    window.context.set_user("tester")
+    qc = window.qc
+    window.show_page(qc)  # a change reloads the page on screen
+    qc.reload()
+    settle(window.context)
+    qc.tests_view.selectRow(0)
+    qc.download.click()
+    wait_until(lambda: qc.downloads is None)
+    settle(window.context)
+    qc.tests_view.selectRow(0)
+    qc.compare.click()
+    mcor = next(iter(qc.windows.values()))
+    assert mcor.state.text() == "Status: ready to compare"
+
+    # One run picked, never raw
+    assert not mcor.pick_button.isEnabled()
+    names = [tile.video.name for tile in mcor.grid.tiles]
+    mcor.grid.tiles[names.index("rigid")].clicked.emit()
+    assert mcor.pick_button.isEnabled()
+    mcor.pick_button.click()
+    settle(window.context)
+
+    message, action, parent = asked[-1]
+    assert message == (
+        "Motion correct 20260304/m1/e1 with rigid's settings?\n\n"
+        "Overwrite the last run's files?"
+    )
+    assert action == "Motion correct" and parent is mcor
+    assert qc.experiments["status"].tolist() == ["correcting with rigid"]
+    assert mcor.state.text() == "Status: correcting with rigid"
+
+    # Refused while a whole correction has not ended
+    sent = cluster_folder(tmp_path / "data") / "mcor" / f"{group_id}.json"
+    sent.write_text(json.dumps({**json.loads(sent.read_text()), "whole": True}))
+    log = sent.parent.parent / "jobs" / f"odyn-mcor-main-g{group_id}-11.out"
+    log.write_text("started  ...\n")
+    mcor.pick_button.click()
+    settle(window.context)
+    boxes = [box for box in mcor.findChildren(QMessageBox) if box.isVisible()]
+    assert len(boxes) == 1 and "has not finished yet" in boxes[0].text()
+    boxes[0].close()
+    mcor.close()
+
+
 def test_an_experiment_with_no_finished_test_is_not_compared(window, tmp_path):
     import gc
 
@@ -2409,3 +2475,28 @@ def test_a_date_shows_without_its_midnight_time():
     assert show(pd.Timestamp("2026-10-14")) == "2026-10-14"
     assert show(pd.Timestamp("2026-10-14 09:30:05")) == "2026-10-14 09:30:05"
     assert show(pd.NaT) == ""
+
+
+def test_an_experiments_status_follows_its_pick():
+    import pandas as pd
+
+    from odyn.app.pane_qc import _picked_status
+
+    pick = {"call_id": 5, "run": "s128", "correct": True}
+
+    def whole(state, call_id=5):
+        return pd.DataFrame({"pick_call_id": [call_id], "state": [state]})
+
+    assert (
+        _picked_status(pick, whole("finished", call_id=None)) == "correcting with s128"
+    )
+    assert _picked_status(pick, whole("waiting")) == "correcting with s128"
+    assert _picked_status(pick, whole("not finished")) == "correcting with s128"
+    assert _picked_status(pick, whole("stopped")) == "correction with s128 stopped"
+    assert _picked_status(pick, whole("finished")) == "ready for final check"
+
+    # The last whole correction had its settings already
+    same = {**pick, "correct": False}
+    assert (
+        _picked_status(same, whole("finished", call_id=None)) == "ready for final check"
+    )

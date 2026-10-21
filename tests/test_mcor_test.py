@@ -672,3 +672,112 @@ def test_the_runs_take_the_baselines_reference_and_levels(tmp_path, slurm, monke
     assert second["strides_um"] == [128, 96]
     assert "levels" not in second
     assert (second["test_acqs"], second["max_shift_um"]) == (4, [20, 20])
+
+
+def a_whole_report(db, group_id, **settings) -> Path:
+    """The report of a whole correction of `group_id`, with `settings`."""
+    folder = db.groups[group_id].mcor_test_folder()
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "metrics.json").write_text(
+        json.dumps({"settings": {"run": None, "whole": True, **settings}})
+    )
+
+    return folder
+
+
+RIGID = {"pw_rigid": False, "max_shift_um": [80.0, 80.0], "shifts_opencv": False}
+PIECEWISE = {
+    **RIGID,
+    "pw_rigid": True,
+    "strides_um": [128.0, 128.0],
+    "overlap_um": [64.0, 64.0],
+    "max_deviation_um": 6.0,
+}
+
+
+def test_a_picked_test_is_recorded_and_only_corrected_when_new(tmp_path):
+    from odyn.groups import candidate_settings
+
+    db, group_id = a_loop(tmp_path)
+    group = db.groups[group_id]
+
+    # A test's report has more than the settings picked; a rigid one's
+    # patches do not count
+    assert (
+        candidate_settings(
+            {**RIGID, "run": "rigid", "max_shifts_px": [9, 9], "strides_um": [1, 1]}
+        )
+        == RIGID
+    )
+
+    # Nothing corrected whole yet: picking takes a correction
+    assert group.pick_mcor_candidate(run="rigid", settings=RIGID) is True
+
+    # The last whole correction had the same settings: nothing to redo
+    a_whole_report(db, group_id, **RIGID, max_shifts_px=[9, 9])
+    assert group.pick_mcor_candidate(run="rigid", settings=RIGID) is False
+    assert group.pick_mcor_candidate(run="s128", settings=PIECEWISE) is True
+
+    calls = db.latest_calls("pick_mcor_candidate")
+    assert calls["user"].tolist() == ["ana"] * 3
+    assert calls["output_correct"].tolist() == [True, False, True]
+
+    with pytest.raises(ValueError, match="Unknown settings run"):
+        group.pick_mcor_candidate(run="x", settings={"run": "x"})
+
+
+def test_the_tick_corrects_with_the_test_picked_once(tmp_path, slurm, monkeypatch):
+    from odyn.cluster import TickReport, pick_candidate, submit_picks
+
+    db, group_id = a_loop(tmp_path)
+    a_whole_report(db, group_id, **RIGID)
+    run = db.groups[group_id].mcor_test_folder("s128_o64_d6")
+    run.mkdir()
+    (run / "metrics.json").write_text(
+        json.dumps({"settings": {"run": "s128_o64_d6", **PIECEWISE}})
+    )
+
+    # Refused while the last whole correction runs: both write the same files
+    submit_mcor_test(tmp_path, None, group_id, user="ana", whole=True)
+    (tmp_path / "queue.txt").write_text("4242 RUNNING\n")
+    with pytest.raises(ValueError, match="has not finished yet"):
+        pick_candidate(db, group_id, "s128_o64_d6", run)
+
+    (tmp_path / "queue.txt").write_text("")
+    log = cluster_folder(tmp_path) / "jobs" / f"odyn-mcor-main-g{group_id}-4242.out"
+    log.write_text("started  ...\nfinished now\n")
+    picker = Database(tmp_path, user="bo")
+    assert pick_candidate(picker, group_id, "s128_o64_d6", run) is True
+
+    def submitted():
+        report = TickReport(started_at="now", dry_run=False)
+        submit_picks(Database(tmp_path), None, report, dry_run=False)
+        return report.tests
+
+    # Submitted as who picked it, piecewise, with the longer time
+    assert submitted() == [
+        f"s128_o64_d6 (all) of group {group_id} submitted (job 4242)"
+    ]
+    script = (
+        cluster_folder(tmp_path) / "jobs" / f"mcor-test-g{group_id}.sh"
+    ).read_text()
+    assert f"--group {group_id} --user bo --whole --settings" in script
+    assert "--label 's128_o64_d6 (all)'" in script
+    assert "#SBATCH --time=12:00:00" in script
+    sent = json.loads(
+        (cluster_folder(tmp_path) / "mcor" / f"{group_id}.json").read_text()
+    )
+    assert sent["settings"] == PIECEWISE and sent["label"] == "s128_o64_d6 (all)"
+
+    # Never twice
+    assert submitted() == []
+    assert slurm.read_text().count("sbatch") == 2
+
+    # The job runs the test whole with those settings
+    seen = {}
+    monkeypatch.setattr(
+        "odyn.groups.Group.test_motion_correction",
+        lambda self, **kwargs: seen.update(kwargs) or tmp_path,
+    )
+    run_mcor_test(tmp_path, None, group_id, "bo", True, sent["settings"], sent["label"])
+    assert seen == {"whole": True, **PIECEWISE, "label": "s128_o64_d6 (all)"}

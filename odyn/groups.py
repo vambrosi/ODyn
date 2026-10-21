@@ -96,6 +96,18 @@ MEANS_TABLE = "means.csv"
 MEANS_FPS = 4
 DEFAULT_OVERLAP_UM = [96.0, 96.0]
 DEFAULT_MAX_SHIFT_UM = [80.0, 80.0]
+
+# The settings of a test (`test_motion_correction`'s arguments, as its
+# `metrics.json` has them) a whole correction is run with, once picked
+CANDIDATE_SETTINGS = (
+    "pw_rigid",
+    "max_shift_um",
+    "strides_um",
+    "overlap_um",
+    "max_deviation_um",
+    "gsig_filt_um",
+    "shifts_opencv",
+)
 DEFAULT_MAX_DEVIATION_UM = 12.0
 
 # Preview movie overlay text parameters
@@ -2098,6 +2110,7 @@ class Group(CallRecorder):
         gsig_filt_um: None | float = None,
         shifts_opencv: bool = False,
         run: None | str = None,
+        label: None | str = None,
         movie: bool = True,
         levels: None | Sequence[float] = None,
         movie_size: float = TEST_MOVIE_SIZE,
@@ -2143,6 +2156,8 @@ class Group(CallRecorder):
         - `gsig_filt_um`, `shifts_opencv`: see `run_motion_correction`
         - `run`: the name of this test among others of the experiment (a
         sweep's), its folder and its label on the videos
+        - `label`: its name on the videos and the plot instead (a whole
+        correction with a picked test's settings: `<run> (all)`)
         - `movie`: write the test's video (and the raw one, if not there yet)
         - `levels`: the values shown as black and white in the video; by
         default the raw video's (its 1st and 99.5th percentiles)
@@ -2185,6 +2200,7 @@ class Group(CallRecorder):
 
         settings = {
             "run": run,
+            "label": label,
             "whole": whole,
             "pw_rigid": pw_rigid,
             "max_shift_um": list(max_shift_um),
@@ -2234,7 +2250,7 @@ class Group(CallRecorder):
             patches = None
             shifts = np.asarray(self.mc.shifts_rig)
 
-        title = run or ("rigid (all)" if whole else "test")
+        title = label or run or ("rigid (all)" if whole else "test")
         where = ", ".join(str(path) for path in self.experiments["exp_path"])
         logger.info(f"Writing the test's report to {folder}")
         paths = write_report(
@@ -2562,6 +2578,61 @@ class Group(CallRecorder):
         # Reset mcor DataFrames
         self._tables.pop("mcor_files", None)
         self.db._tables.pop("mcor_files", None)
+
+    @record_call
+    def pick_mcor_candidate(self, *, run: str, settings: dict) -> bool:
+        """
+        Pick a test `run`'s `settings` to motion correct all acquisitions in its
+        group (the `test_motion_correction` ones, see `CANDIDATE_SETTINGS`), and
+        say whether that require a new whole motion correction run.
+
+        **USAGE**
+        ```python
+        group = db.groups[some_index]
+        group.pick_mcor_candidate(
+            run="s128_o64_d6",
+            settings={"pw_rigid": True, "strides_um": [128, 128], ...},
+        )
+        ```
+
+        Only records who picked what: the cluster tick submits the motion
+        correction job (`cluster.submit_picks`), which overwrites the files
+        saved, unless the last full motion correction had the same settings
+        (`False` then, and `{"correct": false}` as the call output).
+        """
+        unknown = sorted(set(settings) - set(CANDIDATE_SETTINGS))
+
+        if unknown:
+            raise ValueError(
+                f"Unknown settings {', '.join(unknown)}; a candidate's are "
+                f"{', '.join(CANDIDATE_SETTINGS)}."
+            )
+
+        last = self.last_whole_settings()
+        correct = last is None or last != candidate_settings(settings)
+
+        if correct:
+            logger.info(f"{run} picked: every acquisition is corrected with it next")
+        else:
+            logger.info(f"{run} picked: the last whole correction already used it")
+
+        self.set_output({"run": run, "correct": correct})
+
+        return correct
+
+    def last_whole_settings(self) -> None | dict:
+        """
+        The settings (`CANDIDATE_SETTINGS`) of the last whole correction, from
+        its report, or `None` without one.
+        """
+        path = self.mcor_test_folder() / "metrics.json"
+
+        try:
+            settings = json.loads(path.read_text()).get("settings") or {}
+        except (OSError, ValueError):
+            return None
+
+        return candidate_settings(settings) if settings.get("whole") else None
 
     @record_call
     def approve_mcor_files(self, *, exclude_acq_ids: Sequence[int] = ()) -> None:
@@ -3467,6 +3538,27 @@ def _draw_scale_bar(
     _draw_label(
         picture, text, (end - text_width, text_baseline), scale, thickness, offset
     )
+
+
+def candidate_settings(settings: dict) -> dict:
+    """
+    The settings of a test's `metrics.json` a whole correction is run with
+    (`CANDIDATE_SETTINGS`), as `test_motion_correction` takes them; those
+    left out of a rigid test's (the patches) are left out here too.
+    """
+    picked = {
+        key: settings[key]
+        for key in CANDIDATE_SETTINGS
+        if settings.get(key) is not None
+    }
+    picked["pw_rigid"] = bool(picked.get("pw_rigid", False))
+    picked["shifts_opencv"] = bool(picked.get("shifts_opencv", False))
+
+    if not picked["pw_rigid"]:
+        for key in ("strides_um", "overlap_um", "max_deviation_um"):
+            picked.pop(key, None)
+
+    return picked
 
 
 def as_raw(movie: np.ndarray, raw: np.ndarray) -> tuple[np.ndarray, int]:

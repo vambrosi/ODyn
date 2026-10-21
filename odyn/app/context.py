@@ -208,12 +208,15 @@ class Context(QObject):
         box.open()
         self.last_report = (title, message)
 
-    def confirm(self, title: str, message: str, action: str) -> bool:
+    def confirm(self, title: str, message: str, action: str, parent=None) -> bool:
         """
         Ask before doing something that cannot be taken back: `action` names
         the button that goes ahead, the other cancels (and is the default).
+        The box goes over `parent` (the main window by default).
         """
-        box = QMessageBox(QMessageBox.Icon.Warning, title, message, parent=self.window)
+        box = QMessageBox(
+            QMessageBox.Icon.Warning, title, message, parent=parent or self.window
+        )
         go = box.addButton(action, QMessageBox.ButtonRole.DestructiveRole)
         cancel = box.addButton(QMessageBox.StandardButton.Cancel)
         box.setDefaultButton(cancel)

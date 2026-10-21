@@ -75,6 +75,29 @@ QPushButton:disabled {{
     border-color: palette(midlight);
 }}
 
+/* Drawn here rather than natively: macOS draws its slider at the top of
+   the control, off the middle of the row it is in */
+QSlider::groove:horizontal {{
+    height: 4px;
+    border-radius: 2px;
+    background: palette(mid);
+}}
+QSlider::sub-page:horizontal {{
+    height: 4px;
+    border-radius: 2px;
+    background: palette(highlight);
+}}
+QSlider::handle:horizontal {{
+    width: 16px;
+    margin: -7px 0px;
+    border-radius: 9px;
+    background: palette(light);
+    border: 1px solid palette(mid);
+}}
+QSlider::sub-page:horizontal:disabled {{
+    background: palette(mid);
+}}
+
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
     background: palette(base);
     color: palette(text);

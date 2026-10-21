@@ -3,7 +3,9 @@ The window an experiment's motion correction is checked in, opened from the
 QC page, with a tab per step. For now one: **Tests**, the raw video and
 every finished run's test video side by side, playing in step (`player`),
 each with its numbers. A click selects a tile; **Show selected** keeps the
-selected ones; **Show report** opens the selected run's plot of shifts.
+selected ones; **Show report** opens the selected run's plot of shifts;
+**Pick candidate** has every acquisition corrected with the selected run's
+settings (see `cluster.pick_candidate`).
 
 Everything is opened from the experiment's local copy (`cache`): played from
 the share, a video is slow.
@@ -13,6 +15,7 @@ from __future__ import annotations
 
 import math
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -119,12 +122,21 @@ class McorWindow(QWidget):
     """
     One experiment's motion correction, from its local `folder`, and its
     finished `runs` (see the module's description). `status` hears what
-    the window has to say; `closed` fires as it closes.
+    the window has to say; `pick` is called with the name of the run
+    picked (none: no picking); `closed` fires as it closes.
     """
 
     closed = Signal()
 
-    def __init__(self, title: str, folder: Path, runs: list[Run], status, parent=None):
+    def __init__(
+        self,
+        title: str,
+        folder: Path,
+        runs: list[Run],
+        status: Callable[[str], None],
+        pick: None | Callable[[str], None] = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setWindowFlag(Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -132,11 +144,14 @@ class McorWindow(QWidget):
         self.setStyleSheet(style.window_stylesheet())  # as the main window
         self.folder = folder
         self.status = status
+        self.pick = pick
         self.runs: dict[str, Run] = {}  # each tile's run, by the tile's name
 
+        self.state = QLabel("")
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         layout = QVBoxLayout(self)
+        layout.addWidget(self.state)
         layout.addWidget(self.tabs)
 
         tests = QWidget()
@@ -149,10 +164,17 @@ class McorWindow(QWidget):
         row = QHBoxLayout()
         self.missing = QLabel("")
         self.show_report = QPushButton("Show report")
-        self.show_report.setStatusTip("Open the selected run's plot of shifts")
+        self.show_report.setToolTip("Open shifts report for this run")
         self.show_report.clicked.connect(self._show_report)
+        self.pick_button = QPushButton("Pick candidate")
+        self.pick_button.setToolTip(
+            "Motion correct every acquisition with this run's settings"
+        )
+        self.pick_button.clicked.connect(self._pick)
+        self.pick_button.setVisible(pick is not None)
         row.addWidget(self.missing, stretch=1)
         row.addWidget(self.show_report)
+        row.addWidget(self.pick_button)
         tests_layout.addLayout(row)
         index = self.tabs.addTab(tests, "Tests")
         self.tabs.setTabToolTip(index, "The raw video and each test run, side by side")
@@ -199,11 +221,22 @@ class McorWindow(QWidget):
 
         return self.runs.get(picked[0].name)
 
+    def set_status(self, text: str) -> None:
+        """Show the experiment's status (see `pane_qc.my_experiments`)."""
+        self.state.setText(f"Status: {text}")
+
     def _enable(self, *_) -> None:
         run = self._picked_run()
         self.show_report.setEnabled(
             run is not None and (run.folder / "shifts.png").is_file()
         )
+        self.pick_button.setEnabled(run is not None)
+
+    def _pick(self) -> None:
+        run = self._picked_run()
+
+        if run is not None and self.pick is not None:
+            self.pick(run.name)
 
     def _show_report(self) -> None:
         run = self._picked_run()
