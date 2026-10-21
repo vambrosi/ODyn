@@ -50,6 +50,9 @@ MAX_ZOOM = 16.0
 # A selected tile's border, in px
 BORDER_PX = 3
 
+# The least room between a tile's name and its numbers, in px
+NAME_GAP_PX = 16
+
 
 def read_frames(path: str | Path) -> np.ndarray:
     """Every frame of the video at `path`, grayscale, as `(frames, h, w)` uint8."""
@@ -163,6 +166,21 @@ class VideoTile(QWidget):
 
         self.update()
 
+    def numbers_fit(self, name: None | str = None) -> bool:
+        """
+        Whether the numbers fit beside the name (`name`, or the video's), on
+        the tile's top line; when not, they are left out (the tooltip has
+        them).
+        """
+        if not self.video.numbers:
+            return False
+
+        metrics = self.fontMetrics()
+        used = metrics.horizontalAdvance(name or self.video.name)
+        used += metrics.horizontalAdvance(self.video.numbers)
+
+        return used + NAME_GAP_PX <= self.width() - 12
+
     def set_selected(self, selected: bool) -> None:
         self.selected = selected
         self.update()
@@ -219,7 +237,7 @@ class VideoTile(QWidget):
             text,
         )
 
-        if self.video.numbers:
+        if self.numbers_fit(text):
             painter.setPen(QColor(220, 220, 220))
             painter.drawText(
                 QRectF(6, 2, self.width() - 12, 16),

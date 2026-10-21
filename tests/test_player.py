@@ -121,3 +121,51 @@ def test_selected_tiles_can_be_shown_alone(app, tmp_path):
     assert [v.name for v in grid.visible()] == ["a", "b", "c"]
     assert [v.name for v in grid.selected] == ["a"]
     grid.close()
+
+
+def test_a_runs_tile_shows_its_numbers_and_its_older_videos(tmp_path):
+    from odyn.app.mcor_window import Run, numbers_line, raw_video, test_video
+
+    run = Run("s128", tmp_path, corr_with_ref=0.91234, flow_px=0.5, at_limit=0.0)
+    assert numbers_line(run) == "corr 0.912  flow 0.50 px"
+    assert numbers_line(Run("x", tmp_path, jitter_px=float("nan"))) == ""
+    assert numbers_line(Run("x", tmp_path, at_limit=0.012)) == "at limit 1.2%"
+
+    # Folders from before the raw video was apart: raw | test, and the raw
+    # video in the sweep's baseline
+    (tmp_path / "rigid").mkdir()
+    (tmp_path / "rigid" / "e1_raw.avi").write_bytes(b"")
+    (tmp_path / "e1_raw_test.avi").write_bytes(b"")
+    assert raw_video(tmp_path) == tmp_path / "rigid" / "e1_raw.avi"
+    assert test_video(tmp_path) == tmp_path / "e1_raw_test.avi"
+
+    # Now: the raw video in `raw/`, and the test alone first
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "e1_raw.mp4").write_bytes(b"")
+    (tmp_path / "e1_test.avi").write_bytes(b"")
+    assert raw_video(tmp_path) == tmp_path / "raw" / "e1_raw.mp4"
+    assert test_video(tmp_path) == tmp_path / "e1_test.avi"
+    assert test_video(tmp_path / "missing") is None
+
+
+def test_a_narrow_tile_leaves_its_numbers_out(app, tmp_path):
+    from odyn.app.player import Video, VideoTile, View
+
+    tile = VideoTile(
+        Video("s128_o64_d6", tmp_path / "x.avi", "corr 0.912  flow 0.52 px"), View()
+    )
+    tile.resize(600, 300)
+    assert tile.numbers_fit()
+    tile.resize(150, 150)
+    assert not tile.numbers_fit()
+    assert "corr 0.912" in tile.toolTip()  # still there, under the pointer
+    assert not VideoTile(Video("raw", tmp_path / "x.avi"), View()).numbers_fit()
+
+
+def test_the_qc_window_looks_as_the_main_window(app, tmp_path):
+    from odyn.app import style
+    from odyn.app.mcor_window import McorWindow
+
+    window = McorWindow("e1", tmp_path, [], print)
+    assert window.styleSheet() == style.window_stylesheet()
+    window.close()

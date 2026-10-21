@@ -1129,6 +1129,25 @@ def test_qc_lists_the_tests_of_this_users_experiments(tmp_path, monkeypatch):
     runs = my_tests(db, "tester", my_recordings(db, "tester"))["run"].tolist()
     assert runs == ["rigid", "s128_o64_d6", "rigid (all)"]
 
+    # One row per experiment, its files counted once, the cluster's test
+    # first among the runs to compare
+    from odyn.app.pane_qc import my_experiments
+
+    experiments = my_experiments(tests, db.main_folder, tmp_path / "base")
+    assert len(experiments) == 1
+    row = experiments.iloc[0]
+    top = db.groups[group_id].mcor_test_folder()
+    assert row["folder"] == str(top)
+    assert row["folders"] == [str(top), str(top / "rigid")]
+    assert [run.name for run in row["finished"]] == ["test", "rigid"]
+    assert row["finished"][0].corr_with_ref == 0.9
+    assert row["bytes"] == sum(
+        path.stat().st_size
+        for f in (top, top / "rigid")
+        for path in f.iterdir()
+        if path.is_file()
+    )
+
 
 def pd_isna(value) -> bool:
     import pandas as pd
@@ -1136,13 +1155,38 @@ def pd_isna(value) -> bool:
     return bool(pd.isna(value))
 
 
-def test_qc_opens_a_tests_files(window, tmp_path, monkeypatch):
+def a_video(path, frames=4, value=100) -> None:
+    """A small grayscale video at `path`."""
+    import cv2
+    import numpy as np
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(path), cv2.VideoWriter_fourcc(*"MJPG"), 10, (40, 32), isColor=False
+    )
+
+    for index in range(frames):
+        writer.write(np.full((32, 40), value + index, np.uint8))
+
+    writer.release()
+
+
+def test_qc_opens_an_experiments_files(window, tmp_path, monkeypatch):
     from PySide6.QtGui import QDesktopServices
 
     import gc
 
-    a_tested_experiment(tmp_path / "data")
+    db, group_id = a_tested_experiment(tmp_path / "data")
+    top = db.groups[group_id].mcor_test_folder()
+    del db
     gc.collect()  # its database (a cycle with its groups) closes in this thread
+
+    # Real videos: the raw one apart, and each finished run's test alone
+    for folder in (top, top / "rigid"):
+        (folder / "Group_1_e1_raw_test.avi").unlink()
+        a_video(folder / "Group_1_e1_test.avi")
+
+    a_video(top / "raw" / "Group_1_e1_raw.avi")
     opened = []
     monkeypatch.setattr(
         QDesktopServices, "openUrl", lambda url: opened.append(url) or True
@@ -1152,49 +1196,95 @@ def test_qc_opens_a_tests_files(window, tmp_path, monkeypatch):
     qc = window.qc
     qc.reload()
     settle(window.context)
-    assert len(qc.tests) == 3
 
-    # The rows' order is not shown twice: the date comes first
-    headers = [
-        qc.tests_view.model().headerData(i, Qt.Orientation.Horizontal)
-        for i in range(qc.tests_view.model().columnCount())
-    ]
-    assert headers[:2] == ["submitted_at", "path"]
-    assert not qc.show_folder.isEnabled()
+    # One row for the experiment, whatever its tests
+    rows = qc.experiments[["path", "status", "runs", "local"]].values.tolist()
+    assert rows == [["20260304/m1/e1", "ready to compare", "2 of 3 finished", "no"]]
+    assert qc.experiments["size"].iloc[0].endswith("B")
+    assert qc.download_all.text().startswith("Download all (1 experiment, ")
 
-    # Nothing opens from the share: a test is downloaded first
-    assert qc.tests["local"].tolist() == ["no", "", "no"]
-    assert qc.download_all.text().startswith("Download all (2 tests, ")
-    qc.tests_view.selectRow(0)  # the sweep's baseline
-    assert not qc.show_folder.isEnabled() and qc.download.isEnabled()
-    assert not qc.delete_local.isEnabled()
+    # Nothing opens from the share: an experiment is downloaded first
+    qc.tests_view.selectRow(0)
+    assert not qc.compare.isEnabled() and not qc.show_folder.isEnabled()
+    assert qc.download.isEnabled() and not qc.delete_local.isEnabled()
     qc.download.click()
     wait_until(lambda: qc.downloads is None)
     settle(window.context)
-    assert qc.tests["local"].tolist() == ["yes", "", "no"]
+    assert qc.experiments["local"].tolist() == ["yes"]
     assert window.cache_label.text() != "Local cache: 0 B"
+    local = window.context.cache_base / "cache"
+    assert len(list(local.rglob("*.avi"))) == 3
 
     qc.tests_view.selectRow(0)
     qc.show_folder.click()
-    qc.play_movie.click()
-    qc.show_report.click()
+    assert Path(opened[-1].toLocalFile()).name == top.name
 
-    names = [Path(url.toLocalFile()).name for url in opened]
-    assert names == ["rigid", "Group_1_e1_raw_test.avi", "shifts.png"]
-    local = window.context.cache_base / "cache"
-    assert all(Path(url.toLocalFile()).is_relative_to(local) for url in opened)
+    # The window: raw first, then the cluster's test, then the sweep's runs
+    qc.compare.click()
+    assert len(qc.windows) == 1
+    mcor = next(iter(qc.windows.values()))
+    grid = mcor.grid
+    assert [tile.video.name for tile in grid.tiles] == ["raw", "test", "rigid"]
+    assert grid.tiles[1].video.numbers.startswith("corr 0.900  flow 0.60 px")
+    assert all(tile.video.path.is_relative_to(local) for tile in grid.tiles)
+    wait_until(lambda: grid.frame_count == 4)
+    assert mcor.missing.text() == ""
 
-    # A run without its files yet has nothing to download or open
-    qc.tests_view.selectRow(1)
-    assert not qc.download.isEnabled() and not qc.play_movie.isEnabled()
+    # A run's plot, from its tile
+    assert not mcor.show_report.isEnabled()
+    grid.tiles[2].clicked.emit()
+    assert mcor.show_report.isEnabled()
+    mcor.show_report.click()
+    report = Path(opened[-1].toLocalFile())
+    assert report.name == "shifts.png" and report.parent.name == "rigid"
+    assert report.is_relative_to(local)
+    grid.tiles[0].clicked.emit()  # the raw video has no plot
+    assert not mcor.show_report.isEnabled()
 
-    # The local copy goes, the share's stays
-    qc.tests_view.selectRow(0)
+    # Opened again, the same window comes up
+    qc.compare.click()
+    assert list(qc.windows.values()) == [mcor]
+
+    # The local copy goes (its window with it), the share's stays
     qc.delete_local.click()
     settle(window.context)
-    assert qc.tests["local"].tolist() == ["no", "", "no"]
+    assert qc.windows == {}
+    assert qc.experiments["local"].tolist() == ["no"]
     assert window.cache_label.text() == "Local cache: 0 B"
-    assert (Path(qc.tests["folder"].iloc[0]) / "metrics.json").is_file()
+    assert (top / "metrics.json").is_file()
+
+
+def test_an_experiment_with_no_finished_test_is_not_compared(window, tmp_path):
+    import gc
+
+    db, group_id = a_tested_experiment(tmp_path / "data")
+    top = db.groups[group_id].mcor_test_folder()
+    del db
+    gc.collect()
+
+    # Only the sweep's run left, unfinished, and nothing to download
+    import shutil
+
+    from odyn.cluster import cluster_folder
+
+    cluster = cluster_folder(tmp_path / "data")
+    (cluster / "mcor" / f"{group_id}.json").unlink()
+    (cluster / "jobs" / f"odyn-sweep-main-g{group_id}-20.out").unlink()
+    shutil.rmtree(top)
+
+    window.context.set_user("tester")
+    qc = window.qc
+    qc.reload()
+    settle(window.context)
+    row = qc.experiments.iloc[0]
+    assert [row["status"], row["runs"], row["local"]] == [
+        "waiting for the cluster",
+        "0 of 2 finished",
+        "",
+    ]
+    qc.tests_view.selectRow(0)
+    assert not qc.download.isEnabled() and not qc.compare.isEnabled()
+    assert qc.download_all.text() == "Download all"
 
 
 def test_worker_runs_jobs_in_order(app, tmp_path):
@@ -2290,35 +2380,25 @@ def test_a_table_sorts_by_any_column_and_keeps_its_rows(app):
     assert [model.index_value(r) for r in range(4)] == [13, 12, 11, 10]
 
 
-def test_a_sorted_qc_list_still_opens_the_row_picked(window, tmp_path, monkeypatch):
-    import gc
+def test_a_sorted_qc_list_still_picks_the_row_selected(window):
+    import pandas as pd
 
-    from PySide6.QtGui import QDesktopServices
+    from odyn.app.pane_qc import EXPERIMENT_COLUMNS, EXPERIMENT_HIDDEN
 
-    a_tested_experiment(tmp_path / "data")
-    gc.collect()
-    opened = []
-    monkeypatch.setattr(
-        QDesktopServices, "openUrl", lambda url: opened.append(url) or True
-    )
-    window.context.set_user("tester")
     qc = window.qc
-    window.show_page(qc)
-    qc.reload()
-    settle(window.context)
-    qc.download_all.click()
-    wait_until(lambda: qc.downloads is None)
-    settle(window.context)
+    rows = [
+        dict.fromkeys([*EXPERIMENT_COLUMNS, *EXPERIMENT_HIDDEN], "")
+        | {"path": path, "local": "no", "folders": [], "bytes": 0}
+        for path in ("b", "c", "a")
+    ]
+    qc.experiments = pd.DataFrame(rows)
+    qc._model(qc.tests_view).set_frame(qc.experiments[EXPERIMENT_COLUMNS])
 
-    # Sorted by run name: s128_o64_d6, rigid, test (descending)
     view = qc.tests_view
-    view.sortByColumn(qc.tests.columns.get_loc("run"), Qt.SortOrder.DescendingOrder)
-    shown = [view.model().row_values(r)["run"] for r in range(3)]
-    assert shown == ["test", "s128_o64_d6", "rigid"]
-
-    view.selectRow(2)  # rigid
-    qc.show_folder.click()
-    assert Path(opened[-1].toLocalFile()).name == "rigid"
+    view.sortByColumn(EXPERIMENT_COLUMNS.index("path"), Qt.SortOrder.AscendingOrder)
+    assert [view.model().row_values(r)["path"] for r in range(3)] == ["a", "b", "c"]
+    view.selectRow(1)
+    assert [label for label, _ in qc._picked()] == ["b"]
 
 
 def test_a_date_shows_without_its_midnight_time():
