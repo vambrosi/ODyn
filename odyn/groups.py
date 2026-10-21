@@ -86,6 +86,14 @@ MCOR_TESTS_FOLDER = "mcor-tests"
 # and the black and white its videos share
 RAW_PREVIEW_FOLDER = "raw"
 RAW_LEVELS_FILE = "levels.json"
+
+# ... and the final correction's, beside it: one frame per acquisition, its
+# mean, raw (in `raw/`) and corrected (in `final/`), and how each matches the
+# reference
+FINAL_FOLDER = "final"
+MEANS_VIDEO = "means.avi"
+MEANS_TABLE = "means.csv"
+MEANS_FPS = 4
 DEFAULT_OVERLAP_UM = [96.0, 96.0]
 DEFAULT_MAX_SHIFT_UM = [80.0, 80.0]
 DEFAULT_MAX_DEVIATION_UM = 12.0
@@ -1816,6 +1824,7 @@ class Group(CallRecorder):
         # on every file would have, or rounding makes them differ slightly.
         min_mov = None
         self.clipped_values = self.saved_values = 0
+        self.means: list[tuple[int, str, np.ndarray, np.ndarray]] = []
         kept = set(report_positions)
         self.report_parts: dict[str, list] = {
             "raw": [],
@@ -1876,11 +1885,71 @@ class Group(CallRecorder):
                     "clipped_pct": round(share, 6),
                 }
             )
+            self._write_means(template, settings["max_shifts"])
 
         if is_test:
             # Record what caiman wrote so save_preview_movie can find it after a restart
             self.set_output({"mmap_names": [Path(p).name for p in self.mc.mmap_file]})
             self.test_mmap_paths = [Path(p) for p in self.mc.mmap_file]
+
+    def _write_means(self, reference: None | np.ndarray, max_shifts) -> None:
+        """
+        Every acquisition's mean, raw and corrected, as videos of one frame
+        per acquisition at full size, for checking each of them: `raw/means.avi`
+        and `final/means.avi` in the experiment's test folder, with the same
+        black and white, and `final/means.csv`, how well each mean matches the
+        reference (as a test's report measures it).
+        """
+        from .mcor_report import correlation
+
+        if not self.means:
+            return
+
+        acq_ids = np.array([m[0] for m in self.means])
+        raw = np.stack([m[2] for m in self.means])
+        final = np.stack([m[3] for m in self.means])
+        levels = tuple(float(v) for v in np.percentile(raw, [1, 99.5]))
+        first = self.experiments.iloc[0]
+        um_per_px = float(first["width_um"]) / int(first["width_px"])
+        folder = self.mcor_test_folder()
+
+        for name, stack in ((RAW_PREVIEW_FOLDER, raw), (FINAL_FOLDER, final)):
+            path = folder / name / MEANS_VIDEO
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _write_preview_movie(
+                path,
+                stack,
+                frame_rate=MEANS_FPS,
+                panels=[f"{name} mean"],
+                frame_acq=acq_ids,
+                um_per_px=um_per_px,
+                levels=levels,
+            )
+            self.add_output_file(path)
+
+        margin = max(int(v) for v in max_shifts) + 2
+        rows = [
+            {
+                "position": position,
+                "acq_id": acq_id,
+                "file": file,
+                "raw_corr_with_ref": (
+                    None
+                    if reference is None
+                    else round(correlation(raw_mean, reference, margin), 4)
+                ),
+                "final_corr_with_ref": (
+                    None
+                    if reference is None
+                    else round(correlation(final_mean, reference, margin), 4)
+                ),
+            }
+            for position, (acq_id, file, raw_mean, final_mean) in enumerate(self.means)
+        ]
+        table = folder / FINAL_FOLDER / MEANS_TABLE
+        pd.DataFrame(rows).to_csv(table, index=False)
+        self.add_output_file(table)
+        self.means = []
 
     def _keep_for_report(
         self, positions_in: list[int], acquisitions: pd.DataFrame, kept: set[int]
@@ -1958,11 +2027,21 @@ class Group(CallRecorder):
             mcor_folder.mkdir(parents=True, exist_ok=True)
             mcor_path = mcor_folder / (raw_path.stem + "_mcor.tif")
 
-            movie, clipped = as_raw(
-                np.asarray(cm.load(mmap_path)), tifffile.imread(raw_path)
-            )
+            raw = tifffile.imread(raw_path)
+            movie, clipped = as_raw(np.asarray(cm.load(mmap_path)), raw)
             self.clipped_values += clipped
             self.saved_values += movie.size
+
+            # Each acquisition's mean, raw and corrected, for checking them all
+            self.means.append(
+                (
+                    int(acq_id),
+                    raw_path.name,
+                    raw.mean(axis=0, dtype=np.float32),
+                    movie.mean(axis=0, dtype=np.float32),
+                )
+            )
+            del raw
 
             if clipped:
                 share = 100 * clipped / movie.size

@@ -240,6 +240,32 @@ def test_as_raw_rounds_and_counts_what_it_clips():
         as_raw(movie[:1], raw)
 
 
+def test_a_final_correction_leaves_each_acquisitions_mean_to_check(tmp_path, caiman):
+    import cv2
+
+    db, group_id = a_loop(tmp_path)
+    group = db.groups[group_id]
+    group.run_motion_correction(
+        use_gui_parameters=False, is_test=False, pw_rigid=False, batch_acqs=3
+    )
+
+    # One frame per acquisition, at full size, raw and corrected
+    folder = group.mcor_test_folder()
+
+    for name in ("raw", "final"):
+        video = cv2.VideoCapture(str(folder / name / "means.avi"))
+        assert int(video.get(cv2.CAP_PROP_FRAME_COUNT)) == 8
+        assert (video.get(cv2.CAP_PROP_FRAME_WIDTH), video.get(3 + 1)) == (40, 48)
+        video.release()
+
+    table = pd.read_csv(folder / "final" / "means.csv")
+    assert table["position"].tolist() == list(range(8))
+    assert table["acq_id"].tolist() == sorted(group.acquisitions.index)
+    assert table["raw_corr_with_ref"].between(-1, 1).all()
+    # The stand-in leaves the movies as they were
+    assert (table["final_corr_with_ref"] == table["raw_corr_with_ref"]).all()
+
+
 def test_without_a_reference_a_final_correction_is_one_batch(tmp_path, caiman):
     db, group_id = a_loop(tmp_path)
 
