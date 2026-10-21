@@ -282,8 +282,17 @@ def test_without_a_reference_a_final_correction_is_one_batch(tmp_path, caiman):
     assert caiman["templates"] == [None]
 
 
-def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
+def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman, monkeypatch):
+    import odyn.mcor_report as report
+
     db, group_id = a_loop(tmp_path)
+    titles = []
+    plot = report.plot_shifts
+    monkeypatch.setattr(
+        report,
+        "plot_shifts",
+        lambda *args: titles.append(args[-1]) or plot(*args),
+    )
 
     folder = db.groups[group_id].test_motion_correction(
         test_acqs=4, movie=False, side_by_side=True
@@ -304,6 +313,7 @@ def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):
         assert len(tif.pages) == 4  # pages, not one RGB image
     assert tifffile.imread(folder / "reference.tif").shape == (48, 40)
     assert (folder / "shifts.png").stat().st_size > 0
+    assert titles == [f"20260304/m1/e1 — group {group_id} — test"]
 
     # The stand-in leaves the movie as it was: the frames are compared with
     # the reference, and the motion left is measured, for every acquisition

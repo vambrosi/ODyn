@@ -74,6 +74,9 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
+# The plot of shifts' title, unless told which test it is
+TITLE = "Test motion correction"
+
 
 def write_report(
     folder: Path,
@@ -90,6 +93,7 @@ def write_report(
     patch_shifts: None | tuple[np.ndarray, np.ndarray] = None,
     keep_patch_shifts: bool = False,
     side_by_side: bool = False,
+    title: str = TITLE,
 ) -> list[Path]:
     """
     Write the report on one test into `folder` (see the module's description)
@@ -104,7 +108,8 @@ def write_report(
     `(frames, patches)`, which the patch jitter is measured from; with
     `keep_patch_shifts` they are saved in `shifts.npz` too (hundreds of
     megabytes at small patches). `settings` go into `metrics.json` as they
-    are.
+    are. `title` heads the plot of shifts, to tell one test's from another's
+    (`<experiment> — group <id> — <run>`).
     """
     folder.mkdir(parents=True, exist_ok=True)
     margin = max(max_shifts) + 2
@@ -237,7 +242,7 @@ def write_report(
             }
         ),
     )
-    plot_shifts(written["png"], shifts, frame_counts, rows, max_shifts)
+    plot_shifts(written["png"], shifts, frame_counts, rows, max_shifts, title)
 
     return list(written.values())
 
@@ -316,6 +321,7 @@ def plot_shifts(
     frame_counts: Sequence[int],
     rows: list[dict],
     max_shifts: Sequence[int],
+    title: str = TITLE,
 ) -> None:
     """
     The shifts of every frame (dy, dx), how each acquisition's frames match the
@@ -328,13 +334,13 @@ def plot_shifts(
     import matplotlib.pyplot as plt
 
     with plt.rc_context({"font.size": 12, "legend.fontsize": 11}):
-        _draw_shifts(plt, path, shifts, frame_counts, rows, max_shifts)
+        _draw_shifts(plt, path, shifts, frame_counts, rows, max_shifts, title)
 
 
-def _draw_shifts(plt, path, shifts, frame_counts, rows, max_shifts) -> None:
+def _draw_shifts(plt, path, shifts, frame_counts, rows, max_shifts, title) -> None:
     fig, axes = plt.subplots(4, 1, figsize=(14, 14), layout="constrained")
     fig.get_layout_engine().set(h_pad=0.25)
-    fig.suptitle("Test motion correction", fontsize=16)
+    fig.suptitle(title, fontsize=16)
     edges = np.cumsum(frame_counts)[:-1]
 
     for axis, (index, name) in zip(axes[:2], ((0, "dy"), (1, "dx"))):

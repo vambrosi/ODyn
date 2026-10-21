@@ -2234,6 +2234,8 @@ class Group(CallRecorder):
             patches = None
             shifts = np.asarray(self.mc.shifts_rig)
 
+        title = run or ("rigid (all)" if whole else "test")
+        where = ", ".join(str(path) for path in self.experiments["exp_path"])
         logger.info(f"Writing the test's report to {folder}")
         paths = write_report(
             folder,
@@ -2249,11 +2251,11 @@ class Group(CallRecorder):
             patch_shifts=patches,
             keep_patch_shifts=keep_patch_shifts,
             side_by_side=side_by_side,
+            title=f"{where} — group {self.group_id} — {title}",
         )
 
         if movie:
             levels = levels or self._raw_preview(acq_ids, movie_size)
-            title = run or ("rigid (all)" if whole else "test")
             paths.append(
                 self.save_preview_movie(
                     grid=["test"],
