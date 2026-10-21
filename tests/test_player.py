@@ -120,6 +120,17 @@ def test_selected_tiles_can_be_shown_alone(app, tmp_path):
     grid.show_all.click()
     assert [v.name for v in grid.visible()] == ["a", "b", "c"]
     assert [v.name for v in grid.selected] == ["a"]
+    assert grid.show_selected.text() == "Show selected (1)"
+    assert grid.position.text().endswith(f"/ {grid.frame_count}")  # not the 1
+
+    # All let go at once, and every tile shown again
+    grid.tiles[1].clicked.emit()
+    grid.show_selected.click()
+    assert grid.deselect_all.isEnabled()
+    grid.deselect_all.click()
+    assert grid.selected == [] and len(grid.visible()) == 3
+    assert not grid.deselect_all.isEnabled() and not grid.show_all.isEnabled()
+    assert grid.show_selected.text() == "Show selected"
     grid.close()
 
 

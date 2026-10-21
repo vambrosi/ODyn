@@ -10,7 +10,7 @@ corrections (and raw and final means) in.
   timer, one seek bar, play and pause, and a speed. The wheel zooms and a drag
   pans, on any tile, and every tile follows, so the same spot is compared.
   **Show selected** keeps the selected tiles only; **Show all** brings the
-  others back.
+  others back, still selected; **Deselect all** (or Esc) lets them all go.
 
 No database in here.
 """
@@ -24,7 +24,15 @@ from pathlib import Path
 import numpy as np
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPen
+from PySide6.QtGui import (
+    QColor,
+    QImage,
+    QKeySequence,
+    QPainter,
+    QPalette,
+    QPen,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QGridLayout,
@@ -349,21 +357,42 @@ class VideoGrid(QWidget):
         self.columns.valueChanged.connect(self._lay_out)
         self.show_selected = QPushButton("Show selected")
         self.show_selected.clicked.connect(lambda: self.filter_selected(True))
+        # As wide as with a count, so the row does not shift as it changes
+        widest = self.show_selected.fontMetrics().horizontalAdvance(
+            "Show selected (88)"
+        )
+        self.show_selected.setMinimumWidth(widest + 32)
         self.show_all = QPushButton("Show all")
+        self.show_all.setToolTip("Show every video again, the selection kept")
         self.show_all.clicked.connect(lambda: self.filter_selected(False))
+        self.deselect_all = QPushButton("Deselect all")
+        self.deselect_all.setToolTip("Deselect every video (Esc)")
+        self.deselect_all.clicked.connect(self.clear_selection)
+        escape = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        escape.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        escape.activated.connect(self.clear_selection)
         self.reset_view = QPushButton("Fit")
         self.reset_view.setToolTip("Zoom back out to the whole frame")
         self.reset_view.clicked.connect(self.fit)
 
         controls = QHBoxLayout()
-        controls.addWidget(self.play_button)
-        controls.addWidget(self.slider, stretch=1)
-        controls.addWidget(self.position)
-        controls.addWidget(self.speed)
-        controls.addWidget(self.columns)
-        controls.addWidget(self.reset_view)
-        controls.addWidget(self.show_selected)
-        controls.addWidget(self.show_all)
+        middle = Qt.AlignmentFlag.AlignVCenter
+
+        for widget, stretch in (
+            (self.play_button, 0),
+            (self.slider, 1),
+            (self.position, 0),
+            (self.speed, 0),
+            (self.columns, 0),
+            (self.reset_view, 0),
+            (self.show_selected, 0),
+            (self.show_all, 0),
+            (self.deselect_all, 0),
+        ):
+            # macOS lays a button out with room for its native look, which
+            # the stylesheet replaced: the widget itself, so the row lines up
+            widget.setAttribute(Qt.WidgetAttribute.WA_LayoutUsesWidgetRect)
+            controls.addWidget(widget, stretch, middle)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -479,8 +508,13 @@ class VideoGrid(QWidget):
         self.slider.setRange(0, max(0, count - 1))
         self.play_button.setEnabled(count > 1)
         self.slider.setEnabled(count > 1)
-        self.show_selected.setEnabled(any(t.selected for t in self.tiles))
+        picked = sum(t.selected for t in self.tiles)
+        self.show_selected.setEnabled(bool(picked))
+        self.show_selected.setText(
+            f"Show selected ({picked})" if picked else "Show selected"
+        )
         self.show_all.setEnabled(self.only_selected)
+        self.deselect_all.setEnabled(bool(picked))
 
         if count:
             self.position.setText(f"{self.index + 1} / {count}")
@@ -528,6 +562,17 @@ class VideoGrid(QWidget):
     @property
     def selected(self) -> list[Video]:
         return [tile.video for tile in self.tiles if tile.selected]
+
+    def clear_selection(self) -> None:
+        """Deselect every tile, and show them all."""
+        if not any(tile.selected for tile in self.tiles):
+            return
+
+        for tile in self.tiles:
+            tile.set_selected(False)
+
+        self.filter_selected(False)
+        self.selection_changed.emit()
 
     def filter_selected(self, only: bool) -> None:
         """Show the selected tiles only (`only`), or every tile again."""
