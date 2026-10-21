@@ -11,8 +11,9 @@ corrections (and raw and final means) in.
   pans, on any tile, and every tile follows, so the same spot is compared;
   zoomed in, the part shown fills the tile. The pointer over one tile shows as
   a cross at the same spot on the others.
-  **Show selected** keeps the selected tiles only; **Show all** brings the
-  others back, still selected; **Deselect all** (or Esc) lets them all go.
+  `filter_selected` shows the selected tiles only, or all again (still
+  selected); `clear_selection` lets them all go. The buttons and keys for
+  these are the window's (`mcor_window`).
 
 No database in here.
 """
@@ -29,11 +30,9 @@ from PySide6.QtCore import QPointF, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,
-    QKeySequence,
     QPainter,
     QPalette,
     QPen,
-    QShortcut,
 )
 from PySide6.QtWidgets import (
     QComboBox,
@@ -437,25 +436,12 @@ class VideoGrid(QWidget):
         self.columns.setRange(1, 8)
         self.columns.setPrefix("columns: ")
         self.columns.valueChanged.connect(self._lay_out)
-        self.show_selected = QPushButton("Show selected")
-        self.show_selected.clicked.connect(lambda: self.filter_selected(True))
-        # As wide as with a count, so the row does not shift as it changes
-        widest = self.show_selected.fontMetrics().horizontalAdvance(
-            "Show selected (88)"
-        )
-        self.show_selected.setMinimumWidth(widest + 32)
-        self.show_all = QPushButton("Show all")
-        self.show_all.setToolTip("Show every video again, the selection kept")
-        self.show_all.clicked.connect(lambda: self.filter_selected(False))
-        self.deselect_all = QPushButton("Deselect all")
-        self.deselect_all.setToolTip("Deselect every video (Esc)")
-        self.deselect_all.clicked.connect(self.clear_selection)
-        escape = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
-        escape.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        escape.activated.connect(self.clear_selection)
-        self.reset_view = QPushButton("Fit")
-        self.reset_view.setToolTip("Zoom back out to the whole frame")
-        self.reset_view.clicked.connect(self.fit)
+
+        # The keys belong to the window's shortcuts (Space, arrows), not to
+        # whichever control was clicked last
+        self.play_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.speed.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         controls = QHBoxLayout()
         middle = Qt.AlignmentFlag.AlignVCenter
@@ -466,10 +452,6 @@ class VideoGrid(QWidget):
             (self.position, 0),
             (self.speed, 0),
             (self.columns, 0),
-            (self.reset_view, 0),
-            (self.show_selected, 0),
-            (self.show_all, 0),
-            (self.deselect_all, 0),
         ):
             # macOS lays a button out with room for its native look, which
             # the stylesheet replaced: the widget itself, so the row lines up
@@ -583,6 +565,16 @@ class VideoGrid(QWidget):
         count = self.frame_count
         self.seek((self.index + self.stride) % count if count else 0)
 
+    def step_by(self, frames: int) -> None:
+        """Pause, and go `frames` forward (back when negative)."""
+        self.pause()
+        self.seek(self.index + frames)
+
+    def change_speed(self, by: int) -> None:
+        """Go `by` speeds faster (slower when negative), within `SPEEDS`."""
+        index = min(max(self.speed.currentIndex() + by, 0), len(SPEEDS) - 1)
+        self.speed.setCurrentIndex(index)
+
     def _set_speed(self, *_) -> None:
         """Up to the screen's refresh one frame at a time, then in strides."""
         fps = SPEEDS[self.speed.currentIndex()]
@@ -594,13 +586,6 @@ class VideoGrid(QWidget):
         self.slider.setRange(0, max(0, count - 1))
         self.play_button.setEnabled(count > 1)
         self.slider.setEnabled(count > 1)
-        picked = sum(t.selected for t in self.tiles)
-        self.show_selected.setEnabled(bool(picked))
-        self.show_selected.setText(
-            f"Show selected ({picked})" if picked else "Show selected"
-        )
-        self.show_all.setEnabled(self.only_selected)
-        self.deselect_all.setEnabled(bool(picked))
 
         if count:
             self.position.setText(f"{self.index + 1} / {count}")
@@ -680,13 +665,13 @@ class VideoGrid(QWidget):
             tile.set_selected(False)
 
         self.filter_selected(False)
-        self.selection_changed.emit()
 
     def filter_selected(self, only: bool) -> None:
         """Show the selected tiles only (`only`), or every tile again."""
         self.only_selected = only and any(t.selected for t in self.tiles)
         self._lay_out()
         self._enable()
+        self.selection_changed.emit()
 
     def visible(self) -> list[Video]:
         return [tile.video for tile in self.tiles if not tile.isHidden()]

@@ -1,11 +1,16 @@
 """
 The window an experiment's motion correction is checked in, opened from the
-QC page, with a tab per step. For now one: **Tests**, the raw video and
-every finished run's test video side by side, playing in step (`player`),
-each with its numbers. A click selects a tile; **Show selected** keeps the
-selected ones; **Show report** opens the selected run's plot of shifts;
-**Pick candidate** has every acquisition corrected with the selected run's
-settings (see `cluster.pick_candidate`).
+QC page. As the main window: the steps on a bar at the left (Full run,
+Tests, Final), a page each, and the tools of the page on a bar at the right,
+each with its shortcut (in its tooltip).
+
+**Tests** shows the raw video and every finished run's test video side by
+side, playing in step (`player`), each with its numbers. A click selects a
+tile. The tools: Fit, Mirrored pointer, Selected only, Clear selection, the
+report of the selected run (its plot of shifts), and Pick candidate, which
+has every acquisition corrected with the selected run settings (see
+`cluster.pick_candidate`). Space plays, the arrows step (Shift: 10 frames),
+`[` and `]` change the speed.
 
 Everything is opened from the experiment's local copy (`cache`): played from
 the share, a video is slow.
@@ -19,13 +24,21 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtCore import QSize, Qt, QUrl, Signal
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QDesktopServices,
+    QKeySequence,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QPushButton,
-    QTabWidget,
+    QSizePolicy,
+    QStackedWidget,
+    QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -33,6 +46,7 @@ from PySide6.QtWidgets import (
 from ..groups import RAW_PREVIEW_FOLDER
 from . import style
 from .player import Video, VideoGrid
+from .symbols import icon
 
 # Where the raw video is in experiment folders from before `raw/`: the
 # sweep's baseline
@@ -148,42 +162,144 @@ class McorWindow(QWidget):
         self.runs: dict[str, Run] = {}  # each tile's run, by the tile's name
 
         self.state = QLabel("")
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
+        self.pages = QStackedWidget()
+        middle = QHBoxLayout()
+        middle.setContentsMargins(0, 0, 0, 0)
+        middle.setSpacing(0)
+        self.left = self._bar("Steps", middle)
+        middle.addWidget(self.pages, stretch=1)
+        self.right = self._bar("Tools", middle)
+
         layout = QVBoxLayout(self)
         layout.addWidget(self.state)
-        layout.addWidget(self.tabs)
+        layout.addLayout(middle, stretch=1)
+
+        # The steps, in the order of the work; only Tests has a page so far
+        self.steps = QActionGroup(self)
+        self.full_run_action = self._action(
+            self.left, "full-run", "Full run", "Ctrl+1", checkable=True
+        )
+        self.tests_action = self._action(
+            self.left, "tests", "Tests", "Ctrl+2", checkable=True
+        )
+        self.final_action = self._action(
+            self.left, "final", "Final", "Ctrl+3", checkable=True
+        )
+
+        for action in (self.full_run_action, self.tests_action, self.final_action):
+            self.steps.addAction(action)
+
+        self.full_run_action.setEnabled(False)
+        self.final_action.setEnabled(False)
+        self.tests_action.setChecked(True)
 
         tests = QWidget()
         tests_layout = QVBoxLayout(tests)
-        tests_layout.setContentsMargins(0, 0, 0, 0)
+        tests_layout.setContentsMargins(8, 0, 8, 0)
         self.grid = VideoGrid()
         self.grid.selection_changed.connect(self._enable)
         tests_layout.addWidget(self.grid, stretch=1)
-
-        row = QHBoxLayout()
         self.missing = QLabel("")
-        self.show_report = QPushButton("Show report")
-        self.show_report.setToolTip("Open shifts report for this run")
-        self.show_report.clicked.connect(self._show_report)
-        self.pick_button = QPushButton("Pick candidate")
-        self.pick_button.setToolTip(
-            "Motion correct every acquisition with this run's settings"
+        tests_layout.addWidget(self.missing)
+        self.pages.addWidget(tests)
+
+        # The tools
+        self.fit_action = self._action(self.right, "fit", "Fit (zoom out)", "0")
+        self.fit_action.triggered.connect(self.grid.fit)
+        self.pointer_action = self._action(
+            self.right, "pointer", "Mirrored pointer", "H", checkable=True
         )
-        self.pick_button.clicked.connect(self._pick)
-        self.pick_button.setVisible(pick is not None)
-        row.addWidget(self.missing, stretch=1)
-        row.addWidget(self.show_report)
-        row.addWidget(self.pick_button)
-        tests_layout.addLayout(row)
-        index = self.tabs.addTab(tests, "Tests")
-        self.tabs.setTabToolTip(index, "The raw video and each test run, side by side")
+        self.pointer_action.setChecked(self.grid.view.mirror)
+        self.pointer_action.toggled.connect(self.grid.set_mirror)
+        self.only_action = self._action(
+            self.right, "selected-only", "Selected only", "F", checkable=True
+        )
+        self.only_action.toggled.connect(self.grid.filter_selected)
+        self.clear_action = self._action(
+            self.right, "clear-selection", "Clear selection", "Esc"
+        )
+        self.clear_action.triggered.connect(self.grid.clear_selection)
+        self.right.addSeparator()
+        self.report_action = self._action(
+            self.right, "report", "Open the report of the selected run", "R"
+        )
+        self.report_action.triggered.connect(self._show_report)
+        self._foot(self.right)
+        self.pick_action = self._action(
+            self.right,
+            "pick",
+            "Pick candidate: motion correct every acquisition with the "
+            "selected run settings",
+            "Ctrl+Return",
+        )
+        self.pick_action.triggered.connect(self._pick)
+        self.pick_action.setVisible(pick is not None)
+
+        # The transport, from the keyboard
+        for key, do in (
+            ("Space", self.grid.toggle),
+            ("Right", lambda: self.grid.step_by(1)),
+            ("Left", lambda: self.grid.step_by(-1)),
+            ("Shift+Right", lambda: self.grid.step_by(10)),
+            ("Shift+Left", lambda: self.grid.step_by(-10)),
+            ("]", lambda: self.grid.change_speed(1)),
+            ("[", lambda: self.grid.change_speed(-1)),
+        ):
+            QShortcut(QKeySequence(key), self).activated.connect(do)
 
         full = QShortcut(QKeySequence(QKeySequence.StandardKey.FullScreen), self)
         full.activated.connect(self._toggle_full_screen)
 
         self.set_runs(runs)
         self.resize(1200, 800)
+
+    # ----------------------------------------------------------------------- #
+    # The bars
+    # ----------------------------------------------------------------------- #
+
+    def _bar(self, name: str, row: QHBoxLayout) -> QToolBar:
+        """A vertical bar of icons, as the main window has them."""
+        bar = QToolBar(name)
+        bar.setOrientation(Qt.Orientation.Vertical)
+        bar.setMovable(False)
+        bar.setIconSize(QSize(style.BAR_ICON_PX, style.BAR_ICON_PX))
+        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        holder = QWidget()
+        holder_layout = QVBoxLayout(holder)
+        holder_layout.setContentsMargins(*style.BAR_MARGINS)
+        holder_layout.addWidget(bar)
+        row.addWidget(holder)
+
+        return bar
+
+    def _foot(self, bar: QToolBar) -> None:
+        """Push what follows to the bottom of the bar."""
+        filler = QWidget()
+        filler.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        bar.addWidget(filler)
+
+    def _action(
+        self, bar: QToolBar, symbol: str, title: str, key: str, checkable=False
+    ) -> QAction:
+        """A bar button with its shortcut, named in its tooltip."""
+        action = QAction(icon(symbol), "", self)
+        sequence = QKeySequence(key)
+        action.setShortcut(sequence)
+        action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        native = sequence.toString(QKeySequence.SequenceFormat.NativeText)
+        action.setToolTip(f"{title} ({native})")
+        action.setCheckable(checkable)
+        bar.addAction(action)
+        button = bar.widgetForAction(action)
+
+        if isinstance(button, QToolButton):
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        return action
+
+    # ----------------------------------------------------------------------- #
+    # Videos
+    # ----------------------------------------------------------------------- #
 
     def set_runs(self, runs: list[Run]) -> None:
         """Show the raw video and `runs`' test videos, those downloaded."""
@@ -227,10 +343,16 @@ class McorWindow(QWidget):
 
     def _enable(self, *_) -> None:
         run = self._picked_run()
-        self.show_report.setEnabled(
+        any_selected = bool(self.grid.selected)
+        self.report_action.setEnabled(
             run is not None and (run.folder / "shifts.png").is_file()
         )
-        self.pick_button.setEnabled(run is not None)
+        self.pick_action.setEnabled(run is not None)
+        self.clear_action.setEnabled(any_selected)
+        self.only_action.setEnabled(any_selected or self.grid.only_selected)
+        self.only_action.blockSignals(True)
+        self.only_action.setChecked(self.grid.only_selected)
+        self.only_action.blockSignals(False)
 
     def _pick(self) -> None:
         run = self._picked_run()

@@ -1231,15 +1231,15 @@ def test_qc_opens_an_experiments_files(window, tmp_path, monkeypatch):
     assert mcor.missing.text() == ""
 
     # A run's plot, from its tile
-    assert not mcor.show_report.isEnabled()
+    assert not mcor.report_action.isEnabled()
     grid.tiles[2].clicked.emit()
-    assert mcor.show_report.isEnabled()
-    mcor.show_report.click()
+    assert mcor.report_action.isEnabled()
+    mcor.report_action.trigger()
     report = Path(opened[-1].toLocalFile())
     assert report.name == "shifts.png" and report.parent.name == "rigid"
     assert report.is_relative_to(local)
     grid.tiles[0].clicked.emit()  # the raw video has no plot
-    assert not mcor.show_report.isEnabled()
+    assert not mcor.report_action.isEnabled()
 
     # Opened again, the same window comes up
     qc.compare.click()
@@ -1291,11 +1291,11 @@ def test_a_test_is_picked_from_the_window(window, tmp_path, monkeypatch):
     assert mcor.state.text() == "Status: ready to compare"
 
     # One run picked, never raw
-    assert not mcor.pick_button.isEnabled()
+    assert not mcor.pick_action.isEnabled()
     names = [tile.video.name for tile in mcor.grid.tiles]
     mcor.grid.tiles[names.index("rigid")].clicked.emit()
-    assert mcor.pick_button.isEnabled()
-    mcor.pick_button.click()
+    assert mcor.pick_action.isEnabled()
+    mcor.pick_action.trigger()
     settle(window.context)
 
     message, action, parent = asked[-1]
@@ -1312,7 +1312,7 @@ def test_a_test_is_picked_from_the_window(window, tmp_path, monkeypatch):
     sent.write_text(json.dumps({**json.loads(sent.read_text()), "whole": True}))
     log = sent.parent.parent / "jobs" / f"odyn-mcor-main-g{group_id}-11.out"
     log.write_text("started  ...\n")
-    mcor.pick_button.click()
+    mcor.pick_action.trigger()
     settle(window.context)
     boxes = [box for box in mcor.findChildren(QMessageBox) if box.isVisible()]
     assert len(boxes) == 1 and "has not finished yet" in boxes[0].text()

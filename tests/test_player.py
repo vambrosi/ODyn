@@ -5,7 +5,8 @@ import time
 import numpy as np
 import pytest
 
-from PySide6.QtCore import QEventLoop, QPointF
+from PySide6.QtCore import QEventLoop, QPointF, Qt
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QApplication
 
 from odyn.app.player import Video, VideoGrid, read_frames
@@ -17,15 +18,20 @@ def app():
 
 
 def a_video(path, frames=6, height=40, width=60):
-    """Frame i is a flat gray of 20 * (i + 1), so frames can be told apart."""
+    """
+    Frame i is a flat gray of 20 * (i + 1) (round 255), so frames can be told
+    apart.
+    """
     import cv2
+
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     writer = cv2.VideoWriter(
         str(path), cv2.VideoWriter_fourcc(*"MJPG"), 10, (width, height), isColor=False
     )
 
     for i in range(frames):
-        writer.write(np.full((height, width), 20 * (i + 1), np.uint8))
+        writer.write(np.full((height, width), 20 * (i + 1) % 256, np.uint8))
 
     writer.release()
 
@@ -171,30 +177,27 @@ def test_selected_tiles_can_be_shown_alone(app, tmp_path):
     loaded(grid)
     grid.show()
 
-    assert not grid.show_selected.isEnabled()
+    grid.filter_selected(True)  # nothing selected: nothing to filter
+    assert not grid.only_selected
     grid.tiles[0].clicked.emit()
     grid.tiles[2].clicked.emit()
     assert [v.name for v in grid.selected] == ["a", "c"]
 
-    grid.show_selected.click()
+    grid.filter_selected(True)
     assert [v.name for v in grid.visible()] == ["a", "c"]
-    assert grid.show_all.isEnabled()
 
     grid.tiles[2].clicked.emit()  # let one go
-    grid.show_all.click()
+    grid.filter_selected(False)
     assert [v.name for v in grid.visible()] == ["a", "b", "c"]
     assert [v.name for v in grid.selected] == ["a"]
-    assert grid.show_selected.text() == "Show selected (1)"
-    assert grid.position.text().endswith(f"/ {grid.frame_count}")  # not the 1
+    assert grid.position.text().endswith(f"/ {grid.frame_count}")
 
     # All let go at once, and every tile shown again
     grid.tiles[1].clicked.emit()
-    grid.show_selected.click()
-    assert grid.deselect_all.isEnabled()
-    grid.deselect_all.click()
+    grid.filter_selected(True)
+    grid.clear_selection()
     assert grid.selected == [] and len(grid.visible()) == 3
-    assert not grid.deselect_all.isEnabled() and not grid.show_all.isEnabled()
-    assert grid.show_selected.text() == "Show selected"
+    assert not grid.only_selected
     grid.close()
 
 
@@ -243,4 +246,65 @@ def test_the_qc_window_looks_as_the_main_window(app, tmp_path):
 
     window = McorWindow("e1", tmp_path, [], print)
     assert window.styleSheet() == style.window_stylesheet()
+
+    # The steps at the left, Tests the only one with a page so far
+    steps = [a for a in window.left.actions() if not a.isSeparator()]
+    assert [a.toolTip() for a in steps] == [
+        f"{name} ({QKeySequence(key).toString(QKeySequence.SequenceFormat.NativeText)})"
+        for name, key in (
+            ("Full run", "Ctrl+1"),
+            ("Tests", "Ctrl+2"),
+            ("Final", "Ctrl+3"),
+        )
+    ]
+    assert [a.isEnabled() for a in steps] == [False, True, False]
+    assert window.tests_action.isChecked()
+
+    # Every tool says its key
+    tools = [a for a in window.right.actions() if a.toolTip()]
+    assert all(a.toolTip().endswith(")") for a in tools)
+    assert window.fit_action.shortcut() == QKeySequence("0")
+    window.close()
+
+
+def test_the_qc_window_is_driven_from_the_keyboard(app, tmp_path):
+    from PySide6.QtTest import QTest
+
+    from odyn.app.mcor_window import McorWindow, Run
+
+    a_video(tmp_path / "raw" / "e1_raw.avi", frames=30)
+    a_video(tmp_path / "e1_test.avi", frames=30)
+    window = McorWindow("e1", tmp_path, [Run("test", tmp_path)], print)
+    window.show()
+    window.activateWindow()
+    grid = window.grid
+    loaded(grid)
+
+    QTest.keyClick(window, Qt.Key.Key_Right)
+    assert grid.index == 1
+    QTest.keyClick(window, Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier)
+    assert grid.index == 11
+    QTest.keyClick(window, Qt.Key.Key_Left)
+    assert grid.index == 10
+    QTest.keyClick(window, Qt.Key.Key_BracketRight)
+    assert grid.speed.currentText() == "20 frames/s"
+    QTest.keyClick(window, Qt.Key.Key_Space)
+    assert grid.timer.isActive()
+    QTest.keyClick(window, Qt.Key.Key_Space)
+    assert not grid.timer.isActive()
+
+    # Selected only and Clear selection follow the selection
+    assert not window.only_action.isEnabled() and not window.clear_action.isEnabled()
+    grid.tiles[1].clicked.emit()
+    assert window.report_action.isEnabled() is False  # no plot in this folder
+    QTest.keyClick(window, Qt.Key.Key_F)
+    assert window.only_action.isChecked() and [v.name for v in grid.visible()] == [
+        "test"
+    ]
+    QTest.keyClick(window, Qt.Key.Key_Escape)
+    assert grid.selected == [] and not window.only_action.isChecked()
+    assert len(grid.visible()) == 2
+
+    QTest.keyClick(window, Qt.Key.Key_H)
+    assert grid.view.mirror is False
     window.close()

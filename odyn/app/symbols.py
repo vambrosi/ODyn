@@ -103,6 +103,16 @@ GLYPHS = {
     "panel-restore": ("close_fullscreen", "", "-"),
     "form-open": ("right_panel_open", "", "<"),
     "form-close": ("right_panel_close", "", ">"),
+    # The motion correction window (`mcor_window`)
+    "full-run": ("movie", "", "f"),
+    "tests": ("grid_view", "", "t"),
+    "final": ("approval", "", "v"),
+    "fit": ("fit_screen", "", "0"),
+    "pointer": ("my_location", "", "+"),
+    "selected-only": ("filter_center_focus", "", "s"),
+    "clear-selection": ("deselect", "", "-"),
+    "report": ("monitoring", "", "r"),
+    "pick": ("check_circle", "", "p"),
 }
 
 
