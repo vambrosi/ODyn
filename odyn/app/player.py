@@ -8,7 +8,9 @@ corrections (and raw and final means) in.
   A click selects it (its border lights up) or lets it go.
 - `VideoGrid` lays the tiles out, `columns` wide, and plays them together: one
   timer, one seek bar, play and pause, and a speed. The wheel zooms and a drag
-  pans, on any tile, and every tile follows, so the same spot is compared.
+  pans, on any tile, and every tile follows, so the same spot is compared;
+  zoomed in, the part shown fills the tile. The pointer over one tile shows as
+  a cross at the same spot on the others.
   **Show selected** keeps the selected tiles only; **Show all** brings the
   others back, still selected; **Deselect all** (or Esc) lets them all go.
 
@@ -47,9 +49,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-# How fast the videos can play, in frames per second
-SPEEDS = (2, 5, 10, 20, 30)
+# How fast the videos can play, in frames per second. Screens refresh near
+# 60 Hz, so faster speeds step more than one frame per refresh
+SPEEDS = (10, 20, 30, 60, 120, 240)
 DEFAULT_SPEED = 10
+MAX_REFRESH = 60
+
+# The mirrored pointer: the arms of its cross, in px, and its colors
+CROSS_PX = 8
+CROSS_COLOR = QColor(0, 255, 160)
+CROSS_EDGE = QColor(0, 0, 0)
 
 # How far the wheel zooms per step, and the most it zooms in
 ZOOM_STEP = 1.25
@@ -129,10 +138,17 @@ class FrameReader(QThread):
 
 @dataclass
 class View:
-    """What every tile shows of its frame: a zoom and the point at the middle."""
+    """
+    What every tile shows of its frame: a zoom and the point at the middle,
+    and where the pointer is (as a fraction of the frame, over which tile),
+    mirrored on the others with `mirror`.
+    """
 
     zoom: float = 1.0
     center: QPointF = field(default_factory=lambda: QPointF(0.5, 0.5))
+    pointer: None | QPointF = None
+    pointer_tile: None | object = None
+    mirror: bool = True
 
 
 class VideoTile(QWidget):
@@ -141,6 +157,7 @@ class VideoTile(QWidget):
     clicked = Signal()
     zoomed = Signal(float, QPointF)  # by how much, at which point of the frame
     panned = Signal(QPointF)  # by how much, as a fraction of the frame
+    hovered = Signal(object)  # the pointer, as a fraction of the frame, or None
 
     def __init__(self, video: Video, view: View, parent=None):
         super().__init__(parent)
@@ -149,11 +166,12 @@ class VideoTile(QWidget):
         self.index = 0
         self.selected = False
         self._image: None | QImage = None
+        self.problem = ""  # why the video could not be read
         self._press: None | QPointF = None
         self._dragged = False
         self.setMinimumSize(120, 120)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setToolTip(f"{video.name}\n{video.numbers}".strip())
+        self.setMouseTracking(True)  # for the mirrored pointer
 
     @property
     def frame_count(self) -> int:
@@ -177,8 +195,7 @@ class VideoTile(QWidget):
     def numbers_fit(self, name: None | str = None) -> bool:
         """
         Whether the numbers fit beside the name (`name`, or the video's), on
-        the tile's top line; when not, they are left out (the tooltip has
-        them).
+        the tile's top line; when not, they are left out.
         """
         if not self.video.numbers:
             return False
@@ -193,13 +210,33 @@ class VideoTile(QWidget):
         self.selected = selected
         self.update()
 
+    def _inner(self) -> QRectF:
+        """The tile under its top line: where the frame goes."""
+        return QRectF(self.rect()).adjusted(
+            BORDER_PX, BORDER_PX + 18, -BORDER_PX, -BORDER_PX
+        )
+
     def source_rect(self) -> QRectF:
-        """The part of the frame shown, at the view's zoom and center."""
+        """
+        The part of the frame shown, at the view's zoom and center. Zoomed in,
+        it widens (or heightens) to the tile's shape, as far as the frame
+        goes, so the tile is filled.
+        """
         if self._image is None:
             return QRectF()
 
         width, height = self._image.width(), self._image.height()
         w, h = width / self.view.zoom, height / self.view.zoom
+        inner = self._inner()
+
+        if self.view.zoom > 1 and inner.width() > 0 and inner.height() > 0:
+            shape = inner.width() / inner.height()
+
+            if w / h < shape:
+                w = min(width, h * shape)
+            else:
+                h = min(height, w / shape)
+
         x = min(max(self.view.center.x() * width - w / 2, 0), width - w)
         y = min(max(self.view.center.y() * height - h / 2, 0), height - h)
 
@@ -207,9 +244,7 @@ class VideoTile(QWidget):
 
     def target_rect(self) -> QRectF:
         """Where the frame goes in the tile: as large as fits, kept in shape."""
-        inner = QRectF(self.rect()).adjusted(
-            BORDER_PX, BORDER_PX + 18, -BORDER_PX, -BORDER_PX
-        )
+        inner = self._inner()
         source = self.source_rect()
 
         if source.isEmpty() or inner.isEmpty():
@@ -253,6 +288,8 @@ class VideoTile(QWidget):
                 self.video.numbers,
             )
 
+        self._draw_pointer(painter)
+
         if self.selected:
             pen = QPen(palette.color(QPalette.ColorRole.Highlight), BORDER_PX)
             painter.setPen(pen)
@@ -260,6 +297,41 @@ class VideoTile(QWidget):
             painter.drawRect(QRectF(self.rect()).adjusted(half, half, -half, -half))
 
         painter.end()
+
+    def tile_point(self, point: QPointF) -> None | QPointF:
+        """Where a point of the frame (as a fraction) is in the tile, if shown."""
+        target, source = self.target_rect(), self.source_rect()
+
+        if self._image is None or source.isEmpty():
+            return None
+
+        x = point.x() * self._image.width()
+        y = point.y() * self._image.height()
+
+        if not source.contains(QPointF(x, y)):
+            return None
+
+        return QPointF(
+            target.x() + (x - source.x()) / source.width() * target.width(),
+            target.y() + (y - source.y()) / source.height() * target.height(),
+        )
+
+    def _draw_pointer(self, painter: QPainter) -> None:
+        """The pointer over another tile, as a cross at the same frame point."""
+        view = self.view
+
+        if not view.mirror or view.pointer is None or view.pointer_tile is self:
+            return
+
+        at = self.tile_point(view.pointer)
+
+        if at is None:
+            return
+
+        for color, width in ((CROSS_EDGE, 3), (CROSS_COLOR, 1.5)):
+            painter.setPen(QPen(color, width))
+            painter.drawLine(at - QPointF(CROSS_PX, 0), at + QPointF(CROSS_PX, 0))
+            painter.drawLine(at - QPointF(0, CROSS_PX), at + QPointF(0, CROSS_PX))
 
     def _frame_point(self, position: QPointF) -> QPointF:
         """A point of the tile as a fraction of the frame."""
@@ -284,6 +356,11 @@ class VideoTile(QWidget):
             self._dragged = False
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt's name)
+        if self._image is not None and self.target_rect().contains(event.position()):
+            self.hovered.emit(self._frame_point(event.position()))
+        else:
+            self.hovered.emit(None)
+
         if self._press is None or self._image is None:
             return
 
@@ -306,6 +383,10 @@ class VideoTile(QWidget):
                     / self._image.height(),
                 )
             )
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 (Qt's name)
+        self.hovered.emit(None)
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt's name)
         if self._press is not None and not self._dragged:
@@ -332,6 +413,7 @@ class VideoGrid(QWidget):
         self.reader: None | FrameReader = None
         self.index = 0
 
+        self.stride = 1  # frames per step of the timer (see `_set_speed`)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._step)
 
@@ -415,7 +497,7 @@ class VideoGrid(QWidget):
             tile.deleteLater()
 
         self.tiles = []
-        self.view = View()
+        self.view = View(mirror=self.view.mirror)
         self.only_selected = False
 
         for video in videos:
@@ -423,6 +505,7 @@ class VideoGrid(QWidget):
             tile.clicked.connect(lambda t=tile: self._toggle(t))
             tile.zoomed.connect(self._zoom)
             tile.panned.connect(self._pan)
+            tile.hovered.connect(lambda point, t=tile: self._hover(t, point))
             self.tiles.append(tile)
 
         self.columns.blockSignals(True)
@@ -460,7 +543,7 @@ class VideoGrid(QWidget):
     def _failed(self, index: int, problem: str) -> None:
         tile = self.tiles[index]
         tile.video.numbers = "could not be read"
-        tile.setToolTip(problem)
+        tile.problem = problem
         tile.update()
 
     # ----------------------------------------------------------------------- #
@@ -498,10 +581,13 @@ class VideoGrid(QWidget):
 
     def _step(self) -> None:
         count = self.frame_count
-        self.seek((self.index + 1) % count if count else 0)
+        self.seek((self.index + self.stride) % count if count else 0)
 
     def _set_speed(self, *_) -> None:
-        self.timer.setInterval(int(1000 / SPEEDS[self.speed.currentIndex()]))
+        """Up to the screen's refresh one frame at a time, then in strides."""
+        fps = SPEEDS[self.speed.currentIndex()]
+        self.stride = max(1, round(fps / MAX_REFRESH))
+        self.timer.setInterval(int(1000 * self.stride / fps))
 
     def _enable(self) -> None:
         count = self.frame_count
@@ -522,6 +608,28 @@ class VideoGrid(QWidget):
     # ----------------------------------------------------------------------- #
     # Zoom, pan, selection
     # ----------------------------------------------------------------------- #
+
+    def _hover(self, tile: VideoTile, point: None | QPointF) -> None:
+        """Mirror the pointer over `tile` on the others."""
+        view = self.view
+
+        if point is None and view.pointer_tile is not tile:
+            return  # left a tile after entering the next
+
+        view.pointer = point
+        view.pointer_tile = None if point is None else tile
+
+        if view.mirror:
+            for other in self.tiles:
+                if other is not tile:
+                    other.update()
+
+    def set_mirror(self, on: bool) -> None:
+        """Show the pointer over one tile on the others, or not."""
+        self.view.mirror = on
+
+        for tile in self.tiles:
+            tile.update()
 
     def _zoom(self, step: float, at: QPointF) -> None:
         old = self.view.zoom

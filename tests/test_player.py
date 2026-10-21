@@ -88,16 +88,80 @@ def test_zoom_and_pan_follow_on_every_tile(app, tmp_path):
     loaded(grid)
     first, second = grid.tiles
 
+    for tile in (first, second):
+        tile.resize(186, 144)  # inside: 180 x 120, the frame's shape (60 x 40)
+
     first.zoomed.emit(4.0, QPointF(0.25, 0.25))
     assert second.view.zoom == 4.0
     assert first.source_rect() == second.source_rect()
     assert first.source_rect().width() == pytest.approx(15)
 
+    # Zoomed in, a tile of another shape is filled: the part shown takes its
+    # shape, as far as the frame goes
+    for tile in (first, second):
+        tile.resize(366, 144)  # inside: 360 x 120, three times wider than high
+
+    shown = first.source_rect()
+    assert (shown.width(), shown.height()) == (pytest.approx(30), pytest.approx(10))
+    assert first.target_rect().width() == pytest.approx(360)
+
     first.panned.emit(QPointF(-1, -1))  # as far as it goes: the corner
     assert second.source_rect().topLeft().x() == pytest.approx(0)
 
     grid.fit()
-    assert second.source_rect().width() == pytest.approx(60)
+    assert second.source_rect().width() == pytest.approx(60)  # whole, at 1
+    grid.close()
+
+
+def test_the_pointer_shows_on_every_other_tile(app, tmp_path):
+    grid = VideoGrid()
+    grid.set_videos([Video(n, a_video(tmp_path / f"{n}.avi")) for n in "ab"])
+    loaded(grid)
+    first, second = grid.tiles
+
+    for tile in (first, second):
+        tile.resize(186, 144)
+
+    first.hovered.emit(QPointF(0.5, 0.25))
+    assert grid.view.pointer == QPointF(0.5, 0.25)
+    assert grid.view.pointer_tile is first
+    at = second.tile_point(grid.view.pointer)
+    target = second.target_rect()
+    assert at.x() == pytest.approx(target.x() + 90)
+    assert at.y() == pytest.approx(target.y() + 30)
+
+    # Leaving a tile after entering the next keeps the next one's
+    second.hovered.emit(QPointF(0.1, 0.1))
+    first.hovered.emit(None)
+    assert grid.view.pointer_tile is second
+    second.hovered.emit(None)
+    assert grid.view.pointer is None
+
+    # Off, and kept off for the next videos
+    grid.set_mirror(False)
+    grid.set_videos([Video("c", a_video(tmp_path / "c.avi"))])
+    assert grid.view.mirror is False
+    grid.close()
+
+
+def test_fast_speeds_step_more_than_one_frame(app, tmp_path):
+    from odyn.app.player import SPEEDS
+
+    grid = VideoGrid()
+    assert SPEEDS == (10, 20, 30, 60, 120, 240)
+
+    grid.speed.setCurrentIndex(SPEEDS.index(30))
+    assert (grid.stride, grid.timer.interval()) == (1, 33)
+    grid.speed.setCurrentIndex(SPEEDS.index(120))
+    assert (grid.stride, grid.timer.interval()) == (2, 16)
+    grid.speed.setCurrentIndex(SPEEDS.index(240))
+    assert (grid.stride, grid.timer.interval()) == (4, 16)
+    grid.speed.setCurrentIndex(SPEEDS.index(120))
+
+    grid.set_videos([Video("a", a_video(tmp_path / "a.avi", frames=6))])
+    loaded(grid)
+    grid._step()
+    assert grid.index == 2
     grid.close()
 
 
@@ -169,7 +233,7 @@ def test_a_narrow_tile_leaves_its_numbers_out(app, tmp_path):
     assert tile.numbers_fit()
     tile.resize(150, 150)
     assert not tile.numbers_fit()
-    assert "corr 0.912" in tile.toolTip()  # still there, under the pointer
+    assert tile.toolTip() == ""  # nothing pops up over the videos
     assert not VideoTile(Video("raw", tmp_path / "x.avi"), View()).numbers_fit()
 
 

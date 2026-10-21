@@ -1198,7 +1198,7 @@ def test_qc_opens_an_experiments_files(window, tmp_path, monkeypatch):
     settle(window.context)
 
     # One row for the experiment, whatever its tests
-    rows = qc.experiments[["path", "status", "runs", "local"]].values.tolist()
+    rows = qc.experiments[["path", "status", "runs", "local copy"]].values.tolist()
     assert rows == [["20260304/m1/e1", "ready to compare", "2 of 3 finished", "no"]]
     assert qc.experiments["size"].iloc[0].endswith("B")
     assert qc.download_all.text().startswith("Download all (1 experiment, ")
@@ -1210,7 +1210,7 @@ def test_qc_opens_an_experiments_files(window, tmp_path, monkeypatch):
     qc.download.click()
     wait_until(lambda: qc.downloads is None)
     settle(window.context)
-    assert qc.experiments["local"].tolist() == ["yes"]
+    assert qc.experiments["local copy"].tolist() == ["yes"]
     assert window.cache_label.text() != "Local cache: 0 B"
     local = window.context.cache_base / "cache"
     assert len(list(local.rglob("*.avi"))) == 3
@@ -1249,7 +1249,7 @@ def test_qc_opens_an_experiments_files(window, tmp_path, monkeypatch):
     qc.delete_local.click()
     settle(window.context)
     assert qc.windows == {}
-    assert qc.experiments["local"].tolist() == ["no"]
+    assert qc.experiments["local copy"].tolist() == ["no"]
     assert window.cache_label.text() == "Local cache: 0 B"
     assert (top / "metrics.json").is_file()
 
@@ -1343,7 +1343,7 @@ def test_an_experiment_with_no_finished_test_is_not_compared(window, tmp_path):
     qc.reload()
     settle(window.context)
     row = qc.experiments.iloc[0]
-    assert [row["status"], row["runs"], row["local"]] == [
+    assert [row["status"], row["runs"], row["local copy"]] == [
         "waiting for the cluster",
         "0 of 2 finished",
         "",
@@ -2454,7 +2454,7 @@ def test_a_sorted_qc_list_still_picks_the_row_selected(window):
     qc = window.qc
     rows = [
         dict.fromkeys([*EXPERIMENT_COLUMNS, *EXPERIMENT_HIDDEN], "")
-        | {"path": path, "local": "no", "folders": [], "bytes": 0}
+        | {"path": path, "local copy": "no", "folders": [], "bytes": 0}
         for path in ("b", "c", "a")
     ]
     qc.experiments = pd.DataFrame(rows)

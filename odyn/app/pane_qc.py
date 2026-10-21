@@ -88,7 +88,7 @@ TEST_COLUMNS = [
 ]
 
 TEST_HIDDEN = ["folder", "bytes", "group_id", "experiment_folder", "pick_call_id"]
-EXPERIMENT_COLUMNS = ["submitted_at", "path", "status", "runs", "local", "size"]
+EXPERIMENT_COLUMNS = ["submitted_at", "path", "status", "runs", "local copy", "size"]
 EXPERIMENT_HIDDEN = ["group_id", "folder", "folders", "bytes", "finished"]
 
 # An experiment's status, from its tests (later steps add their own)
@@ -343,7 +343,7 @@ def my_experiments(
     One row per experiment of `tests` (from `my_tests`), in its order: its
     status (after a test was picked, from `picks`: see
     `cluster.latest_picks`), how many of its tests finished, whether its
-    files are downloaded (`local`: "no", "yes", "partly" or "newer on
+    files are downloaded (`local copy`: "no", "yes", "partly" or "newer on
     server") and how much downloading them copies (`size`). Hidden:
     `folder`, where its tests are; `folders`, those with files to download
     (its own, `raw/`, `final/` and each finished run's); `bytes`, their size;
@@ -400,7 +400,7 @@ def my_experiments(
                 "path": runs["path"].iloc[0],
                 "status": status,
                 "runs": f"{len(done)} of {len(runs)} finished",
-                "local": local,
+                "local copy": local,
                 "size": cache.human_size(size) if folders else "",
                 "group_id": int(group_id),
                 "folder": str(top),
@@ -764,9 +764,9 @@ class QcPane(QWidget):
 
         picked = self._picked()
         busy = self.downloads is not None
-        here = [row["local"] not in (cache.NOT_HERE, "") for _, row in picked]
+        here = [row["local copy"] not in (cache.NOT_HERE, "") for _, row in picked]
         self.download.setEnabled(
-            not busy and any(row["local"] in TO_DOWNLOAD for _, row in picked)
+            not busy and any(row["local copy"] in TO_DOWNLOAD for _, row in picked)
         )
         self.delete_local.setEnabled(not busy and any(here))
 
@@ -912,14 +912,14 @@ class QcPane(QWidget):
         return [
             (str(row["path"]), row)
             for _, row in self.experiments.iterrows()
-            if row["local"] in TO_DOWNLOAD
+            if row["local copy"] in TO_DOWNLOAD
         ]
 
     def _download(self, picked: list[tuple[str, pd.Series]]) -> None:
         experiments = [
             (label, [Path(folder) for folder in row["folders"]])
             for label, row in picked
-            if row["local"] in TO_DOWNLOAD
+            if row["local copy"] in TO_DOWNLOAD
         ]
 
         if not experiments or self.downloads is not None:
