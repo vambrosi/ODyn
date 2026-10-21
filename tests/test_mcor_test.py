@@ -428,7 +428,7 @@ def test_a_test_is_a_job_of_its_own_for_who_added_the_loop(tmp_path, slurm):
     sent = json.loads(
         (cluster_folder(tmp_path) / "mcor" / f"{group_id}.json").read_text()
     )
-    assert (sent["job_id"], sent["user"]) == ("4242", "ana")
+    assert (sent["job_id"], sent["user"], sent["whole"]) == ("4242", "ana", False)
 
 
 def test_a_group_that_does_not_exist_is_refused_before_anything_is_written(
@@ -451,11 +451,13 @@ def test_the_job_records_the_test_as_the_owners(tmp_path, monkeypatch):
     monkeypatch.setattr(
         Group,
         "test_motion_correction",
-        lambda self: seen.append((self.group_id, self.db.user)) or tmp_path,
+        lambda self, whole: seen.append((self.group_id, self.db.user, whole))
+        or tmp_path,
     )
 
     assert run_mcor_test(tmp_path, None, group_id, "ana") == tmp_path
-    assert seen == [(group_id, "ana")]
+    assert run_mcor_test(tmp_path, None, group_id, "ana", whole=True) == tmp_path
+    assert seen == [(group_id, "ana", False), (group_id, "ana", True)]
 
 
 # --------------------------------------------------------------------------- #

@@ -1119,6 +1119,16 @@ def test_qc_lists_the_tests_of_this_users_experiments(tmp_path, monkeypatch):
     submitted = my_recordings(db, "tester")["submitted_at"].iloc[0]
     assert (tests["submitted_at"] == submitted).all()
 
+    # The cluster's whole correction (every acquisition saved) says so
+    import json
+
+    from odyn.cluster import cluster_folder
+
+    sent = cluster_folder(tmp_path) / "mcor" / f"{group_id}.json"
+    sent.write_text(json.dumps({**json.loads(sent.read_text()), "whole": True}))
+    runs = my_tests(db, "tester", my_recordings(db, "tester"))["run"].tolist()
+    assert runs == ["rigid", "s128_o64_d6", "rigid (all)"]
+
 
 def pd_isna(value) -> bool:
     import pandas as pd

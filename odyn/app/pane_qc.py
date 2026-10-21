@@ -274,7 +274,7 @@ def my_tests(
         row = {
             "submitted_at": max(times) if times else None,
             "path": ", ".join(str(paths.get(i, i)) for i in exp_ids),
-            "run": job["run"] or "test",
+            "run": job["run"] or ("rigid (all)" if job.get("whole") else "test"),
             "state": TEST_STATES.get(job["state"], job["state"]),
             "local": "",
             **dict.fromkeys(TEST_NUMBERS),

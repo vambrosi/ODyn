@@ -39,7 +39,7 @@ python -m odyn.cluster <main_folder> start [--every MINUTES] [--dry-run]
 python -m odyn.cluster <main_folder> stop
 python -m odyn.cluster <main_folder> status
 python -m odyn.cluster <main_folder> request process_sync exp_id=12
-python -m odyn.cluster <main_folder> mcor-test --group 7 [--dry-run]
+python -m odyn.cluster <main_folder> mcor-test --group 7 [--whole] [--dry-run]
 python -m odyn.cluster <main_folder> mcor-sweep --group 7 --grid grid.json
 ```
 
@@ -131,7 +131,10 @@ class ClusterConfig:
     conda_sh: str = "$HOME/miniforge3/etc/profile.d/conda.sh"
     conda_env: str = "caiman"
     every_minutes: int = 30
-    # The tick submits a test motion correction of each experiment it adds
+    # The tick submits a test motion correction of each experiment it adds;
+    # with `whole_new_experiments`, one that corrects and saves every
+    # acquisition (the final rigid correction), reporting on the test's
+    whole_new_experiments: bool = True
     test_new_experiments: bool = True
     tick_cpus: int = 1
     tick_memory: str = "8G"
@@ -140,6 +143,10 @@ class ClusterConfig:
     mcor_memory: str = "96G"
     mcor_time: str = "4:00:00"
     mcor_disk_gb: int = 128  # the node's scratch disk, for caiman's temporary files
+    # A whole correction: longer, and more scratch (a batch of 40 acquisitions
+    # and the 24 the report reads, about 2.5 GB each at 1200 x 1200 px)
+    whole_time: str = "6:00:00"
+    whole_disk_gb: int = 200
     scratch: str = "/mnt/scratch"
 
     @classmethod
@@ -330,7 +337,8 @@ def tick(
     One round of the cluster's work: apply the waiting requests, add the
     submitted drafts whose recordings are complete (see
     `odyn.app.submissions`), submit a test motion correction of each experiment
-    they added (unless `test_new_experiments` is off in `ClusterConfig`), process
+    they added (unless `test_new_experiments` is off in `ClusterConfig`; a
+    whole one, which saves every acquisition, with `whole_new_experiments`), process
     the sync files that arrived (or changed) since they were last processed,
     write the heartbeat and, with `chain`, submit the next tick.
 
@@ -365,7 +373,7 @@ def tick(
     db = Database(main_folder, project=project)
 
     if config.test_new_experiments:
-        _submit_tests(db, project, report, dry_run)
+        _submit_tests(db, project, report, dry_run, config.whole_new_experiments)
 
     seen = _read_seen(folder)
 
@@ -402,18 +410,27 @@ def tick(
 
 
 def _submit_tests(
-    db: Database, project: None | str, report: TickReport, dry_run: bool
+    db: Database,
+    project: None | str,
+    report: TickReport,
+    dry_run: bool,
+    whole: bool = False,
 ) -> None:
-    """Submit a test motion correction of each experiment the queue added untested."""
+    """
+    Submit a test motion correction of each experiment the queue added untested
+    (`whole`: one that corrects and saves every acquisition).
+    """
+    what = "whole test" if whole else "test"
+
     for group_id, where in _untested_groups(db, project):
         if dry_run:
-            report.tests.append(f"{where}: would submit a test (group {group_id})")
+            report.tests.append(f"{where}: would submit a {what} (group {group_id})")
             continue
 
         try:
-            job_id = submit_mcor_test(db.main_folder, project, group_id)
+            job_id = submit_mcor_test(db.main_folder, project, group_id, whole=whole)
             report.tests.append(
-                f"{where}: test submitted (group {group_id}, job {job_id})"
+                f"{where}: {what} submitted (group {group_id}, job {job_id})"
             )
 
         except Exception as error:  # the next tick tries again
@@ -704,6 +721,7 @@ def mcor_test_script(
     group_id: int,
     user: str,
     config: ClusterConfig,
+    whole: bool = False,
 ) -> str:
     """The job script of one test motion correction (see `submit_mcor_test`)."""
     command = [
@@ -713,16 +731,24 @@ def mcor_test_script(
         str(group_id),
         "--user",
         user,
+        *(["--whole"] if whole else []),
     ]
+    about = (
+        f"A whole rigid motion correction of group {group_id} (every acquisition "
+        f"saved, the report on the test's), for {user}."
+        if whole
+        else f"A test motion correction of group {group_id}, for {user}."
+    )
 
     return _mcor_script(
         main_folder,
         project,
         config,
         name=f"odyn-mcor-{project or 'main'}-g{group_id}",
-        about=f"A test motion correction of group {group_id}, for {user}.",
+        about=about,
         command=shlex.join(command),
-        time=config.mcor_time,
+        time=config.whole_time if whole else config.mcor_time,
+        disk_gb=config.whole_disk_gb if whole else config.mcor_disk_gb,
     )
 
 
@@ -745,8 +771,12 @@ def _mcor_script(
     about: str,
     command: str,
     time: str,
+    disk_gb: None | int = None,
 ) -> str:
-    """A job script that runs `command` with caiman's files on scratch."""
+    """
+    A job script that runs `command` with caiman's files on scratch
+    (`disk_gb` of it, `mcor_disk_gb` by default).
+    """
     logs = cluster_folder(Path(main_folder).resolve(), project) / JOBS_FOLDER
 
     return f"""#!/bin/bash
@@ -757,7 +787,7 @@ def _mcor_script(
 #SBATCH --cpus-per-task={config.mcor_cpus}
 #SBATCH --mem={config.mcor_memory}
 #SBATCH --time={time}
-#SBATCH --gres=disk:{config.mcor_disk_gb}
+#SBATCH --gres=disk:{disk_gb or config.mcor_disk_gb}
 
 # {about}
 # caiman's temporary files go to the node's scratch disk, removed however the
@@ -790,12 +820,15 @@ def submit_mcor_test(
     group_id: int,
     *,
     user: None | str = None,
+    whole: bool = False,
     dry_run: bool = False,
 ) -> None | str:
     """
     Submit a test motion correction of `group_id` (`Group.test_motion_correction`)
     as its own job, recorded as `user`'s: by default whoever added the group's
-    experiment. Writes the script to `jobs/` and what was submitted to
+    experiment. With `whole`, the job corrects and saves every acquisition (the
+    final rigid correction, with `whole_time` and `whole_disk_gb`) and reports
+    on the test's. Writes the script to `jobs/` and what was submitted to
     `mcor/<group_id>.json`. Returns the job id (`None` in a dry run, which only
     writes and shows the script).
     """
@@ -806,7 +839,9 @@ def submit_mcor_test(
     folder = cluster_folder(main_folder, project)
     script = folder / JOBS_FOLDER / f"mcor-test-g{group_id}.sh"
     script.parent.mkdir(parents=True, exist_ok=True)
-    script.write_text(mcor_test_script(main_folder, project, group_id, user, config))
+    script.write_text(
+        mcor_test_script(main_folder, project, group_id, user, config, whole)
+    )
     job_id = _sbatch([str(script)], dry_run)
 
     if job_id is None:
@@ -819,23 +854,32 @@ def submit_mcor_test(
             "group_id": group_id,
             "job_id": job_id,
             "user": user,
+            "whole": whole,
             "submitted_at": datetime.now().strftime(TIME_FORMAT),
         },
     )
+    what = "whole test" if whole else "test"
     logger.info(
-        f"Submitted the test motion correction of group {group_id} as job {job_id}."
+        f"Submitted the {what} motion correction of group {group_id} as job {job_id}."
     )
 
     return job_id
 
 
 def run_mcor_test(
-    main_folder: str | Path, project: None | str, group_id: int, user: str
+    main_folder: str | Path,
+    project: None | str,
+    group_id: int,
+    user: str,
+    whole: bool = False,
 ) -> Path:
-    """What the job runs: the test, recorded as `user`'s. Returns its folder."""
+    """
+    What the job runs: the test (`whole`: saving every acquisition), recorded
+    as `user`'s. Returns its folder.
+    """
     db = Database(main_folder, project=project, user=user)
 
-    return db.groups[group_id].test_motion_correction()
+    return db.groups[group_id].test_motion_correction(whole=whole)
 
 
 def submit_mcor_sweep(
@@ -1369,11 +1413,17 @@ def main(argv: None | list[str] = None) -> int:
     )
     test.add_argument("--group", type=int, required=True)
     test.add_argument("--user", help="whose it is (default: who added the experiment)")
+    test.add_argument(
+        "--whole",
+        action="store_true",
+        help="correct and save every acquisition (the final rigid correction)",
+    )
     test.add_argument("--dry-run", action="store_true", help="only show the job")
 
     job = commands.add_parser("run-mcor-test", help="what the mcor-test job runs")
     job.add_argument("--group", type=int, required=True)
     job.add_argument("--user", required=True)
+    job.add_argument("--whole", action="store_true")
 
     sweep = commands.add_parser(
         "mcor-sweep", help="submit a sweep of test motion corrections of a group"
@@ -1427,6 +1477,7 @@ def main(argv: None | list[str] = None) -> int:
             args.project,
             args.group,
             user=args.user,
+            whole=args.whole,
             dry_run=args.dry_run,
         )
 
@@ -1446,7 +1497,9 @@ def main(argv: None | list[str] = None) -> int:
         print(f"Wrote {folder}")
 
     elif args.command == "run-mcor-test":
-        folder = run_mcor_test(args.main_folder, args.project, args.group, args.user)
+        folder = run_mcor_test(
+            args.main_folder, args.project, args.group, args.user, args.whole
+        )
         print(f"Wrote {folder}")
 
     elif args.command == "request":

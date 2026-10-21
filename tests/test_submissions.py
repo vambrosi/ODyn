@@ -251,11 +251,13 @@ def test_the_tick_tests_each_loop_it_adds_once(tmp_path, slurm):
     report = tick(tmp_path)
 
     assert report.submissions == ["20260101/m1: added as session 1"]
-    assert report.tests == ["20260101/m1/e1: test submitted (group 1, job 4242)"]
-    assert (
-        "run-mcor-test --group 1 --user ana"
-        in (cluster_folder(tmp_path) / "jobs" / "mcor-test-g1.sh").read_text()
-    )
+    assert report.tests == ["20260101/m1/e1: whole test submitted (group 1, job 4242)"]
+    # By default the final rigid correction: every acquisition, a longer job
+    # with more scratch, the report on the test's
+    script = (cluster_folder(tmp_path) / "jobs" / "mcor-test-g1.sh").read_text()
+    assert "run-mcor-test --group 1 --user ana --whole" in script
+    assert "#SBATCH --time=6:00:00" in script
+    assert "#SBATCH --gres=disk:200" in script
 
     # Never twice
     assert tick(tmp_path).tests == []
@@ -274,6 +276,18 @@ def test_the_tick_tests_each_loop_it_adds_once(tmp_path, slurm):
 
     log.write_text("started  ...\nfinished 2026-01-01T21:00:00\n")
     assert "Tests:      1 submitted, 1 finished" in status(tmp_path)
+
+
+def test_the_tick_can_submit_only_a_test(tmp_path, slurm):
+    a_day(tmp_path)
+    add_now(next(iter(queued(tmp_path)))[0])
+    (tmp_path / ".odyn" / "cluster.json").write_text('{"whole_new_experiments": false}')
+
+    report = tick(tmp_path)
+
+    assert report.tests == ["20260101/m1/e1: test submitted (group 1, job 4242)"]
+    script = (cluster_folder(tmp_path) / "jobs" / "mcor-test-g1.sh").read_text()
+    assert "--whole" not in script and "#SBATCH --time=4:00:00" in script
 
 
 def test_the_tick_can_leave_the_tests_out(tmp_path, slurm):
