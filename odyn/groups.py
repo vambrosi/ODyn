@@ -97,8 +97,8 @@ MEANS_FPS = 4
 DEFAULT_OVERLAP_UM = [96.0, 96.0]
 DEFAULT_MAX_SHIFT_UM = [80.0, 80.0]
 
-# The settings of a test (`test_motion_correction`'s arguments, as its
-# `metrics.json` has them) a whole correction is run with, once picked
+# The test settings a whole correction uses once a test is picked: the
+# `test_motion_correction` arguments, as in the test `metrics.json`
 CANDIDATE_SETTINGS = (
     "pw_rigid",
     "max_shift_um",
@@ -2156,8 +2156,8 @@ class Group(CallRecorder):
         - `gsig_filt_um`, `shifts_opencv`: see `run_motion_correction`
         - `run`: the name of this test among others of the experiment (a
         sweep's), its folder and its label on the videos
-        - `label`: its name on the videos and the plot instead (a whole
-        correction with a picked test's settings: `<run> (all)`)
+        - `label`: the name shown on the videos and the plot instead; a whole
+        correction with picked test settings is `<run> (all)`
         - `movie`: write the test's video (and the raw one, if not there yet)
         - `levels`: the values shown as black and white in the video; by
         default the raw video's (its 1st and 99.5th percentiles)
@@ -2582,9 +2582,10 @@ class Group(CallRecorder):
     @record_call
     def pick_mcor_candidate(self, *, run: str, settings: dict) -> bool:
         """
-        Pick a test `run`'s `settings` to motion correct all acquisitions in its
-        group (the `test_motion_correction` ones, see `CANDIDATE_SETTINGS`), and
-        say whether that require a new whole motion correction run.
+        Pick the `settings` of test `run` to motion correct every acquisition
+        in the group (`test_motion_correction` arguments, see
+        `CANDIDATE_SETTINGS`), and say whether that requires a new whole
+        motion correction.
 
         **USAGE**
         ```python
@@ -2604,7 +2605,7 @@ class Group(CallRecorder):
 
         if unknown:
             raise ValueError(
-                f"Unknown settings {', '.join(unknown)}; a candidate's are "
+                f"Unknown settings {', '.join(unknown)}. The known ones are "
                 f"{', '.join(CANDIDATE_SETTINGS)}."
             )
 
@@ -2622,8 +2623,8 @@ class Group(CallRecorder):
 
     def last_whole_settings(self) -> None | dict:
         """
-        The settings (`CANDIDATE_SETTINGS`) of the last whole correction, from
-        its report, or `None` without one.
+        The settings (`CANDIDATE_SETTINGS`) of the last whole correction, read
+        from its report, or `None` without one.
         """
         path = self.mcor_test_folder() / "metrics.json"
 
@@ -3542,9 +3543,9 @@ def _draw_scale_bar(
 
 def candidate_settings(settings: dict) -> dict:
     """
-    The settings of a test's `metrics.json` a whole correction is run with
-    (`CANDIDATE_SETTINGS`), as `test_motion_correction` takes them; those
-    left out of a rigid test's (the patches) are left out here too.
+    The test settings a whole correction uses (`CANDIDATE_SETTINGS`), from
+    the test `metrics.json` settings, as `test_motion_correction` takes them.
+    A rigid test has no patch settings, so none are kept.
     """
     picked = {
         key: settings[key]

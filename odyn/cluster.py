@@ -487,8 +487,8 @@ ENDED = ("finished", "stopped", "failed", "cancelled", "timeout")
 
 def latest_picks(db: Database) -> dict[int, dict]:
     """
-    Each group's latest `pick_mcor_candidate` call: `call_id`, `user`,
-    `run`, `settings` and `correct` (whether it takes a whole correction).
+    The latest `pick_mcor_candidate` call of each group: `call_id`, `user`,
+    `run`, `settings` and `correct` (whether it needs a whole correction).
     """
     calls = db.method_calls
 
@@ -521,11 +521,11 @@ def latest_picks(db: Database) -> dict[int, dict]:
 
 def pick_candidate(db: Database, group_id: int, run: str, folder: str | Path) -> bool:
     """
-    Pick test `run` (its report in `folder`) to correct every acquisition
-    of `group_id` with, as `db`'s user (`Group.pick_mcor_candidate`); the
-    next tick submits the whole correction (`submit_picks`). Returns
-    whether it takes one. Refused while the group's last whole correction
-    has not ended: both would write the same files.
+    Pick test `run` (report in `folder`) to correct every acquisition of
+    `group_id`, recorded as the `db` user (`Group.pick_mcor_candidate`). The
+    next tick submits the whole correction (`submit_picks`). Returns whether
+    one is needed. Refused while the last whole correction of the group is
+    still running, since both would write the same files.
     """
     sent = cluster_folder(db.main_folder, db.project) / MCOR_FOLDER / f"{group_id}.json"
 
@@ -561,9 +561,9 @@ def submit_picks(
     db: Database, project: None | str, report: TickReport, dry_run: bool
 ) -> None:
     """
-    Submit a whole correction for each group's latest pick (`latest_picks`)
-    that takes one and was not submitted yet, with the settings picked, as
-    the user who picked them.
+    Submit a whole correction for the latest pick of each group
+    (`latest_picks`) that needs one and was not submitted yet, with the
+    picked settings, recorded as the user who picked them.
     """
     folder = cluster_folder(db.main_folder, project) / MCOR_FOLDER
 
@@ -968,9 +968,10 @@ def submit_mcor_test(
     as its own job, recorded as `user`'s: by default whoever added the group's
     experiment. With `whole`, the job corrects and saves every acquisition (the
     final correction, with `whole_time`, or `whole_pw_time` for piecewise
-    rigid, and `whole_disk_gb`) and reports on the test's. `settings` are
-    the test's (`CANDIDATE_SETTINGS`; rigid by default), `label` its name on
-    the report, and `pick_call_id` the `pick_mcor_candidate` call it runs.
+    rigid, and `whole_disk_gb`) and reports on the test acquisitions.
+    `settings` are the test settings (`CANDIDATE_SETTINGS`; rigid by
+    default), `label` the name on the report, and `pick_call_id` the
+    `pick_mcor_candidate` call it runs.
     Writes the script to `jobs/` and what was submitted to
     `mcor/<group_id>.json`. Returns the job id (`None` in a dry run, which only
     writes and shows the script).
@@ -1025,8 +1026,8 @@ def run_mcor_test(
 ) -> Path:
     """
     What the job runs: the test (`whole`: saving every acquisition), with
-    `settings` (`CANDIDATE_SETTINGS`) and `label`, recorded as `user`'s.
-    Returns its folder.
+    `settings` (`CANDIDATE_SETTINGS`) and `label`, recorded as `user`.
+    Returns the test folder.
     """
     db = Database(main_folder, project=project, user=user)
     given = candidate_settings(settings) if settings else {}
@@ -1573,8 +1574,8 @@ def main(argv: None | list[str] = None) -> int:
     job.add_argument("--group", type=int, required=True)
     job.add_argument("--user", required=True)
     job.add_argument("--whole", action="store_true")
-    job.add_argument("--settings", type=json.loads, help="the test's, as JSON")
-    job.add_argument("--label", help="its name on the report")
+    job.add_argument("--settings", type=json.loads, help="test settings, as JSON")
+    job.add_argument("--label", help="name on the report")
 
     sweep = commands.add_parser(
         "mcor-sweep", help="submit a sweep of test motion corrections of a group"

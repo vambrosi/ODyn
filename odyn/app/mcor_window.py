@@ -120,10 +120,10 @@ def numbers_line(run: Run) -> str:
 
 class McorWindow(QWidget):
     """
-    One experiment's motion correction, from its local `folder`, and its
-    finished `runs` (see the module's description). `status` hears what
-    the window has to say; `pick` is called with the name of the run
-    picked (none: no picking); `closed` fires as it closes.
+    The motion correction of one experiment, from its local `folder`, and
+    its finished `runs` (see the module description). `status` gets the
+    window messages; `pick` gets the name of the picked run (none: no
+    picking); `closed` fires as the window closes.
     """
 
     closed = Signal()
@@ -222,7 +222,7 @@ class McorWindow(QWidget):
         return self.runs.get(picked[0].name)
 
     def set_status(self, text: str) -> None:
-        """Show the experiment's status (see `pane_qc.my_experiments`)."""
+        """Show the experiment status (see `pane_qc.my_experiments`)."""
         self.state.setText(f"Status: {text}")
 
     def _enable(self, *_) -> None:

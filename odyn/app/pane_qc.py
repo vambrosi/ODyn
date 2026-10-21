@@ -347,8 +347,8 @@ def my_experiments(
     server") and how much downloading them copies (`size`). Hidden:
     `folder`, where its tests are; `folders`, those with files to download
     (its own, `raw/`, `final/` and each finished run's); `bytes`, their size;
-    `finished`, its finished runs (as `Run`s, with the share's folders), the
-    cluster's own test first.
+    `finished`, its finished runs (as `Run`s, with folders on the share), the
+    cluster test first.
     """
     rows = []
 
@@ -415,17 +415,17 @@ def my_experiments(
 
 def _picked_status(pick: dict, whole: pd.DataFrame) -> str:
     """
-    An experiment's status once a test was picked: correcting with it (the
-    whole correction submitted, `whole`'s job, or not yet), stopped, or
+    The experiment status once a test was picked: correcting with it (the
+    whole correction job in `whole`, or not submitted yet), stopped, or
     ready for the final check.
     """
     if not pick["correct"]:
-        return FINAL_CHECK  # the last whole correction had its settings
+        return FINAL_CHECK  # the last whole correction used these settings
 
     ran = whole[whole["pick_call_id"] == pick["call_id"]]
 
     if ran.empty:
-        return CORRECTING.format(run=pick["run"])  # at the cluster's next run
+        return CORRECTING.format(run=pick["run"])  # at the next cluster run
 
     state = ran["state"].iloc[0]
 
@@ -844,8 +844,8 @@ class QcPane(QWidget):
 
     def _pick(self, key: str, run: str) -> None:
         """
-        Pick test `run` of the experiment whose tests are in `key` to correct
-        every acquisition with (`cluster.pick_candidate`), once confirmed.
+        Once confirmed, pick test `run` to correct every acquisition of the
+        experiment with tests in `key` (`cluster.pick_candidate`).
         """
         window = self.windows.get(key)
         rows = self.experiments[self.experiments["folder"] == key]
@@ -882,8 +882,8 @@ class QcPane(QWidget):
                 box.open()
             elif result:
                 self.context.status.emit(
-                    f"{row['path']} will be corrected with {run} at the cluster's "
-                    "next run"
+                    f"{row['path']} will be corrected with {run} at the next "
+                    "cluster run"
                 )
             else:
                 self.context.status.emit(
