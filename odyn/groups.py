@@ -1810,6 +1810,7 @@ class Group(CallRecorder):
         # given. The batches after the first are given the first's, as one run
         # on every file would have, or rounding makes them differ slightly.
         min_mov = None
+        self.clipped_values = self.saved_values = 0
         kept = set(report_positions)
         self.report_parts: dict[str, list] = {
             "raw": [],
@@ -1856,6 +1857,20 @@ class Group(CallRecorder):
             cm.stop_server(dview=dview)
 
         logger.info("Finished motion correction")
+
+        if not is_test:
+            share = 100 * self.clipped_values / max(1, self.saved_values)
+            logger.info(
+                f"Saved as int16; {self.clipped_values} values ({share:.4f}%) "
+                "clipped to the raw frames' range."
+            )
+            self.set_output(
+                {
+                    "saved_dtype": "int16",
+                    "clipped_values": int(self.clipped_values),
+                    "clipped_pct": round(share, 6),
+                }
+            )
 
         if is_test:
             # Record what caiman wrote so save_preview_movie can find it after a restart
@@ -1912,6 +1927,10 @@ class Group(CallRecorder):
         Save a final correction's movies as TIFFs in `processed/mcor` beside
         each acquisition's `raw` folder, record them in `mcor_files`, and delete
         caiman's temporary files (but those in `keep`, which a report reads).
+
+        Saved as the raw files are, int16, each frame clipped to its raw
+        frame's range first, as NoRMCorre does (`as_raw`). How many values
+        were clipped is logged and added to the call's output.
         """
         import caiman as cm
 
@@ -1934,26 +1953,33 @@ class Group(CallRecorder):
             mcor_folder.mkdir(parents=True, exist_ok=True)
             mcor_path = mcor_folder / (raw_path.stem + "_mcor.tif")
 
-            mc = cm.load(mmap_path)
+            movie, clipped = as_raw(
+                np.asarray(cm.load(mmap_path)), tifffile.imread(raw_path)
+            )
+            self.clipped_values += clipped
+            self.saved_values += movie.size
 
-            # Threshold to switch to BigTIFF, checked against the size of the
-            # file actually being saved (since raw/mcor have different sizes).
-            # This needs to be checked because tifffile does not complain, it
-            # just writes a file that cannot be read back.
-            big = mc.nbytes > BIGTIFF_BYTES
-
-            if big:
-                logger.info(f"{mc.nbytes / 2**30:.1f} GB, saving as BigTIFF.")
-
-            # Saving TIFFs directly because caiman saves them as 64-bit
-            with tifffile.TiffWriter(mcor_path, bigtiff=big) as tif:
-                tif.write(
-                    [mc[i].copy() for i in range(mc.shape[0])],
-                    shape=mc[0].shape,
-                    dtype=mc.dtype,
+            if clipped:
+                share = 100 * clipped / movie.size
+                logger.info(
+                    f"{raw_path.name}: {clipped} values ({share:.4f}%) clipped to "
+                    "the raw frames' range."
                 )
 
-            del mc
+            # Threshold to switch to BigTIFF, checked against the size of the
+            # file actually being saved. This needs to be checked because
+            # tifffile does not complain, it just writes a file that cannot be
+            # read back.
+            big = movie.nbytes > BIGTIFF_BYTES
+
+            if big:
+                logger.info(f"{movie.nbytes / 2**30:.1f} GB, saving as BigTIFF.")
+
+            # One page per frame, as the raw files are
+            with tifffile.TiffWriter(mcor_path, bigtiff=big) as tif:
+                tif.write(list(movie), shape=movie.shape[1:], dtype=movie.dtype)
+
+            del movie
 
             # Record each file separately, so the lock is only held briefly.
             with self.db._locked() as con, con:
@@ -3321,6 +3347,32 @@ def _draw_scale_bar(
     _draw_label(
         picture, text, (end - text_width, text_baseline), scale, thickness, offset
     )
+
+
+def as_raw(movie: np.ndarray, raw: np.ndarray) -> tuple[np.ndarray, int]:
+    """
+    A corrected `movie` (frames, height, width) as its `raw` one is stored:
+    each frame clipped to its raw frame's minimum and maximum (caiman's FFT
+    shifts ring past them, near bright spots; NoRMCorre clips the same way),
+    rounded, as int16. Returns it and how many values were clipped.
+    """
+    if movie.shape != raw.shape:
+        raise ValueError(
+            f"The corrected movie is {movie.shape}, its raw one {raw.shape}."
+        )
+
+    info = np.iinfo(np.int16)
+    out = np.empty(movie.shape, np.int16)
+    clipped = 0
+
+    for i, (frame, source) in enumerate(zip(movie, raw)):
+        low = max(float(source.min()), info.min)
+        high = min(float(source.max()), info.max)
+        frame = np.asarray(frame, np.float32)
+        clipped += int(np.count_nonzero((frame < low) | (frame > high)))
+        out[i] = np.rint(np.clip(frame, low, high))
+
+    return out, clipped
 
 
 def _write_preview_movie(

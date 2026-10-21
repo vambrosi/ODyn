@@ -188,6 +188,58 @@ def test_a_whole_piecewise_test_reports_its_patches(tmp_path, caiman):
     assert summary["dy_median"].tolist() == [0.75] * 4
 
 
+def test_a_final_correction_is_saved_as_the_raw_files_are(tmp_path, caiman):
+    db, group_id = a_loop(tmp_path)
+
+    # Overshoot as FFT shifts do: past each frame's raw range, and not whole
+    stand_in = sys.modules["caiman"]
+    stand_in.load = lambda path: np.load(path) * 1.5 - 100.3
+
+    db.groups[group_id].run_motion_correction(
+        use_gui_parameters=False, is_test=False, pw_rigid=False
+    )
+
+    files = db.groups[group_id].mcor_files.sort_index()
+    raw_paths = db.groups[group_id].acquisitions.sort_index()["raw_path"]
+    saved = tifffile.imread(tmp_path / files["mcor_path"].iloc[0])
+    raw = tifffile.imread(tmp_path / raw_paths.iloc[0])
+
+    assert saved.dtype == raw.dtype == np.int16
+    # Every frame within its raw frame's range, as NoRMCorre clips
+    assert (saved.min(axis=(1, 2)) >= raw.min(axis=(1, 2))).all()
+    assert (saved.max(axis=(1, 2)) <= raw.max(axis=(1, 2))).all()
+    expected = np.rint(
+        np.clip(
+            raw * 1.5 - 100.3,
+            raw.min(axis=(1, 2))[:, None, None],
+            raw.max(axis=(1, 2))[:, None, None],
+        )
+    )
+    np.testing.assert_array_equal(saved, expected)
+
+    output = db.latest_calls("run_motion_correction").iloc[0]
+    assert output["output_saved_dtype"] == "int16"
+    assert output["output_clipped_values"] > 0
+
+
+def test_as_raw_rounds_and_counts_what_it_clips():
+    from odyn.groups import as_raw
+
+    raw = np.array([[[0, 10], [20, 30]], [[-5, 0], [5, 100]]], np.int16)
+    movie = np.array(
+        [[[-1.0, 10.4], [20.6, 31.0]], [[-5.0, 0.49], [4.5, 100.0]]], np.float32
+    )
+
+    saved, clipped = as_raw(movie, raw)
+
+    assert saved.dtype == np.int16
+    assert saved.tolist() == [[[0, 10], [21, 30]], [[-5, 0], [4, 100]]]
+    assert clipped == 2
+
+    with pytest.raises(ValueError, match="is"):
+        as_raw(movie[:1], raw)
+
+
 def test_without_a_reference_a_final_correction_is_one_batch(tmp_path, caiman):
     db, group_id = a_loop(tmp_path)
 
