@@ -47,9 +47,11 @@ def caiman(monkeypatch, tmp_path):
             self.shifts_opencv = settings["shifts_opencv"]
             self.gSig_filt = settings.get("gSig_filt")
             seen["settings"] = settings
+            seen.setdefault("batches", []).append([Path(f).name for f in fnames])
 
         def motion_correct(self, template=None, save_movie=False):
             seen["template"] = template
+            seen.setdefault("templates", []).append(template)
             self.mmap_file, self.shifts_rig = [], []
 
             for name in self.fname:
@@ -104,6 +106,53 @@ def a_loop(tmp_path, user="ana") -> tuple[Database, int]:
     return db, int(
         db.group_experiments.index[db.group_experiments["exp_id"] == exp_id][0]
     )
+
+
+def test_a_final_correction_goes_in_batches_with_one_reference(tmp_path, caiman):
+    db, group_id = a_loop(tmp_path)
+    group = db.groups[group_id]
+
+    group.run_motion_correction(
+        use_gui_parameters=False, is_test=False, pw_rigid=False, batch_acqs=3
+    )
+
+    # Eight acquisitions, three at a time, all to the same reference
+    assert [len(names) for names in caiman["batches"]] == [3, 3, 2]
+    assert sum(caiman["batches"], []) == sorted(sum(caiman["batches"], []))
+    first = caiman["templates"][0]
+    assert first is not None
+    assert all(t is first for t in caiman["templates"])
+
+    # Every acquisition saved and recorded, caiman's copies gone
+    files = db.groups[group_id].mcor_files
+    assert len(files) == 8
+    assert all((tmp_path / path).is_file() for path in files["mcor_path"])
+    assert not list((tmp_path / "caiman-temp").glob("*.npy"))
+    saved = tifffile.imread(tmp_path / files["mcor_path"].iloc[0])
+    assert saved.shape == (56, 48, 40)
+
+    with db._locked() as con:
+        used = con.execute(
+            "SELECT parameters_used FROM method_calls"
+            " WHERE method_name = 'Group.run_motion_correction'"
+        ).fetchone()[0]
+    assert json.loads(used)["batch_acqs"] == 3
+
+
+def test_without_a_reference_a_final_correction_is_one_batch(tmp_path, caiman):
+    db, group_id = a_loop(tmp_path)
+
+    # caiman then carries its template from file to file: no batches
+    db.groups[group_id].run_motion_correction(
+        use_gui_parameters=False,
+        is_test=False,
+        pw_rigid=False,
+        reference_acqs=0,
+        batch_acqs=3,
+    )
+
+    assert [len(names) for names in caiman["batches"]] == [8]
+    assert caiman["templates"] == [None]
 
 
 def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman):

@@ -70,6 +70,10 @@ REFERENCE_FRAMES = 200
 # A test motion correction runs on this many acquisitions, spread over the experiment
 TEST_ACQS = 24
 
+# A final correction runs on this many acquisitions at a time: caiman's
+# temporary copies take about 2.5 GB each for 1200 x 1200 px and 433 frames
+FINAL_BATCH_ACQS = 40
+
 # A test's videos are half the movies' size: a quarter of the file
 TEST_MOVIE_SIZE = 0.5
 
@@ -1604,6 +1608,7 @@ class Group(CallRecorder):
         strides_um: list[float] = DEFAULT_STRIDES_UM,
         gsig_filt_um: None | float = None,
         reuse_reference: bool = False,
+        batch_acqs: int = FINAL_BATCH_ACQS,
     ) -> None:
         """
         Method that does test/final motion correction
@@ -1636,6 +1641,10 @@ class Group(CallRecorder):
         - `reuse_reference`: align to the reference saved by an earlier run,
         when there is one, instead of building it again (runs that should be
         compared, like a sweep's, then share the same one)
+        - `batch_acqs`: a final correction corrects and saves this many
+        acquisitions at a time, so caiman's temporary files (float32 copies
+        of the movies) fit the scratch disk; with a reference this changes
+        nothing in the result
 
         *CaImAn motion correction parameters (before metadata adjustments)*
         - `border_nan`: copy along the boundary (if `True`, fill in with NaN)
@@ -1772,22 +1781,57 @@ class Group(CallRecorder):
         elif reference_acqs > 0:
             template = self._reference_template(reference_acqs, settings["max_shifts"])
 
+        # A final correction goes in batches of acquisitions, each saved and
+        # its temporary files deleted before the next: caiman's float32 copies
+        # of a whole experiment would not fit the node's scratch disk. With a
+        # reference every acquisition is aligned to the same image, so batches
+        # change nothing; without one caiman carries its template from file to
+        # file, so it then runs on all of them at once.
+        batch = len(raw_paths) if is_test or template is None else max(1, batch_acqs)
+        batches = [
+            list(range(start, min(start + batch, len(raw_paths))))
+            for start in range(0, len(raw_paths), batch)
+        ]
+
+        if not is_test:
+            self.update_parameters_used({"batch_acqs": batch})
+
         _, dview, _ = cm.cluster.setup_cluster(
             backend="multiprocessing", n_processes=n_processes, single_thread=False
         )
 
+        # caiman adds an offset (minus the movie's minimum) to every frame while
+        # aligning it and takes it off after, finding it in the first file it is
+        # given. The batches after the first are given the first's, as one run
+        # on every file would have, or rounding makes them differ slightly.
+        min_mov = None
+
         try:
-            self.mc = MotionCorrect(raw_paths, dview=dview, **settings)
-            self.mc.motion_correct(
-                template=_filtered(template, settings.get("gSig_filt")),
-                save_movie=True,
-            )
+            for number, positions_in in enumerate(batches, start=1):
+                if len(batches) > 1:
+                    logger.info(
+                        f"Batch {number} of {len(batches)}: acquisitions "
+                        f"{positions_in[0] + 1} to {positions_in[-1] + 1}"
+                    )
 
-            # What it was aligned to (None: caiman's own), for test reports
-            self.mc_reference = template
+                paths = [raw_paths[i] for i in positions_in]
+                offset = {} if min_mov is None else {"min_mov": min_mov}
+                self.mc = MotionCorrect(paths, dview=dview, **settings, **offset)
+                self.mc.motion_correct(
+                    template=_filtered(template, settings.get("gSig_filt")),
+                    save_movie=True,
+                )
+                min_mov = getattr(self.mc, "min_mov", None)
 
-        except:
-            raise
+                # What it was aligned to (None: caiman's own), for test reports
+                self.mc_reference = template
+
+                if not is_test:
+                    self._save_mcor_files(
+                        [acquisitions_slice.index[i] for i in positions_in],
+                        list(self.mc.mmap_file),
+                        paths,
+                    )
 
         # Always stop the server after motion correction
         finally:
@@ -1795,14 +1839,20 @@ class Group(CallRecorder):
 
         logger.info("Finished motion correction")
 
-        # --- Save the results in TIFF files (if it is not a test) --- #
         if is_test:
             # Record what caiman wrote so save_preview_movie can find it after a restart
             self.set_output({"mmap_names": [Path(p).name for p in self.mc.mmap_file]})
             self.test_mmap_paths = [Path(p) for p in self.mc.mmap_file]
-            return
 
-        logger.info("Saving mcor files...")
+    def _save_mcor_files(
+        self, acq_ids: Sequence, mmap_paths: Sequence[str], raw_paths: Sequence[Path]
+    ) -> None:
+        """
+        Save a final correction's movies as TIFFs in `processed/mcor` beside
+        each acquisition's `raw` folder, record them in `mcor_files`, and delete
+        caiman's temporary files.
+        """
+        import caiman as cm
 
         insertion_query = """
             INSERT OR REPLACE INTO mcor_files
@@ -1813,17 +1863,14 @@ class Group(CallRecorder):
                 ) VALUES (?, ?, ?, ?);
         """
 
-        # Load mmap files and save them as TIFFs
-        # TODO: Confirm that mmap_file and fname have the same order
         for acq_id, mmap_path, raw_path in tqdm(
-            zip(acquisitions_slice.index, self.mc.mmap_file, self.mc.fname),
+            zip(acq_ids, mmap_paths, raw_paths),
             desc="Saving mcor files",
-            total=len(self.mc.mmap_file),
+            total=len(mmap_paths),
         ):
-            # Create folder if it doesn't exist
+            raw_path = Path(raw_path)
             mcor_folder = raw_path.parent.parent / "processed" / "mcor"
             mcor_folder.mkdir(parents=True, exist_ok=True)
-
             mcor_path = mcor_folder / (raw_path.stem + "_mcor.tif")
 
             mc = cm.load(mmap_path)
@@ -1845,17 +1892,22 @@ class Group(CallRecorder):
                     dtype=mc.dtype,
                 )
 
+            del mc
+
             # Record each file separately, so the lock is only held briefly.
             with self.db._locked() as con, con:
                 con.execute(
                     insertion_query,
                     [
-                        acq_id,
+                        int(acq_id),
                         mcor_path.relative_to(self.db.main_folder).as_posix(),
                         McorSource.CAIMAN.value,
                         self.current_call_id,
                     ],
                 )
+
+            # Saved and recorded: caiman's copy is not needed any more
+            Path(mmap_path).unlink(missing_ok=True)
 
         # Reset mcor DataFrames
         self._tables.pop("mcor_files", None)
