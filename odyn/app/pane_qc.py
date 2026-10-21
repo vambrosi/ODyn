@@ -835,17 +835,18 @@ class QcPane(QWidget):
             self._local(row),
             runs,
             self.context.status.emit,
-            pick=lambda run: self._pick(key, run),
+            pick=lambda run, aside: self._pick(key, run, aside),
         )
         window.set_status(row["status"])
         window.closed.connect(lambda: self.windows.pop(key, None))
         self.windows[key] = window
         window.show()
 
-    def _pick(self, key: str, run: str) -> None:
+    def _pick(self, key: str, run: str, aside: list[str] = ()) -> None:
         """
         Once confirmed, pick test `run` to correct every acquisition of the
-        experiment with tests in `key` (`cluster.pick_candidate`).
+        experiment with tests in `key` (`cluster.pick_candidate`), with the
+        runs set `aside`, first to last.
         """
         window = self.windows.get(key)
         rows = self.experiments[self.experiments["folder"] == key]
@@ -869,7 +870,7 @@ class QcPane(QWidget):
 
         def pick(db):
             try:
-                return pick_candidate(db, group_id, run, folder)
+                return pick_candidate(db, group_id, run, folder, list(aside))
             except ValueError as error:  # refused: said over the window
                 return str(error)
 

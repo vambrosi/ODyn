@@ -11,9 +11,13 @@ corrections (and raw and final means) in.
   pans, on any tile, and every tile follows, so the same spot is compared;
   zoomed in, the part shown fills the tile. The pointer over one tile shows as
   a cross at the same spot on the others.
-  `filter_selected` shows the selected tiles only, or all again (still
-  selected); `clear_selection` lets them all go. The buttons and keys for
-  these are the window's (`mcor_window`).
+- Tracking the candidates: a click **focuses** a tile, shift-click adds or
+  removes one; `clear_focus` lets them all go, changing nothing else.
+  `star_focused` marks them (the star stays in every view); `set_aside_focused`
+  takes them out of play, into a strip under the grid in the order set aside,
+  and `bring_back` puts the last one (or a clicked one) back.
+  `show_focused_only` keeps the tiles focused at that moment, until turned
+  off. The buttons and keys for these are the window's (`mcor_window`).
 
 No database in here.
 """
@@ -26,7 +30,7 @@ from pathlib import Path
 
 import numpy as np
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -63,8 +67,15 @@ CROSS_EDGE = QColor(0, 0, 0)
 ZOOM_STEP = 1.25
 MAX_ZOOM = 16.0
 
-# A selected tile's border, in px
+# A focused tile's border, in px
 BORDER_PX = 3
+
+# The strip of tiles set aside: its height, and how dark they are drawn
+ASIDE_HEIGHT_PX = 110
+ASIDE_WIDTH_PX = 150
+QWIDGETSIZE_MAX = 16777215  # Qt's "no limit"
+ASIDE_SHADE = QColor(0, 0, 0, 150)
+STAR_COLOR = QColor(255, 200, 40)
 
 # The least room between a tile's name and its numbers, in px
 NAME_GAP_PX = 16
@@ -104,6 +115,7 @@ class Video:
     name: str
     path: Path
     numbers: str = ""
+    candidate: bool = True  # can be set aside (not the raw video)
     frames: None | np.ndarray = field(default=None, repr=False)
 
 
@@ -151,9 +163,14 @@ class View:
 
 
 class VideoTile(QWidget):
-    """One video's current frame, its name and numbers; clicked, it is selected."""
+    """
+    One video's current frame, its name and numbers; a star when starred, a
+    border when focused, darker when set aside. `clicked(add)` fires on a
+    click (`add`: with Shift), `menu_requested` on a right click.
+    """
 
-    clicked = Signal()
+    clicked = Signal(bool)
+    menu_requested = Signal(QPoint)  # where, on the screen
     zoomed = Signal(float, QPointF)  # by how much, at which point of the frame
     panned = Signal(QPointF)  # by how much, as a fraction of the frame
     hovered = Signal(object)  # the pointer, as a fraction of the frame, or None
@@ -163,7 +180,9 @@ class VideoTile(QWidget):
         self.video = video
         self.view = view
         self.index = 0
-        self.selected = False
+        self.focused = False
+        self.starred = False
+        self.aside_rank: None | int = None  # 1 for the first set aside
         self._image: None | QImage = None
         self.problem = ""  # why the video could not be read
         self._press: None | QPointF = None
@@ -205,8 +224,8 @@ class VideoTile(QWidget):
 
         return used + NAME_GAP_PX <= self.width() - 12
 
-    def set_selected(self, selected: bool) -> None:
-        self.selected = selected
+    def set_focused(self, focused: bool) -> None:
+        self.focused = focused
         self.update()
 
     def _inner(self) -> QRectF:
@@ -267,19 +286,34 @@ class VideoTile(QWidget):
         if self._image is not None:
             painter.drawImage(self.target_rect(), self._image, self.source_rect())
 
+        left = 6.0
+
+        if self.starred:
+            painter.setPen(STAR_COLOR)
+            painter.drawText(
+                QRectF(left, 2, 16, 16),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                "\u2605",
+            )
+            left += 16
+
         painter.setPen(QColor(255, 220, 90))
         text = (
             self.video.name
             if self.video.frames is not None
             else (f"{self.video.name} (loading)")
         )
+
+        if self.aside_rank is not None:
+            text = f"{self.aside_rank}. {text}"
+
         painter.drawText(
-            QRectF(6, 2, self.width() - 12, 16),
+            QRectF(left, 2, self.width() - left - 6, 16),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             text,
         )
 
-        if self.numbers_fit(text):
+        if self.aside_rank is None and self.numbers_fit(text):
             painter.setPen(QColor(220, 220, 220))
             painter.drawText(
                 QRectF(6, 2, self.width() - 12, 16),
@@ -289,7 +323,10 @@ class VideoTile(QWidget):
 
         self._draw_pointer(painter)
 
-        if self.selected:
+        if self.aside_rank is not None:
+            painter.fillRect(self.rect(), ASIDE_SHADE)
+
+        if self.focused:
             pen = QPen(palette.color(QPalette.ColorRole.Highlight), BORDER_PX)
             painter.setPen(pen)
             half = BORDER_PX / 2
@@ -387,9 +424,13 @@ class VideoTile(QWidget):
         self.hovered.emit(None)
         super().leaveEvent(event)
 
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 (Qt's name)
+        self.menu_requested.emit(event.globalPos())
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt's name)
         if self._press is not None and not self._dragged:
-            self.clicked.emit()
+            add = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self.clicked.emit(add)
 
         self._press = None
         self._dragged = False
@@ -398,17 +439,21 @@ class VideoTile(QWidget):
 class VideoGrid(QWidget):
     """
     Videos side by side, playing in step (see the module's description).
-    `frame_changed(index)` fires as the frame shown changes.
+    `frame_changed(index)` fires as the frame shown changes, `focus_changed`
+    as the focus, the stars or the tiles set aside change, and
+    `menu_requested(tile, where)` on a right click on a tile (focused first).
     """
 
     frame_changed = Signal(int)
-    selection_changed = Signal()
+    focus_changed = Signal()
+    menu_requested = Signal(object, QPoint)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.view = View()
         self.tiles: list[VideoTile] = []
-        self.only_selected = False
+        self.aside: list[VideoTile] = []  # in the order set aside
+        self.only: None | list[VideoTile] = None  # `show_focused_only`
         self.reader: None | FrameReader = None
         self.index = 0
 
@@ -422,6 +467,13 @@ class VideoGrid(QWidget):
         self.layout_grid = QGridLayout(self.holder)
         self.layout_grid.setSpacing(4)
         self.area.setWidget(self.holder)
+
+        self.strip = QWidget()
+        self.strip.setFixedHeight(ASIDE_HEIGHT_PX)
+        self.layout_strip = QHBoxLayout(self.strip)
+        self.layout_strip.setContentsMargins(0, 4, 0, 0)
+        self.layout_strip.setSpacing(4)
+        self.strip.hide()
 
         self.play_button = QPushButton("Play")
         self.play_button.clicked.connect(self.toggle)
@@ -461,6 +513,7 @@ class VideoGrid(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.area, stretch=1)
+        layout.addWidget(self.strip)
         layout.addLayout(controls)
         self._set_speed()
         self._enable()
@@ -479,12 +532,14 @@ class VideoGrid(QWidget):
             tile.deleteLater()
 
         self.tiles = []
+        self.aside = []
+        self.only = None
         self.view = View(mirror=self.view.mirror)
-        self.only_selected = False
 
         for video in videos:
             tile = VideoTile(video, self.view)
-            tile.clicked.connect(lambda t=tile: self._toggle(t))
+            tile.clicked.connect(lambda add, t=tile: self._clicked(t, add))
+            tile.menu_requested.connect(lambda where, t=tile: self._menu(t, where))
             tile.zoomed.connect(self._zoom)
             tile.panned.connect(self._pan)
             tile.hovered.connect(lambda point, t=tile: self._hover(t, point))
@@ -591,7 +646,7 @@ class VideoGrid(QWidget):
             self.position.setText(f"{self.index + 1} / {count}")
 
     # ----------------------------------------------------------------------- #
-    # Zoom, pan, selection
+    # Zoom, pan, pointer
     # ----------------------------------------------------------------------- #
 
     def _hover(self, tile: VideoTile, point: None | QPointF) -> None:
@@ -647,31 +702,98 @@ class VideoGrid(QWidget):
         self.view.center = QPointF(0.5, 0.5)
         self._clamp()
 
-    def _toggle(self, tile: VideoTile) -> None:
-        tile.set_selected(not tile.selected)
-        self._enable()
-        self.selection_changed.emit()
+    # ----------------------------------------------------------------------- #
+    # Focus, stars, set aside
+    # ----------------------------------------------------------------------- #
 
-    @property
-    def selected(self) -> list[Video]:
-        return [tile.video for tile in self.tiles if tile.selected]
-
-    def clear_selection(self) -> None:
-        """Deselect every tile, and show them all."""
-        if not any(tile.selected for tile in self.tiles):
+    def _clicked(self, tile: VideoTile, add: bool) -> None:
+        """
+        Focus `tile` alone, or add or remove it (`add`). A tile set aside
+        comes back instead.
+        """
+        if tile in self.aside:
+            self.bring_back(tile)
             return
 
-        for tile in self.tiles:
-            tile.set_selected(False)
+        if add:
+            tile.set_focused(not tile.focused)
+        else:
+            for other in self.tiles:
+                other.set_focused(other is tile)
 
-        self.filter_selected(False)
+        self._changed()
 
-    def filter_selected(self, only: bool) -> None:
-        """Show the selected tiles only (`only`), or every tile again."""
-        self.only_selected = only and any(t.selected for t in self.tiles)
-        self._lay_out()
+    def _menu(self, tile: VideoTile, where: QPoint) -> None:
+        if tile not in self.aside and not tile.focused:
+            self._clicked(tile, add=False)
+
+        self.menu_requested.emit(tile, where)
+
+    def _changed(self) -> None:
         self._enable()
-        self.selection_changed.emit()
+        self.focus_changed.emit()
+
+    @property
+    def focused(self) -> list[Video]:
+        return [tile.video for tile in self.tiles if tile.focused]
+
+    @property
+    def starred(self) -> list[Video]:
+        return [tile.video for tile in self.tiles if tile.starred]
+
+    @property
+    def set_aside(self) -> list[Video]:
+        """The videos set aside, the first set aside first."""
+        return [tile.video for tile in self.aside]
+
+    def clear_focus(self) -> None:
+        """Let every tile go; what is shown stays as it is."""
+        for tile in self.tiles:
+            tile.set_focused(False)
+
+        self._changed()
+
+    def star_focused(self) -> None:
+        """Star the focused tiles, or unstar them when all are starred."""
+        focused = [tile for tile in self.tiles if tile.focused]
+        star = not all(tile.starred for tile in focused)
+
+        for tile in focused:
+            tile.starred = star
+            tile.update()
+
+        self._changed()
+
+    def set_aside_focused(self) -> None:
+        """Take the focused candidates out of play, in the strip."""
+        for tile in self.tiles:
+            if tile.focused and tile.video.candidate and tile not in self.aside:
+                tile.set_focused(False)
+                self.aside.append(tile)
+
+        self._lay_out()
+        self._changed()
+
+    def bring_back(self, tile: None | VideoTile = None) -> None:
+        """Put `tile` back in play: the last one set aside by default."""
+        if not self.aside:
+            return
+
+        tile = tile if tile in self.aside else self.aside[-1]
+        self.aside.remove(tile)
+
+        if self.only is not None:
+            self.only.append(tile)
+
+        self._lay_out()
+        self._changed()
+
+    def show_focused_only(self, on: bool) -> None:
+        """Show the tiles focused now, and only them, until turned off."""
+        focused = [tile for tile in self.tiles if tile.focused]
+        self.only = focused if on and focused else None
+        self._lay_out()
+        self._changed()
 
     def visible(self) -> list[Video]:
         return [tile.video for tile in self.tiles if not tile.isHidden()]
@@ -679,15 +801,32 @@ class VideoGrid(QWidget):
     def _lay_out(self, *_) -> None:
         for tile in self.tiles:
             self.layout_grid.removeWidget(tile)
+            self.layout_strip.removeWidget(tile)
 
-        shown = [t for t in self.tiles if t.selected or not self.only_selected]
+        while self.layout_strip.count():  # the stretch
+            self.layout_strip.takeAt(0)
+
+        playing = [t for t in self.tiles if t not in self.aside]
+        shown = [t for t in playing if self.only is None or t in self.only]
         columns = max(1, self.columns.value())
 
         for tile in self.tiles:
-            tile.setVisible(tile in shown)
+            tile.setVisible(tile in shown or tile in self.aside)
+            tile.aside_rank = None
+            tile.setMinimumSize(120, 120)
+            tile.setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX)
 
         for position, tile in enumerate(shown):
             self.layout_grid.addWidget(tile, position // columns, position % columns)
+
+        for rank, tile in enumerate(self.aside, start=1):
+            tile.aside_rank = rank
+            tile.setMinimumSize(80, 60)
+            tile.setMaximumSize(ASIDE_WIDTH_PX, ASIDE_HEIGHT_PX - 4)
+            self.layout_strip.addWidget(tile)
+
+        self.layout_strip.addStretch(1)
+        self.strip.setVisible(bool(self.aside))
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt's name)
         self.pause()

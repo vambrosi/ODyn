@@ -66,6 +66,7 @@ import sys
 import time
 import uuid
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -519,13 +520,20 @@ def latest_picks(db: Database) -> dict[int, dict]:
     return picks
 
 
-def pick_candidate(db: Database, group_id: int, run: str, folder: str | Path) -> bool:
+def pick_candidate(
+    db: Database,
+    group_id: int,
+    run: str,
+    folder: str | Path,
+    set_aside: Sequence[str] = (),
+) -> bool:
     """
     Pick test `run` (report in `folder`) to correct every acquisition of
     `group_id`, recorded as the `db` user (`Group.pick_mcor_candidate`). The
     next tick submits the whole correction (`submit_picks`). Returns whether
     one is needed. Refused while the last whole correction of the group is
-    still running, since both would write the same files.
+    still running, since both would write the same files. `set_aside` are
+    the runs set aside before it, first to last (`Group.pick_mcor_candidate`).
     """
     sent = cluster_folder(db.main_folder, db.project) / MCOR_FOLDER / f"{group_id}.json"
 
@@ -553,7 +561,7 @@ def pick_candidate(db: Database, group_id: int, run: str, folder: str | Path) ->
         raise ValueError(f"No settings of {run} to pick ({error}).") from None
 
     return db.groups[group_id].pick_mcor_candidate(
-        run=run, settings=candidate_settings(settings)
+        run=run, settings=candidate_settings(settings), set_aside=list(set_aside)
     )
 
 

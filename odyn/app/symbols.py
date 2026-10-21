@@ -109,8 +109,10 @@ GLYPHS = {
     "final": ("approval", "", "v"),
     "fit": ("fit_screen", "", "0"),
     "pointer": ("my_location", "", "+"),
-    "selected-only": ("filter_center_focus", "", "s"),
-    "clear-selection": ("deselect", "", "-"),
+    "focused-only": ("filter_center_focus", "", "f"),
+    "clear-focus": ("deselect", "", "-"),
+    "star": ("star", "", "*"),
+    "set-aside": ("visibility_off", "", "x"),
     "report": ("monitoring", "", "r"),
     "pick": ("check_circle", "", "p"),
 }

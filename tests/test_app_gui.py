@@ -1232,13 +1232,13 @@ def test_qc_opens_an_experiments_files(window, tmp_path, monkeypatch):
 
     # A run's plot, from its tile
     assert not mcor.report_action.isEnabled()
-    grid.tiles[2].clicked.emit()
+    grid.tiles[2].clicked.emit(False)
     assert mcor.report_action.isEnabled()
     mcor.report_action.trigger()
     report = Path(opened[-1].toLocalFile())
     assert report.name == "shifts.png" and report.parent.name == "rigid"
     assert report.is_relative_to(local)
-    grid.tiles[0].clicked.emit()  # the raw video has no plot
+    grid.tiles[0].clicked.emit(False)  # the raw video has no plot
     assert not mcor.report_action.isEnabled()
 
     # Opened again, the same window comes up
@@ -1290,10 +1290,12 @@ def test_a_test_is_picked_from_the_window(window, tmp_path, monkeypatch):
     mcor = next(iter(qc.windows.values()))
     assert mcor.state.text() == "Status: ready to compare"
 
-    # One run picked, never raw
+    # One run picked, never raw; the cluster test set aside first
     assert not mcor.pick_action.isEnabled()
     names = [tile.video.name for tile in mcor.grid.tiles]
-    mcor.grid.tiles[names.index("rigid")].clicked.emit()
+    mcor.grid.tiles[names.index("test")].clicked.emit(False)
+    mcor.aside_action.trigger()
+    mcor.grid.tiles[names.index("rigid")].clicked.emit(False)
     assert mcor.pick_action.isEnabled()
     mcor.pick_action.trigger()
     settle(window.context)
@@ -1305,6 +1307,12 @@ def test_a_test_is_picked_from_the_window(window, tmp_path, monkeypatch):
     )
     assert action == "Motion correct" and parent is mcor
     assert qc.experiments["status"].tolist() == ["correcting with rigid"]
+
+    # What was set aside goes with the pick
+    from odyn import Database
+
+    calls = Database(tmp_path / "data").latest_calls("pick_mcor_candidate")
+    assert calls["input_set_aside"].iloc[0] == ["test"]
     assert mcor.state.text() == "Status: correcting with rigid"
 
     # Refused while a whole correction has not ended

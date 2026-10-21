@@ -6,9 +6,11 @@ each with its shortcut (in its tooltip).
 
 **Tests** shows the raw video and every finished run's test video side by
 side, playing in step (`player`), each with its numbers. A click selects a
-tile. The tools: Fit, Mirrored pointer, Selected only, Clear selection, the
-report of the selected run (its plot of shifts), and Pick candidate, which
-has every acquisition corrected with the selected run settings (see
+tile, Shift adds one; a right click opens the tools for it. The tools: Fit,
+Mirrored pointer, Focused only, Clear focus, Star, Set aside (into a strip
+under the grid, in order), Bring back, the report of the focused run (its
+plot of shifts), and Pick candidate, which has every acquisition corrected
+with the focused run settings, recording the runs set aside (see
 `cluster.pick_candidate`). Space plays, the arrows step (Shift: 10 frames),
 `[` and `]` change the speed.
 
@@ -35,6 +37,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QMenu,
     QSizePolicy,
     QStackedWidget,
     QToolBar,
@@ -136,8 +139,9 @@ class McorWindow(QWidget):
     """
     The motion correction of one experiment, from its local `folder`, and
     its finished `runs` (see the module description). `status` gets the
-    window messages; `pick` gets the name of the picked run (none: no
-    picking); `closed` fires as the window closes.
+    window messages; `pick` gets the name of the picked run and those set
+    aside, first to last (none: no picking); `closed` fires as the window
+    closes.
     """
 
     closed = Signal()
@@ -148,7 +152,7 @@ class McorWindow(QWidget):
         folder: Path,
         runs: list[Run],
         status: Callable[[str], None],
-        pick: None | Callable[[str], None] = None,
+        pick: None | Callable[[str, list[str]], None] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -197,7 +201,8 @@ class McorWindow(QWidget):
         tests_layout = QVBoxLayout(tests)
         tests_layout.setContentsMargins(8, 0, 8, 0)
         self.grid = VideoGrid()
-        self.grid.selection_changed.connect(self._enable)
+        self.grid.focus_changed.connect(self._enable)
+        self.grid.menu_requested.connect(self._menu)
         tests_layout.addWidget(self.grid, stretch=1)
         self.missing = QLabel("")
         tests_layout.addWidget(self.missing)
@@ -212,16 +217,25 @@ class McorWindow(QWidget):
         self.pointer_action.setChecked(self.grid.view.mirror)
         self.pointer_action.toggled.connect(self.grid.set_mirror)
         self.only_action = self._action(
-            self.right, "selected-only", "Selected only", "F", checkable=True
+            self.right, "focused-only", "Focused only", "F", checkable=True
         )
-        self.only_action.toggled.connect(self.grid.filter_selected)
+        self.only_action.toggled.connect(self.grid.show_focused_only)
         self.clear_action = self._action(
-            self.right, "clear-selection", "Clear selection", "Esc"
+            self.right, "clear-focus", "Clear focus", "Esc"
         )
-        self.clear_action.triggered.connect(self.grid.clear_selection)
+        self.clear_action.triggered.connect(self.grid.clear_focus)
+        self.right.addSeparator()
+        self.star_action = self._action(self.right, "star", "Star", "S")
+        self.star_action.triggered.connect(self.grid.star_focused)
+        self.aside_action = self._action(self.right, "set-aside", "Set aside", "X")
+        self.aside_action.triggered.connect(self.grid.set_aside_focused)
+        self.back_action = self._action(
+            self.right, "undo", "Bring back the last set aside", "Ctrl+Z"
+        )
+        self.back_action.triggered.connect(lambda: self.grid.bring_back())
         self.right.addSeparator()
         self.report_action = self._action(
-            self.right, "report", "Open the report of the selected run", "R"
+            self.right, "report", "Open the report of the focused run", "R"
         )
         self.report_action.triggered.connect(self._show_report)
         self._foot(self.right)
@@ -229,7 +243,7 @@ class McorWindow(QWidget):
             self.right,
             "pick",
             "Pick candidate: motion correct every acquisition with the "
-            "selected run settings",
+            "focused run settings",
             "Ctrl+Return",
         )
         self.pick_action.triggered.connect(self._pick)
@@ -308,7 +322,7 @@ class McorWindow(QWidget):
         raw = raw_video(self.folder)
 
         if raw is not None:
-            videos.append(Video("raw", raw))
+            videos.append(Video("raw", raw, candidate=False))
 
         absent = []
 
@@ -330,7 +344,8 @@ class McorWindow(QWidget):
         self._enable()
 
     def _picked_run(self) -> None | Run:
-        picked = self.grid.selected
+        """The focused run, when one alone is."""
+        picked = self.grid.focused
 
         if len(picked) != 1:
             return None
@@ -343,22 +358,46 @@ class McorWindow(QWidget):
 
     def _enable(self, *_) -> None:
         run = self._picked_run()
-        any_selected = bool(self.grid.selected)
+        focused = self.grid.focused
+        only = self.grid.only is not None
         self.report_action.setEnabled(
             run is not None and (run.folder / "shifts.png").is_file()
         )
         self.pick_action.setEnabled(run is not None)
-        self.clear_action.setEnabled(any_selected)
-        self.only_action.setEnabled(any_selected or self.grid.only_selected)
+        self.clear_action.setEnabled(bool(focused))
+        self.star_action.setEnabled(bool(focused))
+        self.aside_action.setEnabled(any(video.candidate for video in focused))
+        self.back_action.setEnabled(bool(self.grid.aside))
+        self.only_action.setEnabled(bool(focused) or only)
         self.only_action.blockSignals(True)
-        self.only_action.setChecked(self.grid.only_selected)
+        self.only_action.setChecked(only)
         self.only_action.blockSignals(False)
+
+    def _menu(self, tile, where) -> None:
+        """The tools for a tile, at `where` (a right click)."""
+        menu = QMenu(self)
+
+        if tile in self.grid.aside:
+            menu.addAction("Bring back", lambda: self.grid.bring_back(tile))
+        else:
+            for action, text in (
+                (self.star_action, "Unstar" if tile.starred else "Star"),
+                (self.aside_action, "Set aside"),
+                (self.report_action, "Open the report"),
+                (self.pick_action, "Pick candidate"),
+            ):
+                if action.isVisible():
+                    item = menu.addAction(text, action.trigger)
+                    item.setEnabled(action.isEnabled())
+                    item.setShortcut(action.shortcut())
+
+        menu.popup(where)
 
     def _pick(self) -> None:
         run = self._picked_run()
 
         if run is not None and self.pick is not None:
-            self.pick(run.name)
+            self.pick(run.name, [video.name for video in self.grid.set_aside])
 
     def _show_report(self) -> None:
         run = self._picked_run()

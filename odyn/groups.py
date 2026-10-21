@@ -2580,7 +2580,9 @@ class Group(CallRecorder):
         self.db._tables.pop("mcor_files", None)
 
     @record_call
-    def pick_mcor_candidate(self, *, run: str, settings: dict) -> bool:
+    def pick_mcor_candidate(
+        self, *, run: str, settings: dict, set_aside: Sequence[str] = ()
+    ) -> bool:
         """
         Pick the `settings` of test `run` to motion correct every acquisition
         in the group (`test_motion_correction` arguments, see
@@ -2595,6 +2597,9 @@ class Group(CallRecorder):
             settings={"pw_rigid": True, "strides_um": [128, 128], ...},
         )
         ```
+
+        `set_aside` are the runs set aside while comparing, first to last: a
+        ranking from worst to best, kept with the pick.
 
         Only records who picked what: the cluster tick submits the motion
         correction job (`cluster.submit_picks`), which overwrites the files

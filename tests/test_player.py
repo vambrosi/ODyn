@@ -171,33 +171,67 @@ def test_fast_speeds_step_more_than_one_frame(app, tmp_path):
     grid.close()
 
 
-def test_selected_tiles_can_be_shown_alone(app, tmp_path):
+def test_tiles_are_focused_starred_and_set_aside(app, tmp_path):
     grid = VideoGrid()
-    grid.set_videos([Video(n, a_video(tmp_path / f"{n}.avi")) for n in "abc"])
+    grid.set_videos(
+        [Video("raw", a_video(tmp_path / "raw.avi"), candidate=False)]
+        + [Video(n, a_video(tmp_path / f"{n}.avi")) for n in "abc"]
+    )
     loaded(grid)
     grid.show()
+    raw, a, b, c = grid.tiles
 
-    grid.filter_selected(True)  # nothing selected: nothing to filter
-    assert not grid.only_selected
-    grid.tiles[0].clicked.emit()
-    grid.tiles[2].clicked.emit()
-    assert [v.name for v in grid.selected] == ["a", "c"]
+    def names(videos):
+        return [video.name for video in videos]
 
-    grid.filter_selected(True)
-    assert [v.name for v in grid.visible()] == ["a", "c"]
+    # A click focuses one; Shift adds or removes one
+    a.clicked.emit(False)
+    c.clicked.emit(True)
+    assert names(grid.focused) == ["a", "c"]
+    b.clicked.emit(False)
+    assert names(grid.focused) == ["b"]
+    c.clicked.emit(True)
+    c.clicked.emit(True)
+    assert names(grid.focused) == ["b"]
 
-    grid.tiles[2].clicked.emit()  # let one go
-    grid.filter_selected(False)
-    assert [v.name for v in grid.visible()] == ["a", "b", "c"]
-    assert [v.name for v in grid.selected] == ["a"]
-    assert grid.position.text().endswith(f"/ {grid.frame_count}")
+    # Focused only keeps those focused then, whatever the focus after
+    a.clicked.emit(True)
+    grid.show_focused_only(True)
+    assert names(grid.visible()) == ["a", "b"]
+    grid.clear_focus()
+    assert grid.focused == [] and names(grid.visible()) == ["a", "b"]
+    grid.show_focused_only(False)
+    assert names(grid.visible()) == ["raw", "a", "b", "c"]
 
-    # All let go at once, and every tile shown again
-    grid.tiles[1].clicked.emit()
-    grid.filter_selected(True)
-    grid.clear_selection()
-    assert grid.selected == [] and len(grid.visible()) == 3
-    assert not grid.only_selected
+    # A star stays; starring all the starred unstars them
+    a.clicked.emit(False)
+    grid.star_focused()
+    grid.clear_focus()
+    assert names(grid.starred) == ["a"]
+    a.clicked.emit(False)
+    b.clicked.emit(True)
+    grid.star_focused()
+    assert names(grid.starred) == ["a", "b"]
+    grid.star_focused()
+    assert grid.starred == []
+
+    # Set aside, in order, out of the grid and into the strip; never raw
+    c.clicked.emit(False)
+    grid.set_aside_focused()
+    a.clicked.emit(False)
+    raw.clicked.emit(True)
+    grid.set_aside_focused()
+    assert names(grid.set_aside) == ["c", "a"]
+    assert (c.aside_rank, a.aside_rank) == (1, 2)
+    assert grid.layout_grid.indexOf(c) == -1 and grid.layout_strip.indexOf(c) == 0
+    assert grid.strip.isVisible()
+    assert names(grid.focused) == ["raw"]
+
+    # Brought back: the last one, or one clicked in the strip
+    grid.bring_back()
+    assert names(grid.set_aside) == ["c"] and a.aside_rank is None
+    c.clicked.emit(False)
+    assert grid.set_aside == [] and not grid.strip.isVisible()
     grid.close()
 
 
@@ -293,17 +327,30 @@ def test_the_qc_window_is_driven_from_the_keyboard(app, tmp_path):
     QTest.keyClick(window, Qt.Key.Key_Space)
     assert not grid.timer.isActive()
 
-    # Selected only and Clear selection follow the selection
+    # Focused only and Clear focus follow the focus
     assert not window.only_action.isEnabled() and not window.clear_action.isEnabled()
-    grid.tiles[1].clicked.emit()
+    grid.tiles[1].clicked.emit(False)
     assert window.report_action.isEnabled() is False  # no plot in this folder
     QTest.keyClick(window, Qt.Key.Key_F)
     assert window.only_action.isChecked() and [v.name for v in grid.visible()] == [
         "test"
     ]
-    QTest.keyClick(window, Qt.Key.Key_Escape)
-    assert grid.selected == [] and not window.only_action.isChecked()
+    QTest.keyClick(window, Qt.Key.Key_Escape)  # the view stays
+    assert grid.focused == [] and window.only_action.isChecked()
+    QTest.keyClick(window, Qt.Key.Key_F)
     assert len(grid.visible()) == 2
+
+    # Star, set aside and bring back; never the raw video
+    grid.tiles[1].clicked.emit(False)
+    QTest.keyClick(window, Qt.Key.Key_S)
+    assert [v.name for v in grid.starred] == ["test"]
+    grid.tiles[0].clicked.emit(False)
+    assert not window.aside_action.isEnabled()
+    grid.tiles[1].clicked.emit(False)
+    QTest.keyClick(window, Qt.Key.Key_X)
+    assert [v.name for v in grid.set_aside] == ["test"]
+    QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert grid.set_aside == []
 
     QTest.keyClick(window, Qt.Key.Key_H)
     assert grid.view.mirror is False
