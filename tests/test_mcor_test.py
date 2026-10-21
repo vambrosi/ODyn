@@ -139,6 +139,55 @@ def test_a_final_correction_goes_in_batches_with_one_reference(tmp_path, caiman)
     assert json.loads(used)["batch_acqs"] == 3
 
 
+def test_a_whole_test_saves_every_acquisition_and_reports_on_the_test_ones(
+    tmp_path, caiman
+):
+    db, group_id = a_loop(tmp_path)
+    group = db.groups[group_id]
+
+    folder = group.test_motion_correction(
+        test_acqs=4, movies=(), whole=True, batch_acqs=3
+    )
+
+    # Every acquisition corrected (in batches) and saved as the final
+    assert [len(names) for names in caiman["batches"]] == [3, 3, 2]
+    assert len(db.groups[group_id].mcor_files) == 8
+
+    # The report is a test's: on the spread acquisitions, in the test folder
+    assert folder == group.mcor_test_folder()
+    summary = pd.read_csv(folder / "summary.csv")
+    assert summary["position"].tolist() == spread_acquisitions(8, 4)
+    assert summary["dy_median"].tolist() == [0.5] * 4
+    shifts = np.load(folder / "shifts.npz")
+    assert shifts["shifts"].shape == (4 * 56, 2)
+    metrics = json.loads((folder / "metrics.json").read_text())
+    assert metrics["settings"]["whole"] is True
+
+    # And nothing of caiman's is left behind
+    assert not list((tmp_path / "caiman-temp").glob("*.npy"))
+
+
+def test_a_whole_piecewise_test_reports_its_patches(tmp_path, caiman):
+    db, group_id = a_loop(tmp_path)
+
+    folder = db.groups[group_id].test_motion_correction(
+        test_acqs=4,
+        movies=(),
+        whole=True,
+        batch_acqs=5,
+        pw_rigid=True,
+        strides_um=[24, 24],
+        overlap_um=[12, 12],
+        max_deviation_um=3,
+        run="pw",
+    )
+
+    metrics = json.loads((folder / "metrics.json").read_text())
+    assert metrics["patch_jitter_median_px"] == 0.5
+    summary = pd.read_csv(folder / "summary.csv")
+    assert summary["dy_median"].tolist() == [0.75] * 4
+
+
 def test_without_a_reference_a_final_correction_is_one_batch(tmp_path, caiman):
     db, group_id = a_loop(tmp_path)
 

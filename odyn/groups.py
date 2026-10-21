@@ -1609,6 +1609,7 @@ class Group(CallRecorder):
         gsig_filt_um: None | float = None,
         reuse_reference: bool = False,
         batch_acqs: int = FINAL_BATCH_ACQS,
+        report_positions: Sequence[int] = (),
     ) -> None:
         """
         Method that does test/final motion correction
@@ -1645,6 +1646,10 @@ class Group(CallRecorder):
         acquisitions at a time, so caiman's temporary files (float32 copies
         of the movies) fit the scratch disk; with a reference this changes
         nothing in the result
+        - `report_positions`: in a final correction, the acquisitions (by
+        position) a report is written from afterwards: their temporary files
+        are kept, and their files and every frame's shift are left in
+        `report_parts` (see `test_motion_correction(whole=True)`)
 
         *CaImAn motion correction parameters (before metadata adjustments)*
         - `border_nan`: copy along the boundary (if `True`, fill in with NaN)
@@ -1805,6 +1810,14 @@ class Group(CallRecorder):
         # given. The batches after the first are given the first's, as one run
         # on every file would have, or rounding makes them differ slightly.
         min_mov = None
+        kept = set(report_positions)
+        self.report_parts: dict[str, list] = {
+            "raw": [],
+            "mmap": [],
+            "shifts": [],
+            "patch_dy": [],
+            "patch_dx": [],
+        }
 
         try:
             for number, positions_in in enumerate(batches, start=1):
@@ -1827,10 +1840,15 @@ class Group(CallRecorder):
                 self.mc_reference = template
 
                 if not is_test:
+                    mmaps = list(self.mc.mmap_file)
+                    self._keep_for_report(positions_in, acquisitions_slice, kept)
                     self._save_mcor_files(
                         [acquisitions_slice.index[i] for i in positions_in],
-                        list(self.mc.mmap_file),
+                        mmaps,
                         paths,
+                        keep={
+                            mmaps[k] for k, i in enumerate(positions_in) if i in kept
+                        },
                     )
 
         # Always stop the server after motion correction
@@ -1844,13 +1862,56 @@ class Group(CallRecorder):
             self.set_output({"mmap_names": [Path(p).name for p in self.mc.mmap_file]})
             self.test_mmap_paths = [Path(p) for p in self.mc.mmap_file]
 
+    def _keep_for_report(
+        self, positions_in: list[int], acquisitions: pd.DataFrame, kept: set[int]
+    ) -> None:
+        """
+        From the batch caiman just corrected (`positions_in`, in `acquisitions`),
+        add to `report_parts` the acquisitions in `kept`: their raw and
+        temporary files and each of their frames' shift (and every patch's).
+        """
+        if not kept & set(positions_in):
+            return
+
+        frames = [int(acquisitions["frame_count"].iloc[i]) for i in positions_in]
+        edges = np.concatenate([[0], np.cumsum(frames)])
+
+        if self.mc.pw_rigid:
+            patch_dy = np.asarray(self.mc.y_shifts_els, float)
+            patch_dx = np.asarray(self.mc.x_shifts_els, float)
+            shifts = np.stack(
+                [np.median(patch_dy, axis=1), np.median(patch_dx, axis=1)], axis=1
+            )
+        else:
+            patch_dy = patch_dx = None
+            shifts = np.asarray(self.mc.shifts_rig, float)
+
+        parts = self.report_parts
+
+        for k, position in enumerate(positions_in):
+            if position not in kept:
+                continue
+
+            frame = slice(edges[k], edges[k + 1])
+            parts["raw"].append(Path(self.mc.fname[k]))
+            parts["mmap"].append(self.mc.mmap_file[k])
+            parts["shifts"].append(shifts[frame])
+
+            if patch_dy is not None and patch_dx is not None:
+                parts["patch_dy"].append(patch_dy[frame])
+                parts["patch_dx"].append(patch_dx[frame])
+
     def _save_mcor_files(
-        self, acq_ids: Sequence, mmap_paths: Sequence[str], raw_paths: Sequence[Path]
+        self,
+        acq_ids: Sequence,
+        mmap_paths: Sequence[str],
+        raw_paths: Sequence[Path],
+        keep: set[str] = frozenset(),
     ) -> None:
         """
         Save a final correction's movies as TIFFs in `processed/mcor` beside
         each acquisition's `raw` folder, record them in `mcor_files`, and delete
-        caiman's temporary files.
+        caiman's temporary files (but those in `keep`, which a report reads).
         """
         import caiman as cm
 
@@ -1907,7 +1968,8 @@ class Group(CallRecorder):
                 )
 
             # Saved and recorded: caiman's copy is not needed any more
-            Path(mmap_path).unlink(missing_ok=True)
+            if mmap_path not in keep:
+                Path(mmap_path).unlink(missing_ok=True)
 
         # Reset mcor DataFrames
         self._tables.pop("mcor_files", None)
@@ -1932,6 +1994,8 @@ class Group(CallRecorder):
         side_by_side: bool = False,
         keep_patch_shifts: bool = False,
         reuse_reference: bool = False,
+        whole: bool = False,
+        batch_acqs: int = FINAL_BATCH_ACQS,
     ) -> Path:
         """
         A test motion correction, and the files to judge it by
@@ -1977,15 +2041,24 @@ class Group(CallRecorder):
         - `keep_patch_shifts`: also save every patch's shift in `shifts.npz`
         (piecewise rigid; hundreds of megabytes at small patches)
         - `reuse_reference`: align to the reference an earlier run saved
+        - `whole`: correct every acquisition and save them, as the final
+        correction (`run_motion_correction(is_test=False)`), and write the
+        report and videos from the same `test_acqs` acquisitions as a test,
+        `batch_acqs` at a time (see `run_motion_correction`)
         """
         import caiman as cm
 
         from .mcor_report import write_report
         from .registration import spread_acquisitions
 
+        acquisitions = self.acquisitions
+        positions = spread_acquisitions(len(acquisitions), test_acqs)
+        acq_ids = [int(i) for i in acquisitions.index[positions]]
+        folder = self.mcor_test_folder(run)
+
         self.run_motion_correction(
             use_gui_parameters=False,
-            is_test=True,
+            is_test=not whole,
             test_acqs=test_acqs,
             pw_rigid=pw_rigid,
             max_shift_um=max_shift_um,
@@ -1995,15 +2068,13 @@ class Group(CallRecorder):
             gsig_filt_um=gsig_filt_um,
             shifts_opencv=shifts_opencv,
             reuse_reference=reuse_reference,
+            report_positions=positions if whole else (),
+            batch_acqs=batch_acqs,
         )
-
-        acquisitions = self.acquisitions
-        positions = spread_acquisitions(len(acquisitions), test_acqs)
-        acq_ids = [int(i) for i in acquisitions.index[positions]]
-        folder = self.mcor_test_folder(run)
 
         settings = {
             "run": run,
+            "whole": whole,
             "pw_rigid": pw_rigid,
             "max_shift_um": list(max_shift_um),
             "max_shifts_px": [int(v) for v in self.mc.max_shifts],
@@ -2026,23 +2097,37 @@ class Group(CallRecorder):
                 "max_deviation_px": float(self.mc.max_deviation_rigid),
             }
 
+        if whole:
+            # The report's acquisitions, kept from the batches
+            parts = self.report_parts
+            raw_files, mmap_files = parts["raw"], parts["mmap"]
+            shifts = np.concatenate(parts["shifts"])
+            patches = (
+                (np.concatenate(parts["patch_dy"]), np.concatenate(parts["patch_dx"]))
+                if pw_rigid
+                else None
+            )
+            self.test_mmap_paths = [Path(p) for p in mmap_files]
+
         # Piecewise rigid given a template skips caiman's rigid pass, so it
         # has no `shifts_rig`: each frame's shift is the median of its patches'
-        if pw_rigid:
+        elif pw_rigid:
+            raw_files, mmap_files = self.mc.fname, list(self.mc.mmap_file)
             patches = (
                 np.asarray(self.mc.y_shifts_els, float),
                 np.asarray(self.mc.x_shifts_els, float),
             )
             shifts = np.stack([np.median(p, axis=1) for p in patches], axis=1)
         else:
+            raw_files, mmap_files = self.mc.fname, list(self.mc.mmap_file)
             patches = None
             shifts = np.asarray(self.mc.shifts_rig)
 
         logger.info(f"Writing the test's report to {folder}")
         paths = write_report(
             folder,
-            [Path(p) for p in self.mc.fname],
-            list(self.mc.mmap_file),
+            [Path(p) for p in raw_files],
+            mmap_files,
             lambda path: np.asarray(cm.load(path)),
             shifts,
             self.mc_reference,
@@ -2072,6 +2157,11 @@ class Group(CallRecorder):
 
         if levels is not None:
             _add_to_json(folder / "metrics.json", {"movie_levels": list(levels)})
+
+        if whole:
+            # The final TIFFs are saved: the report's copies can go
+            for path in self.test_mmap_paths:
+                path.unlink(missing_ok=True)
 
         for path in paths:
             self.add_output_file(path)
