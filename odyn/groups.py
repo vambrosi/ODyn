@@ -2712,6 +2712,32 @@ class Group(CallRecorder):
         return candidate_settings(settings) if settings.get("whole") else None
 
     @record_call
+    def run_again(self, *, runs: Sequence[str]) -> list[str]:
+        """
+        Ask the cluster to run this group's stopped test jobs again: `runs`
+        names them, "correction" for the group's own job (the cluster's test,
+        or the full correction) and a sweep's runs by their names.
+
+        **USAGE**
+        ```python
+        group = db.groups[some_index]
+        group.run_again(runs=["correction", "s64_o32_d3"])
+        ```
+
+        Only records the request: the cluster's next tick submits the jobs
+        again, with their own settings (`cluster.submit_reruns`).
+        """
+        runs = sorted(dict.fromkeys(str(run) for run in runs))
+
+        if not runs:
+            raise ValueError("Name the runs to run again.")
+
+        logger.info(f"Asked to run again: {', '.join(runs)}")
+        self.set_output({"runs": runs})
+
+        return runs
+
+    @record_call
     def check_raw(self, *, exclude_acq_ids: Sequence[int] = ()) -> list[int]:
         """
         Record that this group's raw acquisitions were checked (the full run

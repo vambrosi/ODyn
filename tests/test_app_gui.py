@@ -2590,3 +2590,48 @@ def test_a_database_this_computer_cannot_write_is_said_up_front(app, tmp_path):
 
     worker.stop()
     window.close()
+
+
+def test_stopped_jobs_are_run_again_from_the_qc_page(window, tmp_path, monkeypatch):
+    import gc
+    import json
+
+    from odyn.cluster import cluster_folder
+
+    monkeypatch.setenv("PATH", "")  # off the cluster: the recorded states
+    db, group_id = a_tested_experiment(tmp_path / "data")
+    del db
+    gc.collect()
+    folder = cluster_folder(tmp_path / "data")
+
+    # The tick recorded the cluster test and the sweep's piecewise run stopped
+    sent = folder / "mcor" / f"{group_id}.json"
+    sent.write_text(json.dumps(json.loads(sent.read_text()) | {"state": "stopped"}))
+    log = folder / "jobs" / f"odyn-mcor-main-g{group_id}-11.out"
+    log.write_text("started\nKilled\n")  # it did not finish after all
+    sweep = folder / "sweeps" / f"g{group_id}.json"
+    content = json.loads(sweep.read_text())
+    sweep.write_text(json.dumps(content | {"states": {"21_1": "stopped"}}))
+    asked = []
+    monkeypatch.setattr(
+        window.context,
+        "confirm",
+        lambda title, message, action, parent=None: asked.append(message) or True,
+    )
+
+    window.context.set_user("tester")
+    qc = window.qc
+    window.show_page(qc)
+    qc.reload()
+    settle(window.context)
+    row = qc.experiments.iloc[0]
+    assert row["runs"] == "1 of 3 finished, 2 stopped"
+    qc.tests_view.selectRow(0)
+    assert qc.run_again.isEnabled()
+
+    qc.run_again.click()
+    settle(window.context)
+    assert asked == ["Run again the stopped jobs of 20260304/m1/e1: s128_o64_d6, test?"]
+    calls = Database(tmp_path / "data").latest_calls("run_again")
+    assert calls["user"].iloc[0] == "tester"
+    assert calls["output_runs"].iloc[0] == ["correction", "s128_o64_d6"]

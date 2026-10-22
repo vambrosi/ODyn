@@ -44,6 +44,7 @@ from PySide6.QtGui import QDesktopServices
 from datetime import datetime
 
 from ..cluster import (
+    CORRECTION_RUN,
     ClusterConfig,
     heartbeat,
     latest_picks,
@@ -97,6 +98,7 @@ TEST_HIDDEN = [
     "experiment_folder",
     "pick_call_id",
     "flow_worst_acq",
+    "job",
 ]
 EXPERIMENT_COLUMNS = [
     "submitted_at",
@@ -107,11 +109,22 @@ EXPERIMENT_COLUMNS = [
     "local copy",
     "size",
 ]
-EXPERIMENT_HIDDEN = ["group_id", "folder", "folders", "bytes", "finished", "excluded"]
+EXPERIMENT_HIDDEN = [
+    "group_id",
+    "folder",
+    "folders",
+    "bytes",
+    "finished",
+    "excluded",
+    "stopped",
+]
 
 # An experiment's status, from its tests (later steps add their own)
 WAITING = "waiting for the cluster"
 STOPPED = "stopped"
+
+# A job's states once it ended without finishing (`squeue`'s and ours)
+STOPPED_STATES = ("stopped", "failed", "timeout", "cancelled", "out_of_memory")
 READY = "ready to compare"
 CORRECTING = "correcting with {run}"
 CORRECTION_STOPPED = "correction with {run} stopped"
@@ -334,6 +347,8 @@ def my_tests(
             "group_id": group_id,
             "experiment_folder": str(db.groups[group_id].mcor_test_folder()),
             "pick_call_id": job.get("pick_call_id"),
+            # What `Group.run_again` calls it
+            "job": job["run"] or CORRECTION_RUN,
         }
 
         if job["state"] == "finished" and (folder / "metrics.json").is_file():
@@ -386,6 +401,7 @@ def my_experiments(
     for group_id, runs in tests.groupby("group_id", sort=False):
         top = Path(runs["experiment_folder"].iloc[0])
         done = runs[runs["state"] == "finished"]
+        stopped = runs[runs["state"].isin(STOPPED_STATES)]
         states = set(runs["state"])
 
         if len(done):
@@ -435,7 +451,8 @@ def my_experiments(
                 "path": runs["path"].iloc[0],
                 "status": status,
                 "raw check": _raw_check_line((checks or {}).get(int(group_id))),
-                "runs": f"{len(done)} of {len(runs)} finished",
+                "runs": f"{len(done)} of {len(runs)} finished"
+                + (f", {len(stopped)} stopped" if len(stopped) else ""),
                 "local copy": local,
                 "size": cache.human_size(size) if folders else "",
                 "group_id": int(group_id),
@@ -444,6 +461,9 @@ def my_experiments(
                 "bytes": size,
                 "finished": finished,
                 "excluded": list((checks or {}).get(int(group_id)) or []),
+                "stopped": [
+                    (str(run["job"]), str(run["run"])) for _, run in stopped.iterrows()
+                ],
             }
         )
 
@@ -751,6 +771,8 @@ class QcPane(QWidget):
         self.show_folder.clicked.connect(self._show_folder)
         self.compare = QPushButton("Compare tests")
         self.compare.clicked.connect(self._compare)
+        self.run_again = QPushButton("Run again")
+        self.run_again.clicked.connect(self._run_again)
         self.tests_view = self._table(
             "Motion correction",
             "Your experiments' motion corrections: the cluster's tests and the "
@@ -760,6 +782,7 @@ class QcPane(QWidget):
                 self.download_all,
                 self.delete_local,
                 self.show_folder,
+                self.run_again,
                 self.compare,
             ],
         )
@@ -955,6 +978,13 @@ class QcPane(QWidget):
         self.show_folder.setEnabled(one)
         self.show_folder.setStatusTip("Open the experiment's test folder" + tip)
         ready = one and bool(len(picked[0][1]["finished"]))
+        stopped = len(picked) == 1 and bool(picked[0][1]["stopped"])
+        self.run_again.setEnabled(stopped)
+        self.run_again.setStatusTip(
+            "Run the stopped jobs again at the cluster's next run"
+            if stopped
+            else "Run stopped jobs again (none stopped)"
+        )
         self.compare.setEnabled(ready)
         self.compare.setStatusTip(
             "Compare the raw video and each test, side by side"
@@ -1064,6 +1094,40 @@ class QcPane(QWidget):
             self.context.cache_changed.emit()
 
         self.context.run(approve, approved, "approve", writes=True)
+
+    def _run_again(self) -> None:
+        """
+        Once confirmed, ask the cluster to run the selected experiment's
+        stopped jobs again (`Group.run_again`).
+        """
+        picked = self._picked()
+
+        if len(picked) != 1 or not picked[0][1]["stopped"]:
+            return
+
+        label, row = picked[0]
+        stopped = row["stopped"]
+        listed = ", ".join(name for _, name in stopped)
+
+        if not self.context.confirm(
+            "Run again",
+            f"Run again the stopped jobs of {label}: {listed}?",
+            "Run again",
+        ):
+            return
+
+        group_id = int(row["group_id"])
+        jobs = [job for job, _ in stopped]
+
+        def ask(db):
+            return db.groups[group_id].run_again(runs=jobs)
+
+        def asked(_):
+            self.context.status.emit(
+                f"{label}: {listed} will run again at the cluster's next run"
+            )
+
+        self.context.run(ask, asked, "run again", writes=True)
 
     def _check_raw(self, key: str, excluded: list[int]) -> None:
         """

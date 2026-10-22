@@ -927,3 +927,96 @@ def test_an_approval_is_found_for_the_qc_page(tmp_path, caiman):
     calls = db.latest_calls("approve_mcor_files")
     assert latest_approvals(db) == {group_id: int(calls.index[0])}
     assert len(db.groups[group_id].approved_mcor_files) == len(acq_ids) - 1
+
+
+def test_the_tick_records_which_jobs_stopped_for_the_app(tmp_path, slurm, monkeypatch):
+    from odyn.cluster import mcor_tests, record_job_states
+
+    db, group_id = a_loop(tmp_path)
+    submit_mcor_test(tmp_path, None, group_id, user="ana", whole=True)
+    logs = cluster_folder(tmp_path) / "jobs"
+    (logs / f"odyn-mcor-main-g{group_id}-4242.out").write_text("started\nKilled\n")
+
+    # Running, then ended without finishing, as squeue says on the cluster
+    (tmp_path / "queue.txt").write_text("4242 RUNNING\n")
+    assert record_job_states(tmp_path, None) == 1
+    assert record_job_states(tmp_path, None) == 0  # nothing new
+    (tmp_path / "queue.txt").write_text("")
+    assert record_job_states(tmp_path, None) == 1
+    assert mcor_tests(tmp_path)[0]["state"] == "stopped"
+
+    # Off the cluster (no squeue), the state recorded stands in
+    monkeypatch.setenv("PATH", "")
+    assert mcor_tests(tmp_path)[0]["state"] == "stopped"
+    assert record_job_states(tmp_path, None) == 0
+
+
+def test_stopped_jobs_run_again_once_with_their_settings(tmp_path, slurm):
+    from odyn.cluster import (
+        TickReport,
+        mcor_sweep_runs,
+        sweep_runs,
+        submit_reruns,
+    )
+
+    db, group_id = a_loop(tmp_path)
+    folder = cluster_folder(tmp_path)
+    submit_mcor_test(
+        tmp_path,
+        None,
+        group_id,
+        user="ana",
+        whole=True,
+        settings=PIECEWISE,
+        label="s128 (all)",
+        pick_call_id=7,
+    )
+    grid = {
+        "runs": [
+            {"strides_um": [128, 128], "overlap_um": [64, 64], "max_deviation_um": 6},
+            {"strides_um": [64, 64], "overlap_um": [32, 32], "max_deviation_um": 3},
+        ]
+    }
+    submit_mcor_sweep(tmp_path, None, group_id, grid, user="ana")
+    names = [run["run"] for run in sweep_runs(grid)]
+
+    def submit():
+        report = TickReport(started_at="now", dry_run=False)
+        submit_reruns(Database(tmp_path), None, report, dry_run=False)
+        assert report.errors == []
+        return report.tests
+
+    # Nothing asked: nothing submitted
+    before = slurm.read_text().count("sbatch")
+    assert submit() == []
+
+    # The correction again, as it was; once
+    db.groups[group_id].run_again(runs=["correction"])
+    assert submit() == [f"group {group_id}: s128 (all) again submitted (job 4242)"]
+    sent = json.loads((folder / "mcor" / f"{group_id}.json").read_text())
+    assert sent["settings"] == PIECEWISE and sent["label"] == "s128 (all)"
+    assert sent["pick_call_id"] == 7 and "rerun_call_id" in sent
+    assert submit() == []
+
+    # The sweep's baseline again: the runs waiting on it go with it, after it
+    db.groups[group_id].run_again(runs=["rigid"])
+    assert submit() == [
+        f"group {group_id}: sweep runs again submitted "
+        f"({', '.join(sorted(['rigid', *names]))})"
+    ]
+    calls = slurm.read_text()
+    assert calls.count("sbatch") == before + 3
+    assert "scancel 4242" in calls  # the first array, waiting on nothing
+    assert "--array=1,2 --output=" in calls and "--dependency=afterok:4242" in calls
+    runs = mcor_sweep_runs(tmp_path)
+    assert {run["job_id"] for run in runs} == {"4242", "4242_1", "4242_2"}
+    assert submit() == []
+
+    # One run alone: no baseline, no dependency
+    db.groups[group_id].run_again(runs=[names[1]])
+    submit()
+    last = slurm.read_text().strip().splitlines()[-1]
+    assert "--array=2 " in last and "dependency" not in last
+
+    with pytest.raises(ValueError, match="Name the runs"):
+        db.groups[group_id].run_again(runs=[])

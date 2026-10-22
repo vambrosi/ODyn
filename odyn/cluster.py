@@ -98,6 +98,10 @@ SWEEPS_FOLDER = "sweeps"
 # reference and the movie levels from
 BASELINE_RUN = "rigid"
 
+# The name `Group.run_again` gives the experiment's own job (the cluster's
+# test, or the full correction), as opposed to a sweep's runs
+CORRECTION_RUN = "correction"
+
 # What a request may ask for. A request is executed by name, so this list is
 # the whole of what another computer can make the cluster do.
 REQUESTABLE = ("process_sync",)
@@ -391,6 +395,10 @@ def tick(
         _submit_tests(db, project, report, dry_run, config.whole_new_experiments)
 
     submit_picks(db, project, report, dry_run)
+    submit_reruns(db, project, report, dry_run)
+
+    if not dry_run:
+        record_job_states(main_folder, project)
 
     seen = _read_seen(folder)
 
@@ -590,6 +598,161 @@ def pick_repeats(db: Database, group_id: int, folder: str | Path) -> tuple[bool,
     last = db.groups[group_id].last_whole_settings()
 
     return last == picked, last is None or not last.get("pw_rigid")
+
+
+def latest_reruns(db: Database) -> dict[int, dict]:
+    """Each group's latest `Group.run_again` call: `call_id`, `user`, `runs`."""
+    calls = db.method_calls
+
+    if calls.empty:
+        return {}
+
+    latest: dict[int, dict] = {}
+    asked = calls[calls["method_name"] == "Group.run_again"].sort_index()
+
+    for call_id, call in asked.iterrows():
+        inputs, output = call["parameter_inputs"], call["call_output"]
+
+        if isinstance(inputs, dict) and isinstance(output, dict):
+            latest[int(call["group_id"])] = {
+                "call_id": int(call_id),
+                "user": str(call["user"]),
+                "runs": list(inputs.get("runs") or []),
+            }
+
+    return latest
+
+
+def submit_reruns(
+    db: Database, project: None | str, report: TickReport, dry_run: bool
+) -> None:
+    """
+    Submit again the test jobs a `Group.run_again` call asked for, once
+    each: the experiment's own (`CORRECTION_RUN`, with its settings, label
+    and pick), and a sweep's runs (the stopped baseline with every run not
+    finished after it, which waited on it). Each record keeps the call it
+    ran (`rerun_call_id`), so a call is never run twice.
+    """
+    folder = cluster_folder(db.main_folder, project)
+
+    for group_id, rerun in sorted(latest_reruns(db).items()):
+        call_id, names = rerun["call_id"], set(rerun["runs"])
+        sent_path = folder / MCOR_FOLDER / f"{group_id}.json"
+        sweep_path = folder / SWEEPS_FOLDER / f"g{group_id}.json"
+
+        try:
+            if CORRECTION_RUN in names and sent_path.is_file():
+                sent = json.loads(sent_path.read_text())
+
+                if sent.get("rerun_call_id") != call_id:
+                    what = f"group {group_id}: {sent.get('label') or 'test'} again"
+
+                    if dry_run:
+                        report.tests.append(f"would submit {what}")
+                    else:
+                        job_id = submit_mcor_test(
+                            db.main_folder,
+                            project,
+                            group_id,
+                            user=sent["user"],
+                            whole=bool(sent.get("whole")),
+                            settings=sent.get("settings") or None,
+                            label=sent.get("label"),
+                            pick_call_id=sent.get("pick_call_id"),
+                        )
+                        again = json.loads(sent_path.read_text())
+                        _write_json(sent_path, again | {"rerun_call_id": call_id})
+                        report.tests.append(f"{what} submitted (job {job_id})")
+
+            if names - {CORRECTION_RUN} and sweep_path.is_file():
+                sweep = json.loads(sweep_path.read_text())
+
+                if sweep.get("rerun_call_id") != call_id:
+                    what = f"group {group_id}: sweep runs again"
+
+                    if dry_run:
+                        report.tests.append(f"would submit {what}")
+                    else:
+                        jobs = rerun_sweep(db.main_folder, project, sweep, names)
+                        sweep = json.loads(sweep_path.read_text())
+                        _write_json(
+                            sweep_path,
+                            sweep
+                            | {
+                                "reruns": (sweep.get("reruns") or {}) | jobs,
+                                "rerun_call_id": call_id,
+                            },
+                        )
+                        report.tests.append(
+                            f"{what} submitted ({', '.join(sorted(jobs))})"
+                        )
+
+        except Exception as error:  # the next tick tries again
+            report.errors.append(
+                f"group {group_id}: run again: {type(error).__name__}: {error}"
+            )
+
+
+def rerun_sweep(
+    main_folder: str | Path, project: None | str, sweep: dict, names: set[str]
+) -> dict[str, str]:
+    """
+    Submit again the runs `names` of `sweep` with its own job script: the
+    baseline as one job, the piecewise runs as an array of their tasks (after
+    the baseline, when it runs again too, with every run not finished). The
+    first sweep's tasks still waiting on a failed baseline are cancelled.
+    Returns each run's new job id.
+    """
+    folder = cluster_folder(main_folder, project)
+    script = folder / JOBS_FOLDER / f"mcor-sweep-g{sweep['group_id']}.sh"
+    logs = folder.resolve() / JOBS_FOLDER
+    states = {run: state for run, state in _sweep_states(main_folder, project, sweep)}
+    baseline = BASELINE_RUN in names
+    tasks = [
+        (task, run["run"])
+        for task, run in enumerate(sweep["runs"], start=1)
+        if run["run"] in names or (baseline and states.get(run["run"]) != "finished")
+    ]
+    jobs: dict[str, str] = {}
+    base_job = None
+
+    if baseline:
+        _cancel_waiting(sweep)
+        base_job = _sbatch([str(script)], dry_run=False)
+        jobs[BASELINE_RUN] = str(base_job)
+
+    if tasks:
+        arguments = [
+            f"--array={','.join(str(task) for task, _ in tasks)}",
+            f"--output={logs}/%x-%A_%a.out",
+        ]
+
+        if base_job is not None:
+            arguments.append(f"--dependency=afterok:{base_job}")
+
+        array = _sbatch([*arguments, str(script)], dry_run=False)
+        jobs |= {run: f"{array}_{task}" for task, run in tasks}
+
+    return jobs
+
+
+def _sweep_states(main_folder, project, sweep: dict) -> list[tuple[str, str]]:
+    """Each run of `sweep` with its state, as `mcor_sweep_runs` has it."""
+    states = {
+        (run["run"], run["state"])
+        for run in mcor_sweep_runs(main_folder, project)
+        if run["group_id"] == int(sweep["group_id"])
+    }
+
+    return sorted(states)
+
+
+def _cancel_waiting(sweep: dict) -> None:
+    """Cancel the sweep's first array, whose tasks wait on its baseline."""
+    try:
+        subprocess.run(["scancel", str(sweep["array_job"])], capture_output=True)
+    except FileNotFoundError:
+        pass
 
 
 def submit_picks(
@@ -1319,7 +1482,9 @@ def mcor_tests(main_folder: str | Path, project: None | str = None) -> list[dict
     - "pending" or "running" (or another Slurm state) while in Slurm's queue
     - "finished" once its log ends with the `finished` line
     - "stopped" when the job ended without it (the log says why)
-    - "unknown" without `squeue` (off the cluster)
+
+    Off the cluster (no `squeue`), the state the last tick recorded
+    (`record_job_states`), or "unknown" without one.
     """
     folder = cluster_folder(main_folder, project)
     in_queue = _slurm_jobs()
@@ -1327,10 +1492,11 @@ def mcor_tests(main_folder: str | Path, project: None | str = None) -> list[dict
 
     for path in (folder / MCOR_FOLDER).glob("*.json"):
         test = json.loads(path.read_text())
+        recorded = test.get("state")
         name = f"odyn-mcor-{project or 'main'}-g{test['group_id']}"
         log = folder / JOBS_FOLDER / f"{name}-{test['job_id']}.out"
         test["log"] = log if log.is_file() else None
-        test["state"] = _job_state(str(test["job_id"]), test["log"], in_queue)
+        test["state"] = _job_state(str(test["job_id"]), test["log"], in_queue, recorded)
         tests.append(test)
 
     return sorted(tests, key=lambda t: t["submitted_at"], reverse=True)
@@ -1357,12 +1523,9 @@ def mcor_sweep_runs(main_folder: str | Path, project: None | str = None) -> list
 
     for sweep in sorted(sweeps, key=lambda s: s["submitted_at"], reverse=True):
         name = f"odyn-sweep-{project or 'main'}-g{sweep['group_id']}"
-        jobs = [(BASELINE_RUN, str(sweep["baseline_job"]))] + [
-            (run["run"], f"{sweep['array_job']}_{task}")
-            for task, run in enumerate(sweep["runs"], start=1)
-        ]
+        recorded = sweep.get("states") or {}
 
-        for run, job_id in jobs:
+        for run, job_id in sweep_jobs(sweep):
             log = folder / JOBS_FOLDER / f"{name}-{job_id}.out"
             log = log if log.is_file() else None
             runs.append(
@@ -1373,15 +1536,37 @@ def mcor_sweep_runs(main_folder: str | Path, project: None | str = None) -> list
                     "run": run,
                     "job_id": job_id,
                     "log": log,
-                    "state": _job_state(job_id, log, in_queue),
+                    "state": _job_state(job_id, log, in_queue, recorded.get(job_id)),
                 }
             )
 
     return runs
 
 
-def _job_state(job_id: str, log: None | Path, in_queue: None | dict[str, str]) -> str:
-    """A job's state for `mcor_tests` (`<array>_<task>` for an array's task)."""
+def sweep_jobs(sweep: dict) -> list[tuple[str, str]]:
+    """
+    A submitted sweep's runs and their jobs, the baseline first: the job that
+    ran it last (`reruns`, see `submit_reruns`), else the first.
+    """
+    reruns = sweep.get("reruns") or {}
+    jobs = [(BASELINE_RUN, str(sweep["baseline_job"]))] + [
+        (run["run"], f"{sweep['array_job']}_{task}")
+        for task, run in enumerate(sweep["runs"], start=1)
+    ]
+
+    return [(run, str(reruns.get(run, job_id))) for run, job_id in jobs]
+
+
+def _job_state(
+    job_id: str,
+    log: None | Path,
+    in_queue: None | dict[str, str],
+    recorded: None | str = None,
+) -> str:
+    """
+    A job's state for `mcor_tests` (`<array>_<task>` for an array's task).
+    Off the cluster, `recorded` (by the last tick) stands in for `squeue`.
+    """
     queued = None if in_queue is None else _queued(job_id, in_queue)
 
     if queued is not None:
@@ -1390,7 +1575,59 @@ def _job_state(job_id: str, log: None | Path, in_queue: None | dict[str, str]) -
     if log is not None and _last_line(log).startswith("finished"):
         return "finished"
 
-    return "unknown" if in_queue is None else "stopped"
+    if in_queue is None:
+        return recorded or "unknown"
+
+    return "stopped"
+
+
+def record_job_states(main_folder: str | Path, project: None | str) -> int:
+    """
+    Write each test job's state (as `mcor_tests` sees it here, with `squeue`)
+    into its record, so the app, which has no `squeue`, can tell a job that
+    stopped from one still running. Returns how many records changed.
+    """
+    in_queue = _slurm_jobs()
+
+    if in_queue is None:
+        return 0
+
+    folder = cluster_folder(main_folder, project)
+    logs = folder / JOBS_FOLDER
+    changed = 0
+
+    for path in (folder / MCOR_FOLDER).glob("*.json"):
+        test = json.loads(path.read_text())
+        name = f"odyn-mcor-{project or 'main'}-g{test['group_id']}"
+        log = logs / f"{name}-{test['job_id']}.out"
+        state = _job_state(
+            str(test["job_id"]), log if log.is_file() else None, in_queue
+        )
+
+        if test.get("state") != state:
+            _write_json(path, test | {"state": state})
+            changed += 1
+
+    for path in (folder / SWEEPS_FOLDER).glob("g*.json"):
+        sweep = json.loads(path.read_text())
+
+        if "baseline_job" not in sweep:
+            continue
+
+        name = f"odyn-sweep-{project or 'main'}-g{sweep['group_id']}"
+        states = {}
+
+        for _, job_id in sweep_jobs(sweep):
+            log = logs / f"{name}-{job_id}.out"
+            states[job_id] = _job_state(
+                job_id, log if log.is_file() else None, in_queue
+            )
+
+        if sweep.get("states") != states:
+            _write_json(path, sweep | {"states": states})
+            changed += 1
+
+    return changed
 
 
 def _queued(job_id: str, in_queue: dict[str, str]) -> None | str:
