@@ -1239,7 +1239,9 @@ def test_qc_opens_an_experiments_files(window, tmp_path, monkeypatch):
     grid.clear_focus()
     assert all(tile.video.path.is_relative_to(local) for tile in grid.tiles)
     wait_until(lambda: grid.frame_count == 4)
-    assert mcor.missing.text() == ""
+    assert mcor.missing.text() == (  # these reports are from before
+        "No per-frame numbers to plot (older tests): test, rigid"
+    )
 
     # A run's plot, from its tile
     assert not mcor.report_action.isEnabled()

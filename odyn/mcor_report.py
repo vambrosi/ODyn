@@ -17,7 +17,13 @@ more), which shows where a rigid correction falls short (one part of the
 field moving apart from the rest, say);
 - `flow_worst.tif`: the same for the acquisition with the most of it;
 - `shifts.npz`, `shifts.png`: the shift of every frame (and, when asked, of
-every patch, for piecewise rigid) and the measures below, as plots.
+every patch, for piecewise rigid) and the measures below, as plots;
+- `shifts_summary.npz`: small, for the app to plot every test on shared
+axes: per frame, the shift (`dy`, `dx`; for piecewise rigid the median of
+the patches, with their 10th and 90th percentiles in `dy_p10`, `dy_p90`,
+`dx_p10`, `dx_p90`), and the correlation with the reference of the raw and
+the corrected frame (`raw_corr`, `corr`); `acq_ids` and `frame_counts` say
+which acquisition each frame is from.
 
 What is measured, and why this way rather than as NoRMCorre and caiman do:
 - **Mean against the reference** (`*_corr_with_ref`): each acquisition's mean
@@ -76,6 +82,9 @@ import tifffile
 
 # The plot of shifts' title, unless told which test it is
 TITLE = "Test motion correction"
+
+# What the app plots, per frame (see `write_shifts_summary`)
+SHIFTS_SUMMARY = "shifts_summary.npz"
 
 
 def write_report(
@@ -204,6 +213,7 @@ def write_report(
         "flow_average": folder / "flow_average.tif",
         "flow": folder / "flow_worst.tif",
         "npz": folder / "shifts.npz",
+        "summary_npz": folder / SHIFTS_SUMMARY,
         "png": folder / "shifts.png",
     }
     tifffile.imwrite(written["reference"], reference.astype(np.float32))
@@ -241,6 +251,15 @@ def write_report(
                 "patch_dx": np.asarray(patch_shifts[1], np.float32),
             }
         ),
+    )
+    write_shifts_summary(
+        written["summary_npz"],
+        shifts,
+        patch_shifts,
+        np.concatenate(raw_frames) if raw_frames else [],
+        np.concatenate(test_frames) if test_frames else [],
+        acq_ids,
+        frame_counts,
     )
     plot_shifts(written["png"], shifts, frame_counts, rows, max_shifts, title)
 
@@ -313,6 +332,44 @@ def side_by_side_pages(
         )
 
     return canvas
+
+
+def write_shifts_summary(
+    path: Path,
+    shifts: np.ndarray,
+    patch_shifts: None | tuple[np.ndarray, np.ndarray],
+    raw_corr: Sequence[float],
+    corr: Sequence[float],
+    acq_ids: Sequence[int],
+    frame_counts: Sequence[int],
+) -> None:
+    """
+    The per-frame numbers the app plots (see the module description), as
+    float32. `raw_corr` and `corr` are left out when there is no reference
+    (no frame was compared).
+    """
+    shifts = np.asarray(shifts, np.float32).reshape(-1, 2)
+    content = {
+        "dy": shifts[:, 0],
+        "dx": shifts[:, 1],
+        "acq_ids": np.asarray(acq_ids, np.int64),
+        "frame_counts": np.asarray(frame_counts, np.int64),
+    }
+
+    if patch_shifts is not None:
+        for name, patches in zip(("dy", "dx"), patch_shifts):
+            patches = np.asarray(patches, np.float32).reshape(len(shifts), -1)
+            low, high = np.percentile(patches, [10, 90], axis=1)
+            content[f"{name}_p10"] = low.astype(np.float32)
+            content[f"{name}_p90"] = high.astype(np.float32)
+
+    if len(corr) == len(shifts):
+        content["corr"] = np.asarray(corr, np.float32)
+
+    if len(raw_corr) == len(shifts):
+        content["raw_corr"] = np.asarray(raw_corr, np.float32)
+
+    np.savez_compressed(path, **content)
 
 
 def plot_shifts(

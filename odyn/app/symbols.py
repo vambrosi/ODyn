@@ -113,6 +113,7 @@ GLYPHS = {
     "clear-focus": ("deselect", "", "-"),
     "star": ("star", "", "*"),
     "set-aside": ("visibility_off", "", "x"),
+    "plots": ("show_chart", "", "~"),
     "report": ("monitoring", "", "r"),
     "pick": ("check_circle", "", "p"),
 }

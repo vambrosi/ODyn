@@ -30,7 +30,16 @@ from pathlib import Path
 
 import numpy as np
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import (
+    QElapsedTimer,
+    QPoint,
+    QPointF,
+    QRectF,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -116,6 +125,7 @@ class Video:
     path: Path
     numbers: str = ""
     candidate: bool = True  # can be set aside (not the raw video)
+    color: None | QColor = None  # its color in the plots, as a square by its name
     frames: None | np.ndarray = field(default=None, repr=False)
 
 
@@ -288,6 +298,10 @@ class VideoTile(QWidget):
 
         left = 6.0
 
+        if self.video.color is not None:
+            painter.fillRect(QRectF(left, 5, 10, 10), self.video.color)
+            left += 14
+
         if self.starred:
             painter.setPen(STAR_COLOR)
             painter.drawText(
@@ -446,6 +460,7 @@ class VideoGrid(QWidget):
 
     frame_changed = Signal(int)
     focus_changed = Signal()
+    hovered = Signal(object)  # the video under the pointer, or None
     menu_requested = Signal(object, QPoint)
 
     def __init__(self, parent=None):
@@ -457,9 +472,15 @@ class VideoGrid(QWidget):
         self.reader: None | FrameReader = None
         self.index = 0
 
-        self.stride = 1  # frames per step of the timer (see `_set_speed`)
+        self.fps = DEFAULT_SPEED
         self.timer = QTimer(self)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.timeout.connect(self._step)
+
+        # Playing follows the clock, not the timer's ticks: a tick late (many
+        # tiles, the plots) shows a later frame, so the speed stays true
+        self.clock = QElapsedTimer()
+        self.played_from = 0  # the frame the clock started at
 
         self.area = QScrollArea()
         self.area.setWidgetResizable(True)
@@ -478,7 +499,7 @@ class VideoGrid(QWidget):
         self.play_button = QPushButton("Play")
         self.play_button.clicked.connect(self.toggle)
         self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.valueChanged.connect(self.seek)
+        self.slider.valueChanged.connect(self._slid)
         self.position = QLabel("")
         self.speed = QComboBox()
         self.speed.addItems([f"{fps} frames/s" for fps in SPEEDS])
@@ -595,8 +616,13 @@ class VideoGrid(QWidget):
 
     def play(self) -> None:
         if self.frame_count > 1:
+            self._restart_clock()
             self.timer.start()
             self.play_button.setText("Pause")
+
+    def _restart_clock(self) -> None:
+        self.played_from = self.index
+        self.clock.start()
 
     def pause(self) -> None:
         self.timer.stop()
@@ -616,9 +642,24 @@ class VideoGrid(QWidget):
         self.position.setText(f"{self.index + 1} / {count}" if count else "")
         self.frame_changed.emit(self.index)
 
+    def _slid(self, index: int) -> None:
+        """The slider moved: show its frame, and play on from there."""
+        self.seek(index)
+
+        if self.timer.isActive():
+            self._restart_clock()
+
     def _step(self) -> None:
+        self.seek(self.frame_at(self.clock.elapsed()))
+
+    def frame_at(self, elapsed_ms: float) -> int:
+        """The frame due `elapsed_ms` after playing started, going round."""
         count = self.frame_count
-        self.seek((self.index + self.stride) % count if count else 0)
+
+        if not count:
+            return 0
+
+        return (self.played_from + int(elapsed_ms * self.fps / 1000)) % count
 
     def step_by(self, frames: int) -> None:
         """Pause, and go `frames` forward (back when negative)."""
@@ -631,10 +672,12 @@ class VideoGrid(QWidget):
         self.speed.setCurrentIndex(index)
 
     def _set_speed(self, *_) -> None:
-        """Up to the screen's refresh one frame at a time, then in strides."""
-        fps = SPEEDS[self.speed.currentIndex()]
-        self.stride = max(1, round(fps / MAX_REFRESH))
-        self.timer.setInterval(int(1000 * self.stride / fps))
+        """A tick per frame, up to the screen's refresh (frames then skip)."""
+        self.fps = SPEEDS[self.speed.currentIndex()]
+        self.timer.setInterval(int(1000 / min(self.fps, MAX_REFRESH)))
+
+        if self.timer.isActive():
+            self._restart_clock()
 
     def _enable(self) -> None:
         count = self.frame_count
@@ -656,8 +699,12 @@ class VideoGrid(QWidget):
         if point is None and view.pointer_tile is not tile:
             return  # left a tile after entering the next
 
+        before = view.pointer_tile
         view.pointer = point
         view.pointer_tile = None if point is None else tile
+
+        if view.pointer_tile is not before:
+            self.hovered.emit(None if point is None else tile.video)
 
         if view.mirror:
             for other in self.tiles:

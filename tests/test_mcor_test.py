@@ -313,6 +313,13 @@ def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman, monkeypatch):
         assert len(tif.pages) == 4  # pages, not one RGB image
     assert tifffile.imread(folder / "reference.tif").shape == (48, 40)
     assert (folder / "shifts.png").stat().st_size > 0
+
+    # The per-frame numbers the app plots, every frame of the test
+    summary_npz = np.load(folder / "shifts_summary.npz")
+    counts = summary_npz["frame_counts"]
+    assert len(summary_npz["dy"]) == counts.sum() == len(summary_npz["corr"])
+    assert summary_npz["acq_ids"].tolist() == summary["acq_id"].tolist()
+    assert "dy_p10" not in summary_npz  # rigid: no patches
     assert titles == [f"20260304/m1/e1 — group {group_id} — test"]
 
     # The stand-in leaves the movie as it was: the frames are compared with
@@ -781,3 +788,30 @@ def test_the_tick_corrects_with_the_test_picked_once(tmp_path, slurm, monkeypatc
     )
     run_mcor_test(tmp_path, None, group_id, "bo", True, sent["settings"], sent["label"])
     assert seen == {"whole": True, **PIECEWISE, "label": "s128_o64_d6 (all)"}
+
+
+def test_a_video_frame_map_says_where_each_frame_is_from(tmp_path):
+    from odyn.groups import frame_map_path, read_frame_map, write_frame_map
+
+    video = tmp_path / "e1_test.avi"
+    assert frame_map_path(video) == tmp_path / "e1_test.frames.csv"
+    write_frame_map(frame_map_path(video), [5, 5, 9], [0, 50, 0])
+    frames = read_frame_map(frame_map_path(video))
+    assert frames.values.tolist() == [[0, 5, 0], [1, 5, 50], [2, 9, 0]]
+    assert read_frame_map(tmp_path / "missing.frames.csv") is None
+
+
+def test_the_shifts_summary_has_the_patches_spread(tmp_path):
+    from odyn.mcor_report import write_shifts_summary
+
+    shifts = np.array([[1.0, 2.0], [1.5, 2.5], [2.0, 3.0]])
+    patches = (
+        np.array([[0, 1, 2, 10]] * 3, float),
+        np.array([[2, 2, 2, 2]] * 3, float),
+    )
+    path = tmp_path / "shifts_summary.npz"
+    write_shifts_summary(path, shifts, patches, [0.2] * 3, [0.5] * 3, [7], [3])
+    data = np.load(path)
+    assert data["dy"].tolist() == [1.0, 1.5, 2.0]
+    assert data["dy_p90"][0] > data["dy_p10"][0] and data["dx_p10"][0] == 2
+    assert data["raw_corr"].tolist() == pytest.approx([0.2] * 3)

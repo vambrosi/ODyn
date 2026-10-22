@@ -1419,7 +1419,7 @@ class Group(CallRecorder):
 
         logger.info(f"Saving movie to {path}")
 
-        movie, frame_acq = self._load_preview_movie(
+        movie, frame_acq, frame_in_acq = self._load_preview_movie(
             movie_types, downsample_ratio, downsample_type, raw_of_test
         )
 
@@ -1456,6 +1456,9 @@ class Group(CallRecorder):
             codec=codec,
             size=size,
         )
+
+        # Which frame of which acquisition each video frame is, beside it
+        write_frame_map(frame_map_path(path), frame_acq, frame_in_acq)
 
         # outputs table stores paths relative to main_folder, so a save_folder
         # somewhere else cannot be recorded (it would not be useful).
@@ -1543,8 +1546,10 @@ class Group(CallRecorder):
         Frames go along time and the types along width, so a two-type grid is
         one movie with the panels next to each other.
 
-        Returns `(movie, frame_acq)`, where `frame_acq` says which acquisition
-        each frame came from. Panels share the time axis, so one array is enough.
+        Returns `(movie, frame_acq, frame_in_acq)`: `frame_acq` says which
+        acquisition each frame came from, and `frame_in_acq` which frame of
+        it (the middle of the frames averaged, for "average"). Panels share
+        the time axis, so one array each is enough.
 
         NOTE:
         - We check that the frame -> acq_id map is the same for all panels.
@@ -1555,6 +1560,7 @@ class Group(CallRecorder):
 
         movie_chains = []
         labels: list[np.ndarray] = []
+        within: list[np.ndarray] = []
         paths_by_type = self._movie_paths(movie_types, raw_of_test)
 
         for movie_type in movie_types:
@@ -1568,6 +1574,7 @@ class Group(CallRecorder):
             # movie to average it away. Same number of frames out either way.
             movie_chain = None
             frame_acq = []
+            frame_in_acq = []
 
             for acq_id, path in tqdm(
                 movie_paths, desc=f"Loading {movie_type.value} movies"
@@ -1586,8 +1593,16 @@ class Group(CallRecorder):
                     if movie.ndim == 2:
                         movie = movie[np.newaxis]
 
+                    frame_in_acq.append(np.asarray(frames_to_keep, int))
+
                 else:
-                    movie = cm.load(path).resize(1, 1, downsample_ratio)
+                    movie = cm.load(path)
+                    total = len(movie)
+                    movie = movie.resize(1, 1, downsample_ratio)
+                    bins = total / len(movie)
+                    frame_in_acq.append(
+                        ((np.arange(len(movie)) + 0.5) * bins).astype(int)
+                    )
 
                 frame_acq.append(np.full(len(movie), acq_id))
 
@@ -1601,6 +1616,7 @@ class Group(CallRecorder):
 
             movie_chains.append(movie_chain)
             labels.append(np.concatenate(frame_acq))
+            within.append(np.concatenate(frame_in_acq))
 
         # frame -> acq_id map represented by frame_acq must be the same
         # for all panels, or else something upstream failed.
@@ -1612,7 +1628,7 @@ class Group(CallRecorder):
 
         movie_chain = cm.concatenate(movie_chains, axis=2)
 
-        return movie_chain, labels[0]
+        return movie_chain, labels[0], within[0]
 
     @memorize_params
     @record_call
@@ -3415,6 +3431,36 @@ def _save_movie(
         writer.release()
 
     logger.info(f"Wrote {path}")
+
+
+def frame_map_path(video: Path) -> Path:
+    """Where the frame map of `video` is: `x_test.avi` -> `x_test.frames.csv`."""
+    return video.with_suffix(".frames.csv")
+
+
+def write_frame_map(
+    path: Path, frame_acq: Sequence[int], frame_in_acq: Sequence[int]
+) -> None:
+    """
+    Which acquisition (`acq_id`) and which frame of it (`frame_in_acq`) each
+    frame of a video is, as a CSV (`frame`, `acq_id`, `frame_in_acq`).
+    Written with the video, so the two never drift apart.
+    """
+    pd.DataFrame(
+        {
+            "frame": np.arange(len(frame_acq)),
+            "acq_id": np.asarray(frame_acq, int),
+            "frame_in_acq": np.asarray(frame_in_acq, int),
+        }
+    ).to_csv(path, index=False)
+
+
+def read_frame_map(path: Path) -> None | pd.DataFrame:
+    """The frame map written by `write_frame_map`, or `None` without one."""
+    try:
+        return pd.read_csv(path)
+    except (OSError, ValueError):
+        return None
 
 
 def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:

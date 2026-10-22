@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +41,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QSizePolicy,
+    QSplitter,
     QStackedWidget,
     QToolBar,
     QToolButton,
@@ -46,9 +49,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..groups import RAW_PREVIEW_FOLDER
+from ..groups import RAW_PREVIEW_FOLDER, frame_map_path, read_frame_map
 from . import style
 from .player import Video, VideoGrid
+from .plots import RAW_COLOR, Series, ShiftPlots, read_summary, run_color
 from .symbols import icon
 
 # Where the raw video is in experiment folders from before `raw/`: the
@@ -237,9 +241,23 @@ class McorWindow(QWidget):
         self.grid = VideoGrid()
         self.grid.focus_changed.connect(self._enable)
         self.grid.menu_requested.connect(self._menu)
-        tests_layout.addWidget(self.grid, stretch=1)
-        self.details = QLabel("")  # the numbers of the focused runs
-        self.details.setWordWrap(True)
+        self.plots = ShiftPlots()
+        self.split = QSplitter(Qt.Orientation.Vertical)
+        self.split.addWidget(self.grid)
+        self.split.addWidget(self.plots)
+        self.split.setStretchFactor(0, 3)
+        self.split.setStretchFactor(1, 1)
+        self.split.setChildrenCollapsible(False)
+        self.split.setSizes([600, 220])
+        tests_layout.addWidget(self.split, stretch=1)
+        self.grid.frame_changed.connect(self._mark_frame)
+        self.grid.hovered.connect(self._show_details)
+        self.hovered: None | Video = None
+        self.frame_x: None | np.ndarray = None  # each video frame on the plots
+        # The numbers of the run under the pointer, or else the focused one:
+        # one line, so the grid keeps its room
+        self.details = QLabel("")
+        self.details.setFixedHeight(self.details.fontMetrics().height() + 4)
         self.details.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -274,6 +292,11 @@ class McorWindow(QWidget):
         )
         self.back_action.triggered.connect(lambda: self.grid.bring_back())
         self.right.addSeparator()
+        self.plots_action = self._action(
+            self.right, "plots", "Plots of the focused runs", "P", checkable=True
+        )
+        self.plots_action.setChecked(True)
+        self.plots_action.toggled.connect(self.plots.setVisible)
         self.report_action = self._action(
             self.right, "report", "Open the report of the focused run", "R"
         )
@@ -362,7 +385,8 @@ class McorWindow(QWidget):
         raw = raw_video(self.folder)
 
         if raw is not None:
-            videos.append(Video("raw", raw, candidate=False))
+            # Gray, as its correlation on the plots
+            videos.append(Video("raw", raw, candidate=False, color=RAW_COLOR))
 
         absent = []
 
@@ -373,15 +397,73 @@ class McorWindow(QWidget):
                 absent.append(run.name)
                 continue
 
-            videos.append(Video(run.name, path, numbers_line(run)))
+            color = run_color(len(self.runs))
+            videos.append(Video(run.name, path, numbers_line(run), color=color))
             self.runs[run.name] = run
 
         self.grid.set_videos(videos)
         problems = ([] if raw is not None else ["raw"]) + absent
-        self.missing.setText(
-            f"Not downloaded yet: {', '.join(problems)}" if problems else ""
-        )
+        notes = [f"Not downloaded yet: {', '.join(problems)}"] if problems else []
+        notes += self._load_plots(videos, raw)
+        self.missing.setText("\n".join(notes))
         self._enable()
+
+    def _load_plots(self, videos: list[Video], raw: None | Path) -> list[str]:
+        """
+        Read the runs' per-frame numbers for the plots, and where each video
+        frame falls on them (from the raw video's frame map). Returns what
+        could not be plotted, in words.
+        """
+        series, missing = [], []
+
+        for video in videos:
+            if video.name not in self.runs:
+                continue
+
+            data = read_summary(self.runs[video.name].folder)
+
+            if data is None:
+                missing.append(video.name)
+            else:
+                series.append(Series(video.name, video.color, data))
+
+        self.plots.set_series(series)
+        self.frame_x = None
+
+        if series and raw is not None:
+            frames = read_frame_map(frame_map_path(raw))
+            data = series[0].data
+            starts = dict(
+                zip(
+                    data["acq_ids"].tolist(),
+                    np.concatenate([[0], np.cumsum(data["frame_counts"])[:-1]]),
+                )
+            )
+
+            if frames is not None and set(frames["acq_id"]) <= set(starts):
+                self.frame_x = np.array(
+                    [
+                        starts[acq_id] + within
+                        for acq_id, within in zip(
+                            frames["acq_id"], frames["frame_in_acq"]
+                        )
+                    ],
+                    float,
+                )
+
+        self._mark_frame(self.grid.index)
+
+        if missing:
+            return [f"No per-frame numbers to plot (older tests): {', '.join(missing)}"]
+
+        return []
+
+    def _mark_frame(self, index: int) -> None:
+        """Mark the frame the videos show on the plots."""
+        x = self.frame_x
+        self.plots.set_marker(
+            float(x[index]) if x is not None and index < len(x) else None
+        )
 
     def _picked_run(self) -> None | Run:
         """The focused run, when one alone is."""
@@ -396,14 +478,17 @@ class McorWindow(QWidget):
         """Show the experiment status (see `pane_qc.my_experiments`)."""
         self.state.setText(f"Status: {text}")
 
+    def _show_details(self, video: None | Video = None) -> None:
+        """The numbers of the run under the pointer, else the one focused."""
+        self.hovered = video
+        focused = self.grid.focused
+        shown = video or (focused[0] if len(focused) == 1 else None)
+        run = None if shown is None else self.runs.get(shown.name)
+        self.details.setText("" if run is None else details_line(run))
+
     def _enable(self, *_) -> None:
-        self.details.setText(
-            "\n".join(
-                details_line(self.runs[video.name])
-                for video in self.grid.focused
-                if video.name in self.runs
-            )
-        )
+        self.plots.show_runs([video.name for video in self.grid.focused])
+        self._show_details(self.hovered)
         run = self._picked_run()
         focused = self.grid.focused
         only = self.grid.only is not None

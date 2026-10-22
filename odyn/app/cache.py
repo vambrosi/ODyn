@@ -40,6 +40,8 @@ SMALL_FILES = (
     "flow_worst.tif",
     "summary.csv",
     "metrics.json",
+    "shifts_summary.npz",
+    "*.frames.csv",
 )
 
 # What `state` says of a test

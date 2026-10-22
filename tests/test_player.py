@@ -79,8 +79,8 @@ def test_the_videos_play_in_step(app, tmp_path):
     assert grid.index == 3 and grid.position.text() == "4 / 4"
 
     # Playing goes round
-    grid._step()
-    assert grid.index == 0
+    grid.played_from = grid.index
+    assert grid.frame_at(100) == 0  # 10 frames/s: one frame later
     grid.play()
     assert grid.timer.isActive() and grid.play_button.text() == "Pause"
     grid.toggle()
@@ -150,24 +150,30 @@ def test_the_pointer_shows_on_every_other_tile(app, tmp_path):
     grid.close()
 
 
-def test_fast_speeds_step_more_than_one_frame(app, tmp_path):
+def test_playing_keeps_time_whatever_the_ticks(app, tmp_path):
     from odyn.app.player import SPEEDS
 
     grid = VideoGrid()
     assert SPEEDS == (10, 20, 30, 60, 120, 240)
 
+    # A tick per frame, up to the screen's refresh
     grid.speed.setCurrentIndex(SPEEDS.index(30))
-    assert (grid.stride, grid.timer.interval()) == (1, 33)
-    grid.speed.setCurrentIndex(SPEEDS.index(120))
-    assert (grid.stride, grid.timer.interval()) == (2, 16)
+    assert grid.timer.interval() == 33
     grid.speed.setCurrentIndex(SPEEDS.index(240))
-    assert (grid.stride, grid.timer.interval()) == (4, 16)
-    grid.speed.setCurrentIndex(SPEEDS.index(120))
+    assert grid.timer.interval() == 16
 
-    grid.set_videos([Video("a", a_video(tmp_path / "a.avi", frames=6))])
+    # The frame shown is the one due by the clock: a late tick skips ahead
+    grid.set_videos([Video("a", a_video(tmp_path / "a.avi", frames=60))])
     loaded(grid)
-    grid._step()
-    assert grid.index == 2
+    grid.seek(5)
+    grid.play()
+    assert grid.played_from == 5
+    assert grid.frame_at(100) == 5 + 24  # 240 frames/s, 0.1 s
+    assert grid.frame_at(1000) == (5 + 240) % 60
+
+    # The slider moved while playing: on from there
+    grid.slider.setValue(40)
+    assert grid.played_from == 40
     grid.close()
 
 
@@ -365,4 +371,74 @@ def test_the_qc_window_is_driven_from_the_keyboard(app, tmp_path):
 
     QTest.keyClick(window, Qt.Key.Key_H)
     assert grid.view.mirror is False
+    window.close()
+
+
+def test_the_plots_show_the_focused_runs_on_shared_axes(app, tmp_path):
+    from odyn.app.mcor_window import McorWindow, Run
+    from odyn.app.plots import RAW_COLOR
+    from odyn.groups import frame_map_path, write_frame_map
+    from odyn.mcor_report import write_shifts_summary
+
+    # Two acquisitions of 100 frames; the videos keep 3 of each
+    raw = a_video(tmp_path / "raw" / "e1_raw.avi")
+    write_frame_map(frame_map_path(raw), [4, 4, 4, 9, 9, 9], [0, 50, 99] * 2)
+    runs = []
+
+    for name, size in (("rigid", 1.0), ("s128", 3.0)):
+        folder = tmp_path / name
+        a_video(folder / "e1_test.avi")
+        shifts = np.stack([np.linspace(0, size, 200)] * 2, axis=1)
+        patches = None if name == "rigid" else (np.ones((200, 4)),) * 2
+        write_shifts_summary(
+            folder / "shifts_summary.npz",
+            shifts,
+            patches,
+            [0.3] * 200,
+            [0.8] * 200,
+            [4, 9],
+            [100, 100],
+        )
+        runs.append(Run(name, folder))
+
+    a_video(tmp_path / "old" / "e1_test.avi")  # from before: no numbers
+    runs.append(Run("old", tmp_path / "old"))
+    window = McorWindow("e1", tmp_path, runs, print)
+    plots = window.plots
+    assert [s.name for s in plots.series] == ["rigid", "s128"]
+    assert "older tests): old" in window.missing.text()
+
+    # Shared ranges, over every run loaded
+    assert plots.ranges["dy"][1] > 3.0 and plots.ranges["dy"][0] < 0.0
+    assert plots.edges.tolist() == [0, 100]
+    assert plots.ranges["corr"][0] == 0  # the correlation axis starts at 0
+
+    # Only the focused runs drawn; the marker follows the video frame
+    assert plots.shown == []
+    window.grid.tiles[2].clicked.emit(False)
+    assert plots.shown == ["s128"]
+    loaded(window.grid)
+    window.grid.seek(4)  # acquisition 9, its frame 50
+    assert plots.marker == 150
+    assert window.grid.tiles[1].video.color is not None
+    assert window.grid.tiles[0].video.color == RAW_COLOR  # as its gray line
+
+    # One line of numbers: the run under the pointer, else the focused one
+    assert window.details.text() == "s128"
+    window.grid.tiles[1].hovered.emit(QPointF(0.5, 0.5))
+    assert window.details.text() == "rigid"
+    window.grid.tiles[1].hovered.emit(None)
+    assert window.details.text() == "s128"
+    window.grid.tiles[1].clicked.emit(True)
+    assert window.details.text() == ""  # two focused, none hovered
+
+    # Drawn (the picture is kept once drawn whole), marker and all
+    plots.resize(400, 200)
+    image = plots.grab().toImage()
+    assert plots._picture is not None
+    marker = plots._x(plots._rows()[0], plots.marker)
+    assert image.pixelColor(int(marker), 30).alpha() > 0
+
+    window.plots_action.trigger()
+    assert not plots.isVisibleTo(window)
     window.close()
