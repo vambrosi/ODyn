@@ -116,6 +116,7 @@ GLYPHS = {
     "plots": ("show_chart", "", "~"),
     "exclude": ("block", "", "e"),
     "check-raw": ("task_alt", "", "c"),
+    "approve": ("verified", "", "a"),
     "report": ("monitoring", "", "r"),
     "pick": ("check_circle", "", "p"),
 }

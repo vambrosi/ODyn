@@ -51,10 +51,11 @@ from ..cluster import (
     mcor_tests,
     pending_requests,
     pick_candidate,
+    pick_repeats,
     send_request,
 )
 from ..database import SyncFlag
-from ..groups import FINAL_FOLDER, FULL_FOLDER, RAW_PREVIEW_FOLDER
+from ..groups import FULL_FOLDER, RAW_PREVIEW_FOLDER
 from ..mcor_sweep import run_numbers
 from . import cache
 from .context import Context
@@ -115,9 +116,10 @@ READY = "ready to compare"
 CORRECTING = "correcting with {run}"
 CORRECTION_STOPPED = "correction with {run} stopped"
 FINAL_CHECK = "ready for final check"
+APPROVED = "approved"
 
 # The folders of an experiment's tests downloaded with it, beside the runs'
-EXPERIMENT_FOLDERS = (RAW_PREVIEW_FOLDER, FINAL_FOLDER, FULL_FOLDER)
+EXPERIMENT_FOLDERS = (RAW_PREVIEW_FOLDER, FULL_FOLDER)
 
 # An experiment some of whose files are downloaded (see `cache.state`)
 PARTLY = "partly"
@@ -362,17 +364,20 @@ def my_experiments(
     base: None | Path = None,
     picks: None | dict[int, dict] = None,
     checks: None | dict[int, list[int]] = None,
+    approvals: None | dict[int, int] = None,
 ) -> pd.DataFrame:
     """
     One row per experiment of `tests` (from `my_tests`), in its order: its
     status (after a test was picked, from `picks`: see
     `cluster.latest_picks`), its raw check (from `checks`, see
-    `latest_raw_checks`; the acquisitions excluded hidden in `excluded`),
+    `latest_raw_checks`; the acquisitions excluded hidden in `excluded`;
+    "approved" once approved after the latest pick, from `approvals`, see
+    `latest_approvals`),
     how many of its tests finished, whether its
     files are downloaded (`local copy`: "no", "yes", "partly" or "newer on
     server") and how much downloading them copies (`size`). Hidden:
     `folder`, where its tests are; `folders`, those with files to download
-    (its own, `raw/`, `final/`, `full/` and each finished run's); `bytes`, their size;
+    (its own, `raw/`, `full/` and each finished run's); `bytes`, their size;
     `finished`, its finished runs (as `Run`s, with folders on the share), the
     cluster test first.
     """
@@ -394,6 +399,11 @@ def my_experiments(
 
         if pick is not None:
             status = _picked_status(pick, runs[runs["folder"] == str(top)])
+
+        approved = (approvals or {}).get(int(group_id))
+
+        if approved is not None and (pick is None or approved > pick["call_id"]):
+            status = APPROVED
 
         finished = [
             Run(
@@ -455,6 +465,25 @@ def latest_raw_checks(db) -> dict[int, list[int]]:
 
         if isinstance(output, dict):  # not one that failed
             latest[int(call["group_id"])] = list(output.get("excluded", []))
+
+    return latest
+
+
+def latest_approvals(db) -> dict[int, int]:
+    """Each group's latest `approve_mcor_files` that worked: its call id."""
+    calls = db.method_calls
+
+    if calls.empty:
+        return {}
+
+    approvals = calls[calls["method_name"] == "Group.approve_mcor_files"]
+    latest: dict[int, int] = {}
+
+    for call_id, call in approvals.sort_index().iterrows():
+        if isinstance(call["call_output"], dict) and call["call_output"].get(
+            "approved"
+        ):
+            latest[int(call["group_id"])] = int(call_id)
 
     return latest
 
@@ -818,6 +847,7 @@ class QcPane(QWidget):
                     base,
                     latest_picks(db),
                     latest_raw_checks(db),
+                    latest_approvals(db),
                 ),
                 cluster_line(db),
                 db.main_folder,
@@ -844,7 +874,9 @@ class QcPane(QWidget):
 
             for _, row in self.experiments.iterrows():
                 if str(row["folder"]) in self.windows:
-                    self.windows[str(row["folder"])].set_status(_window_status(row))
+                    self.windows[str(row["folder"])].set_status(
+                        _window_status(row), row["status"] == FINAL_CHECK
+                    )
             self._count_tabs()
             self._enable()
 
@@ -975,11 +1007,63 @@ class QcPane(QWidget):
             pick=lambda run, aside: self._pick(key, run, aside),
             check_raw=lambda excluded: self._check_raw(key, excluded),
             excluded=row["excluded"],
+            approve=lambda excluded: self._approve(key, excluded),
+            final_ready=row["status"] == FINAL_CHECK,
+            raw_checked=row["raw check"] != "not yet",
         )
         window.set_status(_window_status(row))
         window.closed.connect(lambda: self.windows.pop(key, None))
         self.windows[key] = window
         window.show()
+
+    def _approve(self, key: str, excluded: list[int]) -> None:
+        """
+        Once confirmed, approve the motion corrected files of the experiment
+        with tests in `key`, leaving out `excluded` (`approve_mcor_files`),
+        then delete its local copy: its checking is done.
+        """
+        window = self.windows.get(key)
+        rows = self.experiments[self.experiments["folder"] == key]
+
+        if window is None or rows.empty:
+            return
+
+        row = rows.iloc[0]
+        listed = ", ".join(str(acq_id) for acq_id in excluded)
+        leaving = (
+            f"leaving out acquisitions {listed}" if listed else "every acquisition"
+        )
+
+        if row["raw check"] == "not yet":
+            leaving += " (the raw check is not finished)"
+
+        if not self.context.confirm(
+            "Approve",
+            f"Approve the motion correction of {row['path']}, {leaving}?\n\n"
+            "Its local copy is deleted from this computer.",
+            "Approve",
+            parent=window,
+        ):
+            return
+
+        group_id, folders = int(row["group_id"]), list(row["folders"])
+
+        def approve(db):
+            db.groups[group_id].approve_mcor_files(exclude_acq_ids=excluded)
+
+        def approved(_):
+            window.close()  # its videos are about to go
+            freed = sum(
+                cache.delete(self.main_folder, folder, self.context.cache_base)
+                for folder in folders
+            )
+            self.context.status.emit(
+                f"{row['path']} approved; local copy deleted "
+                f"({cache.human_size(freed)} freed)"
+            )
+            self.context.cache_changed.emit()
+
+        self.context.run(approve, approved, "approve", writes=True)
 
     def _check_raw(self, key: str, excluded: list[int]) -> None:
         """
@@ -1014,6 +1098,7 @@ class QcPane(QWidget):
             return db.groups[group_id].check_raw(exclude_acq_ids=excluded)
 
         def checked(result):
+            window.raw_check_done()  # on to the tests
             self.context.status.emit(
                 f"Raw check of {row['path']} recorded"
                 + (f" ({len(result)} excluded)" if result else "")
@@ -1036,16 +1121,30 @@ class QcPane(QWidget):
         row = rows.iloc[0]
         found = [r for r in row["finished"] if r.name == run]
 
-        if not found or not self.context.confirm(
-            "Pick candidate",
-            f"Motion correct {row['path']} with {run}'s settings?\n\n"
-            "Overwrite the last run's files?",
-            "Motion correct",
-            parent=window,
-        ):
+        if not found:
             return
 
         group_id, folder = int(row["group_id"]), found[0].folder
+
+        def ask(db):
+            return pick_repeats(db, group_id, folder)
+
+        def asked(result):
+            repeats, rigid = result
+            then = (
+                "This will proceed to the final check."
+                if repeats
+                else f"This will overwrite the {'rigid' if rigid else 'last'} "
+                "run files."
+            )
+
+            if self.context.confirm(
+                "Pick candidate",
+                f"Are you sure you want to pick {run}?\n\n{then}",
+                "Pick",
+                parent=window,
+            ):
+                self.context.run(pick, picked, "pick candidate", writes=True)
 
         def pick(db):
             try:
@@ -1065,13 +1164,23 @@ class QcPane(QWidget):
                     f"{row['path']} will be corrected with {run} at the next "
                     "cluster run"
                 )
-            else:
+                box = QMessageBox(
+                    QMessageBox.Icon.Information,
+                    "Pick candidate",
+                    f"Sent to the cluster: {row['path']}, corrected with "
+                    f"{run}'s settings.\n\nCheck back later for the final check.",
+                    parent=window,
+                )
+                box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+                box.open()
+            else:  # already corrected so: on to the final check
                 self.context.status.emit(
                     f"The last correction of {row['path']} already used {run}'s "
                     "settings"
                 )
+                window.final_check()
 
-        self.context.run(pick, picked, "pick candidate", writes=True)
+        self.context.run(ask, asked, "pick candidate")
 
     def _picked(self) -> list[tuple[str, pd.Series]]:
         """The selected experiments, as `(what to call it, row)`, in view order."""

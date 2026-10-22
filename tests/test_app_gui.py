@@ -1136,6 +1136,16 @@ def test_qc_lists_the_tests_of_this_users_experiments(tmp_path, monkeypatch):
 
     experiments = my_experiments(tests, db.main_folder, tmp_path / "base")
     assert len(experiments) == 1
+
+    # Approved after the latest pick: approved; a pick after it: not
+    pick = {"call_id": 5, "run": "s128", "correct": False}
+    status = [
+        my_experiments(
+            tests, db.main_folder, tmp_path / "base", {group_id: pick}, None, approved
+        )["status"].iloc[0]
+        for approved in ({group_id: 7}, {group_id: 3}, None)
+    ]
+    assert status == ["approved", "ready for final check", "ready for final check"]
     row = experiments.iloc[0]
     top = db.groups[group_id].mcor_test_folder()
     assert row["folder"] == str(top)
@@ -1316,11 +1326,16 @@ def test_a_test_is_picked_from_the_window(window, tmp_path, monkeypatch):
 
     message, action, parent = asked[-1]
     assert message == (
-        "Motion correct 20260304/m1/e1 with rigid's settings?\n\n"
-        "Overwrite the last run's files?"
+        "Are you sure you want to pick rigid?\n\n"
+        "This will overwrite the rigid run files."
     )
-    assert action == "Motion correct" and parent is mcor
+    assert action == "Pick" and parent is mcor
     assert qc.experiments["status"].tolist() == ["correcting with rigid"]
+
+    # Sent to the cluster: said over the window
+    boxes = [box for box in mcor.findChildren(QMessageBox) if box.isVisible()]
+    assert len(boxes) == 1 and boxes[0].text().startswith("Sent to the cluster")
+    boxes[0].close()
 
     # What was set aside goes with the pick
     from odyn import Database

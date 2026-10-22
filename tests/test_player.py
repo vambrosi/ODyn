@@ -298,14 +298,14 @@ def test_the_qc_window_looks_as_the_main_window(app, tmp_path):
     window = McorWindow("e1", tmp_path, [], print)
     assert window.styleSheet() == style.window_stylesheet()
 
-    # The steps at the left, Tests the only one with a page so far
+    # The steps at the left; without a full run, only the tests
     steps = [a for a in window.left.actions() if not a.isSeparator()]
     assert [a.toolTip() for a in steps] == [
         f"{name} ({QKeySequence(key).toString(QKeySequence.SequenceFormat.NativeText)})"
         for name, key in (
-            ("Full run", "Ctrl+1"),
+            ("Raw check", "Ctrl+1"),
             ("Tests", "Ctrl+2"),
-            ("Final", "Ctrl+3"),
+            ("Final check", "Ctrl+3"),
         )
     ]
     assert [a.isEnabled() for a in steps] == [False, True, False]
@@ -464,13 +464,14 @@ def test_the_full_run_page_streams_every_acquisition(app, tmp_path):
         [100, 100],
     )
 
-    # Opened on the full run, as it comes first
+    # Opened on the raw check, as it comes first: the raw video alone
     window = McorWindow("e1", tmp_path, [], print)
-    assert window.full_run_action.isEnabled() and window.full_run_action.isChecked()
+    assert window.raw_action.isEnabled() and window.raw_action.isChecked()
+    assert not window.final_action.isEnabled()
     assert window.pages.currentIndex() == FULL_PAGE
     grid = window.current_grid()
     assert grid is window.full_grid
-    assert [tile.video.name for tile in grid.tiles] == ["raw", "corrected"]
+    assert [tile.video.name for tile in grid.tiles] == ["raw"]
     loaded(grid)
 
     # Read from the file as shown, not held
@@ -494,7 +495,7 @@ def test_without_a_full_run_the_window_opens_on_the_tests(app, tmp_path):
     from odyn.app.mcor_window import TESTS_PAGE, McorWindow
 
     window = McorWindow("e1", tmp_path, [], print)
-    assert not window.full_run_action.isEnabled()
+    assert not window.raw_action.isEnabled()
     assert window.pages.currentIndex() == TESTS_PAGE
     window.close()
 
@@ -544,7 +545,56 @@ def test_acquisitions_are_excluded_on_the_full_run(app, tmp_path):
     assert window.excluded == [12]
     QTest.keyClick(window, Qt.Key.Key_E)
 
-    # Finished: what is excluded goes to the record, sorted
+    # Finished: what is excluded goes to the record, sorted; once recorded,
+    # on to the tests
     window.check_action.trigger()
     assert checked == [[9, 12]]
+    window.raw_check_done()
+    assert window.tests_action.isChecked() and window.current_grid() is window.grid
+    window.close()
+
+
+def test_the_final_check_shows_raw_and_corrected_and_approves(app, tmp_path):
+    from odyn.app.mcor_window import McorWindow
+    from odyn.groups import frame_map_path, write_frame_map
+
+    full = tmp_path / "full"
+    raw = a_video(full / "G_e1_raw.avi", frames=6)
+    a_video(full / "G_e1_mcor.avi", frames=6)
+    write_frame_map(frame_map_path(raw), [4] * 3 + [9] * 3, [0, 1, 2] * 2)
+    checked, approved = [], []
+    window = McorWindow(
+        "e1",
+        tmp_path,
+        [],
+        print,
+        check_raw=checked.append,
+        excluded=[9],
+        approve=approved.append,
+        raw_checked=True,
+    )
+
+    # Raw check done, nothing saved yet: the tests, no final check
+    assert window.tests_action.isChecked()
+    assert window.raw_action.isEnabled() and not window.final_action.isEnabled()
+
+    # Back to the raw check: its own button, not Approve
+    window.raw_action.trigger()
+    assert window.check_action.isVisible() and not window.approve_action.isVisible()
+
+    # The picked correction saved: raw | corrected, Approve, same exclusions
+    window.final_check()
+    assert window.final_action.isEnabled() and window.final_action.isChecked()
+    tiles = window.full_grid.tiles
+    assert [tile.video.name for tile in tiles] == ["raw", "corrected"]
+    assert window.approve_action.isVisible() and not window.check_action.isVisible()
+    assert window.exclude_action.isEnabled()
+    window.approve_action.trigger()
+    assert approved == [[9]] and checked == []
+    window.close()
+
+    # Opened once saved: on the final check
+    window = McorWindow("e1", tmp_path, [], print, final_ready=True)
+    assert window.final_action.isChecked()
+    assert len(window.full_grid.tiles) == 2
     window.close()

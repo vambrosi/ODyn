@@ -575,6 +575,23 @@ def pick_candidate(
     )
 
 
+def pick_repeats(db: Database, group_id: int, folder: str | Path) -> tuple[bool, bool]:
+    """
+    Whether picking the test in `folder` repeats the settings of the last
+    whole correction of `group_id` (its files kept then, not corrected
+    again), and whether that last one was rigid (or none was run).
+    """
+    try:
+        settings = json.loads((Path(folder) / "metrics.json").read_text())
+    except (OSError, ValueError):
+        settings = {}
+
+    picked = candidate_settings(settings.get("settings") or {})
+    last = db.groups[group_id].last_whole_settings()
+
+    return last == picked, last is None or not last.get("pw_rigid")
+
+
 def submit_picks(
     db: Database, project: None | str, report: TickReport, dry_run: bool
 ) -> None:

@@ -1,13 +1,23 @@
 """
 The window an experiment's motion correction is checked in, opened from the
-QC page. As the main window: the steps on a bar at the left (Full run,
-Tests, Final), a page each, and the tools of the page on a bar at the right,
-each with its shortcut (in its tooltip).
+QC page. As the main window: the steps on a bar at the left (Raw check,
+Tests, Final check), a page each, and the tools of the page on a bar at the
+right, each with its shortcut (in its tooltip).
 
-**Full run** shows every acquisition raw and as corrected and saved, side
-by side at half size (`full/`, written by the whole correction), read from
-the files as they play (too long to hold), with the acquisition shown and
-the plots over every frame. It is the page the window opens on, when there.
+The full run (`full/`, written by the whole correction) has every
+acquisition raw and as corrected and saved, at half size, read from the
+files as they play (too long to hold), with the acquisition shown and the
+plots over every frame. Two steps show it, on the same page:
+
+**Raw check** shows the raw video alone. E excludes the acquisition shown;
+Finished raw check, at the foot of the bar, records the list
+(`Group.check_raw`) and goes on to the tests. The window opens on it until
+the raw check is done.
+
+**Final check** shows raw | corrected, once the picked correction is saved
+(a pick of the settings the full run already used goes straight there).
+The same list of exclusions, still open to change, goes with Approve
+(`Group.approve_mcor_files`).
 
 **Tests** shows the raw video and every finished run's test video side by
 side, playing in step (`player`), each with its numbers. A click selects a
@@ -55,13 +65,22 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..groups import FULL_FOLDER, RAW_PREVIEW_FOLDER, frame_map_path, read_frame_map
+from ..groups import (
+    FULL_FOLDER,
+    RAW_PREVIEW_FOLDER,
+    frame_map_path,
+    read_frame_map,
+)
 from . import style
 from .player import Video, VideoGrid
 from .plots import RAW_COLOR, Series, ShiftPlots, read_summary, run_color
 from .symbols import icon
 
 # The pages, in the order of the steps on the left bar
+# The steps of the work, and the pages they show: the raw check and the final
+# check are the same page, the first with the raw video alone, the last with
+# raw | corrected
+RAW_STEP, TESTS_STEP, FINAL_STEP = 0, 1, 2
 FULL_PAGE, TESTS_PAGE = 0, 1
 
 # Where the raw video is in experiment folders from before `raw/`: the
@@ -231,6 +250,9 @@ class McorWindow(QWidget):
         pick: None | Callable[[str, list[str]], None] = None,
         check_raw: None | Callable[[list[int]], None] = None,
         excluded: Sequence[int] = (),
+        approve: None | Callable[[list[int]], None] = None,
+        final_ready: bool = False,
+        raw_checked: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -242,6 +264,12 @@ class McorWindow(QWidget):
         self.status = status
         self.pick = pick
         self.check_raw = check_raw
+        self.approve = approve
+        self.final_ready = final_ready  # the picked correction is saved
+        self.raw_checked = raw_checked
+        self.step = TESTS_STEP
+        self.full_videos: list[Video] = []  # raw, corrected
+        self.full_shown: None | int = None  # the step the full grid is set for
         self.excluded = [int(acq_id) for acq_id in excluded]  # in order
         self.runs: dict[str, Run] = {}  # each tile's run, by the tile's name
 
@@ -258,25 +286,27 @@ class McorWindow(QWidget):
         layout.addWidget(self.state)
         layout.addLayout(middle, stretch=1)
 
-        # The steps, in the order of the work; Final has no page yet
+        # The steps, in the order of the work
         self.steps = QActionGroup(self)
-        self.full_run_action = self._action(
-            self.left, "full-run", "Full run", "Ctrl+1", checkable=True
+        self.raw_action = self._action(
+            self.left, "full-run", "Raw check", "Ctrl+1", checkable=True
         )
         self.tests_action = self._action(
             self.left, "tests", "Tests", "Ctrl+2", checkable=True
         )
         self.final_action = self._action(
-            self.left, "final", "Final", "Ctrl+3", checkable=True
+            self.left, "final", "Final check", "Ctrl+3", checkable=True
         )
 
-        for action in (self.full_run_action, self.tests_action, self.final_action):
+        for action in (self.raw_action, self.tests_action, self.final_action):
             self.steps.addAction(action)
 
-        self.final_action.setEnabled(False)
         self.tests_action.setChecked(True)
-        self.full_run_action.triggered.connect(lambda: self._show_page(FULL_PAGE))
-        self.tests_action.triggered.connect(lambda: self._show_page(TESTS_PAGE))
+        self.raw_action.setEnabled(False)
+        self.final_action.setEnabled(False)
+        self.raw_action.triggered.connect(lambda: self.show_step(RAW_STEP))
+        self.tests_action.triggered.connect(lambda: self.show_step(TESTS_STEP))
+        self.final_action.triggered.connect(lambda: self.show_step(FINAL_STEP))
         self._build_full_page()
 
         tests = QWidget()
@@ -356,8 +386,7 @@ class McorWindow(QWidget):
         self.pick_action = self._action(
             self.right,
             "pick",
-            "Pick candidate: motion correct every acquisition with the "
-            "focused run settings",
+            "Pick candidate",
             "Ctrl+Return",
         )
         self.pick_action.triggered.connect(self._pick)
@@ -369,6 +398,14 @@ class McorWindow(QWidget):
             "Ctrl+Return",
         )
         self.check_action.triggered.connect(self._check_raw)
+        self.approve_action = self._action(
+            self.right,
+            "approve",
+            "Approve: the corrected files are used from now on, the excluded "
+            "acquisitions left out",
+            "Ctrl+Return",
+        )
+        self.approve_action.triggered.connect(self._approve)
 
         # The transport, from the keyboard
         for key, do in (
@@ -388,6 +425,10 @@ class McorWindow(QWidget):
         self.set_runs(runs)
         self.set_full()
         self.resize(1200, 800)
+
+    def _approve(self) -> None:
+        if self.approve is not None:
+            self.approve(sorted(self.excluded))
 
     # ----------------------------------------------------------------------- #
     # The full run
@@ -420,22 +461,25 @@ class McorWindow(QWidget):
 
     def set_full(self) -> None:
         """
-        Show the full run from `full/` in the local folder, when there:
-        opened on it, as it comes first in the work.
+        Read the full run from `full/` in the local folder, when there, and
+        open on the step the work is at: the raw check until it is done, the
+        final check once the picked correction is saved, else the tests.
         """
         folder = self.folder / FULL_FOLDER
         raw = next(iter(_videos(folder, "raw")), None)
         corrected = next(iter(_videos(folder, "mcor")), None)
-        self.full_run_action.setEnabled(raw is not None and corrected is not None)
+        there = raw is not None and corrected is not None
+        self.raw_action.setEnabled(there)
+        self.final_action.setEnabled(there and self.final_ready)
 
-        if raw is None or corrected is None:
+        if not there:
             return
 
-        videos = [
+        self.full_videos = [
             Video("raw", raw, candidate=False, color=RAW_COLOR, stream=True),
             Video("corrected", corrected, color=run_color(0), stream=True),
         ]
-        self.full_grid.set_videos(videos, columns=2)
+        self.full_shown = None
         self.full_frames = read_frame_map(frame_map_path(raw))
         data = read_summary(folder)
         self.full_data = data
@@ -452,7 +496,13 @@ class McorWindow(QWidget):
             self.full_missing.setText("")
             self.full_x = frame_positions(self.full_frames, data)
 
-        self._show_page(FULL_PAGE)
+        if self.final_ready:
+            self.show_step(FINAL_STEP)
+        elif not self.raw_checked:
+            self.show_step(RAW_STEP)
+        else:
+            self.show_step(self.step)
+
         self._show_exclusions()
 
     def _shown_acquisition(self) -> None | int:
@@ -500,8 +550,8 @@ class McorWindow(QWidget):
         self._show_exclusions()
 
     def _undo(self) -> None:
-        """Cmd+Z: keep the last excluded (Full run), or bring back (Tests)."""
-        if self.pages.currentIndex() == FULL_PAGE:
+        """Cmd+Z: keep the last excluded (raw or final check), or bring back."""
+        if self.step != TESTS_STEP:
             if self.excluded:
                 self.excluded.pop()
                 self._show_exclusions()
@@ -524,6 +574,7 @@ class McorWindow(QWidget):
 
         self.full_plots.set_excluded(spans)
         self._full_frame(self.full_grid.index)
+
         self._enable()
 
     def _check_raw(self) -> None:
@@ -534,13 +585,29 @@ class McorWindow(QWidget):
         """The grid of the page shown."""
         return self.full_grid if self.pages.currentIndex() == FULL_PAGE else self.grid
 
-    def _show_page(self, index: int) -> None:
+    def show_step(self, step: int) -> None:
+        """
+        Show `step`: the raw check (the raw video alone), the tests, or the
+        final check (raw | corrected), the last two on the same page.
+        """
         for grid in (self.grid, self.full_grid):
             grid.pause()
 
-        self.pages.setCurrentIndex(index)
-        action = self.full_run_action if index == FULL_PAGE else self.tests_action
-        action.setChecked(True)
+        if step != TESTS_STEP and not self.full_videos:
+            step = TESTS_STEP
+
+        if step != TESTS_STEP and step != self.full_shown:
+            self.full_shown = step
+            videos = self.full_videos[:1] if step == RAW_STEP else self.full_videos
+            self.full_grid.set_videos(videos, columns=len(videos))
+
+        self.step = step
+        self.pages.setCurrentIndex(TESTS_PAGE if step == TESTS_STEP else FULL_PAGE)
+        {
+            RAW_STEP: self.raw_action,
+            TESTS_STEP: self.tests_action,
+            FINAL_STEP: self.final_action,
+        }[step].setChecked(True)
         self._enable()
 
     # ----------------------------------------------------------------------- #
@@ -676,9 +743,29 @@ class McorWindow(QWidget):
 
         return self.runs.get(picked[0].name)
 
-    def set_status(self, text: str) -> None:
-        """Show the experiment status (see `pane_qc.my_experiments`)."""
+    def set_status(self, text: str, final_ready: None | bool = None) -> None:
+        """
+        Show the experiment status (see `pane_qc.my_experiments`), and
+        whether its picked correction is saved (Approve then, not the raw
+        check), when given.
+        """
         self.state.setText(f"Status: {text}")
+
+        if final_ready is not None and final_ready != self.final_ready:
+            self.final_ready = final_ready
+            self.final_action.setEnabled(final_ready and bool(self.full_videos))
+            self._enable()
+
+    def raw_check_done(self) -> None:
+        """The raw check is recorded: on to the tests."""
+        self.raw_checked = True
+        self.show_step(TESTS_STEP)
+
+    def final_check(self) -> None:
+        """The picked correction is saved: on to the final check."""
+        self.final_ready = True
+        self.final_action.setEnabled(bool(self.full_videos))
+        self.show_step(FINAL_STEP)
 
     def _show_details(self, video: None | Video = None) -> None:
         """The numbers of the run under the pointer, else the one focused."""
@@ -689,7 +776,8 @@ class McorWindow(QWidget):
         self.details.setText("" if run is None else details_line(run))
 
     def _enable(self, *_) -> None:
-        tests = self.pages.currentIndex() == TESTS_PAGE
+        tests = self.step == TESTS_STEP
+        full = not tests  # the raw or the final check
 
         for action in (
             self.only_action,
@@ -704,12 +792,18 @@ class McorWindow(QWidget):
 
         # The foot of the bar: each page's own last step
         self.pick_action.setVisible(tests and self.pick is not None)
-        self.check_action.setVisible(not tests and self.check_raw is not None)
-        self.check_action.setEnabled(not tests and self.check_raw is not None)
-        self.exclude_action.setEnabled(not tests and self.full_frames is not None)
+        # Each check's own last step: the raw check, or Approve (with the
+        # same exclusions)
+        checking = self.step == RAW_STEP and self.check_raw is not None
+        approving = self.step == FINAL_STEP and self.approve is not None
+        self.check_action.setVisible(checking)
+        self.check_action.setEnabled(checking)
+        self.approve_action.setVisible(approving)
+        self.approve_action.setEnabled(approving)
+        self.exclude_action.setEnabled(full and self.full_frames is not None)
 
         if not tests:
-            self.back_action.setEnabled(bool(self.excluded))
+            self.back_action.setEnabled(full and bool(self.excluded))
             self.back_action.setToolTip(self._tip("Keep the last excluded", "Ctrl+Z"))
             return
 

@@ -86,8 +86,9 @@ def read_summary(folder: Path) -> None | dict[str, np.ndarray]:
 class ShiftPlots(QWidget):
     """The plots (see the module description)."""
 
-    def __init__(self, parent=None):
+    def __init__(self, rows=ROWS, parent=None):
         super().__init__(parent)
+        self.rows = tuple(rows)  # see `ROWS`
         self.series: list[Series] = []
         self.shown: list[str] = []  # the names of the series drawn
         self.raw: None | np.ndarray = None  # the raw frames' correlation
@@ -97,13 +98,22 @@ class ShiftPlots(QWidget):
         self.ranges: dict[str, tuple[float, float]] = {}
         self._picture: None | QPixmap = None  # the plots, without the marker
         self.excluded: list[tuple[float, float]] = []  # frame spans, shaded
-        self.setMinimumHeight(3 * ROW_MIN_PX + 2 * GAP_PX)
+        count = len(self.rows)
+        self.setMinimumHeight(count * ROW_MIN_PX + (count - 1) * GAP_PX)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
     def set_series(self, series: list[Series]) -> None:
         """Every run that can be shown; the ranges cover them all."""
         self.series = series
-        self.frames = max((len(s.data["dy"]) for s in series), default=0)
+        self.frames = max(
+            (
+                len(s.data[key])
+                for s in series
+                for key, _, _ in self.rows
+                if key in s.data
+            ),
+            default=0,
+        )
         first = series[0].data if series else {}
         counts = first.get("frame_counts")
         self.edges = (
@@ -116,7 +126,7 @@ class ShiftPlots(QWidget):
         )
         self.ranges = {}
 
-        for key, _, zero in ROWS:
+        for key, _, zero in self.rows:
             values = []
 
             for s in series:
@@ -144,8 +154,8 @@ class ShiftPlots(QWidget):
             pad = (high - low) * 0.05 or 1.0
             low, high = low - pad, high + pad
 
-            if zero == "floor":
-                low = 0.0
+            if zero == "floor":  # a correlation: from 0, and never above 1
+                low, high = 0.0, min(high, 1.0)
 
             self.ranges[key] = (low, high)
 
@@ -172,11 +182,13 @@ class ShiftPlots(QWidget):
 
     def _rows(self) -> list[QRectF]:
         # A pixel inside the widget all round, so no frame line is cut off
-        height = (self.height() - 2 * GAP_PX - 2) / 3
+        count = len(self.rows)
+        height = (self.height() - (count - 1) * GAP_PX - 2) / count
         width = self.width() - LEFT_PX - 8
 
         return [
-            QRectF(LEFT_PX, 1 + i * (height + GAP_PX), width, height) for i in range(3)
+            QRectF(LEFT_PX, 1 + i * (height + GAP_PX), width, height)
+            for i in range(count)
         ]
 
     def _x(self, rect: QRectF, frame: float) -> float:
@@ -235,7 +247,7 @@ class ShiftPlots(QWidget):
         line.setAlpha(40)
         drawn = [s for s in self.series if s.name in self.shown]
 
-        for rect, (key, label, zero) in zip(self._rows(), ROWS):
+        for rect, (key, label, zero) in zip(self._rows(), self.rows):
             painter.setPen(QPen(line, 1))
             painter.drawRect(rect)
             painter.setPen(text)

@@ -254,30 +254,24 @@ def test_as_raw_rounds_and_counts_what_it_clips():
         as_raw(movie[:1], raw)
 
 
-def test_a_final_correction_leaves_each_acquisitions_mean_to_check(tmp_path, caiman):
-    import cv2
-
+def test_a_final_correction_leaves_every_frames_match_to_check(tmp_path, caiman):
     db, group_id = a_loop(tmp_path)
     group = db.groups[group_id]
     group.run_motion_correction(
         use_gui_parameters=False, is_test=False, pw_rigid=False, batch_acqs=3
     )
 
-    # One frame per acquisition, at full size, raw and corrected
+    # Every frame of every acquisition, in order, raw and corrected
     folder = group.mcor_test_folder()
-
-    for name in ("raw", "final"):
-        video = cv2.VideoCapture(str(folder / name / "means.avi"))
-        assert int(video.get(cv2.CAP_PROP_FRAME_COUNT)) == 8
-        assert (video.get(cv2.CAP_PROP_FRAME_WIDTH), video.get(3 + 1)) == (40, 48)
-        video.release()
-
-    table = pd.read_csv(folder / "final" / "means.csv")
-    assert table["position"].tolist() == list(range(8))
-    assert table["acq_id"].tolist() == sorted(group.acquisitions.index)
-    assert table["raw_corr_with_ref"].between(-1, 1).all()
+    full = np.load(folder / "full" / "shifts_summary.npz")
+    assert full["acq_ids"].tolist() == sorted(group.acquisitions.index)
+    assert len(full["corr"]) == len(full["raw_corr"]) == 8 * 56
+    assert np.all(np.abs(full["corr"]) <= 1)
     # The stand-in leaves the movies as they were
-    assert (table["final_corr_with_ref"] == table["raw_corr_with_ref"]).all()
+    np.testing.assert_allclose(full["corr"], full["raw_corr"], atol=1e-5)
+
+    # No means any more: the full run's videos show motion within each one
+    assert not (folder / "final").exists()
 
 
 def test_without_a_reference_a_final_correction_is_one_batch(tmp_path, caiman):
@@ -747,6 +741,32 @@ def test_a_picked_test_is_recorded_and_only_corrected_when_new(tmp_path):
         group.pick_mcor_candidate(run="x", settings={"run": "x"})
 
 
+def test_the_window_knows_if_a_pick_repeats_the_last_whole_run(tmp_path):
+    from odyn.cluster import pick_repeats
+
+    db, group_id = a_loop(tmp_path)
+    folders = {}
+
+    for run, settings in (("rigid", RIGID), ("s128", PIECEWISE)):
+        folders[run] = tmp_path / run
+        folders[run].mkdir()
+        (folders[run] / "metrics.json").write_text(
+            json.dumps({"settings": {"run": run, **settings}})
+        )
+
+    # Nothing whole yet: a pick corrects (said as over the rigid run)
+    assert pick_repeats(db, group_id, folders["rigid"]) == (False, True)
+
+    # The rigid full run: picking rigid again goes on to the final check
+    a_whole_report(db, group_id, **RIGID)
+    assert pick_repeats(db, group_id, folders["rigid"]) == (True, True)
+    assert pick_repeats(db, group_id, folders["s128"]) == (False, True)
+
+    # After a piecewise one: rigid overwrites its files
+    a_whole_report(db, group_id, **PIECEWISE)
+    assert pick_repeats(db, group_id, folders["rigid"]) == (False, False)
+
+
 def test_the_tick_corrects_with_the_test_picked_once(tmp_path, slurm, monkeypatch):
     from odyn.cluster import TickReport, pick_candidate, submit_picks
 
@@ -890,3 +910,20 @@ def test_the_raw_check_records_what_is_left_out(tmp_path):
         "done",
         "done, 2 excluded",
     ]
+
+
+def test_an_approval_is_found_for_the_qc_page(tmp_path, caiman):
+    from odyn.app.pane_qc import latest_approvals
+
+    db, group_id = a_loop(tmp_path)
+    group = db.groups[group_id]
+    assert latest_approvals(db) == {}
+    group.approve_mcor_files()  # nothing saved yet: not an approval
+    assert latest_approvals(db) == {}
+
+    group.run_motion_correction(use_gui_parameters=False, is_test=False, pw_rigid=False)
+    acq_ids = [int(i) for i in group.acquisitions.index]
+    group.approve_mcor_files(exclude_acq_ids=[acq_ids[0]])
+    calls = db.latest_calls("approve_mcor_files")
+    assert latest_approvals(db) == {group_id: int(calls.index[0])}
+    assert len(db.groups[group_id].approved_mcor_files) == len(acq_ids) - 1
