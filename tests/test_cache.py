@@ -2,6 +2,8 @@
 
 import os
 
+import pytest
+
 from pathlib import Path
 
 from odyn.app.cache import (
@@ -54,7 +56,9 @@ def test_only_a_tests_own_small_files_are_copied(tmp_path):
 
     assert state(main, folder, base) == NOT_HERE
     heard = []
-    local = download(main, folder, base, progress=heard.append)
+    local = download(
+        main, folder, base, progress=lambda name, n: n or heard.append(name)
+    )
 
     assert local == local_folder(main, folder, base)
     assert sorted(path.name for path in local.iterdir()) == sorted(names)
@@ -64,7 +68,7 @@ def test_only_a_tests_own_small_files_are_copied(tmp_path):
 
     # Again: nothing to copy
     heard.clear()
-    download(main, folder, base, progress=heard.append)
+    download(main, folder, base, progress=lambda name, n: n or heard.append(name))
     assert heard == []
 
 
@@ -79,7 +83,7 @@ def test_a_file_changed_on_the_share_is_copied_again(tmp_path):
     assert state(main, folder, base) == NEWER
 
     heard = []
-    download(main, folder, base, progress=heard.append)
+    download(main, folder, base, progress=lambda name, n: n or heard.append(name))
     assert heard == ["summary.csv"]
     assert state(main, folder, base) == HERE
 
@@ -139,3 +143,32 @@ def test_a_download_copies_no_file_flags(tmp_path, monkeypatch):
     local = cache.download(main, test, tmp_path / "base")
     assert (local / "metrics.json").read_text() == "{}"
     assert cache.state(main, test, tmp_path / "base") == cache.HERE
+
+
+def test_a_download_tells_its_bytes_and_can_be_stopped(tmp_path, monkeypatch):
+    from odyn.app import cache
+
+    monkeypatch.setattr(cache, "CHUNK_BYTES", 100)
+    main, base = tmp_path / "share", tmp_path / ".odyn"
+    folder = a_test(main)
+    assert sum(p.stat().st_size for p in cache.pending(main, folder, base)) == 410
+
+    # Every chunk heard, all the bytes
+    copied = []
+    cache.download(main, folder, base, progress=lambda name, n: copied.append(n))
+    assert sum(copied) == 410
+    assert cache.pending(main, folder, base) == []
+
+    # Stopped mid-file: no partial file left, nothing taken for downloaded
+    (folder / "summary.csv").write_bytes(b"z" * 350)
+
+    def stop(name, n):
+        if n:
+            raise InterruptedError("cancelled")
+
+    with pytest.raises(InterruptedError):
+        cache.download(main, folder, base, progress=stop)
+
+    local = cache.local_folder(main, folder, base)
+    assert not list(local.glob(".*.part"))
+    assert cache.pending(main, folder, base) == [folder / "summary.csv"]

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 
 from collections.abc import Callable
 from pathlib import Path
@@ -43,6 +42,9 @@ SMALL_FILES = (
     "shifts_summary.npz",
     "*.frames.csv",
 )
+
+# How much a download copies at a time, between two progress reports
+CHUNK_BYTES = 4 * 1024 * 1024
 
 # What `state` says of a test
 NOT_HERE = "no"
@@ -127,33 +129,47 @@ def state(main_folder: str | Path, folder: str | Path, base=None) -> str:
     return NEWER
 
 
+def pending(main_folder: str | Path, folder: str | Path, base=None) -> list[Path]:
+    """The files of test `folder` a download would copy: not here, or changed."""
+    local = local_folder(main_folder, folder, base)
+
+    return [path for path in small_files(folder) if not _same(path, local / path.name)]
+
+
 def download(
     main_folder: str | Path,
     folder: str | Path,
     base=None,
-    progress: None | Callable[[str], None] = None,
+    progress: None | Callable[[str, int], None] = None,
 ) -> Path:
     """
     Copy test `folder`'s small files here, those not here already or changed
-    on the share, and return the local folder. Each file is written under a
-    temporary name and renamed when complete, so a copy cut short is never
-    taken for a whole one. `progress` hears each file's name before it is
-    copied.
+    on the share (`pending`), and return the local folder. Each file is
+    written under a temporary name and renamed when complete, so a copy cut
+    short is never taken for a whole one. `progress(name, copied)` hears each
+    file as it starts (`copied` 0) and every chunk copied (its bytes); an
+    exception it raises stops the download, the partial file deleted.
     """
     local = local_folder(main_folder, folder, base)
     local.mkdir(parents=True, exist_ok=True)
 
-    for path in small_files(folder):
+    for path in pending(main_folder, folder, base):
         target = local / path.name
 
-        if _same(path, target):
-            continue
-
         if progress is not None:
-            progress(path.name)
+            progress(path.name, 0)
 
         partial = target.with_name(f".{target.name}.part")
-        shutil.copyfile(path, partial)
+
+        def copied(count: int, name: str = path.name) -> None:
+            if progress is not None:
+                progress(name, count)
+
+        try:
+            _copy(path, partial, copied)
+        except BaseException:
+            partial.unlink(missing_ok=True)
+            raise
 
         # The time only, which `state` reads. Not `copy2`: it also copies the
         # file flags, and macOS refuses a user the flags a network share sets
@@ -163,6 +179,14 @@ def download(
         os.replace(partial, target)
 
     return local
+
+
+def _copy(source: Path, target: Path, copied: Callable[[int], None]) -> None:
+    """Copy `source`'s data to `target`, telling `copied` each chunk's bytes."""
+    with open(source, "rb") as reading, open(target, "wb") as writing:
+        while chunk := reading.read(CHUNK_BYTES):
+            writing.write(chunk)
+            copied(len(chunk))
 
 
 def delete(main_folder: str | Path, folder: str | Path, base=None) -> int:

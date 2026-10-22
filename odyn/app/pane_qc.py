@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTableView,
     QTabWidget,
@@ -37,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from PySide6.QtCore import Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QElapsedTimer, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 
 from datetime import datetime
@@ -456,14 +457,21 @@ def _picked_status(pick: dict, whole: pd.DataFrame) -> str:
     return CORRECTING.format(run=pick["run"])
 
 
+# How often a download says how far it is (ms), and what it says when stopped
+REPORT_MS = 250
+CANCELLED = "cancelled"
+
+
 class Downloads(QThread):
     """
     Downloads experiments' files one after the other, off the database thread
-    (a share can be slow). `progress` says which, `done` how many were
-    downloaded and, if it stopped early, why.
+    (a share can be slow). `progress(done, total, text)` tells the bytes
+    copied of all to copy and, in words, which experiment, how fast and how
+    long is left; `done` how many experiments were downloaded and, if it
+    stopped early, why ("cancelled" when asked to stop).
     """
 
-    progress = Signal(str)
+    progress = Signal(object, object, str)  # bytes: can pass 2 GB
     done = Signal(int, str)
 
     def __init__(
@@ -479,24 +487,79 @@ class Downloads(QThread):
 
     def run(self) -> None:
         count = len(self.experiments)
+        clock = QElapsedTimer()
+        clock.start()
+        last = -REPORT_MS
 
-        def check(_name: str) -> None:
-            if self.isInterruptionRequested():
-                raise InterruptedError("the app was closed")
+        try:
+            total = sum(
+                path.stat().st_size
+                for _, folders in self.experiments
+                for folder in folders
+                for path in cache.pending(self.main_folder, folder, self.base)
+            )
+        except OSError as error:
+            self.done.emit(0, str(error))
+            return
+
+        done = 0
 
         for index, (label, folders) in enumerate(self.experiments):
-            self.progress.emit(
-                f"Downloading experiment {index + 1} of {count} ({label})"
-            )
+            where = f"{label} ({index + 1} of {count})" if count > 1 else label
+
+            def copied(_name: str, size: int) -> None:
+                nonlocal done, last
+
+                if self.isInterruptionRequested():
+                    raise InterruptedError(CANCELLED)
+
+                done += size
+                now = clock.elapsed()
+
+                if now - last >= REPORT_MS:
+                    last = now
+                    self.progress.emit(
+                        done, total, _download_line(where, done, total, now)
+                    )
 
             try:
+                copied("", 0)
+
                 for folder in folders:
-                    cache.download(self.main_folder, folder, self.base, progress=check)
+                    cache.download(self.main_folder, folder, self.base, progress=copied)
             except (OSError, InterruptedError) as error:
-                self.done.emit(index, f"{label}: {error}")
+                self.done.emit(
+                    index, CANCELLED if str(error) == CANCELLED else f"{label}: {error}"
+                )
                 return
 
         self.done.emit(count, "")
+
+
+def _download_line(where: str, done: int, total: int, elapsed_ms: float) -> str:
+    """`Downloading e1: 120 MB of 560 MB, 12 MB/s, about 40 s left`."""
+    line = f"Downloading {where}: {cache.human_size(done)} of {cache.human_size(total)}"
+    seconds = elapsed_ms / 1000
+
+    if done and seconds >= 1:
+        rate = done / seconds
+        left = (total - done) / rate
+        line += f", {cache.human_size(rate)}/s, about {_duration(left)} left"
+
+    return line
+
+
+def _duration(seconds: float) -> str:
+    """`40 s`, `3 min`, `1 h 20 min`."""
+    if seconds < 60:
+        return f"{max(1, round(seconds))} s"
+
+    if seconds < 3600:
+        return f"{round(seconds / 60)} min"
+
+    hours, minutes = divmod(round(seconds / 60), 60)
+
+    return f"{hours} h {minutes} min"
 
 
 def my_missing(db, mine: pd.DataFrame) -> pd.DataFrame:
@@ -632,6 +695,21 @@ class QcPane(QWidget):
             ],
         )
         self.tests_view.setSelectionMode(QTableView.SelectionMode.ExtendedSelection)
+
+        # How far a download is, under the table, while there is one
+        self.download_bar = QProgressBar()
+        self.download_bar.setRange(0, 1000)
+        self.download_bar.setTextVisible(False)
+        self.download_text = QLabel("")
+        self.cancel_download = QPushButton("Cancel")
+        self.cancel_download.setStatusTip("Stop the download (what was copied stays)")
+        self.cancel_download.clicked.connect(self._cancel_download)
+        progress = QHBoxLayout()
+        progress.addWidget(self.download_text, stretch=1)
+        progress.addWidget(self.download_bar, stretch=1)
+        progress.addWidget(self.cancel_download)
+        self.tests_view.parentWidget().layout().insertLayout(1, progress)
+        self._show_download(False)
         self.tests_view.doubleClicked.connect(self._compare)
 
         for view in (self.queue_view, self.recordings_view, self.tests_view):
@@ -947,10 +1025,26 @@ class QcPane(QWidget):
         self.downloads = Downloads(
             self.main_folder, experiments, self.context.cache_base
         )
-        self.downloads.progress.connect(self.context.status.emit)
+        self.downloads.progress.connect(self._download_progress)
         self.downloads.done.connect(self._downloaded)
+        self.download_bar.setValue(0)
+        self.download_text.setText("Looking at what to download...")
+        self._show_download(True)
         self.downloads.start()
         self._enable()
+
+    def _show_download(self, shown: bool) -> None:
+        for widget in (self.download_bar, self.download_text, self.cancel_download):
+            widget.setVisible(shown)
+
+    def _download_progress(self, done: int, total: int, text: str) -> None:
+        self.download_bar.setValue(int(1000 * done / total) if total else 1000)
+        self.download_text.setText(text)
+
+    def _cancel_download(self) -> None:
+        if self.downloads is not None:
+            self.downloads.requestInterruption()
+            self.download_text.setText("Stopping the download...")
 
     def _downloaded(self, count: int, problem: str) -> None:
         if self.downloads is not None:
@@ -958,11 +1052,18 @@ class QcPane(QWidget):
             self.downloads.deleteLater()
             self.downloads = None
 
+        self._show_download(False)
         plural = "" if count == 1 else "s"
-        self.context.status.emit(
-            f"Downloaded {count} experiment{plural}"
-            + (f"; stopped at {problem}" if problem else "")
-        )
+
+        if problem == CANCELLED:
+            self.context.status.emit(
+                f"Download cancelled ({count} experiment{plural} downloaded)"
+            )
+        else:
+            self.context.status.emit(
+                f"Downloaded {count} experiment{plural}"
+                + (f"; stopped at {problem}" if problem else "")
+            )
         self.context.cache_changed.emit()
         self.reload()
 

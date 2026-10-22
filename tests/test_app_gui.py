@@ -1214,6 +1214,7 @@ def test_qc_opens_an_experiments_files(window, tmp_path, monkeypatch):
     wait_until(lambda: qc.downloads is None)
     settle(window.context)
     assert qc.experiments["local copy"].tolist() == ["yes"]
+    assert not qc.download_bar.isVisibleTo(qc)  # only while downloading
     assert window.cache_label.text() != "Local cache: 0 B"
     local = window.context.cache_base / "cache"
     assert len(list(local.rglob("*.avi"))) == 3
@@ -2521,3 +2522,33 @@ def test_an_experiments_status_follows_its_pick():
     assert (
         _picked_status(same, whole("finished", call_id=None)) == "ready for final check"
     )
+
+
+def test_a_download_says_how_far_it_is():
+    from odyn.app.pane_qc import _download_line, _duration
+
+    assert _download_line("e1", 0, 560e6, 100) == "Downloading e1: 0 B of 560.0 MB"
+    assert _download_line("e1 (1 of 2)", 120e6, 560e6, 10_000) == (
+        "Downloading e1 (1 of 2): 120.0 MB of 560.0 MB, 12.0 MB/s, about 37 s left"
+    )
+    assert [_duration(s) for s in (0.2, 40, 200, 4900)] == [
+        "1 s",
+        "40 s",
+        "3 min",
+        "1 h 22 min",
+    ]
+
+
+def test_a_download_can_be_cancelled(tmp_path):
+    from odyn.app.pane_qc import CANCELLED, Downloads
+
+    main = tmp_path / "share"
+    folder = main / "cache" / "mcor-tests" / "e1_g1"
+    folder.mkdir(parents=True)
+    (folder / "metrics.json").write_text("{}")
+    downloads = Downloads(main, [("e1", [folder])], tmp_path / "base")
+    ended = []
+    downloads.done.connect(lambda count, problem: ended.append((count, problem)))
+    downloads.isInterruptionRequested = lambda: True  # Cancel, at the first report
+    downloads.run()  # here, not in a thread
+    assert ended == [(0, CANCELLED)]
