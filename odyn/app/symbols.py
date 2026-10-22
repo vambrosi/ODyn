@@ -114,6 +114,8 @@ GLYPHS = {
     "star": ("star", "", "*"),
     "set-aside": ("visibility_off", "", "x"),
     "plots": ("show_chart", "", "~"),
+    "exclude": ("block", "", "e"),
+    "check-raw": ("task_alt", "", "c"),
     "report": ("monitoring", "", "r"),
     "pick": ("check_circle", "", "p"),
 }

@@ -2784,6 +2784,53 @@ class Group(CallRecorder):
         return candidate_settings(settings) if settings.get("whole") else None
 
     @record_call
+    def check_raw(self, *, exclude_acq_ids: Sequence[int] = ()) -> list[int]:
+        """
+        Record that this group's raw acquisitions were checked (the full run
+        page of the app), and which are to be left out: the mouse moved, the
+        plane drifted, the laser failed. Returns them, sorted.
+
+        **USAGE**
+        ```python
+        group = db.groups[some_index]
+        group.check_raw()                          # every acquisition is fine
+        group.check_raw(exclude_acq_ids=[7, 12])
+        ```
+
+        The latest call is the one that counts (`raw_exclusions`): approving
+        the motion corrected files leaves them out.
+        """
+        acq_ids = {int(acq_id) for acq_id in self.acquisitions.index}
+        excluded = sorted({int(acq_id) for acq_id in exclude_acq_ids})
+        missing = [acq_id for acq_id in excluded if acq_id not in acq_ids]
+
+        if missing:
+            raise ValueError(f"{missing} are not acquisitions of {self!r}.")
+
+        if excluded:
+            logger.info(f"Raw check: {len(excluded)} left out: {excluded}")
+        else:
+            logger.info("Raw check: every acquisition kept")
+
+        self.set_output({"excluded": excluded, "acquisitions": len(acq_ids)})
+
+        return excluded
+
+    def raw_exclusions(self) -> None | list[int]:
+        """The acquisitions the latest `check_raw` left out; `None` before one."""
+        calls = self.db.method_calls
+        mine = calls[
+            (calls["method_name"] == "Group.check_raw")
+            & (calls["group_id"] == self.group_id)
+            & calls["call_output"].map(lambda output: isinstance(output, dict))
+        ]
+
+        if mine.empty:
+            return None
+
+        return list(mine.sort_index()["call_output"].iloc[-1].get("excluded", []))
+
+    @record_call
     def approve_mcor_files(self, *, exclude_acq_ids: Sequence[int] = ()) -> None:
         """
         Approve this group's motion corrected files for further processing/analysis

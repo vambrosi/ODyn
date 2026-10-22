@@ -43,6 +43,7 @@ GAP_PX = 6
 ROW_MIN_PX = 40
 
 RAW_COLOR = QColor(150, 150, 150)
+EXCLUDED_COLOR = QColor(235, 87, 87, 50)  # an acquisition left out
 
 # Distinct colors for the runs, in order (as a tile shows its run's)
 PALETTE = (
@@ -95,6 +96,7 @@ class ShiftPlots(QWidget):
         self.marker: None | float = None
         self.ranges: dict[str, tuple[float, float]] = {}
         self._picture: None | QPixmap = None  # the plots, without the marker
+        self.excluded: list[tuple[float, float]] = []  # frame spans, shaded
         self.setMinimumHeight(3 * ROW_MIN_PX + 2 * GAP_PX)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
@@ -153,6 +155,11 @@ class ShiftPlots(QWidget):
         if list(names) != self.shown:
             self.shown = list(names)
             self._redraw()
+
+    def set_excluded(self, spans: list[tuple[float, float]]) -> None:
+        """Shade these spans of frames (acquisitions left out)."""
+        self.excluded = list(spans)
+        self._redraw()
 
     def set_marker(self, frame: None | float) -> None:
         """Mark `frame` (an index into the plotted frames), or nothing."""
@@ -265,6 +272,13 @@ class ShiftPlots(QWidget):
 
             painter.save()
             painter.setClipRect(rect)
+
+            for start, end in self.excluded:
+                left, right = self._x(rect, start), self._x(rect, end)
+                painter.fillRect(
+                    QRectF(left, rect.top(), max(1.0, right - left), rect.height()),
+                    EXCLUDED_COLOR,
+                )
 
             if key == "corr" and self.raw is not None:
                 self._draw_line(painter, rect, key, self.raw, RAW_COLOR)

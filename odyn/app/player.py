@@ -733,7 +733,10 @@ class VideoGrid(QWidget):
 
     def _enable(self) -> None:
         count = self.frame_count
+        self.slider.blockSignals(True)  # a range set later keeps the frame shown
         self.slider.setRange(0, max(0, count - 1))
+        self.slider.setValue(self.index)
+        self.slider.blockSignals(False)
         self.play_button.setEnabled(count > 1)
         self.slider.setEnabled(count > 1)
 

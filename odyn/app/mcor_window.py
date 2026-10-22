@@ -30,7 +30,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -229,6 +229,8 @@ class McorWindow(QWidget):
         runs: list[Run],
         status: Callable[[str], None],
         pick: None | Callable[[str, list[str]], None] = None,
+        check_raw: None | Callable[[list[int]], None] = None,
+        excluded: Sequence[int] = (),
         parent=None,
     ):
         super().__init__(parent)
@@ -239,6 +241,8 @@ class McorWindow(QWidget):
         self.folder = folder
         self.status = status
         self.pick = pick
+        self.check_raw = check_raw
+        self.excluded = [int(acq_id) for acq_id in excluded]  # in order
         self.runs: dict[str, Run] = {}  # each tile's run, by the tile's name
 
         self.state = QLabel("")
@@ -332,7 +336,11 @@ class McorWindow(QWidget):
         self.back_action = self._action(
             self.right, "undo", "Bring back the last set aside", "Ctrl+Z"
         )
-        self.back_action.triggered.connect(lambda: self.grid.bring_back())
+        self.back_action.triggered.connect(self._undo)
+        self.exclude_action = self._action(
+            self.right, "exclude", "Exclude the acquisition shown (again: keep it)", "E"
+        )
+        self.exclude_action.triggered.connect(self._toggle_exclusion)
         self.right.addSeparator()
         self.plots_action = self._action(
             self.right, "plots", "Plots of the focused runs", "P", checkable=True
@@ -354,6 +362,13 @@ class McorWindow(QWidget):
         )
         self.pick_action.triggered.connect(self._pick)
         self.pick_action.setVisible(pick is not None)
+        self.check_action = self._action(
+            self.right,
+            "check-raw",
+            "Finished raw check: record the acquisitions excluded",
+            "Ctrl+Return",
+        )
+        self.check_action.triggered.connect(self._check_raw)
 
         # The transport, from the keyboard
         for key, do in (
@@ -394,11 +409,14 @@ class McorWindow(QWidget):
         split.setChildrenCollapsible(False)
         split.setSizes([600, 220])
         layout.addWidget(split, stretch=1)
+        self.excluded_label = QLabel("")
+        layout.addWidget(self.excluded_label)
         self.full_missing = QLabel("")
         layout.addWidget(self.full_missing)
         self.pages.insertWidget(FULL_PAGE, page)
         self.full_frames: None | pd.DataFrame = None  # the frame map
         self.full_x: None | np.ndarray = None
+        self.full_data: None | dict[str, np.ndarray] = None
 
     def set_full(self) -> None:
         """
@@ -420,6 +438,7 @@ class McorWindow(QWidget):
         self.full_grid.set_videos(videos, columns=2)
         self.full_frames = read_frame_map(frame_map_path(raw))
         data = read_summary(folder)
+        self.full_data = data
         self.full_x = None
 
         if data is None:
@@ -434,17 +453,29 @@ class McorWindow(QWidget):
             self.full_x = frame_positions(self.full_frames, data)
 
         self._show_page(FULL_PAGE)
-        self._full_frame(0)
+        self._show_exclusions()
+
+    def _shown_acquisition(self) -> None | int:
+        """The acquisition of the full run frame shown."""
+        frames, index = self.full_frames, self.full_grid.index
+
+        if frames is None or index >= len(frames):
+            return None
+
+        return int(frames["acq_id"].iloc[index])
 
     def _full_frame(self, index: int) -> None:
         """Where the full run is: its acquisition, and the marker."""
         frames = self.full_frames
         where = ""
+        acq_id = self._shown_acquisition()
 
-        if frames is not None and index < len(frames):
-            acq_id = int(frames["acq_id"].iloc[index])
+        if acq_id is not None:
             order = list(dict.fromkeys(frames["acq_id"].tolist()))
             where = f"Acquisition {acq_id} ({order.index(acq_id) + 1} of {len(order)})"
+
+            if acq_id in self.excluded:
+                where += ", excluded"
 
         self.full_info.setText(
             "   ".join(part for part in (where, "Videos at half resolution") if part)
@@ -453,6 +484,51 @@ class McorWindow(QWidget):
         self.full_plots.set_marker(
             float(x[index]) if x is not None and index < len(x) else None
         )
+
+    def _toggle_exclusion(self) -> None:
+        """Exclude the acquisition shown, or keep it again."""
+        acq_id = self._shown_acquisition()
+
+        if acq_id is None:
+            return
+
+        if acq_id in self.excluded:
+            self.excluded.remove(acq_id)
+        else:
+            self.excluded.append(acq_id)
+
+        self._show_exclusions()
+
+    def _undo(self) -> None:
+        """Cmd+Z: keep the last excluded (Full run), or bring back (Tests)."""
+        if self.pages.currentIndex() == FULL_PAGE:
+            if self.excluded:
+                self.excluded.pop()
+                self._show_exclusions()
+        else:
+            self.grid.bring_back()
+
+    def _show_exclusions(self) -> None:
+        """The acquisitions excluded: in words, and shaded on the plots."""
+        listed = ", ".join(str(acq_id) for acq_id in sorted(self.excluded))
+        self.excluded_label.setText(f"Excluded: {listed}" if listed else "")
+        data = self.full_data
+        spans = []
+
+        if data is not None:
+            starts = np.concatenate([[0], np.cumsum(data["frame_counts"])])
+
+            for k, acq_id in enumerate(data["acq_ids"].tolist()):
+                if acq_id in self.excluded:
+                    spans.append((float(starts[k]), float(starts[k + 1] - 1)))
+
+        self.full_plots.set_excluded(spans)
+        self._full_frame(self.full_grid.index)
+        self._enable()
+
+    def _check_raw(self) -> None:
+        if self.check_raw is not None:
+            self.check_raw(sorted(self.excluded))
 
     def current_grid(self) -> VideoGrid:
         """The grid of the page shown."""
@@ -500,8 +576,7 @@ class McorWindow(QWidget):
         sequence = QKeySequence(key)
         action.setShortcut(sequence)
         action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
-        native = sequence.toString(QKeySequence.SequenceFormat.NativeText)
-        action.setToolTip(f"{title} ({native})")
+        action.setToolTip(self._tip(title, key))
         action.setCheckable(checkable)
         bar.addAction(action)
         button = bar.widgetForAction(action)
@@ -510,6 +585,13 @@ class McorWindow(QWidget):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         return action
+
+    @staticmethod
+    def _tip(title: str, key: str) -> str:
+        """A tooltip naming its shortcut, as this system writes it."""
+        native = QKeySequence(key).toString(QKeySequence.SequenceFormat.NativeText)
+
+        return f"{title} ({native})"
 
     # ----------------------------------------------------------------------- #
     # Videos
@@ -620,8 +702,20 @@ class McorWindow(QWidget):
         ):
             action.setEnabled(tests)
 
+        # The foot of the bar: each page's own last step
+        self.pick_action.setVisible(tests and self.pick is not None)
+        self.check_action.setVisible(not tests and self.check_raw is not None)
+        self.check_action.setEnabled(not tests and self.check_raw is not None)
+        self.exclude_action.setEnabled(not tests and self.full_frames is not None)
+
         if not tests:
+            self.back_action.setEnabled(bool(self.excluded))
+            self.back_action.setToolTip(self._tip("Keep the last excluded", "Ctrl+Z"))
             return
+
+        self.back_action.setToolTip(
+            self._tip("Bring back the last set aside", "Ctrl+Z")
+        )
 
         self.plots.show_runs([video.name for video in self.grid.focused])
         self._show_details(self.hovered)

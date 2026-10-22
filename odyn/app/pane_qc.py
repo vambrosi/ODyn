@@ -97,8 +97,16 @@ TEST_HIDDEN = [
     "pick_call_id",
     "flow_worst_acq",
 ]
-EXPERIMENT_COLUMNS = ["submitted_at", "path", "status", "runs", "local copy", "size"]
-EXPERIMENT_HIDDEN = ["group_id", "folder", "folders", "bytes", "finished"]
+EXPERIMENT_COLUMNS = [
+    "submitted_at",
+    "path",
+    "status",
+    "raw check",
+    "runs",
+    "local copy",
+    "size",
+]
+EXPERIMENT_HIDDEN = ["group_id", "folder", "folders", "bytes", "finished", "excluded"]
 
 # An experiment's status, from its tests (later steps add their own)
 WAITING = "waiting for the cluster"
@@ -353,11 +361,14 @@ def my_experiments(
     main_folder: Path,
     base: None | Path = None,
     picks: None | dict[int, dict] = None,
+    checks: None | dict[int, list[int]] = None,
 ) -> pd.DataFrame:
     """
     One row per experiment of `tests` (from `my_tests`), in its order: its
     status (after a test was picked, from `picks`: see
-    `cluster.latest_picks`), how many of its tests finished, whether its
+    `cluster.latest_picks`), its raw check (from `checks`, see
+    `latest_raw_checks`; the acquisitions excluded hidden in `excluded`),
+    how many of its tests finished, whether its
     files are downloaded (`local copy`: "no", "yes", "partly" or "newer on
     server") and how much downloading them copies (`size`). Hidden:
     `folder`, where its tests are; `folders`, those with files to download
@@ -413,6 +424,7 @@ def my_experiments(
                 "submitted_at": runs["submitted_at"].iloc[0],
                 "path": runs["path"].iloc[0],
                 "status": status,
+                "raw check": _raw_check_line((checks or {}).get(int(group_id))),
                 "runs": f"{len(done)} of {len(runs)} finished",
                 "local copy": local,
                 "size": cache.human_size(size) if folders else "",
@@ -421,10 +433,38 @@ def my_experiments(
                 "folders": [str(folder) for folder in folders],
                 "bytes": size,
                 "finished": finished,
+                "excluded": list((checks or {}).get(int(group_id)) or []),
             }
         )
 
     return pd.DataFrame(rows, columns=[*EXPERIMENT_COLUMNS, *EXPERIMENT_HIDDEN])
+
+
+def latest_raw_checks(db) -> dict[int, list[int]]:
+    """Each group's latest `check_raw`: the acquisitions it excluded."""
+    calls = db.method_calls
+
+    if calls.empty:
+        return {}
+
+    checks = calls[calls["method_name"] == "Group.check_raw"].sort_index()
+    latest: dict[int, list[int]] = {}
+
+    for _, call in checks.iterrows():
+        output = call["call_output"]
+
+        if isinstance(output, dict):  # not one that failed
+            latest[int(call["group_id"])] = list(output.get("excluded", []))
+
+    return latest
+
+
+def _raw_check_line(excluded: None | list[int]) -> str:
+    """`not yet`, `done`, or `done, 2 excluded`."""
+    if excluded is None:
+        return "not yet"
+
+    return f"done, {len(excluded)} excluded" if excluded else "done"
 
 
 def _value(value):
@@ -777,6 +817,7 @@ class QcPane(QWidget):
                     db.main_folder,
                     base,
                     latest_picks(db),
+                    latest_raw_checks(db),
                 ),
                 cluster_line(db),
                 db.main_folder,
@@ -803,7 +844,7 @@ class QcPane(QWidget):
 
             for _, row in self.experiments.iterrows():
                 if str(row["folder"]) in self.windows:
-                    self.windows[str(row["folder"])].set_status(row["status"])
+                    self.windows[str(row["folder"])].set_status(_window_status(row))
             self._count_tabs()
             self._enable()
 
@@ -932,11 +973,53 @@ class QcPane(QWidget):
             runs,
             self.context.status.emit,
             pick=lambda run, aside: self._pick(key, run, aside),
+            check_raw=lambda excluded: self._check_raw(key, excluded),
+            excluded=row["excluded"],
         )
-        window.set_status(row["status"])
+        window.set_status(_window_status(row))
         window.closed.connect(lambda: self.windows.pop(key, None))
         self.windows[key] = window
         window.show()
+
+    def _check_raw(self, key: str, excluded: list[int]) -> None:
+        """
+        Once confirmed, record the raw check of the experiment with tests in
+        `key`, leaving out the acquisitions `excluded` (`Group.check_raw`).
+        """
+        window = self.windows.get(key)
+        rows = self.experiments[self.experiments["folder"] == key]
+
+        if window is None or rows.empty:
+            return
+
+        row = rows.iloc[0]
+        listed = ", ".join(str(acq_id) for acq_id in excluded)
+        leaving = (
+            f"excluding acquisitions {listed}"
+            if listed
+            else "keeping every acquisition"
+        )
+
+        if not self.context.confirm(
+            "Finished raw check",
+            f"Finish the raw check of {row['path']}, {leaving}?",
+            "Finish",
+            parent=window,
+        ):
+            return
+
+        group_id = int(row["group_id"])
+
+        def check(db):
+            return db.groups[group_id].check_raw(exclude_acq_ids=excluded)
+
+        def checked(result):
+            self.context.status.emit(
+                f"Raw check of {row['path']} recorded"
+                + (f" ({len(result)} excluded)" if result else "")
+            )
+
+        self.context.run(check, checked, "raw check", writes=True)
 
     def _pick(self, key: str, run: str, aside: list[str] = ()) -> None:
         """
@@ -1178,3 +1261,8 @@ class QcPane(QWidget):
         assert isinstance(model, FrameModel)
 
         return model
+
+
+def _window_status(row: pd.Series) -> str:
+    """The experiment status for its window: its status and raw check."""
+    return f"{row['status']}; raw check: {row['raw check']}"

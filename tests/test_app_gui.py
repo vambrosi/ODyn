@@ -1302,7 +1302,7 @@ def test_a_test_is_picked_from_the_window(window, tmp_path, monkeypatch):
     qc.tests_view.selectRow(0)
     qc.compare.click()
     mcor = next(iter(qc.windows.values()))
-    assert mcor.state.text() == "Status: ready to compare"
+    assert mcor.state.text() == "Status: ready to compare; raw check: not yet"
 
     # One run picked, never raw; the cluster test set aside first
     assert not mcor.pick_action.isEnabled()
@@ -1327,7 +1327,7 @@ def test_a_test_is_picked_from_the_window(window, tmp_path, monkeypatch):
 
     calls = Database(tmp_path / "data").latest_calls("pick_mcor_candidate")
     assert calls["input_set_aside"].iloc[0] == ["test"]
-    assert mcor.state.text() == "Status: correcting with rigid"
+    assert mcor.state.text().startswith("Status: correcting with rigid;")
 
     # Refused while a whole correction has not ended
     sent = cluster_folder(tmp_path / "data") / "mcor" / f"{group_id}.json"

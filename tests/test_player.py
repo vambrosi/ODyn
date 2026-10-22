@@ -497,3 +497,54 @@ def test_without_a_full_run_the_window_opens_on_the_tests(app, tmp_path):
     assert not window.full_run_action.isEnabled()
     assert window.pages.currentIndex() == TESTS_PAGE
     window.close()
+
+
+def test_acquisitions_are_excluded_on_the_full_run(app, tmp_path):
+    from PySide6.QtTest import QTest
+
+    from odyn.app.mcor_window import McorWindow
+    from odyn.groups import frame_map_path, write_frame_map
+    from odyn.mcor_report import write_shifts_summary
+
+    full = tmp_path / "full"
+    raw = a_video(full / "G_e1_raw.avi", frames=9)
+    a_video(full / "G_e1_mcor.avi", frames=9)
+    write_frame_map(frame_map_path(raw), [4] * 3 + [9] * 3 + [12] * 3, [0, 1, 2] * 3)
+    write_shifts_summary(
+        full / "shifts_summary.npz",
+        np.zeros((30, 2)),
+        None,
+        [],
+        [],
+        [4, 9, 12],
+        [10] * 3,
+    )
+    checked = []
+
+    # Opened with the exclusions recorded before
+    window = McorWindow(
+        "e1", tmp_path, [], print, check_raw=checked.append, excluded=[12]
+    )
+    window.show()
+    window.activateWindow()
+    loaded(window.full_grid)
+    assert window.excluded_label.text() == "Excluded: 12"
+    assert window.full_plots.excluded == [(20.0, 29.0)]
+    assert window.check_action.isVisible() and not window.pick_action.isVisible()
+
+    # E excludes the acquisition shown, again keeps it; Cmd+Z undoes
+    window.full_grid.seek(4)  # acquisition 9
+    QTest.keyClick(window, Qt.Key.Key_E)
+    assert window.excluded == [12, 9]
+    assert "Acquisition 9 (2 of 3), excluded" in window.full_info.text()
+    QTest.keyClick(window, Qt.Key.Key_E)
+    assert window.excluded == [12]
+    QTest.keyClick(window, Qt.Key.Key_E)
+    QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert window.excluded == [12]
+    QTest.keyClick(window, Qt.Key.Key_E)
+
+    # Finished: what is excluded goes to the record, sorted
+    window.check_action.trigger()
+    assert checked == [[9, 12]]
+    window.close()

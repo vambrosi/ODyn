@@ -862,3 +862,31 @@ def test_the_full_previews_share_the_raw_levels(tmp_path, monkeypatch):
     assert asked[1]["levels"] == (100.0, 900.0) and asked[1]["title"] == "s128 (all)"
     assert all(Path(a["save_folder"]).name == "full" for a in asked)
     assert [p.name for p in paths] == ["G_raw.avi", "G_mcor.avi"]
+
+
+def test_the_raw_check_records_what_is_left_out(tmp_path):
+    from odyn.app.pane_qc import _raw_check_line, latest_raw_checks
+
+    db, group_id = a_loop(tmp_path)
+    group = db.groups[group_id]
+    acq_ids = [int(i) for i in group.acquisitions.index]
+    assert group.raw_exclusions() is None
+    assert latest_raw_checks(db) == {}
+
+    assert group.check_raw(exclude_acq_ids=[acq_ids[3], acq_ids[1]]) == sorted(
+        [acq_ids[1], acq_ids[3]]
+    )
+    assert group.raw_exclusions() == sorted([acq_ids[1], acq_ids[3]])
+
+    # The latest counts; one that failed does not
+    group.check_raw()
+    with pytest.raises(ValueError, match="not acquisitions"):
+        group.check_raw(exclude_acq_ids=[9999])
+
+    assert group.raw_exclusions() == []
+    assert latest_raw_checks(db) == {group_id: []}
+    assert [_raw_check_line(x) for x in (None, [], [3, 5])] == [
+        "not yet",
+        "done",
+        "done, 2 excluded",
+    ]
