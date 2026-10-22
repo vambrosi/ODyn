@@ -87,6 +87,7 @@ class DatabaseWorker(QThread):
         self.can_create = can_create
         self._jobs: queue.Queue[None | Job] = queue.Queue()
         self.db: None | Database = None
+        self.read_only = ""  # why the database cannot be written, once open
         self._finished.connect(self._deliver)
 
     def run(  # type: ignore[override]
@@ -119,6 +120,11 @@ class DatabaseWorker(QThread):
             self.open_failed.emit(f"{type(error).__name__}: {error}")
 
             return
+
+        self.read_only = write_problem(self.db.path)
+
+        if self.read_only:
+            logger.warning(f"Cannot write to {self.db.path}: {self.read_only}")
 
         self.opened.emit()
 
@@ -167,3 +173,18 @@ class DatabaseWorker(QThread):
             object.__setattr__(db, "user", user)
 
         self.run(rename, "set_user")
+
+
+def write_problem(path: Path) -> str:
+    """
+    Why this computer cannot write to the database file at `path`, or "".
+    Tried by opening it for writing, as SQLite does: on a network share the
+    server decides, which the file's mode here does not show. When SQLite
+    cannot, it opens the file read-only without a word, and the first change
+    fails ("attempt to write a readonly database").
+    """
+    try:
+        with open(path, "r+b"):
+            return ""
+    except OSError as error:
+        return error.strerror or str(error)

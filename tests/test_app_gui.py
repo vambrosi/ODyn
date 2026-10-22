@@ -2552,3 +2552,26 @@ def test_a_download_can_be_cancelled(tmp_path):
     downloads.isInterruptionRequested = lambda: True  # Cancel, at the first report
     downloads.run()  # here, not in a thread
     assert ended == [(0, CANCELLED)]
+
+
+def test_a_database_this_computer_cannot_write_is_said_up_front(app, tmp_path):
+    from odyn.app.worker import write_problem
+
+    Database(tmp_path / "data", can_create=True, user="tester")
+    worker = DatabaseWorker(tmp_path / "data", None, user="tester")
+    opened = []
+    worker.opened.connect(lambda: opened.append(True))
+    worker.start()
+    wait_until(lambda: bool(opened))
+    assert worker.read_only == ""  # this one can be written
+    assert write_problem(tmp_path / "missing.db") == "No such file or directory"
+
+    # As SMB refuses it when the lab's group has no write access
+    worker.read_only = "Permission denied"
+    window = MainWindow(worker, drafts=tmp_path / "drafts")
+    assert window.read_only_label.isVisibleTo(window)
+    title, message = window.context.last_report
+    assert title == "Read-only database" and "(Permission denied)" in message
+
+    worker.stop()
+    window.close()

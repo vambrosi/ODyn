@@ -108,6 +108,12 @@ SETTLE_S = 300
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+# Files written on the share from the cluster must stay writable by the lab's
+# group: the computers in the lab reach the share through it (SMB), and a
+# file the group cannot write (a database, a request) breaks the app there.
+# A umask of 0027 (a common default) leaves the group read-only
+SHARE_UMASK = 0o007
+
 
 # --------------------------------------------------------------------------- #
 # Where things are
@@ -805,6 +811,10 @@ def tick_script(
 
 set -euo pipefail
 
+# What the job writes on the share is the lab's: writable by the group (the
+# lab's SMB access goes through it), not by others
+umask {SHARE_UMASK:04o}
+
 export PYTHONUNBUFFERED=1
 export TQDM_DISABLE=1
 
@@ -943,6 +953,10 @@ def _mcor_script(
 # job ends.
 
 set -euo pipefail
+
+# What the job writes on the share is the lab's: writable by the group (the
+# lab's SMB access goes through it), not by others
+umask {SHARE_UMASK:04o}
 
 export PYTHONUNBUFFERED=1
 export TQDM_DISABLE=1
@@ -1549,6 +1563,7 @@ def _value(text: str) -> Any:
 
 
 def main(argv: None | list[str] = None) -> int:
+    os.umask(SHARE_UMASK)  # see `SHARE_UMASK`
     parser = argparse.ArgumentParser(
         prog="python -m odyn.cluster",
         description="Requests and the tick that applies them on the cluster.",

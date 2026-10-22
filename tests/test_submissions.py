@@ -258,6 +258,9 @@ def test_the_tick_tests_each_loop_it_adds_once(tmp_path, slurm):
     assert "run-mcor-test --group 1 --user ana --whole" in script
     assert "#SBATCH --time=6:00:00" in script
     assert "#SBATCH --gres=disk:200" in script
+    assert "umask 0007" in script  # the lab's group can write what it makes
+    scripts = (cluster_folder(tmp_path) / "jobs").glob("*.sh")
+    assert all("umask 0007" in path.read_text() for path in scripts)
 
     # Never twice
     assert tick(tmp_path).tests == []
@@ -297,3 +300,20 @@ def test_the_tick_can_leave_the_tests_out(tmp_path, slurm):
 
     assert tick(tmp_path).tests == []
     assert not (cluster_folder(tmp_path) / "mcor").exists()
+
+
+def test_what_the_cluster_writes_stays_writable_by_the_lab(
+    tmp_path, monkeypatch, slurm
+):
+    import os
+
+    from odyn.cluster import ClusterConfig, SHARE_UMASK, main, tick_script
+
+    assert SHARE_UMASK == 0o007
+    assert "\numask 0007\n" in tick_script(tmp_path, None, ClusterConfig())
+
+    # Run as a command, whatever the login's umask (0027 is common)
+    set_to = []
+    monkeypatch.setattr(os, "umask", lambda mask: set_to.append(mask) or 0o027)
+    main([str(tmp_path), "stop"])
+    assert set_to[0] == 0o007
