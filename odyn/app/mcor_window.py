@@ -4,6 +4,11 @@ QC page. As the main window: the steps on a bar at the left (Full run,
 Tests, Final), a page each, and the tools of the page on a bar at the right,
 each with its shortcut (in its tooltip).
 
+**Full run** shows every acquisition raw and as corrected and saved, side
+by side at half size (`full/`, written by the whole correction), read from
+the files as they play (too long to hold), with the acquisition shown and
+the plots over every frame. It is the page the window opens on, when there.
+
 **Tests** shows the raw video and every finished run's test video side by
 side, playing in step (`player`), each with its numbers. A click selects a
 tile, Shift adds one; a right click opens the tools for it. The tools: Fit,
@@ -23,6 +28,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pandas as pd
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -49,11 +55,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..groups import RAW_PREVIEW_FOLDER, frame_map_path, read_frame_map
+from ..groups import FULL_FOLDER, RAW_PREVIEW_FOLDER, frame_map_path, read_frame_map
 from . import style
 from .player import Video, VideoGrid
 from .plots import RAW_COLOR, Series, ShiftPlots, read_summary, run_color
 from .symbols import icon
+
+# The pages, in the order of the steps on the left bar
+FULL_PAGE, TESTS_PAGE = 0, 1
 
 # Where the raw video is in experiment folders from before `raw/`: the
 # sweep's baseline
@@ -173,6 +182,35 @@ def details_line(run: Run) -> str:
     return f"{run.name}: {', '.join(parts)}" if parts else run.name
 
 
+def frame_positions(
+    frames: None | pd.DataFrame, data: dict[str, np.ndarray]
+) -> None | np.ndarray:
+    """
+    Where each video frame (`frames`, its frame map) falls on the plots of
+    `data` (a `shifts_summary.npz`), or `None` when they do not match.
+    """
+    if frames is None:
+        return None
+
+    starts = dict(
+        zip(
+            data["acq_ids"].tolist(),
+            np.concatenate([[0], np.cumsum(data["frame_counts"])[:-1]]),
+        )
+    )
+
+    if not set(frames["acq_id"]) <= set(starts):
+        return None
+
+    return np.array(
+        [
+            starts[acq_id] + within
+            for acq_id, within in zip(frames["acq_id"], frames["frame_in_acq"])
+        ],
+        float,
+    )
+
+
 class McorWindow(QWidget):
     """
     The motion correction of one experiment, from its local `folder`, and
@@ -216,7 +254,7 @@ class McorWindow(QWidget):
         layout.addWidget(self.state)
         layout.addLayout(middle, stretch=1)
 
-        # The steps, in the order of the work; only Tests has a page so far
+        # The steps, in the order of the work; Final has no page yet
         self.steps = QActionGroup(self)
         self.full_run_action = self._action(
             self.left, "full-run", "Full run", "Ctrl+1", checkable=True
@@ -231,9 +269,11 @@ class McorWindow(QWidget):
         for action in (self.full_run_action, self.tests_action, self.final_action):
             self.steps.addAction(action)
 
-        self.full_run_action.setEnabled(False)
         self.final_action.setEnabled(False)
         self.tests_action.setChecked(True)
+        self.full_run_action.triggered.connect(lambda: self._show_page(FULL_PAGE))
+        self.tests_action.triggered.connect(lambda: self._show_page(TESTS_PAGE))
+        self._build_full_page()
 
         tests = QWidget()
         tests_layout = QVBoxLayout(tests)
@@ -265,15 +305,17 @@ class McorWindow(QWidget):
         self.missing = QLabel("")
         tests_layout.addWidget(self.missing)
         self.pages.addWidget(tests)
+        self.pages.setCurrentIndex(TESTS_PAGE)
 
         # The tools
         self.fit_action = self._action(self.right, "fit", "Fit (zoom out)", "0")
-        self.fit_action.triggered.connect(self.grid.fit)
+        self.fit_action.triggered.connect(lambda: self.current_grid().fit())
         self.pointer_action = self._action(
             self.right, "pointer", "Mirrored pointer", "H", checkable=True
         )
         self.pointer_action.setChecked(self.grid.view.mirror)
         self.pointer_action.toggled.connect(self.grid.set_mirror)
+        self.pointer_action.toggled.connect(self.full_grid.set_mirror)
         self.only_action = self._action(
             self.right, "focused-only", "Focused only", "F", checkable=True
         )
@@ -297,6 +339,7 @@ class McorWindow(QWidget):
         )
         self.plots_action.setChecked(True)
         self.plots_action.toggled.connect(self.plots.setVisible)
+        self.plots_action.toggled.connect(self.full_plots.setVisible)
         self.report_action = self._action(
             self.right, "report", "Open the report of the focused run", "R"
         )
@@ -314,13 +357,13 @@ class McorWindow(QWidget):
 
         # The transport, from the keyboard
         for key, do in (
-            ("Space", self.grid.toggle),
-            ("Right", lambda: self.grid.step_by(1)),
-            ("Left", lambda: self.grid.step_by(-1)),
-            ("Shift+Right", lambda: self.grid.step_by(10)),
-            ("Shift+Left", lambda: self.grid.step_by(-10)),
-            ("]", lambda: self.grid.change_speed(1)),
-            ("[", lambda: self.grid.change_speed(-1)),
+            ("Space", lambda: self.current_grid().toggle()),
+            ("Right", lambda: self.current_grid().step_by(1)),
+            ("Left", lambda: self.current_grid().step_by(-1)),
+            ("Shift+Right", lambda: self.current_grid().step_by(10)),
+            ("Shift+Left", lambda: self.current_grid().step_by(-10)),
+            ("]", lambda: self.current_grid().change_speed(1)),
+            ("[", lambda: self.current_grid().change_speed(-1)),
         ):
             QShortcut(QKeySequence(key), self).activated.connect(do)
 
@@ -328,7 +371,101 @@ class McorWindow(QWidget):
         full.activated.connect(self._toggle_full_screen)
 
         self.set_runs(runs)
+        self.set_full()
         self.resize(1200, 800)
+
+    # ----------------------------------------------------------------------- #
+    # The full run
+    # ----------------------------------------------------------------------- #
+
+    def _build_full_page(self) -> None:
+        """Raw and corrected, every acquisition, with their plots."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 0, 8, 0)
+        self.full_info = QLabel("")
+        layout.addWidget(self.full_info)
+        self.full_grid = VideoGrid()
+        self.full_grid.frame_changed.connect(self._full_frame)
+        self.full_plots = ShiftPlots()
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(self.full_grid)
+        split.addWidget(self.full_plots)
+        split.setChildrenCollapsible(False)
+        split.setSizes([600, 220])
+        layout.addWidget(split, stretch=1)
+        self.full_missing = QLabel("")
+        layout.addWidget(self.full_missing)
+        self.pages.insertWidget(FULL_PAGE, page)
+        self.full_frames: None | pd.DataFrame = None  # the frame map
+        self.full_x: None | np.ndarray = None
+
+    def set_full(self) -> None:
+        """
+        Show the full run from `full/` in the local folder, when there:
+        opened on it, as it comes first in the work.
+        """
+        folder = self.folder / FULL_FOLDER
+        raw = next(iter(_videos(folder, "raw")), None)
+        corrected = next(iter(_videos(folder, "mcor")), None)
+        self.full_run_action.setEnabled(raw is not None and corrected is not None)
+
+        if raw is None or corrected is None:
+            return
+
+        videos = [
+            Video("raw", raw, candidate=False, color=RAW_COLOR, stream=True),
+            Video("corrected", corrected, color=run_color(0), stream=True),
+        ]
+        self.full_grid.set_videos(videos, columns=2)
+        self.full_frames = read_frame_map(frame_map_path(raw))
+        data = read_summary(folder)
+        self.full_x = None
+
+        if data is None:
+            self.full_plots.set_series([])
+            self.full_missing.setText(
+                "No per-frame numbers to plot (written while correcting)"
+            )
+        else:
+            self.full_plots.set_series([Series("corrected", run_color(0), data)])
+            self.full_plots.show_runs(["corrected"])
+            self.full_missing.setText("")
+            self.full_x = frame_positions(self.full_frames, data)
+
+        self._show_page(FULL_PAGE)
+        self._full_frame(0)
+
+    def _full_frame(self, index: int) -> None:
+        """Where the full run is: its acquisition, and the marker."""
+        frames = self.full_frames
+        where = ""
+
+        if frames is not None and index < len(frames):
+            acq_id = int(frames["acq_id"].iloc[index])
+            order = list(dict.fromkeys(frames["acq_id"].tolist()))
+            where = f"Acquisition {acq_id} ({order.index(acq_id) + 1} of {len(order)})"
+
+        self.full_info.setText(
+            "   ".join(part for part in (where, "Videos at half resolution") if part)
+        )
+        x = self.full_x
+        self.full_plots.set_marker(
+            float(x[index]) if x is not None and index < len(x) else None
+        )
+
+    def current_grid(self) -> VideoGrid:
+        """The grid of the page shown."""
+        return self.full_grid if self.pages.currentIndex() == FULL_PAGE else self.grid
+
+    def _show_page(self, index: int) -> None:
+        for grid in (self.grid, self.full_grid):
+            grid.pause()
+
+        self.pages.setCurrentIndex(index)
+        action = self.full_run_action if index == FULL_PAGE else self.tests_action
+        action.setChecked(True)
+        self._enable()
 
     # ----------------------------------------------------------------------- #
     # The bars
@@ -432,24 +569,7 @@ class McorWindow(QWidget):
 
         if series and raw is not None:
             frames = read_frame_map(frame_map_path(raw))
-            data = series[0].data
-            starts = dict(
-                zip(
-                    data["acq_ids"].tolist(),
-                    np.concatenate([[0], np.cumsum(data["frame_counts"])[:-1]]),
-                )
-            )
-
-            if frames is not None and set(frames["acq_id"]) <= set(starts):
-                self.frame_x = np.array(
-                    [
-                        starts[acq_id] + within
-                        for acq_id, within in zip(
-                            frames["acq_id"], frames["frame_in_acq"]
-                        )
-                    ],
-                    float,
-                )
+            self.frame_x = frame_positions(frames, series[0].data)
 
         self._mark_frame(self.grid.index)
 
@@ -487,6 +607,22 @@ class McorWindow(QWidget):
         self.details.setText("" if run is None else details_line(run))
 
     def _enable(self, *_) -> None:
+        tests = self.pages.currentIndex() == TESTS_PAGE
+
+        for action in (
+            self.only_action,
+            self.clear_action,
+            self.star_action,
+            self.aside_action,
+            self.back_action,
+            self.report_action,
+            self.pick_action,
+        ):
+            action.setEnabled(tests)
+
+        if not tests:
+            return
+
         self.plots.show_runs([video.name for video in self.grid.focused])
         self._show_details(self.hovered)
         run = self._picked_run()
@@ -549,7 +685,10 @@ class McorWindow(QWidget):
             self.showFullScreen()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt's name)
-        self.grid.pause()
-        self.grid.stop_reading()
+        for grid in (self.grid, self.full_grid):
+            grid.pause()
+            grid.stop_reading()
+            grid.close_streams()
+
         self.closed.emit()
         super().closeEvent(event)

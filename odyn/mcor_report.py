@@ -334,6 +334,29 @@ def side_by_side_pages(
     return canvas
 
 
+def frame_correlations(
+    movie: np.ndarray, reference: np.ndarray, margin: int, chunk: int = 64
+) -> np.ndarray:
+    """
+    Each frame's correlation with `reference`, away from the edges (`margin`
+    px), as `_summarize` measures it, `chunk` frames at a time (a whole
+    movie as floats would not fit in memory).
+    """
+    target = _inner(np.asarray(reference, np.float32), margin).ravel()
+    target = target - target.mean()
+    target /= np.linalg.norm(target) + 1e-12
+    matches = []
+
+    for start in range(0, len(movie), chunk):
+        part = np.asarray(movie[start : start + chunk], np.float32)
+        part = _inner(part.transpose(1, 2, 0), margin).reshape(-1, len(part)).T
+        part = part - part.mean(axis=1, keepdims=True)
+        norms = np.linalg.norm(part, axis=1) + 1e-12
+        matches.append((part @ target) / norms)
+
+    return np.concatenate(matches).astype(np.float32) if matches else np.zeros(0)
+
+
 def write_shifts_summary(
     path: Path,
     shifts: np.ndarray,

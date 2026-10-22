@@ -442,3 +442,58 @@ def test_the_plots_show_the_focused_runs_on_shared_axes(app, tmp_path):
     window.plots_action.trigger()
     assert not plots.isVisibleTo(window)
     window.close()
+
+
+def test_the_full_run_page_streams_every_acquisition(app, tmp_path):
+    from odyn.app.mcor_window import FULL_PAGE, TESTS_PAGE, McorWindow
+    from odyn.app.player import FrameStream
+    from odyn.groups import frame_map_path, write_frame_map
+    from odyn.mcor_report import write_shifts_summary
+
+    full = tmp_path / "full"
+    raw = a_video(full / "G_e1_raw.avi", frames=6)
+    a_video(full / "G_e1_mcor.avi", frames=6)
+    write_frame_map(frame_map_path(raw), [4, 4, 4, 9, 9, 9], [0, 50, 99] * 2)
+    write_shifts_summary(
+        full / "shifts_summary.npz",
+        np.zeros((200, 2)),
+        None,
+        [0.3] * 200,
+        [0.8] * 200,
+        [4, 9],
+        [100, 100],
+    )
+
+    # Opened on the full run, as it comes first
+    window = McorWindow("e1", tmp_path, [], print)
+    assert window.full_run_action.isEnabled() and window.full_run_action.isChecked()
+    assert window.pages.currentIndex() == FULL_PAGE
+    grid = window.current_grid()
+    assert grid is window.full_grid
+    assert [tile.video.name for tile in grid.tiles] == ["raw", "corrected"]
+    loaded(grid)
+
+    # Read from the file as shown, not held
+    assert isinstance(grid.tiles[0].video.frames, FrameStream)
+    assert grid.frame_count == 6
+    grid.seek(4)
+    assert window.full_info.text().startswith("Acquisition 9 (2 of 2)")
+    assert "half resolution" in window.full_info.text()
+    assert window.full_plots.marker == 150
+    assert window.full_plots.shown == ["corrected"]
+
+    # The tests' tools are for the tests
+    assert not window.star_action.isEnabled()
+    window.tests_action.trigger()
+    assert window.pages.currentIndex() == TESTS_PAGE
+    assert window.current_grid() is window.grid
+    window.close()
+
+
+def test_without_a_full_run_the_window_opens_on_the_tests(app, tmp_path):
+    from odyn.app.mcor_window import TESTS_PAGE, McorWindow
+
+    window = McorWindow("e1", tmp_path, [], print)
+    assert not window.full_run_action.isEnabled()
+    assert window.pages.currentIndex() == TESTS_PAGE
+    window.close()

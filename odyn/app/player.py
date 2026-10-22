@@ -117,16 +117,64 @@ def read_frames(path: str | Path) -> np.ndarray:
     return np.stack(frames)
 
 
+class FrameStream:
+    """
+    A video's frames read from its file as they are shown, for videos too
+    long to hold in memory (a full run's: thousands of frames). Indexed and
+    measured as the array `read_frames` returns; playing on reads the next
+    frame, a jump seeks (each frame of an MJPG video stands alone, so it is
+    quick).
+    """
+
+    def __init__(self, path: str | Path):
+        import cv2
+
+        self.capture = cv2.VideoCapture(str(path))
+        self.count = int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.next = 0
+
+        if not self.capture.isOpened() or self.count <= 0:
+            self.capture.release()
+            raise OSError(f"No frames could be read from '{path}'.")
+
+    def __len__(self) -> int:
+        return self.count
+
+    def __getitem__(self, index: int) -> np.ndarray:
+        import cv2
+
+        if index != self.next:
+            self.capture.set(cv2.CAP_PROP_POS_FRAMES, index)
+
+        ok, frame = self.capture.read()
+        self.next = index + 1
+
+        if not ok:
+            return np.zeros((1, 1), np.uint8)
+
+        if frame.ndim == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        return frame
+
+    def close(self) -> None:
+        self.capture.release()
+
+
 @dataclass
 class Video:
-    """A video to show: its name, a line of numbers, and its file."""
+    """
+    A video to show: its name, a line of numbers, and its file, read whole
+    into memory, or as shown (`stream`, for long ones).
+    """
 
     name: str
     path: Path
     numbers: str = ""
     candidate: bool = True  # can be set aside (not the raw video)
     color: None | QColor = None  # its color in the plots, as a square by its name
-    frames: None | np.ndarray = field(default=None, repr=False)
+    stream: bool = False
+    frames: None | np.ndarray | FrameStream = field(default=None, repr=False)
 
 
 class FrameReader(QThread):
@@ -149,7 +197,9 @@ class FrameReader(QThread):
                 return
 
             try:
-                video.frames = read_frames(video.path)
+                video.frames = (
+                    FrameStream(video.path) if video.stream else read_frames(video.path)
+                )
             except OSError as error:
                 self.failed.emit(index, str(error))
                 continue
@@ -548,6 +598,8 @@ class VideoGrid(QWidget):
         self.stop_reading()
         self.pause()
 
+        self.close_streams()
+
         for tile in self.tiles:
             tile.setParent(None)
             tile.deleteLater()
@@ -875,7 +927,13 @@ class VideoGrid(QWidget):
         self.layout_strip.addStretch(1)
         self.strip.setVisible(bool(self.aside))
 
+    def close_streams(self) -> None:
+        for tile in self.tiles:
+            if isinstance(tile.video.frames, FrameStream):
+                tile.video.frames.close()
+
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt's name)
         self.pause()
         self.stop_reading()
+        self.close_streams()
         super().closeEvent(event)

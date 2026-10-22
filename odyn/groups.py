@@ -91,6 +91,8 @@ RAW_LEVELS_FILE = "levels.json"
 # mean, raw (in `raw/`) and corrected (in `final/`), and how each matches the
 # reference
 FINAL_FOLDER = "final"
+FULL_FOLDER = "full"  # the full run: every acquisition, previews and plots
+FULL_SIZE = 0.5  # the full run's videos, from the movies' size
 MEANS_VIDEO = "means.avi"
 MEANS_TABLE = "means.csv"
 MEANS_FPS = 4
@@ -1854,6 +1856,13 @@ class Group(CallRecorder):
         self.clipped_values = self.saved_values = 0
         self.means: list[tuple[int, str, np.ndarray, np.ndarray]] = []
         kept = set(report_positions)
+
+        # Every frame's shift and match with the reference, for the full run
+        # page (`_write_full_summary`); the matches are measured as each
+        # acquisition is saved
+        self.full_parts: dict[str, list] = {}
+        self.full_reference = template
+        self.full_margin = max(int(v) for v in settings["max_shifts"]) + 2
         self.report_parts: dict[str, list] = {
             "raw": [],
             "mmap": [],
@@ -1885,6 +1894,7 @@ class Group(CallRecorder):
                 if not is_test:
                     mmaps = list(self.mc.mmap_file)
                     self._keep_for_report(positions_in, acquisitions_slice, kept)
+                    self._keep_full_shifts(positions_in, acquisitions_slice)
                     self._save_mcor_files(
                         [acquisitions_slice.index[i] for i in positions_in],
                         mmaps,
@@ -1914,6 +1924,7 @@ class Group(CallRecorder):
                 }
             )
             self._write_means(template, settings["max_shifts"])
+            self._write_full_summary()
 
         if is_test:
             # Record what caiman wrote so save_preview_movie can find it after a restart
@@ -1978,6 +1989,104 @@ class Group(CallRecorder):
         pd.DataFrame(rows).to_csv(table, index=False)
         self.add_output_file(table)
         self.means = []
+
+    def _keep_full_shifts(
+        self, positions_in: list[int], acquisitions: pd.DataFrame
+    ) -> None:
+        """
+        Every frame's shift from the batch caiman just corrected, for the full
+        run (for piecewise rigid: the median of the patches, and their 10th
+        and 90th percentiles).
+        """
+        parts = self.full_parts
+
+        if self.mc.pw_rigid:
+            patches = {
+                "dy": np.asarray(self.mc.y_shifts_els, np.float32),
+                "dx": np.asarray(self.mc.x_shifts_els, np.float32),
+            }
+
+            for name, values in patches.items():
+                low, mid, high = np.percentile(values, [10, 50, 90], axis=1)
+                parts.setdefault(name, []).append(mid.astype(np.float32))
+                parts.setdefault(f"{name}_p10", []).append(low.astype(np.float32))
+                parts.setdefault(f"{name}_p90", []).append(high.astype(np.float32))
+        else:
+            shifts = np.asarray(self.mc.shifts_rig, np.float32).reshape(-1, 2)
+            parts.setdefault("dy", []).append(shifts[:, 0])
+            parts.setdefault("dx", []).append(shifts[:, 1])
+
+        parts.setdefault("acq_ids", []).extend(
+            int(acquisitions.index[i]) for i in positions_in
+        )
+        parts.setdefault("frame_counts", []).extend(
+            int(acquisitions["frame_count"].iloc[i]) for i in positions_in
+        )
+
+    def _write_full_summary(self) -> None:
+        """
+        The full run's per-frame numbers (`full/shifts_summary.npz`, as a
+        test's, see `mcor_report`), from `full_parts`.
+        """
+        from .mcor_report import SHIFTS_SUMMARY
+
+        parts = self.full_parts
+
+        if not parts.get("dy"):
+            return
+
+        content = {
+            key: np.concatenate(values).astype(np.float32)
+            for key, values in parts.items()
+            if key not in ("acq_ids", "frame_counts")
+        }
+        lengths = {len(values) for values in content.values()}
+
+        if len(lengths) > 1:  # a match per frame missing: the shifts only
+            content = {k: v for k, v in content.items() if "corr" not in k}
+
+        content["acq_ids"] = np.asarray(parts["acq_ids"], np.int64)
+        content["frame_counts"] = np.asarray(parts["frame_counts"], np.int64)
+        path = self.mcor_test_folder() / FULL_FOLDER / SHIFTS_SUMMARY
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(path, **content)
+        self.add_output_file(path)
+        self.full_parts = {}
+
+    @record_call
+    def save_full_previews(self, *, label: None | str = None) -> list[Path]:
+        """
+        The full run's videos: every acquisition raw, and as corrected and
+        saved (`mcor_files`), a few frames each (`save_preview_movie`'s
+        default), at half size, with the same black and white, in `full/` of
+        the experiment's test folder. Each has its frame map beside it.
+
+        **USAGE**
+        ```python
+        group = db.groups[some_index]
+        group.save_full_previews()
+        ```
+
+        Run by the whole correction; for an experiment corrected before, run
+        it alone (no plots then: their numbers are measured while correcting).
+        `label` names the corrected video's panel (the run it was corrected
+        with).
+        """
+        folder = str(self.mcor_test_folder() / FULL_FOLDER)
+        raw = self.save_preview_movie(
+            grid=["raw"], save_folder=folder, size=FULL_SIZE, title="raw"
+        )
+        levels = self.preview_levels
+        corrected = self.save_preview_movie(
+            grid=["mcor"],
+            save_folder=folder,
+            size=FULL_SIZE,
+            levels=levels,
+            title=label or "corrected",
+        )
+        self.set_output({"files": [raw.name, corrected.name], "levels": list(levels)})
+
+        return [raw, corrected]
 
     def _keep_for_report(
         self, positions_in: list[int], acquisitions: pd.DataFrame, kept: set[int]
@@ -2059,6 +2168,21 @@ class Group(CallRecorder):
             movie, clipped = as_raw(np.asarray(cm.load(mmap_path)), raw)
             self.clipped_values += clipped
             self.saved_values += movie.size
+
+            # Each frame's match with the reference, for the full run's plots
+            reference = getattr(self, "full_reference", None)
+
+            if reference is not None:
+                from .mcor_report import frame_correlations
+
+                margin = self.full_margin
+                parts = self.full_parts
+                parts.setdefault("raw_corr", []).append(
+                    frame_correlations(raw, reference, margin)
+                )
+                parts.setdefault("corr", []).append(
+                    frame_correlations(movie, reference, margin)
+                )
 
             # Each acquisition's mean, raw and corrected, for checking them all
             self.means.append(
@@ -2304,6 +2428,9 @@ class Group(CallRecorder):
             # The final TIFFs are saved: the report's copies can go
             for path in self.test_mmap_paths:
                 path.unlink(missing_ok=True)
+
+            if movie:
+                paths += self.save_full_previews(label=title)
 
         for path in paths:
             self.add_output_file(path)

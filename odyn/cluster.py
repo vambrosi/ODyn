@@ -41,7 +41,11 @@ python -m odyn.cluster <main_folder> status
 python -m odyn.cluster <main_folder> request process_sync exp_id=12
 python -m odyn.cluster <main_folder> mcor-test --group 7 [--whole] [--dry-run]
 python -m odyn.cluster <main_folder> mcor-sweep --group 7 --grid grid.json
+python -m odyn.cluster <main_folder> full-previews --group 7 --user ana
 ```
+`full-previews` writes the full run's videos of a group corrected before
+they were written (`Group.save_full_previews`); run it on a node (`srun`),
+as it reads every acquisition.
 
 **PYTHON**
 ```python
@@ -1598,6 +1602,12 @@ def main(argv: None | list[str] = None) -> int:
     one.add_argument("--sweep", type=Path, required=True)
     one.add_argument("--task", type=int, required=True)
 
+    previews = commands.add_parser(
+        "full-previews", help="write the full run's videos of a corrected group"
+    )
+    previews.add_argument("--group", type=int, required=True)
+    previews.add_argument("--user", help="whose (default: who added the experiment)")
+
     ask = commands.add_parser("request", help="leave a request for the next tick")
     ask.add_argument("method", choices=REQUESTABLE)
     ask.add_argument("arguments", nargs="*", help="key=value")
@@ -1651,6 +1661,13 @@ def main(argv: None | list[str] = None) -> int:
             time=args.time,
             dry_run=args.dry_run,
         )
+
+    elif args.command == "full-previews":
+        db = Database(args.main_folder, project=args.project)
+        user = args.user or experiment_owner(db, args.group)
+        db = Database(args.main_folder, project=args.project, user=user)
+        paths = db.groups[args.group].save_full_previews()
+        print("Wrote " + ", ".join(str(path) for path in paths))
 
     elif args.command == "run-mcor-sweep":
         folder = run_mcor_sweep(args.sweep, args.task)

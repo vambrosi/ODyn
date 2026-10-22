@@ -166,6 +166,18 @@ def test_a_whole_test_saves_every_acquisition_and_reports_on_the_test_ones(
     # And nothing of caiman's is left behind
     assert not list((tmp_path / "caiman-temp").glob("*.npy"))
 
+    # The full run's numbers: every frame of every acquisition, shifts and
+    # matches with the reference, raw and corrected
+    full = np.load(folder / "full" / "shifts_summary.npz")
+    assert full["frame_counts"].tolist() == [56] * 8
+    assert len(full["acq_ids"]) == 8
+    assert len(full["dy"]) == len(full["corr"]) == len(full["raw_corr"]) == 8 * 56
+    assert "dy_p10" not in full  # rigid
+
+
+def group_folder(db, group_id):
+    return db.groups[group_id].mcor_test_folder()
+
 
 def test_a_whole_piecewise_test_reports_its_patches(tmp_path, caiman):
     db, group_id = a_loop(tmp_path)
@@ -184,6 +196,8 @@ def test_a_whole_piecewise_test_reports_its_patches(tmp_path, caiman):
 
     metrics = json.loads((folder / "metrics.json").read_text())
     assert metrics["patch_jitter_median_px"] == 0.5
+    full = np.load(group_folder(db, group_id) / "full" / "shifts_summary.npz")
+    assert len(full["dy_p10"]) == len(full["dy"]) == 8 * 56
     summary = pd.read_csv(folder / "summary.csv")
     assert summary["dy_median"].tolist() == [0.75] * 4
 
@@ -815,3 +829,36 @@ def test_the_shifts_summary_has_the_patches_spread(tmp_path):
     assert data["dy"].tolist() == [1.0, 1.5, 2.0]
     assert data["dy_p90"][0] > data["dy_p10"][0] and data["dx_p10"][0] == 2
     assert data["raw_corr"].tolist() == pytest.approx([0.2] * 3)
+
+
+def test_frame_correlations_match_the_reports(tmp_path):
+    from odyn.mcor_report import _summarize, frame_correlations
+
+    rng = np.random.default_rng(0)
+    reference = rng.random((30, 40))
+    movie = reference + rng.normal(0, 0.5, (150, 30, 40))
+    _, expected = _summarize(movie, reference, 3)
+    assert frame_correlations(movie, reference, 3, chunk=64) == pytest.approx(
+        expected, abs=1e-5
+    )
+
+
+def test_the_full_previews_share_the_raw_levels(tmp_path, monkeypatch):
+    from odyn.groups import Group
+
+    db, group_id = a_loop(tmp_path)
+    asked = []
+
+    def save_preview_movie(self, **kwargs):
+        asked.append(kwargs)
+        self.preview_levels = kwargs.get("levels") or (100.0, 900.0)
+        return Path(kwargs["save_folder"]) / f"G_{kwargs['grid'][0]}.avi"
+
+    monkeypatch.setattr(Group, "save_preview_movie", save_preview_movie)
+    paths = db.groups[group_id].save_full_previews(label="s128 (all)")
+
+    assert [a["grid"] for a in asked] == [["raw"], ["mcor"]]
+    assert [a["size"] for a in asked] == [0.5, 0.5]
+    assert asked[1]["levels"] == (100.0, 900.0) and asked[1]["title"] == "s128 (all)"
+    assert all(Path(a["save_folder"]).name == "full" for a in asked)
+    assert [p.name for p in paths] == ["G_raw.avi", "G_mcor.avi"]

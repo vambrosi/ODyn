@@ -53,7 +53,7 @@ from ..cluster import (
     send_request,
 )
 from ..database import SyncFlag
-from ..groups import FINAL_FOLDER, RAW_PREVIEW_FOLDER
+from ..groups import FINAL_FOLDER, FULL_FOLDER, RAW_PREVIEW_FOLDER
 from ..mcor_sweep import run_numbers
 from . import cache
 from .context import Context
@@ -106,6 +106,9 @@ READY = "ready to compare"
 CORRECTING = "correcting with {run}"
 CORRECTION_STOPPED = "correction with {run} stopped"
 FINAL_CHECK = "ready for final check"
+
+# The folders of an experiment's tests downloaded with it, beside the runs'
+EXPERIMENT_FOLDERS = (RAW_PREVIEW_FOLDER, FINAL_FOLDER, FULL_FOLDER)
 
 # An experiment some of whose files are downloaded (see `cache.state`)
 PARTLY = "partly"
@@ -357,7 +360,7 @@ def my_experiments(
     files are downloaded (`local copy`: "no", "yes", "partly" or "newer on
     server") and how much downloading them copies (`size`). Hidden:
     `folder`, where its tests are; `folders`, those with files to download
-    (its own, `raw/`, `final/` and each finished run's); `bytes`, their size;
+    (its own, `raw/`, `final/`, `full/` and each finished run's); `bytes`, their size;
     `finished`, its finished runs (as `Run`s, with folders on the share), the
     cluster test first.
     """
@@ -389,7 +392,7 @@ def my_experiments(
             for _, run in done.iterrows()
         ]
         finished.sort(key=lambda run: run.folder != top)  # stable
-        candidates = [top, top / RAW_PREVIEW_FOLDER, top / FINAL_FOLDER]
+        candidates = [top, *(top / name for name in EXPERIMENT_FOLDERS)]
         candidates += [run.folder for run in finished if run.folder != top]
         folders = [folder for folder in candidates if cache.small_files(folder)]
         size = sum(cache.remote_size(folder) for folder in folders)
