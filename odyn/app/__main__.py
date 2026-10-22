@@ -1,5 +1,9 @@
 """
-`python -m odyn.app <main_folder> [--project NAME] [--user NAME] [--create]`
+`python -m odyn.app <main_folder> [--project NAME] [--user NAME] [--create]
+[--no-update]`
+
+Run as a command, the app first updates its own git clone and restarts if
+that brought anything new (see `update`); `--no-update` skips it.
 
 For trying the app without the rig, the recorder can take a stand-in for the
 DAQ: `--simulate` (invented signals) or `--replay FILE [--speed X]` (a sync
@@ -15,6 +19,11 @@ from pathlib import Path
 
 
 def main(argv: None | list[str] = None) -> int:
+    if argv is None:  # launched, not called (a test, say)
+        from .update import update_and_restart
+
+        update_and_restart(sys.argv[1:])
+
     parser = argparse.ArgumentParser(
         prog="python -m odyn.app",
         description=(
@@ -39,6 +48,11 @@ def main(argv: None | list[str] = None) -> int:
         "--create",
         action="store_true",
         help="make the database if it does not exist yet",
+    )
+    parser.add_argument(
+        "--no-update",
+        action="store_true",
+        help="do not update ODyn before starting (also: ODYN_NO_UPDATE=1)",
     )
     stand_in = parser.add_mutually_exclusive_group()
     stand_in.add_argument(

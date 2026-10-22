@@ -42,6 +42,8 @@ python -m odyn.app.install MAIN_FOLDER
 
 where `ODYN_PATH` is where you cloned this repository and `MAIN_FOLDER` is the folder with the data and its `.odyn` folder (`Z:\ImagingData` on the olfactometer PC). Run the last line again to change the folder, or with `--name "ODyn test"` to create a second launcher (for a test folder, say).
 
+The app updates itself: at every launch it pulls the `main` branch of its clone and restarts if that brought anything new (unless the clone is on another branch or has local changes). When an update needs new packages, the app says so (run the `pip install` line above again in that case). To turn updating off, set `ODYN_NO_UPDATE=1`.
+
 ## Usage
 
 Create a notebook file (extension `.ipynb`) in VS Code, and run `from odyn import Database, Group` in a cell. You will get more instructions after that. You will also need to select `caiman` as your _Python Environment_ and install the Jupyter extension (you will get prompts after you try to run a notebook cell).

@@ -705,6 +705,17 @@ def open_window(
         windows.append(window)
         window.show()
 
+        # Restarted after an update (see `update`)
+        from .update import notices
+
+        updated, note = notices()
+
+        if updated:
+            window.say(updated)
+
+        if note:
+            window.context.report("ODyn updated", note)
+
     def failed(message: str):
         QMessageBox.critical(None, "ODyn", f"Could not open the database:\n{message}")
         app.quit()
