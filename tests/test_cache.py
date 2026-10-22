@@ -118,3 +118,24 @@ def test_sizes_read_well():
     assert human_size(999) == "999 B"
     assert human_size(1_234_567) == "1.2 MB"
     assert human_size(2_500_000_000) == "2.5 GB"
+
+
+def test_a_download_copies_no_file_flags(tmp_path, monkeypatch):
+    import errno
+    import shutil
+
+    from odyn.app import cache
+
+    # macOS refuses a user the flags an SMB share sets on its files
+    def refuse(*args, **kwargs):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(shutil, "copystat", refuse)
+    main = tmp_path / "main"
+    test = main / "cache" / "mcor-tests" / "e1_g1"
+    test.mkdir(parents=True)
+    (test / "metrics.json").write_text("{}")
+
+    local = cache.download(main, test, tmp_path / "base")
+    assert (local / "metrics.json").read_text() == "{}"
+    assert cache.state(main, test, tmp_path / "base") == cache.HERE

@@ -153,7 +153,13 @@ def download(
             progress(path.name)
 
         partial = target.with_name(f".{target.name}.part")
-        shutil.copy2(path, partial)  # copy2 keeps the time, which `state` reads
+        shutil.copyfile(path, partial)
+
+        # The time only, which `state` reads. Not `copy2`: it also copies the
+        # file flags, and macOS refuses a user the flags a network share sets
+        # ("Operation not permitted")
+        times = path.stat()
+        os.utime(partial, ns=(times.st_atime_ns, times.st_mtime_ns))
         os.replace(partial, target)
 
     return local
