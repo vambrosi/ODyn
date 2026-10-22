@@ -2509,7 +2509,13 @@ class Group(CallRecorder):
 
         path = self._reference_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        tifffile.imwrite(path, template)
+
+        # Written whole, then put in place: two jobs of the group can build
+        # it at once (a full correction and a sweep), and a run reusing it
+        # must never read half of one
+        partial = path.with_name(f".{path.name}.{os.getpid()}.part")
+        tifffile.imwrite(partial, template)
+        os.replace(partial, path)
         self.add_output_file(path)
         self.update_parameters_used({"reference_acq_ids": acq_ids})
 
