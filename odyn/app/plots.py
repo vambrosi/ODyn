@@ -14,6 +14,9 @@ The data are the runs' `shifts_summary.npz` (see `mcor_report`).
 Drawn with QPainter, as each pixel column's lowest and highest value, so a
 test of tens of thousands of frames draws at once; kept as a picture, so
 only the marker is drawn as the videos play.
+
+A click on the plots, or a drag along them, says which frame is under the
+pointer (`frame_clicked`), so the videos can go there.
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
@@ -85,6 +88,8 @@ def read_summary(folder: Path) -> None | dict[str, np.ndarray]:
 
 class ShiftPlots(QWidget):
     """The plots (see the module description)."""
+
+    frame_clicked = Signal(float)  # an index into the plotted frames
 
     def __init__(self, rows=ROWS, parent=None):
         super().__init__(parent)
@@ -175,6 +180,35 @@ class ShiftPlots(QWidget):
         """Mark `frame` (an index into the plotted frames), or nothing."""
         self.marker = frame
         self.update()
+
+    def frame_at(self, x: float) -> None | float:
+        """The plotted frame at `x` (px) in the widget, or `None` off the plots."""
+        rows = self._rows()
+
+        if not self.frames or not rows or not rows[0].width():
+            return None
+
+        rect = rows[0]
+        share = (x - rect.left()) / rect.width()
+
+        if not 0 <= share <= 1:
+            return None
+
+        return share * max(1, self.frames - 1)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt's name)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._go_to(event.position().x())
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt's name)
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._go_to(event.position().x())
+
+    def _go_to(self, x: float) -> None:
+        frame = self.frame_at(x)
+
+        if frame is not None:
+            self.frame_clicked.emit(frame)
 
     # ----------------------------------------------------------------------- #
     # Drawing

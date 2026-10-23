@@ -1161,6 +1161,13 @@ def test_qc_lists_the_tests_of_this_users_experiments(tmp_path, monkeypatch):
         if path.is_file()
     )
 
+    # A whole correction is no run to compare: rigid (all) is rigid
+    whole = my_tests(db, "tester", my_recordings(db, "tester"))
+    row = my_experiments(whole, db.main_folder, tmp_path / "base").iloc[0]
+    assert whole["whole"].tolist() == [False, False, True]
+    assert "rigid (all)" not in [run.name for run in row["finished"]]
+    assert str(top) in row["folders"]  # its files: the full run's
+
 
 def pd_isna(value) -> bool:
     import pandas as pd

@@ -111,6 +111,8 @@ GLYPHS = {
     "pointer": ("my_location", "", "+"),
     "focused-only": ("filter_center_focus", "", "f"),
     "clear-focus": ("deselect", "", "-"),
+    "select-all": ("select_all", "", "a"),
+    "show-all": ("zoom_out_map", "", "#"),
     "star": ("star", "", "*"),
     "set-aside": ("visibility_off", "", "x"),
     "plots": ("show_chart", "", "~"),

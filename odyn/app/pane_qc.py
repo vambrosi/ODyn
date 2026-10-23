@@ -99,6 +99,7 @@ TEST_HIDDEN = [
     "pick_call_id",
     "flow_worst_acq",
     "job",
+    "whole",
 ]
 EXPERIMENT_COLUMNS = [
     "submitted_at",
@@ -349,6 +350,7 @@ def my_tests(
             "pick_call_id": job.get("pick_call_id"),
             # What `Group.run_again` calls it
             "job": job["run"] or CORRECTION_RUN,
+            "whole": bool(job.get("whole")),
         }
 
         if job["state"] == "finished" and (folder / "metrics.json").is_file():
@@ -393,8 +395,8 @@ def my_experiments(
     server") and how much downloading them copies (`size`). Hidden:
     `folder`, where its tests are; `folders`, those with files to download
     (its own, `raw/`, `full/` and each finished run's); `bytes`, their size;
-    `finished`, its finished runs (as `Run`s, with folders on the share), the
-    cluster test first.
+    `finished`, its finished test runs (as `Run`s, with folders on the
+    share), the cluster test first; not the whole corrections.
     """
     rows = []
 
@@ -428,6 +430,9 @@ def my_experiments(
                 **{key: _value(run[key]) for key in TEST_NUMBERS},
             )
             for _, run in done.iterrows()
+            # A whole correction repeats a test (rigid (all) is rigid): the
+            # full run and the final check show it
+            if not run["whole"]
         ]
         finished.sort(key=lambda run: run.folder != top)  # stable
         candidates = [top, *(top / name for name in EXPERIMENT_FOLDERS)]

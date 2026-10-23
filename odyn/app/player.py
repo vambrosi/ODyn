@@ -10,14 +10,16 @@ corrections (and raw and final means) in.
   timer, one seek bar, play and pause, and a speed. The wheel zooms and a drag
   pans, on any tile, and every tile follows, so the same spot is compared;
   zoomed in, the part shown fills the tile. The pointer over one tile shows as
-  a cross at the same spot on the others.
+  a cross at the same spot on the others (off at first).
 - Tracking the candidates: a click **focuses** a tile, shift-click adds or
-  removes one; `clear_focus` lets them all go, changing nothing else.
-  `star_focused` marks them (the star stays in every view); `set_aside_focused`
-  takes them out of play, into a strip under the grid in the order set aside,
-  and `bring_back` puts the last one (or a clicked one) back.
-  `show_focused_only` keeps the tiles focused at that moment, until turned
-  off. The buttons and keys for these are the window's (`mcor_window`).
+  removes one; `focus_all` takes every tile shown, `clear_focus` lets them
+  all go, changing nothing else. `star_focused` marks them (the star stays
+  in every view); `set_aside_focused` hides them (Hide), into a strip under
+  the grid in the order hidden, and `bring_back` puts the last one (or a
+  clicked one) back. `show_focused_only` shows the tiles focused at that
+  moment, a narrower view each time, until `show_all`; a double click
+  shows its tile alone (`show_only`). The buttons and keys for these are
+  the window's (`mcor_window`), which calls the focus the selection.
 
 No database in here.
 """
@@ -64,7 +66,7 @@ from PySide6.QtWidgets import (
 # How fast the videos can play, in frames per second. Screens refresh near
 # 60 Hz, so faster speeds step more than one frame per refresh
 SPEEDS = (10, 20, 30, 60, 120, 240)
-DEFAULT_SPEED = 10
+DEFAULT_SPEED = 240  # the users' choice: a long video at a glance
 MAX_REFRESH = 60
 
 # The mirrored pointer: the arms of its cross, in px, and its colors
@@ -171,7 +173,7 @@ class Video:
     name: str
     path: Path
     numbers: str = ""
-    candidate: bool = True  # can be set aside (not the raw video)
+    candidate: bool = True  # can be picked (not the raw video)
     color: None | QColor = None  # its color in the plots, as a square by its name
     stream: bool = False
     frames: None | np.ndarray | FrameStream = field(default=None, repr=False)
@@ -219,17 +221,19 @@ class View:
     center: QPointF = field(default_factory=lambda: QPointF(0.5, 0.5))
     pointer: None | QPointF = None
     pointer_tile: None | object = None
-    mirror: bool = True
+    mirror: bool = False  # off by default: it can disorient while moving
 
 
 class VideoTile(QWidget):
     """
     One video's current frame, its name and numbers; a star when starred, a
     border when focused, darker when set aside. `clicked(add)` fires on a
-    click (`add`: with Shift), `menu_requested` on a right click.
+    click (`add`: with Shift), `double_clicked` on a double click,
+    `menu_requested` on a right click.
     """
 
     clicked = Signal(bool)
+    double_clicked = Signal()
     menu_requested = Signal(QPoint)  # where, on the screen
     zoomed = Signal(float, QPointF)  # by how much, at which point of the frame
     panned = Signal(QPointF)  # by how much, as a fraction of the frame
@@ -491,6 +495,11 @@ class VideoTile(QWidget):
     def contextMenuEvent(self, event) -> None:  # noqa: N802 (Qt's name)
         self.menu_requested.emit(event.globalPos())
 
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt's name)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press = None  # no click on its release
+            self.double_clicked.emit()
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt's name)
         if self._press is not None and not self._dragged:
             add = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
@@ -612,6 +621,7 @@ class VideoGrid(QWidget):
         for video in videos:
             tile = VideoTile(video, self.view)
             tile.clicked.connect(lambda add, t=tile: self._clicked(t, add))
+            tile.double_clicked.connect(lambda t=tile: self.show_only(t))
             tile.menu_requested.connect(lambda where, t=tile: self._menu(t, where))
             tile.zoomed.connect(self._zoom)
             tile.panned.connect(self._pan)
@@ -825,6 +835,16 @@ class VideoGrid(QWidget):
 
         self._changed()
 
+    def show_only(self, tile: VideoTile) -> None:
+        """Select `tile` alone and show it alone (a double click)."""
+        if tile in self.aside:
+            return
+
+        for other in self.tiles:
+            other.set_focused(other is tile)
+
+        self.show_focused_only(True)
+
     def _menu(self, tile: VideoTile, where: QPoint) -> None:
         if tile not in self.aside and not tile.focused:
             self._clicked(tile, add=False)
@@ -866,10 +886,17 @@ class VideoGrid(QWidget):
 
         self._changed()
 
-    def set_aside_focused(self) -> None:
-        """Take the focused candidates out of play, in the strip."""
+    def focus_all(self) -> None:
+        """Focus every tile shown (Select all): every run on the plots."""
         for tile in self.tiles:
-            if tile.focused and tile.video.candidate and tile not in self.aside:
+            tile.set_focused(not tile.isHidden() and tile not in self.aside)
+
+        self._changed()
+
+    def set_aside_focused(self) -> None:
+        """Hide the focused tiles, the raw one too: into the strip, in order."""
+        for tile in self.tiles:
+            if tile.focused and tile not in self.aside:
                 tile.set_focused(False)
                 self.aside.append(tile)
 
@@ -890,12 +917,24 @@ class VideoGrid(QWidget):
         self._lay_out()
         self._changed()
 
-    def show_focused_only(self, on: bool) -> None:
-        """Show the tiles focused now, and only them, until turned off."""
+    def show_focused_only(self, on: bool = True) -> None:
+        """
+        Show the tiles focused now, and only them, until shown all again
+        (`on` false): a narrower view each time, as the focus is among the
+        tiles shown.
+        """
         focused = [tile for tile in self.tiles if tile.focused]
         self.only = focused if on and focused else None
         self._lay_out()
         self._changed()
+
+    def show_all(self) -> None:
+        """Every tile in play again; the focus stays."""
+        self.show_focused_only(False)
+
+    @property
+    def showing_all(self) -> bool:
+        return self.only is None
 
     def visible(self) -> list[Video]:
         return [tile.video for tile in self.tiles if not tile.isHidden()]
@@ -913,7 +952,6 @@ class VideoGrid(QWidget):
         columns = max(1, self.columns.value())
 
         for tile in self.tiles:
-            tile.setVisible(tile in shown or tile in self.aside)
             tile.aside_rank = None
             tile.setMinimumSize(120, 120)
             tile.setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX)
@@ -929,6 +967,11 @@ class VideoGrid(QWidget):
 
         self.layout_strip.addStretch(1)
         self.strip.setVisible(bool(self.aside))
+
+        # Once in their layouts: moving between them hides a tile until
+        # the next event, so a tile brought back is shown now
+        for tile in self.tiles:
+            tile.setVisible(tile in shown or tile in self.aside)
 
     def close_streams(self) -> None:
         for tile in self.tiles:

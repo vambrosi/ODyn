@@ -80,6 +80,7 @@ def test_the_videos_play_in_step(app, tmp_path):
 
     # Playing goes round
     grid.played_from = grid.index
+    grid.speed.setCurrentIndex(0)
     assert grid.frame_at(100) == 0  # 10 frames/s: one frame later
     grid.play()
     assert grid.timer.isActive() and grid.play_button.text() == "Pause"
@@ -221,19 +222,30 @@ def test_tiles_are_focused_starred_and_set_aside(app, tmp_path):
     grid.star_focused()
     assert grid.starred == []
 
-    # Set aside, in order, out of the grid and into the strip; never raw
+    # Select all: every tile shown, for every run on the plots
+    grid.focus_all()
+    assert names(grid.focused) == ["raw", "a", "b", "c"]
+    grid.clear_focus()
+
+    # Hidden, in order, out of the grid and into the strip; the raw too
     c.clicked.emit(False)
     grid.set_aside_focused()
     a.clicked.emit(False)
     raw.clicked.emit(True)
     grid.set_aside_focused()
-    assert names(grid.set_aside) == ["c", "a"]
-    assert (c.aside_rank, a.aside_rank) == (1, 2)
+    assert names(grid.set_aside) == ["c", "raw", "a"]  # at once: grid order
+    assert (c.aside_rank, a.aside_rank) == (1, 3)
     assert grid.layout_grid.indexOf(c) == -1 and grid.layout_strip.indexOf(c) == 0
     assert grid.strip.isVisible()
-    assert names(grid.focused) == ["raw"]
+    assert grid.focused == []
+
+    # Select all leaves the hidden ones hidden
+    grid.focus_all()
+    assert names(grid.focused) == ["b"]
+    grid.clear_focus()
 
     # Brought back: the last one, or one clicked in the strip
+    grid.bring_back()
     grid.bring_back()
     assert names(grid.set_aside) == ["c"] and a.aside_rank is None
     c.clicked.emit(False)
@@ -337,40 +349,64 @@ def test_the_qc_window_is_driven_from_the_keyboard(app, tmp_path):
     assert grid.index == 11
     QTest.keyClick(window, Qt.Key.Key_Left)
     assert grid.index == 10
-    QTest.keyClick(window, Qt.Key.Key_BracketRight)
-    assert grid.speed.currentText() == "20 frames/s"
+    assert grid.speed.currentText() == "240 frames/s"  # the fastest
+    QTest.keyClick(window, Qt.Key.Key_BracketLeft)
+    assert grid.speed.currentText() == "120 frames/s"
     QTest.keyClick(window, Qt.Key.Key_Space)
     assert grid.timer.isActive()
     QTest.keyClick(window, Qt.Key.Key_Space)
     assert not grid.timer.isActive()
 
-    # Focused only and Clear focus follow the focus
-    assert not window.only_action.isEnabled() and not window.clear_action.isEnabled()
+    # Show selected only and Clear selection follow the selection; Show all
+    # the view; none stays pressed
+    actions = (window.only_action, window.all_action, window.clear_action)
+    assert not any(action.isCheckable() for action in actions)
+    assert not any(action.isEnabled() for action in actions)
     grid.tiles[1].clicked.emit(False)
     assert window.report_action.isEnabled() is False  # no plot in this folder
     QTest.keyClick(window, Qt.Key.Key_F)
-    assert window.only_action.isChecked() and [v.name for v in grid.visible()] == [
-        "test"
-    ]
+    assert [v.name for v in grid.visible()] == ["test"]
+    assert window.all_action.isEnabled()
     QTest.keyClick(window, Qt.Key.Key_Escape)  # the view stays
-    assert grid.focused == [] and window.only_action.isChecked()
-    QTest.keyClick(window, Qt.Key.Key_F)
-    assert len(grid.visible()) == 2
+    assert grid.focused == [] and not window.only_action.isEnabled()
+    assert [v.name for v in grid.visible()] == ["test"]
+    QTest.keyClick(window, Qt.Key.Key_F, Qt.KeyboardModifier.ShiftModifier)
+    assert len(grid.visible()) == 2 and not window.all_action.isEnabled()
 
-    # Star, set aside and bring back; never the raw video
+    # A double click shows its tile alone; Show selected only again narrows
+    grid.tiles[0].double_clicked.emit()
+    assert [v.name for v in grid.focused] == ["raw"]
+    assert [v.name for v in grid.visible()] == ["raw"]
+    window.all_action.trigger()
+    window.select_action.trigger()
+    window.only_action.trigger()
+    grid.tiles[1].clicked.emit(False)
+    window.only_action.trigger()
+    assert [v.name for v in grid.visible()] == ["test"]
+    window.all_action.trigger()
+    window.clear_action.trigger()
+
+    # Star, hide and undo; the raw video hides too
     grid.tiles[1].clicked.emit(False)
     QTest.keyClick(window, Qt.Key.Key_S)
     assert [v.name for v in grid.starred] == ["test"]
     grid.tiles[0].clicked.emit(False)
-    assert not window.aside_action.isEnabled()
+    assert window.aside_action.isEnabled()
     grid.tiles[1].clicked.emit(False)
     QTest.keyClick(window, Qt.Key.Key_X)
     assert [v.name for v in grid.set_aside] == ["test"]
+    assert window.back_action.toolTip().startswith("Undo last hide")
     QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
     assert grid.set_aside == []
 
-    QTest.keyClick(window, Qt.Key.Key_H)
+    # Select all
+    window.select_action.trigger()
+    assert len(grid.focused) == 2
+
+    # The mirrored pointer starts off
     assert grid.view.mirror is False
+    QTest.keyClick(window, Qt.Key.Key_H)
+    assert grid.view.mirror is True
     window.close()
 
 
@@ -483,8 +519,25 @@ def test_the_full_run_page_streams_every_acquisition(app, tmp_path):
     assert window.full_plots.marker == 150
     assert window.full_plots.shown == ["corrected"]
 
-    # The tests' tools are for the tests
-    assert not window.star_action.isEnabled()
+    # The same selection tools as the tests; the tests' own greyed
+    assert not window.report_action.isEnabled()
+    assert not window.pick_action.isVisible()
+    grid.tiles[0].double_clicked.emit()
+    assert window.star_action.isEnabled() and window.aside_action.isEnabled()
+    assert window.all_action.isEnabled()
+    window.all_action.trigger()
+
+    # A click on the plots goes to the frame shown nearest there
+    plots = window.full_plots
+    plots.resize(400, 200)
+    rect = plots._rows()[0]
+    assert plots.frame_at(rect.left()) == 0
+    assert plots.frame_at(rect.left() - 10) is None
+    plots.frame_clicked.emit(160.0)  # acquisition 9, past frame 50 of it
+    assert grid.index == 4
+    plots.frame_clicked.emit(0.0)
+    assert grid.index == 0
+
     window.tests_action.trigger()
     assert window.pages.currentIndex() == TESTS_PAGE
     assert window.current_grid() is window.grid
@@ -589,6 +642,20 @@ def test_the_final_check_shows_raw_and_corrected_and_approves(app, tmp_path):
     assert [tile.video.name for tile in tiles] == ["raw", "corrected"]
     assert window.approve_action.isVisible() and not window.check_action.isVisible()
     assert window.exclude_action.isEnabled()
+
+    # The raw video hides here too; Cmd+Z undoes the last of hide or exclude
+    window.full_grid.tiles[0].clicked.emit(False)
+    window.aside_action.trigger()
+    assert [v.name for v in window.full_grid.set_aside] == ["raw"]
+    window.full_grid.seek(0)  # acquisition 4
+    window.exclude_action.trigger()
+    assert window.back_action.toolTip().startswith("Undo last exclusion")
+    window.back_action.trigger()
+    assert window.excluded == [9]
+    assert window.back_action.toolTip().startswith("Undo last hide")
+    window.back_action.trigger()
+    assert window.full_grid.set_aside == [] and not window.back_action.isEnabled()
+
     window.approve_action.trigger()
     assert approved == [[9]] and checked == []
     window.close()

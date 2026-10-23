@@ -20,14 +20,20 @@ The same list of exclusions, still open to change, goes with Approve
 (`Group.approve_mcor_files`).
 
 **Tests** shows the raw video and every finished run's test video side by
-side, playing in step (`player`), each with its numbers. A click selects a
-tile, Shift adds one; a right click opens the tools for it. The tools: Fit,
-Mirrored pointer, Focused only, Clear focus, Star, Set aside (into a strip
-under the grid, in order), Bring back, the report of the focused run (its
-plot of shifts), and Pick candidate, which has every acquisition corrected
-with the focused run settings, recording the runs set aside (see
-`cluster.pick_candidate`). Space plays, the arrows step (Shift: 10 frames),
-`[` and `]` change the speed.
+side, playing in step (`player`), each with its numbers, and Pick
+candidate, which has every acquisition corrected with the selected run
+settings, recording the runs hidden, in order (see
+`cluster.pick_candidate`).
+
+Every page has the same tools; those of no use on a page are greyed. A
+click selects a tile (the grid's focus), Shift adds one, a double click
+shows it alone; a right click opens the tools for it. The tools: Fit,
+Mirrored pointer (off at first), Show selected only (narrower each time),
+Show all, Select all, Clear selection, Star, Hide (into a strip under the
+grid, in order; the raw video too), Undo (the last hide, or exclusion),
+Exclude (the checks), the plots, and the report of the selected run (the
+tests). A click on the plots goes to that frame. Space plays, the arrows
+step (Shift: 10 frames), `[` and `]` change the speed.
 
 Everything is opened from the experiment's local copy (`cache`): played from
 the share, a video is slow.
@@ -272,6 +278,9 @@ class McorWindow(QWidget):
         self.full_shown: None | int = None  # the step the full grid is set for
         self.excluded = [int(acq_id) for acq_id in excluded]  # in order
         self.runs: dict[str, Run] = {}  # each tile's run, by the tile's name
+        # What Cmd+Z undoes, last last: ("hide", grid, tiles), or
+        # ("exclude" or "keep", acquisition id) on the raw or final check
+        self.history: list[tuple] = []
 
         self.state = QLabel("")
         self.pages = QStackedWidget()
@@ -313,8 +322,6 @@ class McorWindow(QWidget):
         tests_layout = QVBoxLayout(tests)
         tests_layout.setContentsMargins(8, 0, 8, 0)
         self.grid = VideoGrid()
-        self.grid.focus_changed.connect(self._enable)
-        self.grid.menu_requested.connect(self._menu)
         self.plots = ShiftPlots()
         self.split = QSplitter(Qt.Orientation.Vertical)
         self.split.addWidget(self.grid)
@@ -326,6 +333,15 @@ class McorWindow(QWidget):
         tests_layout.addWidget(self.split, stretch=1)
         self.grid.frame_changed.connect(self._mark_frame)
         self.grid.hovered.connect(self._show_details)
+        self.plots.frame_clicked.connect(
+            lambda frame: self._go_to(self.grid, self.frame_x, frame)
+        )
+
+        # Both grids have the same tools
+        for grid in (self.grid, self.full_grid):
+            grid.focus_changed.connect(self._enable)
+            grid.menu_requested.connect(self._menu)
+
         self.hovered: None | Video = None
         self.frame_x: None | np.ndarray = None  # each video frame on the plots
         # The numbers of the run under the pointer, or else the focused one:
@@ -350,22 +366,29 @@ class McorWindow(QWidget):
         self.pointer_action.setChecked(self.grid.view.mirror)
         self.pointer_action.toggled.connect(self.grid.set_mirror)
         self.pointer_action.toggled.connect(self.full_grid.set_mirror)
+        # The selection (the grids' focus): none of these stays pressed
         self.only_action = self._action(
-            self.right, "focused-only", "Focused only", "F", checkable=True
+            self.right, "focused-only", "Show selected only", "F"
         )
-        self.only_action.toggled.connect(self.grid.show_focused_only)
+        self.only_action.triggered.connect(
+            lambda: self.current_grid().show_focused_only()
+        )
+        self.all_action = self._action(self.right, "show-all", "Show all", "Shift+F")
+        self.all_action.triggered.connect(lambda: self.current_grid().show_all())
+        self.select_action = self._action(
+            self.right, "select-all", "Select all", "Ctrl+A"
+        )
+        self.select_action.triggered.connect(lambda: self.current_grid().focus_all())
         self.clear_action = self._action(
-            self.right, "clear-focus", "Clear focus", "Esc"
+            self.right, "clear-focus", "Clear selection", "Esc"
         )
-        self.clear_action.triggered.connect(self.grid.clear_focus)
+        self.clear_action.triggered.connect(lambda: self.current_grid().clear_focus())
         self.right.addSeparator()
         self.star_action = self._action(self.right, "star", "Star", "S")
-        self.star_action.triggered.connect(self.grid.star_focused)
-        self.aside_action = self._action(self.right, "set-aside", "Set aside", "X")
-        self.aside_action.triggered.connect(self.grid.set_aside_focused)
-        self.back_action = self._action(
-            self.right, "undo", "Bring back the last set aside", "Ctrl+Z"
-        )
+        self.star_action.triggered.connect(lambda: self.current_grid().star_focused())
+        self.aside_action = self._action(self.right, "set-aside", "Hide", "X")
+        self.aside_action.triggered.connect(self._hide)
+        self.back_action = self._action(self.right, "undo", "Undo", "Ctrl+Z")
         self.back_action.triggered.connect(self._undo)
         self.exclude_action = self._action(
             self.right, "exclude", "Exclude the acquisition shown (again: keep it)", "E"
@@ -373,13 +396,13 @@ class McorWindow(QWidget):
         self.exclude_action.triggered.connect(self._toggle_exclusion)
         self.right.addSeparator()
         self.plots_action = self._action(
-            self.right, "plots", "Plots of the focused runs", "P", checkable=True
+            self.right, "plots", "Plots of the selected runs", "P", checkable=True
         )
         self.plots_action.setChecked(True)
         self.plots_action.toggled.connect(self.plots.setVisible)
         self.plots_action.toggled.connect(self.full_plots.setVisible)
         self.report_action = self._action(
-            self.right, "report", "Open the report of the focused run", "R"
+            self.right, "report", "Open the report of the selected run", "R"
         )
         self.report_action.triggered.connect(self._show_report)
         self._foot(self.right)
@@ -444,6 +467,9 @@ class McorWindow(QWidget):
         self.full_grid = VideoGrid()
         self.full_grid.frame_changed.connect(self._full_frame)
         self.full_plots = ShiftPlots()
+        self.full_plots.frame_clicked.connect(
+            lambda frame: self._go_to(self.full_grid, self.full_x, frame)
+        )
         split = QSplitter(Qt.Orientation.Vertical)
         split.addWidget(self.full_grid)
         split.addWidget(self.full_plots)
@@ -544,19 +570,86 @@ class McorWindow(QWidget):
 
         if acq_id in self.excluded:
             self.excluded.remove(acq_id)
+            self.history.append(("keep", acq_id))
         else:
             self.excluded.append(acq_id)
+            self.history.append(("exclude", acq_id))
 
         self._show_exclusions()
 
+    def _hide(self) -> None:
+        """Hide the selected tiles of the page shown (X), for Cmd+Z."""
+        grid = self.current_grid()
+        tiles = [tile for tile in grid.tiles if tile.focused and tile not in grid.aside]
+
+        if tiles:
+            grid.set_aside_focused()
+            self.history.append(("hide", grid, tiles))
+            self._enable()
+
+    def _last_undo(self) -> None | tuple:
+        """
+        The last change Cmd+Z can undo on the page shown, dropping those
+        undone another way (a hidden tile clicked back, say).
+        """
+        grid = self.current_grid()
+        full = grid is self.full_grid
+
+        for k in range(len(self.history) - 1, -1, -1):
+            entry = self.history[k]
+
+            if entry[0] == "hide":
+                if entry[1] is not grid:
+                    continue
+
+                if any(tile in grid.aside for tile in entry[2]):
+                    return entry
+
+                del self.history[k]  # brought back already
+            elif full:
+                kept = entry[1] not in self.excluded
+
+                if (entry[0] == "exclude") != kept:
+                    return entry
+
+                del self.history[k]
+
+        return None
+
     def _undo(self) -> None:
-        """Cmd+Z: keep the last excluded (raw or final check), or bring back."""
-        if self.step != TESTS_STEP:
-            if self.excluded:
-                self.excluded.pop()
-                self._show_exclusions()
+        """Cmd+Z: undo the last hide, or the last exclusion (or keep)."""
+        entry = self._last_undo()
+
+        if entry is None:
+            return
+
+        self.history.remove(entry)
+
+        if entry[0] == "hide":
+            grid, tiles = entry[1], entry[2]
+
+            for tile in reversed(tiles):
+                if tile in grid.aside:
+                    grid.bring_back(tile)
         else:
-            self.grid.bring_back()
+            if entry[0] == "exclude":
+                self.excluded.remove(entry[1])
+            else:
+                self.excluded.append(entry[1])
+
+            self._show_exclusions()
+
+        self._enable()
+
+    def _go_to(self, grid: VideoGrid, x: None | np.ndarray, frame: float) -> None:
+        """
+        Show the video frame nearest to the plotted `frame` (a click on the
+        plots); `x` is where each video frame falls on them.
+        """
+        if x is None or not len(x):
+            return
+
+        grid.seek(int(np.abs(np.asarray(x, float) - frame).argmin()))
 
     def _show_exclusions(self) -> None:
         """The acquisitions excluded: in words, and shaded on the plots."""
@@ -600,6 +693,9 @@ class McorWindow(QWidget):
             self.full_shown = step
             videos = self.full_videos[:1] if step == RAW_STEP else self.full_videos
             self.full_grid.set_videos(videos, columns=len(videos))
+            self.history = [
+                e for e in self.history if e[0] != "hide" or e[1] is not self.full_grid
+            ]
 
         self.step = step
         self.pages.setCurrentIndex(TESTS_PAGE if step == TESTS_STEP else FULL_PAGE)
@@ -778,22 +874,34 @@ class McorWindow(QWidget):
     def _enable(self, *_) -> None:
         tests = self.step == TESTS_STEP
         full = not tests  # the raw or the final check
+        grid = self.current_grid()
+        focused = grid.focused
 
-        for action in (
-            self.only_action,
-            self.clear_action,
-            self.star_action,
-            self.aside_action,
-            self.back_action,
-            self.report_action,
-            self.pick_action,
-        ):
-            action.setEnabled(tests)
+        # The selection, the same on every page
+        self.only_action.setEnabled(bool(focused))
+        self.all_action.setEnabled(not grid.showing_all)
+        self.select_action.setEnabled(bool(grid.visible()))
+        self.clear_action.setEnabled(bool(focused))
+        self.star_action.setEnabled(bool(focused))
+        self.aside_action.setEnabled(bool(focused))
+        last = self._last_undo()
+        self.back_action.setEnabled(last is not None)
+        self.back_action.setToolTip(
+            self._tip(
+                {
+                    None: "Undo",
+                    "hide": "Undo last hide",
+                    "exclude": "Undo last exclusion",
+                    "keep": "Undo last keep",
+                }[None if last is None else last[0]],
+                "Ctrl+Z",
+            )
+        )
 
-        # The foot of the bar: each page's own last step
+        # Each page's own: the report and Pick candidate for the tests;
+        # Exclude for the checks, which end with the raw check or Approve
+        # (with the same exclusions)
         self.pick_action.setVisible(tests and self.pick is not None)
-        # Each check's own last step: the raw check, or Approve (with the
-        # same exclusions)
         checking = self.step == RAW_STEP and self.check_raw is not None
         approving = self.step == FINAL_STEP and self.approve is not None
         self.check_action.setVisible(checking)
@@ -801,48 +909,34 @@ class McorWindow(QWidget):
         self.approve_action.setVisible(approving)
         self.approve_action.setEnabled(approving)
         self.exclude_action.setEnabled(full and self.full_frames is not None)
-
-        if not tests:
-            self.back_action.setEnabled(full and bool(self.excluded))
-            self.back_action.setToolTip(self._tip("Keep the last excluded", "Ctrl+Z"))
-            return
-
-        self.back_action.setToolTip(
-            self._tip("Bring back the last set aside", "Ctrl+Z")
-        )
-
-        self.plots.show_runs([video.name for video in self.grid.focused])
-        self._show_details(self.hovered)
-        run = self._picked_run()
-        focused = self.grid.focused
-        only = self.grid.only is not None
+        run = self._picked_run() if tests else None
         self.report_action.setEnabled(
             run is not None and (run.folder / "shifts.png").is_file()
         )
         self.pick_action.setEnabled(run is not None)
-        self.clear_action.setEnabled(bool(focused))
-        self.star_action.setEnabled(bool(focused))
-        self.aside_action.setEnabled(any(video.candidate for video in focused))
-        self.back_action.setEnabled(bool(self.grid.aside))
-        self.only_action.setEnabled(bool(focused) or only)
-        self.only_action.blockSignals(True)
-        self.only_action.setChecked(only)
-        self.only_action.blockSignals(False)
+
+        if tests:
+            self.plots.show_runs([video.name for video in focused])
+            self._show_details(self.hovered)
 
     def _menu(self, tile, where) -> None:
         """The tools for a tile, at `where` (a right click)."""
         menu = QMenu(self)
+        grid = self.current_grid()
 
-        if tile in self.grid.aside:
-            menu.addAction("Bring back", lambda: self.grid.bring_back(tile))
+        if tile in grid.aside:
+            menu.addAction("Show again", lambda: grid.bring_back(tile))
         else:
             for action, text in (
+                (self.only_action, "Show selected only"),
                 (self.star_action, "Unstar" if tile.starred else "Star"),
-                (self.aside_action, "Set aside"),
+                (self.aside_action, "Hide"),
                 (self.report_action, "Open the report"),
                 (self.pick_action, "Pick candidate"),
             ):
-                if action.isVisible():
+                if action.isVisible() and (
+                    action.isEnabled() or self.step == TESTS_STEP
+                ):
                     item = menu.addAction(text, action.trigger)
                     item.setEnabled(action.isEnabled())
                     item.setShortcut(action.shortcut())
@@ -853,7 +947,9 @@ class McorWindow(QWidget):
         run = self._picked_run()
 
         if run is not None and self.pick is not None:
-            self.pick(run.name, [video.name for video in self.grid.set_aside])
+            # The runs hidden, as a ranking; the raw video is no candidate
+            hidden = [video.name for video in self.grid.set_aside if video.candidate]
+            self.pick(run.name, hidden)
 
     def _show_report(self) -> None:
         run = self._picked_run()
