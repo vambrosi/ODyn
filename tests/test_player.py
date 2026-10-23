@@ -357,7 +357,7 @@ def test_the_qc_window_is_driven_from_the_keyboard(app, tmp_path):
     QTest.keyClick(window, Qt.Key.Key_Space)
     assert not grid.timer.isActive()
 
-    # Show selected only and Clear selection follow the selection; Show all
+    # Show selected and Clear selection follow the selection; Show all
     # the view; none stays pressed
     actions = (window.only_action, window.all_action, window.clear_action)
     assert not any(action.isCheckable() for action in actions)
@@ -373,7 +373,7 @@ def test_the_qc_window_is_driven_from_the_keyboard(app, tmp_path):
     QTest.keyClick(window, Qt.Key.Key_F, Qt.KeyboardModifier.ShiftModifier)
     assert len(grid.visible()) == 2 and not window.all_action.isEnabled()
 
-    # A double click shows its tile alone; Show selected only again narrows
+    # A double click shows its tile alone; Show selected again narrows
     grid.tiles[0].double_clicked.emit()
     assert [v.name for v in grid.focused] == ["raw"]
     assert [v.name for v in grid.visible()] == ["raw"]

@@ -28,7 +28,7 @@ settings, recording the runs hidden, in order (see
 Every page has the same tools; those of no use on a page are greyed. A
 click selects a tile (the grid's focus), Shift adds one, a double click
 shows it alone; a right click opens the tools for it. The tools: Fit,
-Mirrored pointer (off at first), Show selected only (narrower each time),
+Mirrored pointer (off at first), Show selected (narrower each time),
 Show all, Select all, Clear selection, Star, Hide (into a strip under the
 grid, in order; the raw video too), Undo (the last hide, or exclusion),
 Exclude (the checks), the plots, and the report of the selected run (the
@@ -368,7 +368,7 @@ class McorWindow(QWidget):
         self.pointer_action.toggled.connect(self.full_grid.set_mirror)
         # The selection (the grids' focus): none of these stays pressed
         self.only_action = self._action(
-            self.right, "focused-only", "Show selected only", "F"
+            self.right, "focused-only", "Show selected", "F"
         )
         self.only_action.triggered.connect(
             lambda: self.current_grid().show_focused_only()
@@ -928,7 +928,7 @@ class McorWindow(QWidget):
             menu.addAction("Show again", lambda: grid.bring_back(tile))
         else:
             for action, text in (
-                (self.only_action, "Show selected only"),
+                (self.only_action, "Show selected"),
                 (self.star_action, "Unstar" if tile.starred else "Star"),
                 (self.aside_action, "Hide"),
                 (self.report_action, "Open the report"),

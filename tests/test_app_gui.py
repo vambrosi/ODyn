@@ -2592,6 +2592,12 @@ def test_a_database_this_computer_cannot_write_is_said_up_front(app, tmp_path):
     worker.read_only = "Permission denied"
     window = MainWindow(worker, drafts=tmp_path / "drafts")
     assert window.read_only_label.isVisibleTo(window)
+    # At the right, before the cache and the user
+    window.show()
+    app.processEvents()
+    labels = [window.read_only_label, window.cache_label, window.user_label]
+    xs = [label.mapTo(window, label.rect().topLeft()).x() for label in labels]
+    assert xs == sorted(set(xs))
     title, message = window.context.last_report
     assert title == "Read-only database" and "(Permission denied)" in message
 

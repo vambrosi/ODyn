@@ -259,6 +259,13 @@ class MainWindow(QMainWindow):
         self.tip.setObjectName("tip")
         bar.addWidget(self.tip)
         self.tip.hide()
+        # A database this computer cannot write: said once, and kept in view,
+        # first of the widgets at the right
+        self.read_only_label = QLabel("Read-only database")
+        self.read_only_label.setStyleSheet(style.text_style("warning"))
+        self.read_only_label.setToolTip(worker.read_only)
+        self.read_only_label.setVisible(bool(worker.read_only))
+        bar.addPermanentWidget(self.read_only_label)
         self.selection = QLabel()
         self.selection.setObjectName("selection")
         bar.addPermanentWidget(self.selection)
@@ -274,13 +281,6 @@ class MainWindow(QMainWindow):
         self.user_label = QLabel()
         self.user_label.setContentsMargins(16, 0, style.STATUS_INSET_PX, 0)
         bar.addPermanentWidget(self.user_label)
-
-        # A database this computer cannot write: said once, and kept in view
-        self.read_only_label = QLabel("Read-only database")
-        self.read_only_label.setStyleSheet(style.text_style("warning"))
-        self.read_only_label.setToolTip(worker.read_only)
-        self.read_only_label.setVisible(bool(worker.read_only))
-        bar.insertPermanentWidget(0, self.read_only_label)
 
         if worker.read_only:
             self.context.report(
