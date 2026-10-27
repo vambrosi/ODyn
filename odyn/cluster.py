@@ -41,6 +41,7 @@ python -m odyn.cluster <main_folder> status
 python -m odyn.cluster <main_folder> request process_sync exp_id=12
 python -m odyn.cluster <main_folder> mcor-test --group 7 [--whole] [--dry-run]
 python -m odyn.cluster <main_folder> mcor-sweep --group 7 --grid grid.json
+python -m odyn.cluster <main_folder> mcor-backfill --batch 4 [--objective 20]
 python -m odyn.cluster <main_folder> full-previews --group 7 --user ana
 ```
 `full-previews` writes the full run's videos of a group corrected before
@@ -152,9 +153,10 @@ class ClusterConfig:
     # acquisition (the final rigid correction), reporting on the test's
     whole_new_experiments: bool = True
     test_new_experiments: bool = True
-    # With a grid (as `submit_mcor_sweep` takes it, which depends on the
-    # objective), the tick also submits a sweep of each experiment it adds,
-    # each run with `sweep_time` (default: `mcor_time`)
+    # With a grid (as `submit_mcor_sweep` takes it), the tick also submits a
+    # sweep of each experiment it adds, each run with `sweep_time` (default:
+    # `mcor_time`). The sizes depend on the objective, so it can be one grid
+    # per objective instead: {"20": grid, "10": grid} (see `sweep_grid_for`)
     sweep_grid: None | dict = None
     sweep_time: None | str = None
     tick_cpus: int = 1
@@ -477,7 +479,9 @@ def _submit_tests(
                         f"{type(error).__name__}: {error}"
                     )
 
-        if config.sweep_grid and not _sweep_sent(folder, group_id):
+        grid = sweep_grid_for(config, group_objective(db, group_id))
+
+        if grid and not _sweep_sent(folder, group_id):
             if dry_run:
                 report.tests.append(f"{where}: would submit a sweep (group {group_id})")
                 continue
@@ -487,7 +491,7 @@ def _submit_tests(
                     db.main_folder,
                     project,
                     group_id,
-                    config.sweep_grid,
+                    grid,
                     time=config.sweep_time,
                 )
                 report.tests.append(
@@ -500,6 +504,119 @@ def _submit_tests(
                     f"{where}: sweep of group {group_id}: "
                     f"{type(error).__name__}: {error}"
                 )
+
+
+def sweep_grid_for(config: ClusterConfig, objective: None | int) -> None | dict:
+    """
+    The sweep grid for an experiment through `objective` (10, 20, ...): the
+    one grid for all, or that objective's (`ClusterConfig.sweep_grid`), or
+    `None` without one.
+    """
+    grid = config.sweep_grid
+
+    if not grid:
+        return None
+
+    if "runs" in grid:  # one grid for every objective
+        return grid
+
+    return None if objective is None else grid.get(str(int(objective)))
+
+
+def group_objective(db: Database, group_id: int) -> None | int:
+    """The objective of the experiments of `group_id`, if one and known."""
+    links = db.group_experiments
+
+    if group_id not in links.index:
+        return None
+
+    exp_ids = links.loc[[group_id], "exp_id"].astype(int)
+    objectives = set(db.experiments.loc[exp_ids, "objective"].dropna().astype(int))
+
+    return objectives.pop() if len(objectives) == 1 else None
+
+
+def mcor_backfill(
+    main_folder: str | Path,
+    project: None | str,
+    *,
+    batch: int,
+    objective: None | int = None,
+    dry_run: bool = False,
+) -> list[str]:
+    """
+    Correct the next `batch` experiments of the database that were never
+    tested (no test submitted, by the tick or by hand), oldest first, as the
+    tick does a new one: the whole rigid correction (which saves every
+    acquisition, over the files there) and a sweep with the grid of the
+    experiment's objective (`sweep_grid_for`). `objective` keeps those
+    through it. Each is recorded as its owner's (`experiment_owner`), whose
+    QC page lists it. Returns what was done (or would be), a line each.
+
+    Run it again for the next batch: what was submitted is not again.
+    """
+    db = Database(main_folder, project=project)
+    config = ClusterConfig.read(main_folder)
+    folder = cluster_folder(main_folder, project)
+    links = db.group_experiments
+    sizes = links.index.value_counts()
+    paths = db.experiments["exp_path"]
+    done: list[str] = []
+    sent = waiting = 0
+
+    for group_id, exp_id in sorted(
+        zip(links.index, links["exp_id"].astype(int)),
+        key=lambda pair: str(paths[pair[1]]),
+    ):
+        group_id, where = int(group_id), str(paths[exp_id])
+
+        if sizes[group_id] != 1 or (folder / MCOR_FOLDER / f"{group_id}.json").exists():
+            continue
+
+        seen = group_objective(db, group_id)
+
+        if objective is not None and seen != objective:
+            continue
+
+        if sent >= batch:
+            waiting += 1
+            continue
+
+        grid = sweep_grid_for(config, seen)
+        what = f"{where} ({seen}x, group {group_id})"
+
+        if grid is None:
+            done.append(f"{what}: no sweep grid for {seen}x in cluster.json, skipped")
+            continue
+
+        if dry_run:
+            done.append(f"{what}: would submit the whole correction and a sweep")
+            sent += 1
+            continue
+
+        try:
+            whole = submit_mcor_test(main_folder, project, group_id, whole=True)
+            sweep = (
+                submit_mcor_sweep(
+                    main_folder, project, group_id, grid, time=config.sweep_time
+                )
+                if not _sweep_sent(folder, group_id)
+                else None
+            )
+        except Exception as error:  # said, and the next one is tried
+            done.append(f"{what}: {type(error).__name__}: {error}")
+            continue
+
+        sent += 1
+        done.append(
+            f"{what}: whole correction job {whole}"
+            + (f", sweep jobs {sweep[0]} and {sweep[1]}" if sweep else "")
+        )
+
+    if waiting:
+        done.append(f"{waiting} more waiting for the next batch")
+
+    return done
 
 
 def _sweep_sent(folder: Path, group_id: int) -> bool:
@@ -1916,6 +2033,14 @@ def main(argv: None | list[str] = None) -> int:
     one.add_argument("--sweep", type=Path, required=True)
     one.add_argument("--task", type=int, required=True)
 
+    backfill = commands.add_parser(
+        "mcor-backfill",
+        help="correct the next experiments never tested: whole rigid, and a sweep",
+    )
+    backfill.add_argument("--batch", type=int, required=True, help="how many")
+    backfill.add_argument("--objective", type=int, help="only those through it")
+    backfill.add_argument("--dry-run", action="store_true", help="only say which")
+
     previews = commands.add_parser(
         "full-previews", help="write the full run's videos of a corrected group"
     )
@@ -1975,6 +2100,16 @@ def main(argv: None | list[str] = None) -> int:
             time=args.time,
             dry_run=args.dry_run,
         )
+
+    elif args.command == "mcor-backfill":
+        for line in mcor_backfill(
+            args.main_folder,
+            args.project,
+            batch=args.batch,
+            objective=args.objective,
+            dry_run=args.dry_run,
+        ):
+            print(f"  {line}")
 
     elif args.command == "full-previews":
         db = Database(args.main_folder, project=args.project)

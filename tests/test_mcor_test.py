@@ -1020,3 +1020,67 @@ def test_stopped_jobs_run_again_once_with_their_settings(tmp_path, slurm):
 
     with pytest.raises(ValueError, match="Name the runs"):
         db.groups[group_id].run_again(runs=[])
+
+
+def test_old_experiments_are_corrected_in_batches(tmp_path, slurm):
+    from odyn.cluster import ClusterConfig, mcor_backfill, sweep_grid_for
+
+    # Three experiments never tested, by two people, through two objectives
+    for seed, (mouse, objective, user) in enumerate(
+        ((1, 20, "ana"), (2, 10, "bo"), (3, 20, "bo"))
+    ):
+        generate(
+            tmp_path,
+            acquisitions=2,
+            frames=56,
+            height=32,
+            width=40,
+            mouse=f"m{mouse}",
+            seed=seed,
+            start=datetime(2026, 7, mouse, 9),
+        )
+        db = Database(tmp_path, can_create=True, user=user)
+        db.set_mouse(mouse_id=mouse)
+        session_id = db.add_session(mouse_id=mouse, session_date=f"2026-07-0{mouse}")
+        db.add_experiment(
+            session_id=session_id,
+            exp_path=f"2026070{mouse}/m{mouse}/e1",
+            objective=objective,
+        )
+
+    run = {"strides_um": [96, 96], "overlap_um": [48, 48], "max_deviation_um": 6}
+    grid = {"test_acqs": 2, "runs": [run]}
+    config = tmp_path / ".odyn" / "cluster.json"
+    config.write_text(json.dumps({"sweep_grid": {"20": grid}}))
+
+    # One grid for all, or one per objective
+    assert sweep_grid_for(ClusterConfig(sweep_grid=grid), 10) == grid
+    assert sweep_grid_for(ClusterConfig(sweep_grid={"20": grid}), 10) is None
+    assert sweep_grid_for(ClusterConfig(), 20) is None
+
+    # Said first; the 20x ones, oldest first, one at a time
+    assert mcor_backfill(tmp_path, None, batch=1, objective=20, dry_run=True) == [
+        "20260701/m1/e1 (20x, group 1): would submit the whole correction and a sweep",
+        "1 more waiting for the next batch",
+    ]
+    assert not slurm.exists()  # nothing submitted
+
+    done = mcor_backfill(tmp_path, None, batch=1, objective=20)
+    assert done == [
+        "20260701/m1/e1 (20x, group 1): whole correction job 4242, sweep jobs "
+        "4242 and 4242",
+        "1 more waiting for the next batch",
+    ]
+    sent = json.loads((cluster_folder(tmp_path) / "mcor" / "1.json").read_text())
+    assert sent["whole"] and sent["user"] == "ana"
+
+    # The next batch: what was sent is not again; no grid for 10x yet
+    assert mcor_backfill(tmp_path, None, batch=4) == [
+        "20260702/m2/e1 (10x, group 2): no sweep grid for 10x in cluster.json, "
+        "skipped",
+        "20260703/m3/e1 (20x, group 3): whole correction job 4242, sweep jobs "
+        "4242 and 4242",
+    ]
+    sent = json.loads((cluster_folder(tmp_path) / "mcor" / "3.json").read_text())
+    assert sent["user"] == "bo"
+    assert slurm.read_text().count("sbatch") == 6
