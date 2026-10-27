@@ -152,6 +152,11 @@ class ClusterConfig:
     # acquisition (the final rigid correction), reporting on the test's
     whole_new_experiments: bool = True
     test_new_experiments: bool = True
+    # With a grid (as `submit_mcor_sweep` takes it, which depends on the
+    # objective), the tick also submits a sweep of each experiment it adds,
+    # each run with `sweep_time` (default: `mcor_time`)
+    sweep_grid: None | dict = None
+    sweep_time: None | str = None
     tick_cpus: int = 1
     tick_memory: str = "8G"
     tick_time: str = "0:30:00"
@@ -355,11 +360,11 @@ def tick(
     submitted drafts whose recordings are complete (see
     `odyn.app.submissions`), submit a test motion correction of each experiment
     they added (unless `test_new_experiments` is off in `ClusterConfig`; a
-    whole one, which saves every acquisition, with `whole_new_experiments`),
-    submit a whole correction with each test picked in the app
-    (`submit_picks`), process the sync files that arrived (or changed) since
-    they were last processed, write the heartbeat and, with `chain`, submit
-    the next tick.
+    whole one, which saves every acquisition, with `whole_new_experiments`)
+    and a sweep of it (with `sweep_grid`), submit a whole correction with each
+    test picked in the app (`submit_picks`), process the sync files that
+    arrived (or changed) since they were last processed, write the heartbeat
+    and, with `chain`, submit the next tick.
 
     **PARAMETERS**
     - `dry_run` lists what would be done and changes nothing
@@ -391,8 +396,7 @@ def tick(
 
     db = Database(main_folder, project=project)
 
-    if config.test_new_experiments:
-        _submit_tests(db, project, report, dry_run, config.whole_new_experiments)
+    _submit_tests(db, project, report, dry_run, config)
 
     submit_picks(db, project, report, dry_run)
     submit_reruns(db, project, report, dry_run)
@@ -439,35 +443,79 @@ def _submit_tests(
     project: None | str,
     report: TickReport,
     dry_run: bool,
-    whole: bool = False,
+    config: ClusterConfig,
 ) -> None:
     """
     Submit a test motion correction of each experiment the queue added untested
-    (`whole`: one that corrects and saves every acquisition).
+    (a whole one, which corrects and saves every acquisition, with
+    `whole_new_experiments`), and a sweep of it with `sweep_grid`, once each.
     """
+    whole = config.whole_new_experiments
     what = "whole test" if whole else "test"
+    folder = cluster_folder(db.main_folder, project)
 
-    for group_id, where in _untested_groups(db, project):
-        if dry_run:
-            report.tests.append(f"{where}: would submit a {what} (group {group_id})")
-            continue
+    for group_id, where in _added_groups(db, project):
+        sent = folder / MCOR_FOLDER / f"{group_id}.json"
 
-        try:
-            job_id = submit_mcor_test(db.main_folder, project, group_id, whole=whole)
-            report.tests.append(
-                f"{where}: {what} submitted (group {group_id}, job {job_id})"
-            )
+        if config.test_new_experiments and not sent.exists():
+            if dry_run:
+                report.tests.append(
+                    f"{where}: would submit a {what} (group {group_id})"
+                )
+            else:
+                try:
+                    job_id = submit_mcor_test(
+                        db.main_folder, project, group_id, whole=whole
+                    )
+                    report.tests.append(
+                        f"{where}: {what} submitted (group {group_id}, job {job_id})"
+                    )
 
-        except Exception as error:  # the next tick tries again
-            report.errors.append(
-                f"{where}: test of group {group_id}: {type(error).__name__}: {error}"
-            )
+                except Exception as error:  # the next tick tries again
+                    report.errors.append(
+                        f"{where}: test of group {group_id}: "
+                        f"{type(error).__name__}: {error}"
+                    )
+
+        if config.sweep_grid and not _sweep_sent(folder, group_id):
+            if dry_run:
+                report.tests.append(f"{where}: would submit a sweep (group {group_id})")
+                continue
+
+            try:
+                jobs = submit_mcor_sweep(
+                    db.main_folder,
+                    project,
+                    group_id,
+                    config.sweep_grid,
+                    time=config.sweep_time,
+                )
+                report.tests.append(
+                    f"{where}: sweep submitted (group {group_id}, jobs "
+                    f"{' and '.join(str(job) for job in jobs or ())})"
+                )
+
+            except Exception as error:  # the next tick tries again
+                report.errors.append(
+                    f"{where}: sweep of group {group_id}: "
+                    f"{type(error).__name__}: {error}"
+                )
 
 
-def _untested_groups(db: Database, project: None | str) -> list[tuple[int, str]]:
+def _sweep_sent(folder: Path, group_id: int) -> bool:
+    """Whether a sweep of `group_id` was submitted (its jobs recorded)."""
+    try:
+        sweep = json.loads((folder / SWEEPS_FOLDER / f"g{group_id}.json").read_text())
+    except (OSError, ValueError):
+        return False
+
+    return "baseline_job" in sweep
+
+
+def _added_groups(db: Database, project: None | str) -> list[tuple[int, str]]:
     """
-    The experiments the queue added (`odyn.app.submissions.added`) that no test was
-    submitted for: the group each experiment started as, and the experiment's path.
+    The experiments the queue added (`odyn.app.submissions.added`): the group
+    each experiment started as, and the experiment's path.
     """
     # Imported here: the queue belongs to the app (no Qt in it)
     from .app.submissions import added
@@ -481,7 +529,6 @@ def _untested_groups(db: Database, project: None | str) -> list[tuple[int, str]]
     if not exp_ids:
         return []
 
-    sent = cluster_folder(db.main_folder, project) / MCOR_FOLDER
     links = db.group_experiments
     sizes = links.index.value_counts()
     paths = db.experiments["exp_path"]
@@ -494,9 +541,7 @@ def _untested_groups(db: Database, project: None | str) -> list[tuple[int, str]]
             found[exp_id] = int(group_id)
 
     return [
-        (group_id, str(paths.loc[exp_id]))
-        for exp_id, group_id in sorted(found.items())
-        if not (sent / f"{group_id}.json").exists()
+        (group_id, str(paths.loc[exp_id])) for exp_id, group_id in sorted(found.items())
     ]
 
 

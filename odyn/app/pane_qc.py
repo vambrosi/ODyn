@@ -982,7 +982,12 @@ class QcPane(QWidget):
         tip = "" if one else " (download it first)"
         self.show_folder.setEnabled(one)
         self.show_folder.setStatusTip("Open the experiment's test folder" + tip)
-        ready = one and bool(len(picked[0][1]["finished"]))
+        # A test run to compare, or the full run to check (no sweep yet)
+        ready = one and (
+            bool(len(picked[0][1]["finished"]))
+            or str(Path(picked[0][1]["folder"]) / FULL_FOLDER)
+            in picked[0][1]["folders"]
+        )
         stopped = len(picked) == 1 and bool(picked[0][1]["stopped"])
         self.run_again.setEnabled(stopped)
         self.run_again.setStatusTip(
@@ -992,7 +997,7 @@ class QcPane(QWidget):
         )
         self.compare.setEnabled(ready)
         self.compare.setStatusTip(
-            "Compare the raw video and each test, side by side"
+            "Check the full run, and compare the raw video and each test"
             + (tip or ("" if ready else " (once a test finished)"))
         )
 

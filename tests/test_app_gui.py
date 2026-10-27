@@ -1397,6 +1397,49 @@ def test_an_experiment_with_no_finished_test_is_not_compared(window, tmp_path):
     assert qc.download_all.text() == "Download all"
 
 
+def test_an_experiment_with_only_its_full_run_is_checked(
+    window, tmp_path, monkeypatch
+):
+    import gc
+    import json
+
+    from odyn.cluster import cluster_folder
+
+    monkeypatch.setenv("PATH", "")  # no squeue: off the cluster
+    db, group_id = a_tested_experiment(tmp_path / "data")
+    top = db.groups[group_id].mcor_test_folder()
+    del db
+    gc.collect()
+
+    # The whole rigid correction finished, with its full run; no sweep yet
+    cluster = cluster_folder(tmp_path / "data")
+    sent = cluster / "mcor" / f"{group_id}.json"
+    sent.write_text(json.dumps({**json.loads(sent.read_text()), "whole": True}))
+    (cluster / "jobs" / f"odyn-sweep-main-g{group_id}-20.out").unlink()
+    a_video(top / "full" / "G_e1_raw.avi")
+    a_video(top / "full" / "G_e1_mcor.avi")
+
+    window.context.set_user("tester")
+    qc = window.qc
+    window.show_page(qc)
+    qc.reload()
+    settle(window.context)
+    assert qc.experiments.iloc[0]["finished"] == []
+    qc.tests_view.selectRow(0)
+    qc.download.click()
+    wait_until(lambda: qc.downloads is None)
+    settle(window.context)
+    qc.tests_view.selectRow(0)
+    assert qc.compare.isEnabled()
+
+    # Opened on the raw check; the tests say none finished
+    qc.compare.click()
+    mcor = next(iter(qc.windows.values()))
+    assert mcor.raw_action.isChecked()
+    assert "No test run finished yet" in mcor.missing.text()
+    mcor.close()
+
+
 def test_worker_runs_jobs_in_order(app, tmp_path):
     Database(tmp_path, can_create=True)
     worker = DatabaseWorker(tmp_path, None, user="tester")

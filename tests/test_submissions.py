@@ -293,6 +293,36 @@ def test_the_tick_can_submit_only_a_test(tmp_path, slurm):
     assert "--whole" not in script and "#SBATCH --time=4:00:00" in script
 
 
+def test_the_tick_sweeps_each_loop_it_adds_with_a_grid(tmp_path, slurm):
+    import json
+
+    a_day(tmp_path)
+    add_now(next(iter(queued(tmp_path)))[0])
+    grid = {
+        "test_acqs": 4,
+        "runs": [
+            {"strides_um": [96, 96], "overlap_um": [48, 48], "max_deviation_um": 6}
+        ],
+    }
+    (tmp_path / ".odyn" / "cluster.json").write_text(
+        json.dumps({"sweep_grid": grid, "sweep_time": "8:00:00"})
+    )
+
+    report = tick(tmp_path)
+    assert report.tests == [
+        "20260101/m1/e1: whole test submitted (group 1, job 4242)",
+        "20260101/m1/e1: sweep submitted (group 1, jobs 4242 and 4242)",
+    ]
+    sweep = json.loads((cluster_folder(tmp_path) / "sweeps" / "g1.json").read_text())
+    assert [run["run"] for run in sweep["runs"]] == ["s96_o48_d6"]
+    script = (cluster_folder(tmp_path) / "jobs" / "mcor-sweep-g1.sh").read_text()
+    assert "#SBATCH --time=8:00:00" in script
+
+    # Never twice: one test, a baseline and an array
+    assert tick(tmp_path).tests == []
+    assert slurm.read_text().count("sbatch") == 3
+
+
 def test_the_tick_can_leave_the_tests_out(tmp_path, slurm):
     a_day(tmp_path)
     add_now(next(iter(queued(tmp_path)))[0])

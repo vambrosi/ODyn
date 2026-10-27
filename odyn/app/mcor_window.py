@@ -786,6 +786,9 @@ class McorWindow(QWidget):
         self.grid.set_videos(videos)
         problems = ([] if raw is not None else ["raw"]) + absent
         notes = [f"Not downloaded yet: {', '.join(problems)}"] if problems else []
+
+        if not runs:
+            notes.append("No test run finished yet")
         notes += self._load_plots(videos, raw)
         self.missing.setText("\n".join(notes))
         self._enable()
