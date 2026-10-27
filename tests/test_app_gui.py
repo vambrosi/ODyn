@@ -1397,9 +1397,35 @@ def test_an_experiment_with_no_finished_test_is_not_compared(window, tmp_path):
     assert qc.download_all.text() == "Download all"
 
 
-def test_an_experiment_with_only_its_full_run_is_checked(
-    window, tmp_path, monkeypatch
-):
+def test_the_pi_sees_everyones_experiments_to_check(window, tmp_path, monkeypatch):
+    import gc
+
+    monkeypatch.setenv("PATH", "")  # no squeue: off the cluster
+    db, group_id = a_tested_experiment(tmp_path / "data", user="tester")
+    del db
+    gc.collect()
+
+    # None of theirs, until they ask for all users experiments
+    window.context.set_user("pi")
+    qc = window.qc
+    window.show_page(qc)
+    qc.reload()
+    settle(window.context)
+    assert qc.experiments.empty
+
+    qc.everyone.setChecked(True)
+    settle(window.context)
+    assert qc.experiments["path"].tolist() == ["20260304/m1/e1"]
+    assert qc.experiments["user"].tolist() == ["tester"]
+    model = qc._model(qc.tests_view)
+    assert list(model._frame.columns)[:3] == ["submitted_at", "path", "user"]
+
+    qc.everyone.setChecked(False)
+    settle(window.context)
+    assert qc.experiments.empty
+
+
+def test_an_experiment_with_only_its_full_run_is_checked(window, tmp_path, monkeypatch):
     import gc
     import json
 

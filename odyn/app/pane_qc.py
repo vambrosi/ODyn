@@ -26,6 +26,7 @@ from pathlib import Path
 import pandas as pd
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -100,6 +101,7 @@ TEST_HIDDEN = [
     "flow_worst_acq",
     "job",
     "whole",
+    "user",
 ]
 EXPERIMENT_COLUMNS = [
     "submitted_at",
@@ -118,6 +120,7 @@ EXPERIMENT_HIDDEN = [
     "finished",
     "excluded",
     "stopped",
+    "user",
 ]
 
 # An experiment's status, from its tests (later steps add their own)
@@ -212,11 +215,11 @@ def cluster_line(db, now: None | datetime = None) -> tuple[str, str]:
     return text, "computed"
 
 
-def my_recordings(db, user: None | str) -> pd.DataFrame:
+def my_recordings(db, user: None | str, everyone: bool = False) -> pd.DataFrame:
     """
-    One row per experiment or z-stack `user` submitted, newest first, with its
-    sync flags once its sync file was processed. Indexed by `(kind, id)`, as
-    annotations name their target.
+    One row per experiment or z-stack `user` submitted (`everyone`: anyone),
+    newest first, with its sync flags once its sync file was processed.
+    Indexed by `(kind, id)`, as annotations name their target.
     """
     calls = db.method_calls
 
@@ -224,7 +227,9 @@ def my_recordings(db, user: None | str) -> pd.DataFrame:
         return pd.DataFrame(columns=COLUMNS)
 
     method = calls["method_name"].map(lambda m: str(m).rsplit(".", 1)[-1])
-    mine = calls[method.isin(list(INGEST_METHODS)) & (calls["user"] == user)]
+    mine = calls[
+        method.isin(list(INGEST_METHODS)) & (everyone or (calls["user"] == user))
+    ]
     added: dict[tuple[str, int], pd.Timestamp] = {}
 
     for call_id, call in mine.iterrows():
@@ -294,10 +299,15 @@ def sync_flags(call_flag: int) -> str:
 
 
 def my_tests(
-    db, user: None | str, mine: pd.DataFrame, base: None | Path = None
+    db,
+    user: None | str,
+    mine: pd.DataFrame,
+    base: None | Path = None,
+    everyone: bool = False,
 ) -> pd.DataFrame:
     """
-    The test motion corrections of `user`'s experiments, the newest submitted
+    The test motion corrections of `user`'s experiments (`everyone`: of every
+    user's, each with its `user`), the newest submitted
     first (as in `mine`, from `my_recordings`): the cluster's test of each
     ("test") and the runs of each sweep (the baseline first), with the job's
     state and, once a report is there, a few of its numbers and whether it
@@ -308,11 +318,11 @@ def my_tests(
     jobs = [
         {**test, "run": None}
         for test in mcor_tests(db.main_folder, db.project)
-        if test["user"] == user
+        if everyone or test["user"] == user
     ] + [
         run
         for run in mcor_sweep_runs(db.main_folder, db.project)
-        if run["user"] == user
+        if everyone or run["user"] == user
     ]
     jobs.sort(key=lambda job: job["submitted_at"], reverse=True)  # stable
     submitted = {
@@ -351,6 +361,7 @@ def my_tests(
             # What `Group.run_again` calls it
             "job": job["run"] or CORRECTION_RUN,
             "whole": bool(job.get("whole")),
+            "user": job["user"],
         }
 
         if job["state"] == "finished" and (folder / "metrics.json").is_file():
@@ -453,6 +464,7 @@ def my_experiments(
         rows.append(
             {
                 "submitted_at": runs["submitted_at"].iloc[0],
+                "user": runs["user"].iloc[0],
                 "path": runs["path"].iloc[0],
                 "status": status,
                 "raw check": _raw_check_line((checks or {}).get(int(group_id))),
@@ -763,7 +775,7 @@ class QcPane(QWidget):
         self.download.clicked.connect(lambda: self._download(self._picked()))
         self.download_all = QPushButton("Download all")
         self.download_all.setStatusTip(
-            "Copy the test files of every experiment of yours not on this computer"
+            "Copy the test files of every experiment listed not on this computer"
         )
         self.download_all.clicked.connect(lambda: self._download(self._not_here()))
         self.delete_local = QPushButton("Delete local copy")
@@ -778,11 +790,15 @@ class QcPane(QWidget):
         self.compare.clicked.connect(self._compare)
         self.run_again = QPushButton("Run again")
         self.run_again.clicked.connect(self._run_again)
+        self.everyone = QCheckBox("Show all users")
+        self.everyone.setStatusTip("Show every user's experiments")
+        self.everyone.toggled.connect(lambda _: self.reload())
         self.tests_view = self._table(
             "Motion correction",
             "Your experiments' motion corrections: the cluster's tests and the "
             "runs of sweeps",
             [
+                self.everyone,
                 self.download,
                 self.download_all,
                 self.delete_local,
@@ -856,9 +872,11 @@ class QcPane(QWidget):
             self.who.setText("Pick a user to start")
 
         base = self.context.cache_base
+        everyone = self.everyone.isChecked()
 
         def load(db):
             mine = my_recordings(db, user)
+            recorded = my_recordings(db, user, everyone=True) if everyone else mine
             users = db.users
             named = users.loc[users["user_name"] == user, "display_name"]
             name = str(named.iloc[0]) if len(named) else user
@@ -870,7 +888,7 @@ class QcPane(QWidget):
                 mine,
                 my_missing(db, mine),
                 my_experiments(
-                    my_tests(db, user, mine, base),
+                    my_tests(db, user, recorded, base, everyone),
                     db.main_folder,
                     base,
                     latest_picks(db),
@@ -898,7 +916,12 @@ class QcPane(QWidget):
             self._model(self.recordings_view).set_frame(self.mine)
             self._model(self.missing_view).set_frame(missing)
             self.experiments = experiments.reset_index(drop=True)
-            self._model(self.tests_view).set_frame(self.experiments[EXPERIMENT_COLUMNS])
+            columns = list(EXPERIMENT_COLUMNS)
+
+            if everyone:  # whose each is
+                columns.insert(columns.index("path") + 1, "user")
+
+            self._model(self.tests_view).set_frame(self.experiments[columns])
 
             for _, row in self.experiments.iterrows():
                 if str(row["folder"]) in self.windows:
