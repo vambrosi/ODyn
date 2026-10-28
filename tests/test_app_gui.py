@@ -138,33 +138,33 @@ def test_window_opens_on_users_with_every_page_in_the_left_bar(window):
 
 def test_users_pane_is_a_login_screen(window, tmp_path):
     db = Database(tmp_path / "data", user="tester")
-    db.add_user(user_name="ana", display_name="Ana Silva")
-    db.add_user(user_name="bo", display_name="Bo Li")
+    db.add_user(user_name="alice", display_name="Alice Smith")
+    db.add_user(user_name="bob", display_name="Bob Jones")
     db.add_user(user_name="old", display_name="Old Hand")
     db.retire_user(user_name="old")
     window.context.changed.emit()
     settle(window.context)
 
     users = window.users
-    assert [b.text() for b in users.buttons.values()] == ["Ana Silva", "Bo Li"]
+    assert [b.text() for b in users.buttons.values()] == ["Alice Smith", "Bob Jones"]
     assert "Click on your name" in users.hint.text()
 
-    users.buttons["ana"].click()
+    users.buttons["alice"].click()
     settle(window.context)
-    assert window.context.user == "ana"
-    assert users.buttons["ana"].isChecked() and not users.buttons["bo"].isChecked()
-    assert "Ana Silva" in users.hint.text() and "ana" in window.user_label.text()
+    assert window.context.user == "alice"
+    assert users.buttons["alice"].isChecked() and not users.buttons["bob"].isChecked()
+    assert "Alice Smith" in users.hint.text() and "alice" in window.user_label.text()
     # the day's work comes next: with no session yet, the page says where to add one
     assert window.pages.currentWidget() is window.sessions.no_session_page
     assert "add one" in window.sessions.no_session_page.message.text()
 
-    # the worker's database now signs calls as ana
+    # the worker's database now signs calls as alice
     db.set_mouse(mouse_id=1)  # a reader opens fine beside the worker
     window.mice.form.set_values({"mouse_id": "m2"})
     window.mice._save()
     settle(window.context)
     calls = Database(tmp_path / "data").latest_calls("set_mouse")
-    assert calls.iloc[0]["user"] == "ana"
+    assert calls.iloc[0]["user"] == "alice"
 
 
 def test_mice_pane_registers_a_mouse(window, tmp_path):
@@ -822,7 +822,7 @@ def test_qc_pane_lists_nothing_for_a_new_user(window):
     settle(window.context)
 
     assert qc.recordings_view.model().rowCount() == 0
-    assert "tester" in qc.who.text() or "ana" in qc.who.text()
+    assert "tester" in qc.who.text() or "alice" in qc.who.text()
 
     # One tab per list, no counts when empty, the first one shown
     names = [qc.tabs.tabText(i) for i in range(qc.tabs.count())]
@@ -850,6 +850,16 @@ def test_qc_lists_the_drafts_waiting_for_the_cluster(window, tmp_path, monkeypat
     ]
     assert not qc.add_now.isEnabled() and not qc.edit_draft.isEnabled()
     assert qc.tabs.tabText(0) == "Waiting (1)" and qc.tabs.currentIndex() == 0
+
+    # Every user's with Show all users, each with whose it is
+    qc.everyone.setChecked(True)
+    settle(window.context)
+    assert sorted(qc.queue["user"]) == ["someone", "tester"]
+    assert list(qc._model(qc.queue_view)._frame.columns)[:2] == ["submitted_at", "user"]
+    assert qc.who.text() == "To-do list of all users"
+    qc.everyone.setChecked(False)
+    settle(window.context)
+    assert len(qc.queue) == 1
 
     # A tab the user picked stays picked through reloads
     qc.tabs.tabBarClicked.emit(3)
@@ -946,7 +956,7 @@ def test_qc_lists_every_kind_of_recording_this_user_submitted(tmp_path):
             slices=3, step_um=5, top_um=-10, power=30, length_um=-300, reference_um=-15
         ),
     )
-    db = Database(tmp_path, can_create=True, user="ana")
+    db = Database(tmp_path, can_create=True, user="alice")
     db.set_mouse(mouse_id=1)
     session_id = db.add_session(mouse_id=1, session_date="2026-03-04")
     exp_id = db.add_experiment(
@@ -959,7 +969,7 @@ def test_qc_lists_every_kind_of_recording_this_user_submitted(tmp_path):
         session_id=session_id, folder="20260304/m1/zstacks", objective=10
     )
 
-    mine = my_recordings(db, "ana")
+    mine = my_recordings(db, "alice")
     assert list(mine.index) == [
         ("zstack", stack_id),
         ("experiment", grab_id),
@@ -993,7 +1003,7 @@ def test_qc_says_when_the_cluster_last_ran(tmp_path):
     from odyn.app.pane_qc import cluster_line
     from odyn.cluster import send_request, tick
 
-    db = Database(tmp_path, can_create=True, user="ana")
+    db = Database(tmp_path, can_create=True, user="alice")
     assert cluster_line(db) == ("The cluster has not run yet", "computed")
 
     tick(tmp_path)
@@ -1415,11 +1425,11 @@ def test_another_user_never_sees_the_rows_of_the_one_before(
     assert len(qc.experiments) == 1
 
     # Emptied at once, before the next user's rows are loaded
-    window.context.set_user("liz")
+    window.context.set_user("carol")
     assert qc.experiments.empty
     assert qc._model(qc.tests_view).rowCount() == 0
     assert not qc.compare.isEnabled()
-    assert qc.who.text() == "Loading the to-do list of liz"
+    assert qc.who.text() == "Loading the to-do list of carol"
     settle(window.context)
     assert qc.experiments.empty
 
@@ -1431,12 +1441,12 @@ def test_another_user_never_sees_the_rows_of_the_one_before(
         model, "set_frame", lambda frame: shown.append(len(frame)) or set_frame(frame)
     )
     window.context.set_user("tester")
-    window.context.set_user("liz")
+    window.context.set_user("carol")
     settle(window.context)
     assert qc.experiments.empty and not any(shown)
 
 
-def test_the_pi_sees_everyones_experiments_to_check(window, tmp_path, monkeypatch):
+def test_everyones_experiments_are_shown_to_check(window, tmp_path, monkeypatch):
     import gc
 
     monkeypatch.setenv("PATH", "")  # no squeue: off the cluster
@@ -1444,8 +1454,8 @@ def test_the_pi_sees_everyones_experiments_to_check(window, tmp_path, monkeypatc
     del db
     gc.collect()
 
-    # Someone else's: none of hers, until she asks for everyone's
-    window.context.set_user("liz")
+    # None of theirs, until they ask for all users experiments
+    window.context.set_user("carol")
     qc = window.qc
     window.show_page(qc)
     qc.reload()
@@ -1459,9 +1469,32 @@ def test_the_pi_sees_everyones_experiments_to_check(window, tmp_path, monkeypatc
     model = qc._model(qc.tests_view)
     assert list(model._frame.columns)[:3] == ["submitted_at", "path", "user"]
 
+    # The other tabs too: what was added, and its annotations to fill
+    assert qc.mine[["path", "user"]].values.tolist() == [["20260304/m1/e1", "tester"]]
+    added = qc._model(qc.recordings_view)._frame
+    assert list(added.columns)[:2] == ["submitted_at", "user"]
+    annotations = qc._model(qc.missing_view)._frame
+    assert set(annotations["user"]) <= {"tester"}
+
     qc.everyone.setChecked(False)
     settle(window.context)
     assert qc.experiments.empty
+
+    # A job run for the owner (a pick's whole correction) leaves it theirs
+    import json
+
+    from odyn.cluster import cluster_folder
+
+    sent = cluster_folder(tmp_path / "data") / "mcor" / f"{group_id}.json"
+    sent.write_text(json.dumps({**json.loads(sent.read_text()), "user": "carol"}))
+    qc.reload()
+    settle(window.context)
+    assert qc.experiments.empty  # carol's own list: still none
+
+    window.context.set_user("tester")
+    settle(window.context)
+    assert qc.experiments["user"].tolist() == ["tester"]
+    assert "test" in [run.name for run in qc.experiments.iloc[0]["finished"]]
 
 
 def test_an_experiment_with_only_its_full_run_is_checked(window, tmp_path, monkeypatch):

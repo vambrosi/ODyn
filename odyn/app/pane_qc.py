@@ -159,11 +159,14 @@ TEST_NUMBERS = {
 TEST_STATES = {"pending": "waiting", "unknown": "not finished"}
 
 
-def my_queue(main_folder: Path, project: None | str, user: str) -> pd.DataFrame:
+def my_queue(
+    main_folder: Path, project: None | str, user: str, everyone: bool = False
+) -> pd.DataFrame:
     """
-    The drafts `user` submitted that the cluster has not added yet, oldest
-    first: the session, `waiting` or `failed`, how far the copy got (or why
-    it failed), and when it was submitted. `path` is the queued file.
+    The drafts `user` submitted (`everyone`: anyone, each with its `user`)
+    that the cluster has not added yet, oldest first: the session, `waiting`
+    or `failed`, how far the copy got (or why it failed), and when it was
+    submitted. `path` is the queued file.
     """
     rows = []
 
@@ -173,11 +176,12 @@ def my_queue(main_folder: Path, project: None | str, user: str) -> pd.DataFrame:
         except (OSError, ValueError):
             continue
 
-        if draft.data.get("submitted_by") != user:
+        if not everyone and draft.data.get("submitted_by") != user:
             continue
 
         rows.append(
             {
+                "user": draft.data.get("submitted_by", ""),
                 "session": draft.where,
                 "state": state.state,
                 "progress": state.message or "not looked at yet",
@@ -186,7 +190,7 @@ def my_queue(main_folder: Path, project: None | str, user: str) -> pd.DataFrame:
             }
         )
 
-    return pd.DataFrame(rows, columns=[*QUEUE_COLUMNS, "path"])
+    return pd.DataFrame(rows, columns=[*QUEUE_COLUMNS, "path", "user"])
 
 
 def cluster_line(db, now: None | datetime = None) -> tuple[str, str]:
@@ -224,7 +228,7 @@ def my_recordings(db, user: None | str, everyone: bool = False) -> pd.DataFrame:
     calls = db.method_calls
 
     if calls.empty:
-        return pd.DataFrame(columns=COLUMNS)
+        return pd.DataFrame(columns=[*COLUMNS, "user"])
 
     method = calls["method_name"].map(lambda m: str(m).rsplit(".", 1)[-1])
     mine = calls[
@@ -239,13 +243,13 @@ def my_recordings(db, user: None | str, everyone: bool = False) -> pd.DataFrame:
 
         for row_id in ids:
             if isinstance(row_id, int) and (kind, row_id) not in added:
-                added[(kind, row_id)] = call["called_at"]
+                added[(kind, row_id)] = (call["called_at"], call["user"])
 
     tables = {"experiment": db.experiments, "zstack": db.zstacks}
     flags = _exp_sync_flags(db)
     rows = []
 
-    for (kind, row_id), submitted in added.items():
+    for (kind, row_id), (submitted, by) in added.items():
         table = tables[kind]
 
         if row_id not in table.index:
@@ -260,10 +264,11 @@ def my_recordings(db, user: None | str, everyone: bool = False) -> pd.DataFrame:
                 "objective": table.loc[row_id, "objective"],
                 "submitted_at": submitted,
                 "sync": processed or ("" if kind == "zstack" else "not processed"),
+                "user": by,
             }
         )
 
-    frame = pd.DataFrame(rows, columns=["id", *COLUMNS])
+    frame = pd.DataFrame(rows, columns=["id", *COLUMNS, "user"])
     frame = frame.set_index(["kind", "id"], drop=False).drop(columns="id")
 
     # Newest first: the rows are in the order of the calls (and of the ids
@@ -308,7 +313,8 @@ def my_tests(
 ) -> pd.DataFrame:
     """
     The test motion corrections of `user`'s experiments (`everyone`: of every
-    user's, each with its `user`), the newest submitted
+    user's), each with its `user`: who added the experiment (not who ran a
+    job of it since), the newest submitted
     first (as in `mine`, from `my_recordings`): the cluster's test of each
     ("test") and the runs of each sweep (the baseline first), with the job's
     state and, once a report is there, a few of its numbers and whether it
@@ -318,15 +324,17 @@ def my_tests(
     what was seen of each folder for this reload (see `cache.Listing`).
     """
     listing = listing or cache.Listing()
+    # Whose an experiment's tests are: whoever added it (`mine`), never who
+    # ran a job since (a pick made for someone else is recorded as its
+    # maker's, the experiment stays its owner's)
+    owners = {
+        int(row_id): who
+        for (kind, row_id), who in mine["user"].items()
+        if kind == "experiment"
+    }
     jobs = [
-        {**test, "run": None}
-        for test in mcor_tests(db.main_folder, db.project)
-        if everyone or test["user"] == user
-    ] + [
-        run
-        for run in mcor_sweep_runs(db.main_folder, db.project)
-        if everyone or run["user"] == user
-    ]
+        {**test, "run": None} for test in mcor_tests(db.main_folder, db.project)
+    ] + mcor_sweep_runs(db.main_folder, db.project)
     jobs.sort(key=lambda job: job["submitted_at"], reverse=True)  # stable
     submitted = {
         int(row_id): when
@@ -345,11 +353,16 @@ def my_tests(
         if group_id not in links.index:
             continue
 
+        exp_ids = links.loc[[group_id], "exp_id"].astype(int)
+        owner = next((owners[i] for i in exp_ids if i in owners), None)
+
+        if owner is None and not everyone:  # not this user's experiment
+            continue
+
         if group_id not in tops:
             groups = groups if groups is not None else db.groups
             tops[group_id] = groups[group_id].mcor_test_folder()
 
-        exp_ids = links.loc[[group_id], "exp_id"].astype(int)
         top = tops[group_id]
         folder = top / job["run"] if job["run"] else top
         times = [submitted[i] for i in exp_ids if i in submitted]
@@ -371,7 +384,7 @@ def my_tests(
             # What `Group.run_again` calls it
             "job": job["run"] or CORRECTION_RUN,
             "whole": bool(job.get("whole")),
-            "user": job["user"],
+            "user": owner or job["user"],  # (added before calls were recorded)
         }
 
         files = listing.files(folder) if job["state"] == "finished" else {}
@@ -711,13 +724,13 @@ def my_missing(db, mine: pd.DataFrame) -> pd.DataFrame:
     """
     The required annotations still empty on `mine`'s recordings, in the order
     of `mine` (newest first), each with `waiting_since`: when its recording
-    was submitted.
+    was submitted, and `user`: who submitted it.
     """
     missing = db.missing_annotations()
 
     if missing.empty or mine.empty:
-        return missing.iloc[0:0].assign(waiting_since=None)[
-            ["waiting_since", *missing.columns]
+        return missing.iloc[0:0].assign(waiting_since=None, user=None)[
+            ["waiting_since", *missing.columns, "user"]
         ]
 
     rank = {target: position for position, target in enumerate(mine.index)}
@@ -732,15 +745,22 @@ def my_missing(db, mine: pd.DataFrame) -> pd.DataFrame:
         for kind, row_id in zip(missing["target_type"], missing["target_id"])
     ]
 
-    return missing.reset_index(drop=True).assign(waiting_since=since)[
-        ["waiting_since", *missing.columns]
+    whose = [
+        mine["user"].get((kind, int(row_id))) if "user" in mine else None
+        for kind, row_id in zip(missing["target_type"], missing["target_id"])
+    ]
+
+    return missing.reset_index(drop=True).assign(waiting_since=since, user=whose)[
+        ["waiting_since", *missing.columns, "user"]
     ]
 
 
 class QcPane(QWidget):
     """
-    What is waiting on the current user. `restored` gives the path of a draft
-    taken back from the cluster, now among this computer's drafts.
+    What is waiting on the current user, or on every user with "Show all
+    users" (to take over someone's QC; what is done is recorded as done by
+    the current user). `restored` gives the path of a draft taken back from
+    the cluster, now among this computer's drafts.
     """
 
     restored = Signal(object)
@@ -748,8 +768,8 @@ class QcPane(QWidget):
     def __init__(self, context: Context, parent=None):
         super().__init__(parent)
         self.context = context
-        self.queue = pd.DataFrame(columns=[*QUEUE_COLUMNS, "path"])
-        self.mine = pd.DataFrame(columns=COLUMNS)
+        self.queue = pd.DataFrame(columns=[*QUEUE_COLUMNS, "path", "user"])
+        self.mine = pd.DataFrame(columns=[*COLUMNS, "user"])
         self.mine_ids: list[int] = []  # each row's experiment or z-stack id
         self.experiments = pd.DataFrame(
             columns=[*EXPERIMENT_COLUMNS, *EXPERIMENT_HIDDEN]
@@ -766,7 +786,14 @@ class QcPane(QWidget):
         self.who = QLabel("")
         reload = QPushButton("Reload")
         reload.clicked.connect(self.reload)
+        # Every tab, every user's: to take over someone's QC
+        self.everyone = QCheckBox("Show all users")
+        self.everyone.setStatusTip(
+            "Show every user's recordings, annotations and experiments in each tab"
+        )
+        self.everyone.toggled.connect(lambda _: self.reload())
         top.addWidget(self.who, stretch=1)
+        top.addWidget(self.everyone)
         top.addWidget(reload)
         layout.addLayout(top)
         self.cluster = QLabel("")
@@ -830,15 +857,11 @@ class QcPane(QWidget):
         self.compare.clicked.connect(self._compare)
         self.run_again = QPushButton("Run again")
         self.run_again.clicked.connect(self._run_again)
-        self.everyone = QCheckBox("Show all users")
-        self.everyone.setStatusTip("Show every user's experiments")
-        self.everyone.toggled.connect(lambda _: self.reload())
         self.tests_view = self._table(
             "Motion correction",
             "Your experiments' motion corrections: the cluster's tests and the "
             "runs of sweeps",
             [
-                self.everyone,
                 self.download,
                 self.download_all,
                 self.delete_local,
@@ -919,12 +942,11 @@ class QcPane(QWidget):
 
         def load(db):
             listing = cache.Listing()  # each folder looked at once
-            mine = my_recordings(db, user)
-            recorded = my_recordings(db, user, everyone=True) if everyone else mine
+            mine = my_recordings(db, user, everyone)
             users = db.users
             named = users.loc[users["user_name"] == user, "display_name"]
             name = str(named.iloc[0]) if len(named) else user
-            queue = my_queue(db.main_folder, db.project, user)
+            queue = my_queue(db.main_folder, db.project, user, everyone)
 
             return (
                 name,
@@ -932,7 +954,7 @@ class QcPane(QWidget):
                 mine,
                 my_missing(db, mine),
                 my_experiments(
-                    my_tests(db, user, recorded, base, everyone, listing),
+                    my_tests(db, user, mine, base, everyone, listing),
                     db.main_folder,
                     base,
                     latest_picks(db),
@@ -951,7 +973,9 @@ class QcPane(QWidget):
             name, queue, mine, missing, experiments, (cluster, kind), main = result
             self.main_folder = main
 
-            if user:
+            if everyone:
+                self.who.setText("To-do list of all users")
+            elif user:
                 self.who.setText(f"To-do list for {name}")
 
             self.cluster.setText(cluster)
@@ -960,9 +984,21 @@ class QcPane(QWidget):
             self.queue = queue.reset_index(drop=True)
             self.mine = mine.reset_index(drop=True)
             self.mine_ids = [int(row_id) for _, row_id in mine.index]
-            self._model(self.queue_view).set_frame(self.queue[QUEUE_COLUMNS])
-            self._model(self.recordings_view).set_frame(self.mine)
-            self._model(self.missing_view).set_frame(missing)
+
+            def shown(frame, columns):
+                """`columns`, and whose each row is when showing all users."""
+                columns = list(columns)
+
+                if everyone:
+                    columns.insert(1, "user")
+
+                return frame[columns]
+
+            self._model(self.queue_view).set_frame(shown(self.queue, QUEUE_COLUMNS))
+            self._model(self.recordings_view).set_frame(shown(self.mine, COLUMNS))
+            self._model(self.missing_view).set_frame(
+                shown(missing, [c for c in missing.columns if c != "user"])
+            )
             self.experiments = experiments.reset_index(drop=True)
             columns = list(EXPERIMENT_COLUMNS)
 
