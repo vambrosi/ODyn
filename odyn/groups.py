@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 
@@ -1879,8 +1880,10 @@ class Group(CallRecorder):
                 )
                 min_mov = getattr(self.mc, "min_mov", None)
 
-                # What it was aligned to (None: caiman's own), for test reports
+                # What it was aligned to (None: caiman's own), and the file
+                # it is saved in, for test reports
                 self.mc_reference = template
+                self.mc_reference_file = None if template is None else saved
 
                 if not is_test:
                     mmaps = list(self.mc.mmap_file)
@@ -2198,9 +2201,10 @@ class Group(CallRecorder):
         Runs `run_motion_correction` as a test on `test_acqs` acquisitions
         spread over the experiment, all aligned to the experiment's reference,
         then writes into `cache/mcor-tests/<experiment>_g<group>/` (in the files
-        folder; in a folder `run` inside it when given): the reference, a
-        summary and a plot of the shifts, the settings and the numbers for the
-        whole test (see `odyn.mcor_report`), and its video. Returns the folder.
+        folder; in a folder `run` inside it when given): a summary and a plot
+        of the shifts, the settings and the numbers for the whole test, which
+        name the experiment's reference (one file, in its `processed/mcor/`;
+        see `odyn.mcor_report`), and its video. Returns the folder.
 
         Every test of the experiment shows the same frames of the same
         acquisitions, so their videos compare; the raw video of those frames is
@@ -2314,6 +2318,15 @@ class Group(CallRecorder):
 
         title = label or run or ("rigid (all)" if whole else "test")
         where = ", ".join(str(path) for path in self.experiments["exp_path"])
+        saved = getattr(self, "mc_reference_file", None)
+        reference = (
+            None
+            if saved is None or not saved.is_file()
+            else {
+                "file": saved.relative_to(self.db.main_folder).as_posix(),
+                "sha1": _sha1(saved),
+            }
+        )
         logger.info(f"Writing the test's report to {folder}")
         paths = write_report(
             folder,
@@ -2330,6 +2343,7 @@ class Group(CallRecorder):
             keep_patch_shifts=keep_patch_shifts,
             side_by_side=side_by_side,
             title=f"{where} — group {self.group_id} — {title}",
+            reference_file=reference,
         )
 
         if movie:
@@ -3957,3 +3971,14 @@ def _filtered(template: None | np.ndarray, gsig_filt: None | list[int]):
     from caiman.motion_correction import high_pass_filter_space
 
     return high_pass_filter_space(template, gsig_filt)
+
+
+def _sha1(path: Path) -> str:
+    """A file's SHA-1, to tell which version of a file was used."""
+    digest = hashlib.sha1()
+
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+
+    return digest.hexdigest()

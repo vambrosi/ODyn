@@ -259,6 +259,7 @@ class McorWindow(QWidget):
         approve: None | Callable[[list[int]], None] = None,
         final_ready: bool = False,
         raw_checked: bool = False,
+        saved_folder: None | Path = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -273,6 +274,8 @@ class McorWindow(QWidget):
         self.approve = approve
         self.final_ready = final_ready  # the picked correction is saved
         self.raw_checked = raw_checked
+        # Where the experiment's corrected files and reference are, on the share
+        self.saved_folder = saved_folder
         self.step = TESTS_STEP
         self.full_videos: list[Video] = []  # raw, corrected
         self.full_shown: None | int = None  # the step the full grid is set for
@@ -405,6 +408,13 @@ class McorWindow(QWidget):
             self.right, "report", "Open the report of the selected run", "R"
         )
         self.report_action.triggered.connect(self._show_report)
+        self.saved_action = self._action(
+            self.right, "saved-files", "Show the saved files (reference too)", "O"
+        )
+        self.saved_action.triggered.connect(self._show_saved)
+        self.saved_action.setEnabled(
+            saved_folder is not None and Path(saved_folder).is_dir()
+        )
         self._foot(self.right)
         self.pick_action = self._action(
             self.right,
@@ -964,6 +974,15 @@ class McorWindow(QWidget):
 
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
             self.status(f"Could not open {path}")
+
+    def _show_saved(self) -> None:
+        """The experiment's corrected files and its reference, on the share."""
+        folder = self.saved_folder
+
+        if folder is None or not QDesktopServices.openUrl(
+            QUrl.fromLocalFile(str(folder))
+        ):
+            self.status(f"Could not open {folder}")
 
     def _toggle_full_screen(self) -> None:
         if self.isFullScreen():

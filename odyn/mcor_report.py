@@ -2,7 +2,9 @@
 The files a test motion correction is judged by, before the app shows it.
 
 For the acquisitions a test ran on, written into one folder:
-- `reference.tif`: the image every acquisition was aligned to;
+- `reference.tif`: the image every acquisition was aligned to, when it is not
+saved elsewhere already (the experiment's `processed/mcor/`, named in
+`metrics.json` with its SHA-1 instead: one file per experiment);
 - `side_by_side.tif` (when asked): one page per acquisition, its mean
 image raw | test, each column scaled on its own. Scrubbed in Fiji, drift
 shows as the picture sliding from page to page;
@@ -103,6 +105,7 @@ def write_report(
     keep_patch_shifts: bool = False,
     side_by_side: bool = False,
     title: str = TITLE,
+    reference_file: None | dict = None,
 ) -> list[Path]:
     """
     Write the report on one test into `folder` (see the module's description)
@@ -118,7 +121,10 @@ def write_report(
     `keep_patch_shifts` they are saved in `shifts.npz` too (hundreds of
     megabytes at small patches). `settings` go into `metrics.json` as they
     are. `title` heads the plot of shifts, to tell one test's from another's
-    (`<experiment> — group <id> — <run>`).
+    (`<experiment> — group <id> — <run>`). `reference_file` says where the
+    `reference` is saved already (`file`, from the main folder, and its
+    `sha1`): `metrics.json` names it (`reference`) and no copy is written.
+    Otherwise the reference is written here, as `reference.tif`.
     """
     folder.mkdir(parents=True, exist_ok=True)
     margin = max(max_shifts) + 2
@@ -205,6 +211,9 @@ def write_report(
     if settings is not None:
         metrics["settings"] = settings
 
+    # The reference: one file per experiment, named rather than copied
+    metrics["reference"] = reference_file or {"file": "reference.tif"}
+
     written = {
         "reference": folder / "reference.tif",
         "side_by_side": folder / "side_by_side.tif",
@@ -216,7 +225,10 @@ def write_report(
         "summary_npz": folder / SHIFTS_SUMMARY,
         "png": folder / "shifts.png",
     }
-    tifffile.imwrite(written["reference"], reference.astype(np.float32))
+    if reference_file is None:
+        tifffile.imwrite(written["reference"], reference.astype(np.float32))
+    else:
+        del written["reference"]
 
     if side_by_side:
         # Pages, not colors: tifffile takes a stack of 3 or 4 for an RGB image

@@ -665,3 +665,30 @@ def test_the_final_check_shows_raw_and_corrected_and_approves(app, tmp_path):
     assert window.final_action.isChecked()
     assert len(window.full_grid.tiles) == 2
     window.close()
+
+
+def test_the_saved_files_open_from_the_window(app, tmp_path, monkeypatch):
+    from PySide6.QtGui import QDesktopServices
+
+    from odyn.app.mcor_window import McorWindow
+    from odyn.app.pane_qc import saved_folder
+
+    folder = saved_folder(tmp_path, "20260304/m1/e1, 20260304/m1/e2")
+    assert folder == tmp_path / "20260304" / "m1" / "e1" / "processed" / "mcor"
+
+    # Not saved yet: greyed
+    window = McorWindow("e1", tmp_path, [], print, saved_folder=folder)
+    assert not window.saved_action.isEnabled()
+    window.close()
+
+    folder.mkdir(parents=True)
+    opened = []
+    monkeypatch.setattr(
+        QDesktopServices, "openUrl", lambda url: opened.append(url) or True
+    )
+    window = McorWindow("e1", tmp_path, [], print, saved_folder=folder)
+    assert window.saved_action.isEnabled()
+    assert window.saved_action.shortcut().toString() == "O"
+    window.saved_action.trigger()
+    assert [url.toLocalFile() for url in opened] == [str(folder)]
+    window.close()

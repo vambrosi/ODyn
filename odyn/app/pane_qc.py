@@ -755,6 +755,16 @@ def my_missing(db, mine: pd.DataFrame) -> pd.DataFrame:
     ]
 
 
+def saved_folder(main_folder: Path, paths: str) -> Path:
+    """
+    Where an experiment's corrected files and reference are saved: the first
+    experiment's `processed/mcor/` (`paths`, as the QC page lists them).
+    """
+    first = str(paths).split(", ")[0]
+
+    return Path(main_folder) / first / "processed" / "mcor"
+
+
 class QcPane(QWidget):
     """
     What is waiting on the current user, or on every user with "Show all
@@ -1183,6 +1193,7 @@ class QcPane(QWidget):
             approve=lambda excluded: self._approve(key, excluded),
             final_ready=row["status"] == FINAL_CHECK,
             raw_checked=row["raw check"] != "not yet",
+            saved_folder=saved_folder(self.main_folder, row["path"]),
         )
         window.set_status(_window_status(row))
         window.closed.connect(lambda: self.windows.pop(key, None))

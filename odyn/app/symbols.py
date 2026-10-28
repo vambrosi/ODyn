@@ -120,6 +120,7 @@ GLYPHS = {
     "check-raw": ("task_alt", "", "c"),
     "approve": ("verified", "", "a"),
     "report": ("monitoring", "", "r"),
+    "saved-files": ("folder_open", "", "o"),
     "pick": ("check_circle", "", "p"),
 }
 

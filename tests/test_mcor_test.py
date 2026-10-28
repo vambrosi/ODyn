@@ -86,6 +86,22 @@ def caiman(monkeypatch, tmp_path):
     return seen
 
 
+def reference_of(folder: Path) -> np.ndarray:
+    """
+    The reference a test named in its `metrics.json`, checked against its
+    SHA-1.
+    """
+    import hashlib
+
+    named = json.loads((folder / "metrics.json").read_text())["reference"]
+    main = next(p for p in folder.parents if (p / ".odyn").is_dir())
+    path = main / named["file"]
+    assert hashlib.sha1(path.read_bytes()).hexdigest() == named["sha1"]
+    assert path.parent.name == "mcor" and path.parent.parent.name == "processed"
+
+    return tifffile.imread(path)
+
+
 def a_loop(tmp_path, user="alice") -> tuple[Database, int]:
     """Eight acquisitions of loop e1, added by `user`, and its group."""
     generate(
@@ -319,7 +335,9 @@ def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman, monkeypatch):
     assert tifffile.imread(folder / "side_by_side.tif").shape == (4, 48, 88)
     with tifffile.TiffFile(folder / "side_by_side.tif") as tif:
         assert len(tif.pages) == 4  # pages, not one RGB image
-    assert tifffile.imread(folder / "reference.tif").shape == (48, 40)
+    # The reference: one file for the experiment, named, not copied here
+    assert not (folder / "reference.tif").exists()
+    assert reference_of(folder).shape == (48, 40)
     assert (folder / "shifts.png").stat().st_size > 0
 
     # The per-frame numbers the app plots, every frame of the test
@@ -362,7 +380,7 @@ def test_a_piecewise_run_has_its_own_folder_and_measures_the_patches(tmp_path, c
     db, group_id = a_loop(tmp_path)
     group = db.groups[group_id]
     base = group.test_motion_correction(test_acqs=4, movie=False)
-    reference = tifffile.imread(base / "reference.tif")
+    reference = reference_of(base)
     caiman["template"] = None
 
     folder = group.test_motion_correction(
@@ -416,7 +434,7 @@ def test_a_filtered_run_filters_the_reference_too(tmp_path, caiman):
     db, group_id = a_loop(tmp_path)
     group = db.groups[group_id]
     base = group.test_motion_correction(test_acqs=4, movie=False)
-    reference = tifffile.imread(base / "reference.tif")
+    reference = reference_of(base)
 
     folder = group.test_motion_correction(
         test_acqs=4,
@@ -442,8 +460,13 @@ def test_a_filtered_run_filters_the_reference_too(tmp_path, caiman):
     assert recorded["gsig_filt_um"] == 4 and recorded["shifts_opencv"] is True
     assert recorded["gsig_filt_px"] == settings["gSig_filt"]
 
-    # The report compares with the reference itself, not the filtered one
-    np.testing.assert_array_equal(tifffile.imread(folder / "reference.tif"), reference)
+    # The report compares with the reference itself, not the filtered one:
+    # the same file as the run before, unchanged
+    np.testing.assert_array_equal(reference_of(folder), reference)
+    assert (
+        json.loads((folder / "metrics.json").read_text())["reference"]
+        == json.loads((base / "metrics.json").read_text())["reference"]
+    )
 
 
 def test_every_test_video_shares_the_raw_videos_frames_and_levels(
