@@ -33,10 +33,10 @@ class Terminal(io.StringIO):
 
 
 def test_a_file_gets_plain_lines_and_a_terminal_colors():
-    record = a_record(f"Added user 'ana'. {CHECK}")
+    record = a_record(f"Added user 'alice'. {CHECK}")
 
     line = _Formatter().format(record)
-    assert LINE.match(line) and line.endswith("Added user 'ana'. ✔")
+    assert LINE.match(line) and line.endswith("Added user 'alice'. ✔")
     assert "\033" not in line
 
     console = _ConsoleHandler()
@@ -69,7 +69,7 @@ def test_caimans_lines_are_ours_and_say_so():
 
 
 def test_a_calls_stored_log_has_the_time_and_no_colors(tmp_path, capsys):
-    db = Database(tmp_path, can_create=True, user="ana")
+    db = Database(tmp_path, can_create=True, user="alice")
     db.set_mouse(mouse_id=1)
     db.add_session(mouse_id=1, session_date="2026-07-01")
     call_id = int(db.method_calls.index.max())

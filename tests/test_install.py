@@ -67,14 +67,14 @@ def test_the_windows_batch_runs_the_app_once_the_folder_is_there(tmp_path):
         PureWindowsPath(r"Z:\ImagingData"),
         "main-sync",
         tmp_path,
-        PureWindowsPath(r"C:\Users\MossLab\miniforge3\envs\caiman\python.exe"),
+        PureWindowsPath(r"C:\Users\lab\miniforge3\envs\caiman\python.exe"),
     )
     lines = text.split("\r\n")
 
     assert not any("activate.bat" in line for line in lines)
     assert r'if not exist "Z:\ImagingData\.odyn" (' in lines
     assert (
-        r'"C:\Users\MossLab\miniforge3\envs\caiman\python.exe" -m odyn.app '
+        r'"C:\Users\lab\miniforge3\envs\caiman\python.exe" -m odyn.app '
         r'"Z:\ImagingData" --project main-sync'
     ) in lines
 

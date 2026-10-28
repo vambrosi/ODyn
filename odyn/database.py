@@ -945,7 +945,7 @@ class Database(CallRecorder):
 
         **USAGE**
         ```python
-        db.add_user(user_name="vinicius", display_name="Vinicius")
+        db.add_user(user_name="alice", display_name="Alice")
         ```
 
         `user_name` is what `method_calls.user` records; `display_name` is what

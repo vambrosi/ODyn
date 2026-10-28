@@ -19,16 +19,16 @@ def db(tmp_path):
 
 
 def test_users_are_picked_by_name(db):
-    db.add_user(user_name="vinicius", display_name="Vinicius")
-    db.add_user(user_name="pa")
+    db.add_user(user_name="erin", display_name="Erin")
+    db.add_user(user_name="dave")
 
     users = db.users.set_index("user_name")
-    assert users.loc["vinicius", "display_name"] == "Vinicius"
-    assert users.loc["pa", "display_name"] == "pa"
+    assert users.loc["erin", "display_name"] == "Erin"
+    assert users.loc["dave", "display_name"] == "dave"
     assert not users["retired"].any()
 
-    db.retire_user(user_name="pa")
-    assert bool(db.users.set_index("user_name").loc["pa", "retired"])
+    db.retire_user(user_name="dave")
+    assert bool(db.users.set_index("user_name").loc["dave", "retired"])
 
     with pytest.raises(ValueError, match="No user"):
         db.retire_user(user_name="nobody")

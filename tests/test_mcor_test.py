@@ -86,7 +86,7 @@ def caiman(monkeypatch, tmp_path):
     return seen
 
 
-def a_loop(tmp_path, user="ana") -> tuple[Database, int]:
+def a_loop(tmp_path, user="alice") -> tuple[Database, int]:
     """Eight acquisitions of loop e1, added by `user`, and its group."""
     generate(
         tmp_path,
@@ -524,7 +524,7 @@ def test_a_video_takes_the_levels_and_the_title_it_is_given(tmp_path):
 
 
 def test_a_test_is_a_job_of_its_own_for_who_added_the_loop(tmp_path, slurm):
-    _, group_id = a_loop(tmp_path, user="ana")
+    _, group_id = a_loop(tmp_path, user="alice")
 
     job_id = submit_mcor_test(tmp_path, None, group_id)
 
@@ -536,12 +536,12 @@ def test_a_test_is_a_job_of_its_own_for_who_added_the_loop(tmp_path, slurm):
     assert "#SBATCH --gres=disk:128" in script
     assert 'CAIMAN_TEMP="/mnt/scratch/${SLURM_JOB_ID}"' in script
     assert "trap 'rm -rf \"$CAIMAN_TEMP\"' EXIT" in script
-    assert f"run-mcor-test --group {group_id} --user ana" in script
+    assert f"run-mcor-test --group {group_id} --user alice" in script
 
     sent = json.loads(
         (cluster_folder(tmp_path) / "mcor" / f"{group_id}.json").read_text()
     )
-    assert (sent["job_id"], sent["user"], sent["whole"]) == ("4242", "ana", False)
+    assert (sent["job_id"], sent["user"], sent["whole"]) == ("4242", "alice", False)
 
 
 def test_a_group_that_does_not_exist_is_refused_before_anything_is_written(
@@ -559,7 +559,7 @@ def test_a_group_that_does_not_exist_is_refused_before_anything_is_written(
 def test_the_job_records_the_test_as_the_owners(tmp_path, monkeypatch):
     from odyn.groups import Group
 
-    _, group_id = a_loop(tmp_path, user="ana")
+    _, group_id = a_loop(tmp_path, user="alice")
     seen = []
     monkeypatch.setattr(
         Group,
@@ -568,9 +568,9 @@ def test_the_job_records_the_test_as_the_owners(tmp_path, monkeypatch):
         or tmp_path,
     )
 
-    assert run_mcor_test(tmp_path, None, group_id, "ana") == tmp_path
-    assert run_mcor_test(tmp_path, None, group_id, "ana", whole=True) == tmp_path
-    assert seen == [(group_id, "ana", False), (group_id, "ana", True)]
+    assert run_mcor_test(tmp_path, None, group_id, "alice") == tmp_path
+    assert run_mcor_test(tmp_path, None, group_id, "alice", whole=True) == tmp_path
+    assert seen == [(group_id, "alice", False), (group_id, "alice", True)]
 
 
 # --------------------------------------------------------------------------- #
@@ -634,7 +634,7 @@ def test_a_grid_that_cannot_run_is_refused(runs, message):
 
 
 def test_a_sweep_is_a_baseline_then_every_run_at_once(tmp_path, slurm):
-    _, group_id = a_loop(tmp_path, user="ana")
+    _, group_id = a_loop(tmp_path, user="alice")
 
     assert submit_mcor_sweep(tmp_path, None, group_id, GRID) == ("4242", "4242")
 
@@ -653,7 +653,7 @@ def test_a_sweep_is_a_baseline_then_every_run_at_once(tmp_path, slurm):
 
     sweep = json.loads((folder / "sweeps" / f"g{group_id}.json").read_text())
     assert (sweep["user"], sweep["baseline_job"], sweep["array_job"]) == (
-        "ana",
+        "alice",
         "4242",
         "4242",
     )
@@ -663,7 +663,7 @@ def test_a_sweep_is_a_baseline_then_every_run_at_once(tmp_path, slurm):
 def test_the_runs_take_the_baselines_reference_and_levels(tmp_path, slurm, monkeypatch):
     from odyn.groups import Group
 
-    db, group_id = a_loop(tmp_path, user="ana")
+    db, group_id = a_loop(tmp_path, user="alice")
     submit_mcor_sweep(tmp_path, None, group_id, GRID)
     sweep = cluster_folder(tmp_path) / "sweeps" / f"g{group_id}.json"
     asked = []
@@ -677,7 +677,7 @@ def test_the_runs_take_the_baselines_reference_and_levels(tmp_path, slurm, monke
     run_mcor_sweep(sweep, 2)
 
     (user, first), (_, second) = asked
-    assert user == "ana"
+    assert user == "alice"
     assert first["run"] == "rigid" and "pw_rigid" not in first
     assert "movie" not in first and "levels" not in first  # the raw video's
     assert first["side_by_side"] is False
@@ -734,7 +734,7 @@ def test_a_picked_test_is_recorded_and_only_corrected_when_new(tmp_path):
     assert group.pick_mcor_candidate(run="s128", settings=PIECEWISE) is True
 
     calls = db.latest_calls("pick_mcor_candidate")
-    assert calls["user"].tolist() == ["ana"] * 3
+    assert calls["user"].tolist() == ["alice"] * 3
     assert calls["output_correct"].tolist() == [True, False, True]
 
     with pytest.raises(ValueError, match="Unknown settings run"):
@@ -779,7 +779,7 @@ def test_the_tick_corrects_with_the_test_picked_once(tmp_path, slurm, monkeypatc
     )
 
     # Refused while the last whole correction runs: both write the same files
-    submit_mcor_test(tmp_path, None, group_id, user="ana", whole=True)
+    submit_mcor_test(tmp_path, None, group_id, user="alice", whole=True)
     (tmp_path / "queue.txt").write_text("4242 RUNNING\n")
     with pytest.raises(ValueError, match="has not finished yet"):
         pick_candidate(db, group_id, "s128_o64_d6", run)
@@ -787,7 +787,7 @@ def test_the_tick_corrects_with_the_test_picked_once(tmp_path, slurm, monkeypatc
     (tmp_path / "queue.txt").write_text("")
     log = cluster_folder(tmp_path) / "jobs" / f"odyn-mcor-main-g{group_id}-4242.out"
     log.write_text("started  ...\nfinished now\n")
-    picker = Database(tmp_path, user="bo")
+    picker = Database(tmp_path, user="bob")
     assert pick_candidate(picker, group_id, "s128_o64_d6", run) is True
 
     def submitted():
@@ -802,7 +802,7 @@ def test_the_tick_corrects_with_the_test_picked_once(tmp_path, slurm, monkeypatc
     script = (
         cluster_folder(tmp_path) / "jobs" / f"mcor-test-g{group_id}.sh"
     ).read_text()
-    assert f"--group {group_id} --user bo --whole --settings" in script
+    assert f"--group {group_id} --user bob --whole --settings" in script
     assert "--label 's128_o64_d6 (all)'" in script
     assert "#SBATCH --time=12:00:00" in script
     sent = json.loads(
@@ -820,7 +820,9 @@ def test_the_tick_corrects_with_the_test_picked_once(tmp_path, slurm, monkeypatc
         "odyn.groups.Group.test_motion_correction",
         lambda self, **kwargs: seen.update(kwargs) or tmp_path,
     )
-    run_mcor_test(tmp_path, None, group_id, "bo", True, sent["settings"], sent["label"])
+    run_mcor_test(
+        tmp_path, None, group_id, "bob", True, sent["settings"], sent["label"]
+    )
     assert seen == {"whole": True, **PIECEWISE, "label": "s128_o64_d6 (all)"}
 
 
@@ -933,7 +935,7 @@ def test_the_tick_records_which_jobs_stopped_for_the_app(tmp_path, slurm, monkey
     from odyn.cluster import mcor_tests, record_job_states
 
     db, group_id = a_loop(tmp_path)
-    submit_mcor_test(tmp_path, None, group_id, user="ana", whole=True)
+    submit_mcor_test(tmp_path, None, group_id, user="alice", whole=True)
     logs = cluster_folder(tmp_path) / "jobs"
     (logs / f"odyn-mcor-main-g{group_id}-4242.out").write_text("started\nKilled\n")
 
@@ -965,7 +967,7 @@ def test_stopped_jobs_run_again_once_with_their_settings(tmp_path, slurm):
         tmp_path,
         None,
         group_id,
-        user="ana",
+        user="alice",
         whole=True,
         settings=PIECEWISE,
         label="s128 (all)",
@@ -977,7 +979,7 @@ def test_stopped_jobs_run_again_once_with_their_settings(tmp_path, slurm):
             {"strides_um": [64, 64], "overlap_um": [32, 32], "max_deviation_um": 3},
         ]
     }
-    submit_mcor_sweep(tmp_path, None, group_id, grid, user="ana")
+    submit_mcor_sweep(tmp_path, None, group_id, grid, user="alice")
     names = [run["run"] for run in sweep_runs(grid)]
 
     def submit():
@@ -1027,7 +1029,7 @@ def test_old_experiments_are_corrected_in_batches(tmp_path, slurm):
 
     # Three experiments never tested, by two people, through two objectives
     for seed, (mouse, objective, user) in enumerate(
-        ((1, 20, "ana"), (2, 10, "bo"), (3, 20, "bo"))
+        ((1, 20, "alice"), (2, 10, "bob"), (3, 20, "bob"))
     ):
         generate(
             tmp_path,
@@ -1072,7 +1074,7 @@ def test_old_experiments_are_corrected_in_batches(tmp_path, slurm):
         "1 more waiting for the next batch",
     ]
     sent = json.loads((cluster_folder(tmp_path) / "mcor" / "1.json").read_text())
-    assert sent["whole"] and sent["user"] == "ana"
+    assert sent["whole"] and sent["user"] == "alice"
 
     # The next batch: what was sent is not again; no grid for 10x yet
     assert mcor_backfill(tmp_path, None, batch=4) == [
@@ -1082,5 +1084,5 @@ def test_old_experiments_are_corrected_in_batches(tmp_path, slurm):
         "4242 and 4242",
     ]
     sent = json.loads((cluster_folder(tmp_path) / "mcor" / "3.json").read_text())
-    assert sent["user"] == "bo"
+    assert sent["user"] == "bob"
     assert slurm.read_text().count("sbatch") == 6

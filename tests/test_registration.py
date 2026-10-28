@@ -118,7 +118,7 @@ def test_run_motion_correction_hands_caiman_one_reference(tmp_path, monkeypatch)
         width=40,
         start=datetime(2026, 3, 4, 9),
     )
-    db = Database(tmp_path, can_create=True, user="ana")
+    db = Database(tmp_path, can_create=True, user="alice")
     db.set_mouse(mouse_id=1)
     session_id = db.add_session(mouse_id=1, session_date="2026-03-04")
     exp_id = db.add_experiment(

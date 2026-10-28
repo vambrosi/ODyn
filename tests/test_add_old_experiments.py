@@ -43,10 +43,10 @@ def test_old_experiments_are_added_as_who_recorded_them(tmp_path, monkeypatch, c
     table = tmp_path / "old.csv"
     table.write_text(
         "exp_path,user,objective,log\n"
-        "20260707/m1/e1,ana,20,x.xlsx\n"
-        "20260707/m1/e2,ana,10,x.xlsx\n"
-        "20260707/m2/e1,bo,,x.xlsx\n"
-        "20260707/m3/e1,bo,20,x.xlsx\n"
+        "20260707/m1/e1,alice,20,x.xlsx\n"
+        "20260707/m1/e2,alice,10,x.xlsx\n"
+        "20260707/m2/e1,bob,,x.xlsx\n"
+        "20260707/m3/e1,bob,20,x.xlsx\n"
     )
 
     # Said first, a missing folder too
@@ -55,7 +55,7 @@ def test_old_experiments_are_added_as_who_recorded_them(tmp_path, monkeypatch, c
         == 1
     )
     said = capsys.readouterr().out
-    assert "would add 20260707/m1/e1 as ana, 20x" in said
+    assert "would add 20260707/m1/e1 as alice, 20x" in said
     assert "20260707/m2/e1: no objective" in said
     assert "20260707/m3/e1: no such folder" in said
     assert Database(tmp_path, project="old").experiments.empty
@@ -69,7 +69,7 @@ def test_old_experiments_are_added_as_who_recorded_them(tmp_path, monkeypatch, c
     assert sorted(db.experiments["objective"].tolist()) == [10, 20]
     assert len(db.sessions) == 1  # one mouse, one day
     links = db.group_experiments
-    assert {experiment_owner(db, int(g)) for g in links.index} == {"ana"}
+    assert {experiment_owner(db, int(g)) for g in links.index} == {"alice"}
 
     # Again: nothing twice
     run(tmp_path, table, "--project", "old", monkeypatch=monkeypatch)

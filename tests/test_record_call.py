@@ -173,7 +173,7 @@ def consume(db):
 
 
 def test_calls_record_who_where_and_with_what(tmp_path, monkeypatch):
-    monkeypatch.setenv("ODYN_USER", "ana")
+    monkeypatch.setenv("ODYN_USER", "alice")
     db = Database(tmp_path, can_create=True)
 
     produce(db)
@@ -181,7 +181,7 @@ def test_calls_record_who_where_and_with_what(tmp_path, monkeypatch):
     user, name, module, code, environment, consumed = recorded_calls(db)[0]
 
     assert (user, name, module, consumed) == (
-        "ana",
+        "alice",
         "Database.produce",
         "test_record_call",
         None,

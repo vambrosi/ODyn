@@ -305,11 +305,11 @@ def test_users_are_added_and_retired_from_the_command_line(admin):
     from odyn.admin import main
 
     folder = str(admin.main_folder)
-    assert main([folder, "add-user", "ana", "Ana Silva"]) == 0
+    assert main([folder, "add-user", "alice", "Alice Smith"]) == 0
 
     users = admin.db.users.set_index("user_name")
-    assert users.loc["ana", "display_name"] == "Ana Silva"
-    assert not users.loc["ana", "retired"]
+    assert users.loc["alice", "display_name"] == "Alice Smith"
+    assert not users.loc["alice", "retired"]
 
-    assert main([folder, "retire-user", "ana"]) == 0
-    assert admin.db.users.set_index("user_name").loc["ana", "retired"]
+    assert main([folder, "retire-user", "alice"]) == 0
+    assert admin.db.users.set_index("user_name").loc["alice", "retired"]

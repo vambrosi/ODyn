@@ -31,7 +31,7 @@ SETTLED = T0 + timedelta(minutes=11)
 def a_day(tmp_path, *, acqs_per_loop=3, bursts=3, objective=20):
     """
     Three TIFFs of loop e1 (ScanImage set to `acqs_per_loop`), a sync file
-    with `bursts`, and the draft of that day, queued as Ana's.
+    with `bursts`, and the draft of that day, queued as Alice's.
     """
     generate(
         tmp_path,
@@ -43,13 +43,13 @@ def a_day(tmp_path, *, acqs_per_loop=3, bursts=3, objective=20):
     )
     generate_sync(tmp_path / SYNC, acquisitions=bursts, frames=56)
 
-    db = Database(tmp_path, can_create=True, user="ana")
-    db.add_user(user_name="ana")
+    db = Database(tmp_path, can_create=True, user="alice")
+    db.add_user(user_name="alice")
     db.set_mouse(mouse_id=1)
 
     draft = Draft.start(tmp_path / "drafts", mouse_id=1, date="2026-01-01")
     draft.set_part("e1", objective=objective)
-    path = enqueue(draft, tmp_path, user="ana")
+    path = enqueue(draft, tmp_path, user="alice")
 
     return db, draft, path
 
@@ -72,11 +72,11 @@ def test_a_complete_draft_is_added_once_the_copy_settles(tmp_path):
 
     # Added as the person who submitted it, and moved out of the queue
     assert len(db.experiments) == 1
-    assert db.latest_calls("add_experiment").iloc[0]["user"] == "ana"
+    assert db.latest_calls("add_experiment").iloc[0]["user"] == "alice"
     assert queued(tmp_path) == []
     done = queue_folder(tmp_path) / "done"
     assert (done / path.name).exists()
-    assert path.name == f"{draft.path.stem}-ana.json"  # two people's never clash
+    assert path.name == f"{draft.path.stem}-alice.json"  # two people's never clash
     assert '"state": "done"' in (done / f"{path.stem}.state.json").read_text()
 
     # The queued copy kept what ingest made of it
@@ -138,7 +138,7 @@ def test_a_typed_problem_waits_for_the_draft_to_come_again(tmp_path):
 
     # ...submitting the draft again, fixed, does
     draft.set_part("e1", objective=20)
-    enqueue(draft, tmp_path, user="ana")
+    enqueue(draft, tmp_path, user="alice")
     process_submissions(tmp_path, now=SETTLED + timedelta(hours=2))
     [line] = process_submissions(tmp_path, now=SETTLED + timedelta(hours=3))
     assert line.endswith("added as session 1")
@@ -257,10 +257,10 @@ def test_the_tick_tests_each_loop_it_adds_once(tmp_path, slurm):
     # By default the final rigid correction: every acquisition, a longer job
     # with more scratch, the report on the test's
     script = (cluster_folder(tmp_path) / "jobs" / "mcor-test-g1.sh").read_text()
-    assert "run-mcor-test --group 1 --user ana --whole" in script
+    assert "run-mcor-test --group 1 --user alice --whole" in script
     # The log says which experiment, first
     assert (
-        "\necho 'Whole rigid motion correction of group 1 (20260101/m1/e1) for ana'\n"
+        "\necho 'Whole rigid motion correction of group 1 (20260101/m1/e1) for alice'\n"
         in script
     )
     assert "#SBATCH --time=6:00:00" in script
@@ -276,12 +276,12 @@ def test_the_tick_tests_each_loop_it_adds_once(tmp_path, slurm):
     # status says where it is
     (tmp_path / "queue.txt").write_text("4242 RUNNING\n")
     assert "Tests:      1 submitted, 1 running" in status(tmp_path)
-    assert "  running   group 1 rigid (all) for ana, job 4242" in status(tmp_path)
+    assert "  running   group 1 rigid (all) for alice, job 4242" in status(tmp_path)
 
     (tmp_path / "queue.txt").write_text("")
     log = cluster_folder(tmp_path) / "jobs" / "odyn-mcor-main-g1-4242.out"
     log.write_text("started  ...\nTraceback ...\n")
-    assert "group 1 rigid (all) for ana, job 4242" in status(tmp_path)
+    assert "group 1 rigid (all) for alice, job 4242" in status(tmp_path)
     assert ": see odyn-mcor-main-g1-4242.out" in status(tmp_path)
 
     # Why, when Slurm says it at the end
@@ -341,7 +341,7 @@ def test_the_tick_sweeps_each_loop_it_adds_with_a_grid(tmp_path, slurm):
     (tmp_path / "queue.txt").write_text("4242_1 PENDING\n")
     said = status(tmp_path)
     assert "Sweeps:     2 runs" in said
-    assert "  pending   group 1 s96_o48_d6 for ana, job 4242_1" in said
+    assert "  pending   group 1 s96_o48_d6 for alice, job 4242_1" in said
 
 
 def test_the_tick_can_leave_the_tests_out(tmp_path, slurm):

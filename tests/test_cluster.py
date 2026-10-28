@@ -40,19 +40,19 @@ def a_loop(tmp_path, **options):
 
 def test_a_request_runs_as_the_person_who_sent_it(tmp_path):
     db = a_loop(tmp_path)
-    path = send_request(tmp_path, "process_sync", user="ana", exp_id=1)
+    path = send_request(tmp_path, "process_sync", user="alice", exp_id=1)
     assert pending_requests(tmp_path) == [path]
 
     report = tick(tmp_path)
 
-    assert report.applied == ["process_sync(exp_id=1) for ana"]
+    assert report.applied == ["process_sync(exp_id=1) for alice"]
     assert report.processed == []  # processed by the request, not again
     assert pending_requests(tmp_path) == []
     done = json.loads((path.parent / "done" / path.name).read_text())
-    assert done["error"] is None and done["user"] == "ana"
+    assert done["error"] is None and done["user"] == "alice"
 
     call = db.latest_calls("process_sync").iloc[0]
-    assert call["user"] == "ana" and call["call_flag"] == 0
+    assert call["user"] == "alice" and call["call_flag"] == 0
 
 
 def test_requests_for_anything_else_are_refused(tmp_path):
