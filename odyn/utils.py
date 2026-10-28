@@ -31,8 +31,10 @@ import pandas as pd
 # Constants
 # --------------------------------------------------------------------------- #
 
-CHECK = "\033[1;32m✔\033[0m"
-CROSS = "\033[1;31m✘\033[0m"
+# Plain marks: a terminal shows them in color (see `colored`), what is stored
+# keeps the plain character
+CHECK = "✔"
+CROSS = "✘"
 
 ODYN_FOLDER = ".odyn"
 INFO_FOLDER = ".odyn/olfactometer/Log/Info"
@@ -676,39 +678,144 @@ def record_call(func):
 # --------------------------------------------------------------------------- #
 
 
-class _ColorFormatter(logging.Formatter):
-    _COLORS = {
-        logging.DEBUG: "\033[0;37m",  # grey
-        logging.INFO: "\033[1;34m",  # bold blue
-        logging.WARNING: "\033[1;33m",  # bold yellow
-        logging.ERROR: "\033[1;31m",  # bold red
-    }
-    _RESET = "\033[0m"
+# One format for every log line, wherever it goes: the terminal, a job's
+# output file, the database (`record_call`). Color is added only where it is
+# shown (a terminal or a notebook), never stored: escape codes in a file or a
+# database get in the way of searching and of anything else that reads them.
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# Terminal colors: of each level's name, and of the marks
+LEVEL_COLORS = {
+    logging.DEBUG: "\033[0;37m",  # grey
+    logging.INFO: "\033[1;34m",  # bold blue
+    logging.WARNING: "\033[1;33m",  # bold yellow
+    logging.ERROR: "\033[1;31m",  # bold red
+    logging.CRITICAL: "\033[1;31m",
+}
+MARK_COLORS = {CHECK: "\033[1;32m", CROSS: "\033[1;31m"}
+RESET = "\033[0m"
+ESCAPE = re.compile(r"\033\[[0-9;]*m")
+
+# caiman's own log, sent to ours (see `_ToOdyn`), at this level: its INFO
+# lines are the steps of a motion correction (a few per acquisition); DEBUG
+# is every frame and iteration
+CAIMAN_LEVEL = logging.INFO
+
+
+def colored(text: str) -> str:
+    """`text` with its marks (`CHECK`, `CROSS`) in their terminal colors."""
+    for mark, code in MARK_COLORS.items():
+        text = text.replace(mark, f"{code}{mark}{RESET}")
+
+    return text
+
+
+def plain(text: str) -> str:
+    """`text` without terminal colors (logs stored before they were left out)."""
+    return ESCAPE.sub("", text)
+
+
+def log_message(record: logging.LogRecord) -> str:
+    """A record's message, said to be caiman's when it is."""
+    message = record.getMessage()
+
+    return f"caiman: {message}" if record.name.startswith("caiman") else message
+
+
+class _Formatter(logging.Formatter):
+    """`LOG_FORMAT`; with `color`, the level and the marks in color."""
+
+    def __init__(self, color: bool = False):
+        super().__init__(LOG_FORMAT, LOG_DATE_FORMAT)
+        self.color = color
+
+    def formatMessage(self, record: logging.LogRecord) -> str:  # noqa: N802
+        message = log_message(record)
+        level = record.levelname
+
+        if self.color:
+            code = LEVEL_COLORS.get(record.levelno, "")
+            level = f"{code}{level}{RESET}" if code else level
+            message = colored(message)
+
+        return f"{record.asctime} [{level}] {message}"
+
+
+class _ConsoleHandler(logging.StreamHandler):
+    """
+    The console: in color on a terminal or in a notebook (which shows
+    terminal colors), plain into a file (a job's output, a redirect).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.plain = _Formatter()
+        self.color = _Formatter(color=True)
 
     def format(self, record: logging.LogRecord) -> str:
-        color = self._COLORS.get(record.levelno, "")
-        result = f"[{color}{record.levelname}{self._RESET}] {record.getMessage()}"
-
-        # Add error stack trace to log
-        if record.exc_info:
-            if not record.exc_text:
-                record.exc_text = self.formatException(record.exc_info)
-        if record.exc_text:
-            result += "\n" + record.exc_text
-
-        return result
+        return (self.color if _shows_color(self.stream) else self.plain).format(record)
 
 
-_plain_formatter = logging.Formatter("[%(levelname)s] %(message)s")
+def _ipython_shell():
+    """
+    The IPython shell Python runs in, or `None`. Not just whether IPython
+    was imported: caiman imports it (with ipykernel) in any script.
+    """
+    ipython = sys.modules.get("IPython")
+
+    try:
+        return None if ipython is None else ipython.get_ipython()
+    except Exception:  # an IPython too old, or half imported
+        return None
+
+
+def _shows_color(stream) -> bool:
+    shell = _ipython_shell()
+
+    if type(shell).__name__ == "ZMQInteractiveShell":  # a notebook
+        return True
+
+    try:
+        return stream.isatty()
+    except (AttributeError, ValueError):  # no stream, or a closed one
+        return False
+
+
+class _ToOdyn(logging.Handler):
+    """Hands caiman's records to odyn's logger: the same lines, the same places."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        logger.handle(record)
+
+
+def interactive() -> bool:
+    """
+    Whether Python runs for a person typing: a notebook, IPython, or the
+    `python` prompt (not a script, a job or a command).
+    """
+    return (
+        hasattr(sys, "ps1")
+        or bool(sys.flags.interactive)
+        or _ipython_shell() is not None
+    )
+
+
+_plain_formatter = _Formatter()
 
 logger = logging.getLogger("odyn")
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
 
 if not logger.handlers:
-    _console_handler = logging.StreamHandler()
-    _console_handler.setFormatter(_ColorFormatter())
-    logger.addHandler(_console_handler)
+    logger.addHandler(_ConsoleHandler())
+
+_caiman_logger = logging.getLogger("caiman")
+
+if not any(isinstance(h, _ToOdyn) for h in _caiman_logger.handlers):
+    _caiman_logger.addHandler(_ToOdyn())
+    _caiman_logger.setLevel(CAIMAN_LEVEL)
+    _caiman_logger.propagate = False  # once, not again by the root's
 
 
 def jsonable(value):

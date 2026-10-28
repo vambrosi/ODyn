@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..utils import colored, log_message
 from .style import PANEL_FONT_PT, text_style
 from .symbols import icon
 
@@ -98,7 +99,9 @@ class _PanelFormatter(logging.Formatter):
         code = LEVEL_CODES.get(record.levelno, "")
         reset = "\033[0m" if code else ""
 
-        return f"{record.asctime} {code}{record.levelname}{reset} {record.message}"
+        message = colored(log_message(record))
+
+        return f"{record.asctime} {code}{record.levelname}{reset} {message}"
 
 
 class _LogSignal(QObject):

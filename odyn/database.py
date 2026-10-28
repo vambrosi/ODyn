@@ -3,6 +3,7 @@ import math
 import os
 import re
 import sqlite3
+import sys
 
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -68,7 +69,7 @@ from .utils import (
     logger,
     record_call,
 )
-from .utils import _method_calls_dataframe, _read_table
+from .utils import _method_calls_dataframe, _read_table, _shows_color, colored, plain
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -877,6 +878,24 @@ class Database(CallRecorder):
                 )
 
         return frame
+
+    def call_log(self, call_id: int) -> None:
+        """
+        Print the log of recorded call `call_id`, a line each: in color on a
+        terminal or in a notebook, plain elsewhere.
+
+        **EXAMPLE**
+        ```python
+        db.call_log(1332)
+        ```
+        """
+        calls = self.method_calls
+
+        if call_id not in calls.index:
+            raise ValueError(f"There is no recorded call {call_id}.")
+
+        text = plain(str(calls.loc[call_id, "call_log"] or "")).rstrip("\n")
+        print(colored(text) if _shows_color(sys.stdout) else text)
 
     def latest_calls(self, method_name: str) -> pd.DataFrame:
         """
