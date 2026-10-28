@@ -8,6 +8,7 @@ from pathlib import Path
 
 from odyn.app.cache import (
     HERE,
+    Listing,
     NEWER,
     NOT_HERE,
     cache_root,
@@ -70,6 +71,31 @@ def test_only_a_tests_own_small_files_are_copied(tmp_path):
     heard.clear()
     download(main, folder, base, progress=lambda name, n: n or heard.append(name))
     assert heard == []
+
+
+def test_a_reload_lists_each_folder_on_the_share_once(tmp_path, monkeypatch):
+    import odyn.app.cache as module
+
+    main, base = tmp_path / "share", tmp_path / ".odyn"
+    folder = a_test(main)
+    download(main, folder, base)
+    listed = []
+    scan = module._scan
+    monkeypatch.setattr(
+        module, "_scan", lambda path: listed.append(Path(path)) or scan(path)
+    )
+
+    # Every question about the folder, from one listing of it on the share
+    listing = Listing()
+    assert len(small_files(folder, listing)) == 6
+    assert remote_size(folder, listing) == 410
+    assert state(main, folder, base, listing) == HERE
+    assert state(main, folder, base, listing) == HERE
+    assert listed.count(folder) == 1  # the copy here is listed for each state
+
+    # The same answers as asked one by one
+    assert small_files(folder) == small_files(folder, Listing())
+    assert state(main, folder, base) == HERE
 
 
 def test_a_file_changed_on_the_share_is_copied_again(tmp_path):

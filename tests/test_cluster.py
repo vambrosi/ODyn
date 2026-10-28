@@ -213,3 +213,20 @@ def test_an_arrays_waiting_tasks_are_found_in_squeues_list():
     assert _queued("21_7", queue) is None
     assert _queued("30", queue) == "RUNNING"
     assert _queued("31", queue) is None
+
+
+def test_a_jobs_state_off_the_cluster_reads_little(tmp_path, monkeypatch):
+    from odyn.cluster import _job_state, _last_line
+
+    # Only the end of a long log is read
+    log = tmp_path / "odyn-mcor-main-g1-7.out"
+    log.write_text("caiman: Saving file as ...\n" * 50_000 + "finished now\n")
+    assert _last_line(log) == "finished now"
+
+    # A job the last tick saw end is over: its log is not read again
+    def no(*_):
+        raise AssertionError("read the log")
+
+    monkeypatch.setattr("odyn.cluster._last_line", no)
+    assert _job_state("7", log, None, recorded="stopped") == "stopped"
+    assert _job_state("7", log, None, recorded="finished") == "finished"

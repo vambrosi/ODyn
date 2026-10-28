@@ -1684,14 +1684,15 @@ def mcor_tests(main_folder: str | Path, project: None | str = None) -> list[dict
     """
     folder = cluster_folder(main_folder, project)
     in_queue = _slurm_jobs()
+    logs = _job_logs(folder)
     tests = []
 
     for path in (folder / MCOR_FOLDER).glob("*.json"):
         test = json.loads(path.read_text())
         recorded = test.get("state")
         name = f"odyn-mcor-{project or 'main'}-g{test['group_id']}"
-        log = folder / JOBS_FOLDER / f"{name}-{test['job_id']}.out"
-        test["log"] = log if log.is_file() else None
+        log = f"{name}-{test['job_id']}.out"
+        test["log"] = folder / JOBS_FOLDER / log if log in logs else None
         test["state"] = _job_state(str(test["job_id"]), test["log"], in_queue, recorded)
         tests.append(test)
 
@@ -1707,6 +1708,7 @@ def mcor_sweep_runs(main_folder: str | Path, project: None | str = None) -> list
     """
     folder = cluster_folder(main_folder, project)
     in_queue = _slurm_jobs()
+    logs = _job_logs(folder)
     sweeps = []
 
     for path in (folder / SWEEPS_FOLDER).glob("g*.json"):
@@ -1722,8 +1724,8 @@ def mcor_sweep_runs(main_folder: str | Path, project: None | str = None) -> list
         recorded = sweep.get("states") or {}
 
         for run, job_id in sweep_jobs(sweep):
-            log = folder / JOBS_FOLDER / f"{name}-{job_id}.out"
-            log = log if log.is_file() else None
+            log = f"{name}-{job_id}.out"
+            log = folder / JOBS_FOLDER / log if log in logs else None
             runs.append(
                 {
                     "group_id": int(sweep["group_id"]),
@@ -1763,6 +1765,9 @@ def _job_state(
     A job's state for `mcor_tests` (`<array>_<task>` for an array's task).
     Off the cluster, `recorded` (by the last tick) stands in for `squeue`.
     """
+    if in_queue is None and recorded in ENDED:  # over: its log says no more
+        return recorded
+
     queued = None if in_queue is None else _queued(job_id, in_queue)
 
     if queued is not None:
@@ -1872,8 +1877,28 @@ def _slurm_jobs() -> None | dict[str, str]:
     )
 
 
+def _job_logs(folder: Path) -> set[str]:
+    """
+    The names of the job logs in `folder`'s `jobs/`, in one listing (on a
+    network share, asking about each file is a round trip).
+    """
+    try:
+        return {entry.name for entry in os.scandir(folder / JOBS_FOLDER)}
+    except OSError:
+        return set()
+
+
+# How much of the end of a log `_last_line` reads: logs grow long
+TAIL_BYTES = 8192
+
+
 def _last_line(path: Path) -> str:
-    lines = path.read_text(errors="replace").strip().splitlines()
+    with open(path, "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        handle.seek(max(0, handle.tell() - TAIL_BYTES))
+        tail = handle.read().decode(errors="replace")
+
+    lines = tail.strip().splitlines()
 
     return lines[-1] if lines else ""
 

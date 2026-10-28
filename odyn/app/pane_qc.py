@@ -304,6 +304,7 @@ def my_tests(
     mine: pd.DataFrame,
     base: None | Path = None,
     everyone: bool = False,
+    listing: None | cache.Listing = None,
 ) -> pd.DataFrame:
     """
     The test motion corrections of `user`'s experiments (`everyone`: of every
@@ -313,8 +314,10 @@ def my_tests(
     state and, once a report is there, a few of its numbers and whether it
     is downloaded (`local`, see `cache.state`; `base` is where the cache
     is). `folder` is where the report is, `bytes` what downloading it copies,
-    `experiment_folder` where the experiment's tests are.
+    `experiment_folder` where the experiment's tests are. `listing` keeps
+    what was seen of each folder for this reload (see `cache.Listing`).
     """
+    listing = listing or cache.Listing()
     jobs = [
         {**test, "run": None}
         for test in mcor_tests(db.main_folder, db.project)
@@ -333,6 +336,8 @@ def my_tests(
     links = db.group_experiments
     paths = db.experiments["exp_path"]
     rows = []
+    groups = None
+    tops: dict[int, Path] = {}  # each group's test folder, asked once
 
     for job in jobs:
         group_id = int(job["group_id"])
@@ -340,8 +345,13 @@ def my_tests(
         if group_id not in links.index:
             continue
 
+        if group_id not in tops:
+            groups = groups if groups is not None else db.groups
+            tops[group_id] = groups[group_id].mcor_test_folder()
+
         exp_ids = links.loc[[group_id], "exp_id"].astype(int)
-        folder = db.groups[group_id].mcor_test_folder(job["run"])
+        top = tops[group_id]
+        folder = top / job["run"] if job["run"] else top
         times = [submitted[i] for i in exp_ids if i in submitted]
         row = {
             "submitted_at": max(times) if times else None,
@@ -356,7 +366,7 @@ def my_tests(
             "folder": str(folder),
             "bytes": 0,
             "group_id": group_id,
-            "experiment_folder": str(db.groups[group_id].mcor_test_folder()),
+            "experiment_folder": str(top),
             "pick_call_id": job.get("pick_call_id"),
             # What `Group.run_again` calls it
             "job": job["run"] or CORRECTION_RUN,
@@ -364,19 +374,24 @@ def my_tests(
             "user": job["user"],
         }
 
-        if job["state"] == "finished" and (folder / "metrics.json").is_file():
-            try:
-                numbers = run_numbers(folder)
-            except (OSError, ValueError):
-                numbers = {}
+        files = listing.files(folder) if job["state"] == "finished" else {}
 
+        if "metrics.json" in files:
+            local = cache.state(db.main_folder, folder, base, listing)
+            # Read from this computer's copy when it is the same
+            read = (
+                cache.local_folder(db.main_folder, folder, base)
+                if local == cache.HERE
+                else folder
+            )
+            numbers = _run_numbers(read, files)
             row |= {key: numbers.get(name) for key, name in TEST_NUMBERS.items()}
-            written = (folder / "metrics.json").stat().st_mtime
+            written = files["metrics.json"][1]
             row["finished_at"] = datetime.fromtimestamp(written).strftime(
                 "%Y-%m-%d %H:%M"
             )
-            row["local"] = cache.state(db.main_folder, folder, base)
-            row["bytes"] = cache.remote_size(folder)
+            row["local"] = local
+            row["bytes"] = cache.remote_size(folder, listing)
 
         rows.append(row)
 
@@ -386,6 +401,27 @@ def my_tests(
     return pd.DataFrame(rows, columns=[*TEST_COLUMNS, *TEST_HIDDEN])
 
 
+# A run's numbers, by folder and its files' sizes and times: read once
+_NUMBERS: dict[tuple, dict] = {}
+
+
+def _run_numbers(folder: Path, files: dict[str, tuple[int, float]]) -> dict:
+    """`run_numbers` of `folder`, read again only when its files changed."""
+    key = (
+        str(folder),
+        files.get("metrics.json"),
+        files.get("summary.csv"),
+    )
+
+    if key not in _NUMBERS:
+        try:
+            _NUMBERS[key] = run_numbers(folder)
+        except (OSError, ValueError):
+            return {}
+
+    return _NUMBERS[key]
+
+
 def my_experiments(
     tests: pd.DataFrame,
     main_folder: Path,
@@ -393,9 +429,11 @@ def my_experiments(
     picks: None | dict[int, dict] = None,
     checks: None | dict[int, list[int]] = None,
     approvals: None | dict[int, int] = None,
+    listing: None | cache.Listing = None,
 ) -> pd.DataFrame:
     """
-    One row per experiment of `tests` (from `my_tests`), in its order: its
+    One row per experiment of `tests` (from `my_tests`, with the same
+    `listing` to look at each folder once), in its order: its
     status (after a test was picked, from `picks`: see
     `cluster.latest_picks`), its raw check (from `checks`, see
     `latest_raw_checks`; the acquisitions excluded hidden in `excluded`;
@@ -409,6 +447,7 @@ def my_experiments(
     `finished`, its finished test runs (as `Run`s, with folders on the
     share), the cluster test first; not the whole corrections.
     """
+    listing = listing or cache.Listing()
     rows = []
 
     for group_id, runs in tests.groupby("group_id", sort=False):
@@ -448,9 +487,9 @@ def my_experiments(
         finished.sort(key=lambda run: run.folder != top)  # stable
         candidates = [top, *(top / name for name in EXPERIMENT_FOLDERS)]
         candidates += [run.folder for run in finished if run.folder != top]
-        folders = [folder for folder in candidates if cache.small_files(folder)]
-        size = sum(cache.remote_size(folder) for folder in folders)
-        here = {cache.state(main_folder, folder, base) for folder in folders}
+        folders = [folder for folder in candidates if listing.files(folder)]
+        size = sum(cache.remote_size(folder, listing) for folder in folders)
+        here = {cache.state(main_folder, folder, base, listing) for folder in folders}
 
         if not here:
             local = ""
@@ -875,6 +914,7 @@ class QcPane(QWidget):
         everyone = self.everyone.isChecked()
 
         def load(db):
+            listing = cache.Listing()  # each folder looked at once
             mine = my_recordings(db, user)
             recorded = my_recordings(db, user, everyone=True) if everyone else mine
             users = db.users
@@ -888,12 +928,13 @@ class QcPane(QWidget):
                 mine,
                 my_missing(db, mine),
                 my_experiments(
-                    my_tests(db, user, recorded, base, everyone),
+                    my_tests(db, user, recorded, base, everyone, listing),
                     db.main_folder,
                     base,
                     latest_picks(db),
                     latest_raw_checks(db),
                     latest_approvals(db),
+                    listing,
                 ),
                 cluster_line(db),
                 db.main_folder,
