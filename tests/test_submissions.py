@@ -3,6 +3,8 @@ The queue of submitted drafts: what the cluster's tick waits for, adds, and
 refuses (`odyn.app.submissions`).
 """
 
+import json
+
 from datetime import datetime, timedelta
 
 from odyn import Database
@@ -256,6 +258,11 @@ def test_the_tick_tests_each_loop_it_adds_once(tmp_path, slurm):
     # with more scratch, the report on the test's
     script = (cluster_folder(tmp_path) / "jobs" / "mcor-test-g1.sh").read_text()
     assert "run-mcor-test --group 1 --user ana --whole" in script
+    # The log says which experiment, first
+    assert (
+        "\necho 'Whole rigid motion correction of group 1 (20260101/m1/e1) for ana'\n"
+        in script
+    )
     assert "#SBATCH --time=6:00:00" in script
     assert "#SBATCH --gres=disk:200" in script
     assert "umask 0007" in script  # the lab's group can write what it makes
@@ -269,13 +276,23 @@ def test_the_tick_tests_each_loop_it_adds_once(tmp_path, slurm):
     # status says where it is
     (tmp_path / "queue.txt").write_text("4242 RUNNING\n")
     assert "Tests:      1 submitted, 1 running" in status(tmp_path)
-    assert "  running   group 1 for ana, job 4242" in status(tmp_path)
+    assert "  running   group 1 rigid (all) for ana, job 4242" in status(tmp_path)
 
     (tmp_path / "queue.txt").write_text("")
     log = cluster_folder(tmp_path) / "jobs" / "odyn-mcor-main-g1-4242.out"
     log.write_text("started  ...\nTraceback ...\n")
-    assert "group 1 for ana, job 4242" in status(tmp_path)
+    assert "group 1 rigid (all) for ana, job 4242" in status(tmp_path)
     assert ": see odyn-mcor-main-g1-4242.out" in status(tmp_path)
+
+    # Why, when Slurm says it at the end
+    log.write_text(
+        "started  ...\n[...] error: *** JOB 4242 ON cnode-10-19 CANCELLED AT "
+        "2026-10-28T04:49:05 DUE TO TIME LIMIT ***\n"
+    )
+    assert ": time limit, see odyn-mcor-main-g1-4242.out" in status(tmp_path)
+
+    sent = cluster_folder(tmp_path) / "mcor" / "1.json"
+    assert json.loads(sent.read_text())["path"] == "20260101/m1/e1"
 
     log.write_text("started  ...\nfinished 2026-01-01T21:00:00\n")
     assert "Tests:      1 submitted, 1 finished" in status(tmp_path)
@@ -294,8 +311,6 @@ def test_the_tick_can_submit_only_a_test(tmp_path, slurm):
 
 
 def test_the_tick_sweeps_each_loop_it_adds_with_a_grid(tmp_path, slurm):
-    import json
-
     a_day(tmp_path)
     add_now(next(iter(queued(tmp_path)))[0])
     grid = {
@@ -321,6 +336,12 @@ def test_the_tick_sweeps_each_loop_it_adds_with_a_grid(tmp_path, slurm):
     # Never twice: one test, a baseline and an array
     assert tick(tmp_path).tests == []
     assert slurm.read_text().count("sbatch") == 3
+
+    # status lists the sweep's runs by name
+    (tmp_path / "queue.txt").write_text("4242_1 PENDING\n")
+    said = status(tmp_path)
+    assert "Sweeps:     2 runs" in said
+    assert "  pending   group 1 s96_o48_d6 for ana, job 4242_1" in said
 
 
 def test_the_tick_can_leave_the_tests_out(tmp_path, slurm):

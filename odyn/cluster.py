@@ -71,7 +71,7 @@ import sys
 import time
 import uuid
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -504,6 +504,19 @@ def _submit_tests(
                     f"{where}: sweep of group {group_id}: "
                     f"{type(error).__name__}: {error}"
                 )
+
+
+def group_paths(db: Database, group_id: int) -> str:
+    """The experiment folders of `group_id`, as one line (for logs)."""
+    links = db.group_experiments
+
+    if group_id not in links.index:
+        return ""
+
+    paths = db.experiments["exp_path"]
+    exp_ids = links.loc[[group_id], "exp_id"].astype(int)
+
+    return ", ".join(str(paths.get(exp_id, exp_id)) for exp_id in exp_ids)
 
 
 def sweep_grid_for(config: ClusterConfig, objective: None | int) -> None | dict:
@@ -1215,8 +1228,12 @@ def mcor_test_script(
     whole: bool = False,
     settings: None | dict = None,
     label: None | str = None,
+    path: str = "",
 ) -> str:
-    """The job script of one test motion correction (see `submit_mcor_test`)."""
+    """
+    The job script of one test motion correction (see `submit_mcor_test`);
+    `path` is the experiment folder, said in its log.
+    """
     settings = settings or {}
     command = [
         *_odyn_command(main_folder, project),
@@ -1230,10 +1247,11 @@ def mcor_test_script(
         *(["--label", label] if label else []),
     ]
     kind = "piecewise rigid" if settings.get("pw_rigid") else "rigid"
+    where = f"group {group_id}" + (f" ({path})" if path else "")
     about = (
-        f"Whole {kind} motion correction of group {group_id} for {user}"
+        f"Whole {kind} motion correction of {where} for {user}"
         if whole
-        else f"Test motion correction of group {group_id} for {user}"
+        else f"Test motion correction of {where} for {user}"
     )
 
     if whole:
@@ -1311,6 +1329,7 @@ set +u
 conda activate {config.conda_env}
 set -u
 
+echo {shlex.quote(about)}
 echo "{name} as job ${{SLURM_JOB_ID:-none}} on $(hostname)"
 echo "cores    ${{SLURM_CPUS_PER_TASK:-?}}, temporary files in $CAIMAN_TEMP"
 echo "started  $(date --iso-8601=seconds)"
@@ -1344,16 +1363,27 @@ def submit_mcor_test(
     `mcor/<group_id>.json`. Returns the job id (`None` in a dry run, which only
     writes and shows the script).
     """
-    if user is None:
-        user = experiment_owner(Database(main_folder, project=project), group_id)
+    db = Database(main_folder, project=project)
 
+    if user is None:
+        user = experiment_owner(db, group_id)
+
+    path = group_paths(db, group_id)
     config = ClusterConfig.read(main_folder)
     folder = cluster_folder(main_folder, project)
     script = folder / JOBS_FOLDER / f"mcor-test-g{group_id}.sh"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(
         mcor_test_script(
-            main_folder, project, group_id, user, config, whole, settings, label
+            main_folder,
+            project,
+            group_id,
+            user,
+            config,
+            whole,
+            settings,
+            label,
+            path=path,
         )
     )
     job_id = _sbatch([str(script)], dry_run)
@@ -1366,6 +1396,7 @@ def submit_mcor_test(
         folder / MCOR_FOLDER / f"{group_id}.json",
         {
             "group_id": group_id,
+            "path": path,
             "job_id": job_id,
             "user": user,
             "whole": whole,
@@ -1479,7 +1510,10 @@ def submit_mcor_sweep(
             project,
             config,
             name=name,
-            about=f"One run of the sweep of group {group_id}, for {user}.",
+            about=(
+                f"One run of the sweep of group {group_id} "
+                f"({group_paths(db, group_id)}), for {user}"
+            ),
             # Task 0 is the baseline, the array's tasks the piecewise runs
             command=shlex.join(command) + ' --task "${SLURM_ARRAY_TASK_ID:-0}"',
             time=time or config.mcor_time,
@@ -1844,6 +1878,65 @@ def _last_line(path: Path) -> str:
     return lines[-1] if lines else ""
 
 
+def test_name(test: dict) -> str:
+    """
+    A test's name, as the app shows it: its label (a picked correction's
+    `<run> (all)`), `rigid (all)` for a whole one, else `test`.
+    """
+    return test.get("label") or ("rigid (all)" if test.get("whole") else "test")
+
+
+def _job_lines(
+    title: str, jobs: list[dict], name: Callable[[dict], str], what: str = "submitted"
+) -> list[str]:
+    """
+    For `status`: how many `jobs` (tests or sweep runs) in each state, then a
+    line for each not finished, by group and name, with why it stopped.
+    """
+    counts: dict[str, int] = {}
+
+    for job in jobs:
+        counts[job["state"]] = counts.get(job["state"], 0) + 1
+
+    lines = [
+        f"{title:<12}{len(jobs)} {what}"
+        + "".join(f", {n} {state}" for state, n in sorted(counts.items()))
+    ]
+
+    for job in jobs:  # the ones to look at
+        if job["state"] == "finished":
+            continue
+
+        line = (
+            f"  {job['state']:<9} group {job['group_id']} {name(job)} for "
+            f"{job['user']}, job {job['job_id']} ({job['submitted_at']})"
+        )
+
+        if job["state"] == "stopped" and job["log"]:
+            reason = stop_reason(job["log"])
+            line += f": {reason + ', ' if reason else ''}see {job['log'].name}"
+
+        lines.append(line)
+
+    return lines
+
+
+def stop_reason(log: Path) -> str:
+    """Why a job stopped, from the end of its log, when Slurm says it there."""
+    last = _last_line(log)
+
+    if "TIME LIMIT" in last:
+        return "time limit"
+
+    if "oom" in last.lower() or "OUT_OF_MEMORY" in last:
+        return "out of memory"
+
+    if "CANCELLED" in last:
+        return "cancelled"
+
+    return ""
+
+
 def queued_ticks(project: None | str = None) -> list[str]:
     """The ids of this database's ticks waiting or running in Slurm."""
     done = subprocess.run(
@@ -1924,27 +2017,9 @@ def status(main_folder: str | Path, project: None | str = None) -> str:
             lines.append(f"  failed    {path.name}: {state.message}")
 
     tests = mcor_tests(main_folder, project)
-    counts = {}
-
-    for test in tests:
-        counts[test["state"]] = counts.get(test["state"], 0) + 1
-
-    lines.append(
-        f"Tests:      {len(tests)} submitted"
-        + "".join(f", {n} {state}" for state, n in sorted(counts.items()))
-    )
-
-    for test in tests:  # the ones to look at
-        if test["state"] != "finished":
-            lines.append(
-                f"  {test['state']:<9} group {test['group_id']} for {test['user']}, "
-                f"job {test['job_id']} ({test['submitted_at']})"
-                + (
-                    f": see {test['log'].name}"
-                    if test["state"] == "stopped" and test["log"]
-                    else ""
-                )
-            )
+    lines += _job_lines("Tests:", tests, lambda test: test_name(test))
+    runs = mcor_sweep_runs(main_folder, project)
+    lines += _job_lines("Sweeps:", runs, lambda run: run["run"], "runs")
 
     rejected = sorted((folder / REQUESTS_FOLDER / REJECTED_FOLDER).glob("*.json"))
     lines.append(f"Rejected:   {len(rejected)} in total")
