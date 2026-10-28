@@ -1397,6 +1397,45 @@ def test_an_experiment_with_no_finished_test_is_not_compared(window, tmp_path):
     assert qc.download_all.text() == "Download all"
 
 
+def test_another_user_never_sees_the_rows_of_the_one_before(
+    window, tmp_path, monkeypatch
+):
+    import gc
+
+    monkeypatch.setenv("PATH", "")  # no squeue: off the cluster
+    db, _ = a_tested_experiment(tmp_path / "data", user="tester")
+    del db
+    gc.collect()
+
+    window.context.set_user("tester")
+    qc = window.qc
+    window.show_page(qc)
+    qc.reload()
+    settle(window.context)
+    assert len(qc.experiments) == 1
+
+    # Emptied at once, before the next user's rows are loaded
+    window.context.set_user("liz")
+    assert qc.experiments.empty
+    assert qc._model(qc.tests_view).rowCount() == 0
+    assert not qc.compare.isEnabled()
+    assert qc.who.text() == "Loading the to-do list of liz"
+    settle(window.context)
+    assert qc.experiments.empty
+
+    # A reload overtaken by a change of user drops its rows: none shown
+    model = qc._model(qc.tests_view)
+    shown = []
+    set_frame = model.set_frame
+    monkeypatch.setattr(
+        model, "set_frame", lambda frame: shown.append(len(frame)) or set_frame(frame)
+    )
+    window.context.set_user("tester")
+    window.context.set_user("liz")
+    settle(window.context)
+    assert qc.experiments.empty and not any(shown)
+
+
 def test_the_pi_sees_everyones_experiments_to_check(window, tmp_path, monkeypatch):
     import gc
 
@@ -1405,8 +1444,8 @@ def test_the_pi_sees_everyones_experiments_to_check(window, tmp_path, monkeypatc
     del db
     gc.collect()
 
-    # None of theirs, until they ask for all users experiments
-    window.context.set_user("pi")
+    # Someone else's: none of hers, until she asks for everyone's
+    window.context.set_user("liz")
     qc = window.qc
     window.show_page(qc)
     qc.reload()

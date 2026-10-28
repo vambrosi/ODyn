@@ -759,6 +759,7 @@ class QcPane(QWidget):
         self.windows: dict[str, McorWindow] = {}  # open, by experiment folder
         self.tab_names: list[str] = []
         self.tab_picked = False  # by the user, since the user last changed
+        self.loading = 0  # the latest reload: an older one's rows are dropped
 
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
@@ -907,6 +908,9 @@ class QcPane(QWidget):
 
     def reload(self) -> None:
         user = self.context.user
+        self.loading += 1
+        loading = self.loading
+
         if not user:
             self.who.setText("Pick a user to start")
 
@@ -941,6 +945,9 @@ class QcPane(QWidget):
             )
 
         def loaded(result):
+            if loading != self.loading:  # a later reload is on its way
+                return
+
             name, queue, mine, missing, experiments, (cluster, kind), main = result
             self.main_folder = main
 
@@ -997,8 +1004,34 @@ class QcPane(QWidget):
             self.tab_picked = True
 
     def _user_changed(self, *_) -> None:
+        """
+        Another user: the tables empty at once and fill with theirs, so
+        nothing of the user before can be acted on in between.
+        """
         self.tab_picked = False
+        self._clear()
         self.reload()
+
+    def _clear(self) -> None:
+        """Every table empty, until a reload fills them."""
+        self.queue = self.queue.iloc[0:0]
+        self.mine = self.mine.iloc[0:0]
+        self.mine_ids = []
+        self.experiments = self.experiments.iloc[0:0]
+
+        for view in (
+            self.queue_view,
+            self.recordings_view,
+            self.missing_view,
+            self.tests_view,
+        ):
+            self._model(view).set_frame(pd.DataFrame())
+
+        if self.context.user:
+            self.who.setText(f"Loading the to-do list of {self.context.user}")
+
+        self._count_tabs()
+        self._enable()
 
     # ----------------------------------------------------------------------- #
     # Actions
