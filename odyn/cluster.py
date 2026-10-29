@@ -43,10 +43,14 @@ python -m odyn.cluster <main_folder> mcor-test --group 7 [--whole] [--dry-run]
 python -m odyn.cluster <main_folder> mcor-sweep --group 7 --grid grid.json
 python -m odyn.cluster <main_folder> mcor-backfill --batch 4 [--objective 20]
 python -m odyn.cluster <main_folder> full-previews --group 7 --user ana
+python -m odyn.cluster <main_folder> full-report --group 7 [--group 8 ...]
+python -m odyn.cluster <main_folder> full-report --missing
 ```
 `full-previews` writes the full run's videos of a group corrected before
-they were written (`Group.save_full_previews`); run it on a node (`srun`),
-as it reads every acquisition.
+they were written (`Group.save_full_previews`), and `full-report` the
+report on every acquisition (`Group.full_report`; `--missing` lists the
+groups without one); run them on a node (`srun`), as they read every
+acquisition.
 
 **PYTHON**
 ```python
@@ -1646,6 +1650,37 @@ def run_mcor_sweep(sweep: str | Path, task: int) -> Path:
     )
 
 
+def groups_without_full_report(db: Database) -> list[tuple[int, str]]:
+    """
+    The groups whose correction is saved, aligned to a saved reference, but
+    with no report on every acquisition (`full/summary.csv`, see
+    `Group.full_report`): `(group_id, experiment folders)`.
+    """
+    from .groups import FULL_FOLDER
+
+    corrected = set(db.mcor_files.index)
+    links = db.group_experiments
+    missing = []
+
+    for group_id in sorted(set(links.index)):
+        group = db.groups[int(group_id)]
+        acq_ids = set(group.acquisitions.index)
+
+        if not acq_ids or not acq_ids <= corrected:
+            continue
+
+        if not group._reference_path().is_file():
+            continue
+
+        if (group.mcor_test_folder() / FULL_FOLDER / "summary.csv").is_file():
+            continue
+
+        where = ", ".join(str(p) for p in group.experiments["exp_path"])
+        missing.append((int(group_id), where))
+
+    return missing
+
+
 def experiment_owner(db: Database, group_id: int) -> str:
     """
     Who added the experiment of `group_id` (the user of its `add_experiment`
@@ -2147,6 +2182,15 @@ def main(argv: None | list[str] = None) -> int:
     previews.add_argument("--group", type=int, required=True)
     previews.add_argument("--user", help="whose (default: who added the experiment)")
 
+    full = commands.add_parser(
+        "full-report", help="write the report on every acquisition of a correction"
+    )
+    full.add_argument("--group", type=int, action="append", default=[])
+    full.add_argument(
+        "--missing", action="store_true", help="list the groups without one"
+    )
+    full.add_argument("--user", help="whose (default: who added the experiment)")
+
     ask = commands.add_parser("request", help="leave a request for the next tick")
     ask.add_argument("method", choices=REQUESTABLE)
     ask.add_argument("arguments", nargs="*", help="key=value")
@@ -2217,6 +2261,18 @@ def main(argv: None | list[str] = None) -> int:
         db = Database(args.main_folder, project=args.project, user=user)
         paths = db.groups[args.group].save_full_previews()
         print("Wrote " + ", ".join(str(path) for path in paths))
+
+    elif args.command == "full-report":
+        db = Database(args.main_folder, project=args.project)
+
+        if args.missing:
+            for group_id, where in groups_without_full_report(db):
+                print(f"  group {group_id}: {where}")
+
+        for group_id in args.group:
+            user = args.user or experiment_owner(db, group_id)
+            mine = Database(args.main_folder, project=args.project, user=user)
+            print(f"Wrote {mine.groups[group_id].full_report()}")
 
     elif args.command == "run-mcor-sweep":
         folder = run_mcor_sweep(args.sweep, args.task)

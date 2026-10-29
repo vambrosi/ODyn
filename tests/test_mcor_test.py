@@ -193,6 +193,28 @@ def test_a_whole_test_saves_every_acquisition_and_reports_on_the_test_ones(
     assert len(full["dy"]) == len(full["corr"]) == len(full["raw_corr"]) == 8 * 56
     assert "dy_p10" not in full  # rigid
 
+    # The report on every acquisition, as a test's on a few: flow and all
+    every = pd.read_csv(folder / "full" / "summary.csv")
+    assert every["position"].tolist() == list(range(8))
+    assert every["dy_median"].tolist() == [0.5] * 8
+    assert every["test_flow_p90_px"].notna().all()
+    assert (every["test_corr_with_ref"] >= every["raw_corr_with_ref"] - 1e-3).all()
+    checked = json.loads((folder / "full" / "metrics.json").read_text())
+    assert checked["acquisitions"] == 8
+    assert checked["flow_worst_acq_id"] in every["acq_id"].tolist()
+    assert tifffile.imread(folder / "full" / "flow_average.tif").shape == (48, 40)
+
+    # Written again from the saved files (for a correction from before):
+    # the same numbers, and listed until then
+    from odyn.cluster import groups_without_full_report
+
+    assert groups_without_full_report(db) == []
+    (folder / "full" / "summary.csv").unlink()
+    assert [g for g, _ in groups_without_full_report(db)] == [group_id]
+    assert db.groups[group_id].full_report() == folder / "full"
+    again = pd.read_csv(folder / "full" / "summary.csv")
+    pd.testing.assert_frame_equal(again, every, atol=1e-3)
+
 
 def test_a_whole_correction_stopped_partway_goes_on_from_there(tmp_path, caiman):
     db, group_id = a_loop(tmp_path)
@@ -238,6 +260,11 @@ def test_a_whole_correction_stopped_partway_goes_on_from_there(tmp_path, caiman)
     full = np.load(folder / "full" / "shifts_summary.npz")
     assert full["frame_counts"].tolist() == [56] * 8
     assert len(full["dy"]) == len(full["corr"]) == 8 * 56
+    every = pd.read_csv(folder / "full" / "summary.csv")
+    assert every["position"].tolist() == list(range(8))
+    assert (
+        json.loads((folder / "full" / "metrics.json").read_text())["acquisitions"] == 8
+    )
     progress = json.loads(progress_file.read_text())
     assert [b["batch"] for b in progress["done"]] == [1, 2, 3]
     assert progress["finished"] and len(progress["call_ids"]) == 2

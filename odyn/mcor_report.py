@@ -27,6 +27,10 @@ the patches, with their 10th and 90th percentiles in `dy_p10`, `dy_p90`,
 the corrected frame (`raw_corr`, `corr`); `acq_ids` and `frame_counts` say
 which acquisition each frame is from.
 
+A final correction also gets the same numbers on every acquisition
+(`FullReport`, in `full/` of the test folder, built as each is saved):
+`summary.csv`, `metrics.json`, `flow_average.tif`, `flow_worst.tif`.
+
 What is measured, and why this way rather than as NoRMCorre and caiman do:
 - **Mean against the reference** (`*_corr_with_ref`): each acquisition's mean
 image against one image, the same for raw and test. Averaging first removes
@@ -276,6 +280,186 @@ def write_report(
     plot_shifts(written["png"], shifts, frame_counts, rows, max_shifts, title)
 
     return list(written.values())
+
+
+class FullReport:
+    """
+    The report on every acquisition of a final correction, built one
+    acquisition at a time as it is saved (a whole experiment of means would
+    not fit in memory): the same numbers as a test's `summary.csv` (but the
+    match with the average of the corrected means, which takes them all at
+    once), its `metrics.json`, `flow_average.tif` and `flow_worst.tif`. The
+    residual flow says which acquisitions the correction left moving: a
+    first guess at what to exclude.
+
+    **USAGE**
+    ```python
+    report = FullReport(reference, margin)
+    for ...:                                    # each acquisition, in order
+        report.add(position, acq_id, file, raw_mean, test_mean,
+                   raw_frame_corr, test_frame_corr)
+    report.write(folder, shifts, frame_counts, max_shifts)
+    ```
+    """
+
+    def __init__(self, reference: np.ndarray, margin: int):
+        self.reference = np.asarray(reference, np.float32)
+        self.margin = margin
+        self.rows: list[dict] = []
+        self.flow_sum: None | np.ndarray = None  # of every acquisition's
+        self.flow_worst: None | np.ndarray = None
+        self.flow_worst_median = -1.0
+        self.raw_sum: None | np.ndarray = None  # of the means, for crispness
+        self.test_sum: None | np.ndarray = None
+
+    def add(
+        self,
+        position: int,
+        acq_id: int,
+        file: str,
+        raw_mean: np.ndarray,
+        test_mean: np.ndarray,
+        raw_frame_corr: Sequence[float],
+        test_frame_corr: Sequence[float],
+    ) -> dict:
+        """One acquisition's numbers, from its means and its frames' matches."""
+        margin, reference = self.margin, self.reference
+        flow = residual_flow(reference, test_mean, margin)
+        length = np.hypot(flow[..., 0], flow[..., 1]).astype(np.float32)
+        magnitude = _inner(length, margin)
+        median = float(np.median(magnitude))
+        row = {
+            "position": int(position),
+            "acq_id": int(acq_id),
+            "file": file,
+            "raw_corr_with_ref": _round(correlation(raw_mean, reference, margin)),
+            "test_corr_with_ref": _round(correlation(test_mean, reference, margin)),
+            "raw_frame_corr_with_ref_median": _round(_median(raw_frame_corr)),
+            "raw_frame_corr_with_ref_p10": _round(_percentile(raw_frame_corr, 10)),
+            "raw_frame_corr_with_ref_p90": _round(_percentile(raw_frame_corr, 90)),
+            "test_frame_corr_with_ref_median": _round(_median(test_frame_corr)),
+            "test_frame_corr_with_ref_p10": _round(_percentile(test_frame_corr, 10)),
+            "test_frame_corr_with_ref_p90": _round(_percentile(test_frame_corr, 90)),
+            "test_flow_median_px": _round(median, 2),
+            "test_flow_p10_px": _round(float(np.percentile(magnitude, 10)), 2),
+            "test_flow_p90_px": _round(float(np.percentile(magnitude, 90)), 2),
+        }
+        self.rows.append(row)
+        self.flow_sum = length if self.flow_sum is None else self.flow_sum + length
+
+        if median > self.flow_worst_median:
+            self.flow_worst, self.flow_worst_median = length, median
+
+        raw_mean = np.asarray(raw_mean, np.float64)
+        test_mean = np.asarray(test_mean, np.float64)
+        self.raw_sum = raw_mean if self.raw_sum is None else self.raw_sum + raw_mean
+        self.test_sum = (
+            test_mean if self.test_sum is None else self.test_sum + test_mean
+        )
+
+        return row
+
+    def state(self) -> dict[str, np.ndarray]:
+        """What it holds besides the rows, as arrays (to resume, see `restore`)."""
+        empty = np.zeros(0, np.float32)
+
+        return {
+            "flow_sum": empty if self.flow_sum is None else self.flow_sum,
+            "flow_worst": empty if self.flow_worst is None else self.flow_worst,
+            "flow_worst_median": np.asarray(self.flow_worst_median),
+            "raw_sum": empty if self.raw_sum is None else self.raw_sum,
+            "test_sum": empty if self.test_sum is None else self.test_sum,
+        }
+
+    def restore(self, rows: list[dict], state: dict[str, np.ndarray]) -> None:
+        """Pick up from `rows` and `state` (see `state`), saved by a run before."""
+        self.rows = [dict(row) for row in rows]
+
+        def array(name):
+            values = state[name]
+            return None if values.size == 0 else values
+
+        self.flow_sum = array("flow_sum")
+        self.flow_worst = array("flow_worst")
+        self.flow_worst_median = float(state["flow_worst_median"])
+        self.raw_sum = array("raw_sum")
+        self.test_sum = array("test_sum")
+
+    def write(
+        self,
+        folder: Path,
+        shifts: None | np.ndarray = None,
+        frame_counts: None | Sequence[int] = None,
+        max_shifts: None | Sequence[int] = None,
+        settings: None | dict = None,
+    ) -> list[Path]:
+        """
+        Write it into `folder`: `summary.csv`, `metrics.json`,
+        `flow_average.tif` and `flow_worst.tif`. With every frame's `shifts`
+        (and the acquisitions' `frame_counts`), each row says its median
+        shift and how many frames reached `max_shifts`.
+        """
+        folder.mkdir(parents=True, exist_ok=True)
+        rows = [dict(row) for row in self.rows]
+
+        if shifts is not None and frame_counts is not None and len(rows):
+            shifts = np.asarray(shifts, float).reshape(-1, 2)
+            edges = np.concatenate([[0], np.cumsum(frame_counts)]).astype(int)
+
+            for i, row in enumerate(rows):
+                part = shifts[edges[i] : edges[i + 1]]
+                row["dy_median"] = _round(_median(part[:, 0]), 2)
+                row["dx_median"] = _round(_median(part[:, 1]), 2)
+
+                if max_shifts is not None and len(part):
+                    row["at_limit"] = _round(
+                        float(_at_limit(part, max_shifts).mean()), 3
+                    )
+
+        count = max(1, len(rows))
+        worst = max(rows, key=lambda row: row["test_flow_median_px"]) if rows else {}
+        flows = [row["test_flow_p90_px"] for row in rows]
+        metrics = {
+            "acquisitions": len(rows),
+            "crispness_raw": (
+                None
+                if self.raw_sum is None
+                else _round(crispness(self.raw_sum / count, self.margin), 5)
+            ),
+            "crispness_test": (
+                None
+                if self.test_sum is None
+                else _round(crispness(self.test_sum / count, self.margin), 5)
+            ),
+            "flow_worst_acq_id": worst.get("acq_id"),
+            "flow_worst_median_px": worst.get("test_flow_median_px"),
+            "test_flow_p90_px_median": _round(_median(flows), 2),
+            "test_flow_p90_px_max": _round(max(flows), 2) if flows else None,
+        }
+
+        if settings is not None:
+            metrics["settings"] = settings
+
+        written = {
+            "summary": folder / "summary.csv",
+            "metrics": folder / "metrics.json",
+            "flow_average": folder / "flow_average.tif",
+            "flow": folder / "flow_worst.tif",
+        }
+        if rows:
+            _write_csv(written["summary"], rows)
+        else:
+            del written["summary"]
+
+        written["metrics"].write_text(json.dumps(metrics, indent=2))
+
+        if self.flow_sum is not None:
+            tifffile.imwrite(written["flow_average"], self.flow_sum / count)
+            tifffile.imwrite(written["flow"], self.flow_worst)
+        else:
+            del written["flow_average"], written["flow"]
+
+        return list(written.values())
 
 
 def correlation(a: np.ndarray, b: np.ndarray, margin: int) -> float:

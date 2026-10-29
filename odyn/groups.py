@@ -91,6 +91,8 @@ RAW_PREVIEW_FOLDER = "raw"
 RAW_LEVELS_FILE = "levels.json"
 FULL_FOLDER = "full"  # the full run: every acquisition, previews and plots
 PARTS_FOLDER = "parts"  # in it: each saved batch's numbers, to resume
+# The edge a report on a correction from before leaves out, without its own
+DEFAULT_REPORT_MARGIN_PX = 20
 FULL_SIZE = 0.5  # the full run's videos, from the movies' size
 DEFAULT_OVERLAP_UM = [96.0, 96.0]
 DEFAULT_MAX_SHIFT_UM = [80.0, 80.0]
@@ -1724,6 +1726,7 @@ class Group(CallRecorder):
         import caiman as cm
         from caiman.motion_correction import MotionCorrect
 
+        from .mcor_report import FullReport
         from .registration import spread_acquisitions
 
         # --- Optionally override parameters with GUI-picked values --- #
@@ -1869,6 +1872,16 @@ class Group(CallRecorder):
         self.full_parts: dict[str, list] = {}
         self.full_reference = template
         self.full_margin = max(int(v) for v in settings["max_shifts"]) + 2
+        # The report on every acquisition, built as each is saved
+        self._full_report = (
+            None
+            if is_test or template is None
+            else FullReport(template, self.full_margin)
+        )
+        self.full_positions = {
+            int(acq_id): position
+            for position, acq_id in enumerate(self.acquisitions.index)
+        }
         self.report_parts: dict[str, list] = {
             "raw": [],
             "mmap": [],
@@ -1963,6 +1976,9 @@ class Group(CallRecorder):
                 }
             )
             self._write_full_summary()
+
+            if self._full_report is not None:
+                self._write_full_report(settings)
 
             if template is not None:
                 self._progress_finished()
@@ -2061,9 +2077,12 @@ class Group(CallRecorder):
 
     def _part_marks(self) -> dict[str, int]:
         """How long each list of parts is, before a batch adds its own."""
+        report = getattr(self, "_full_report", None)
+
         return {
             **{f"full:{k}": len(v) for k, v in self.full_parts.items()},
             **{f"report:{k}": len(v) for k, v in self.report_parts.items()},
+            "full_report_rows": 0 if report is None else len(report.rows),
         }
 
     def _batch_saved(
@@ -2095,6 +2114,14 @@ class Group(CallRecorder):
                 arrays[f"report:{k}"] = np.concatenate(new)
                 arrays[f"report_lengths:{k}"] = np.asarray([len(v) for v in new])
 
+        # The report on every acquisition, as it stands after this batch
+        report = getattr(self, "_full_report", None)
+        rows = []
+
+        if report is not None:
+            rows = report.rows[marks.get("full_report_rows", 0) :]
+            arrays |= {f"report_state:{k}": v for k, v in report.state().items()}
+
         folder = self._parts_folder()
         folder.mkdir(parents=True, exist_ok=True)
         file = folder / f"batch_{number:03d}.npz"
@@ -2115,6 +2142,7 @@ class Group(CallRecorder):
                 "report_mcor": [
                     _mcor_path(p).relative_to(main).as_posix() for p in raw
                 ],
+                "report_rows": rows,
                 "saved_at": _now(),
             }
         )
@@ -2129,6 +2157,19 @@ class Group(CallRecorder):
         def split(values, lengths):
             edges = np.concatenate([[0], np.cumsum(lengths)]).astype(int)
             return [values[a:b] for a, b in zip(edges[:-1], edges[1:])]
+
+        report = getattr(self, "_full_report", None)
+
+        if report is not None and batch.get("report_rows") is not None:
+            # The state is cumulative: the last batch's is the one kept
+            state = {
+                key.partition(":")[2]: values
+                for key, values in arrays.items()
+                if key.startswith("report_state:")
+            }
+
+            if state:
+                report.restore(report.rows + batch["report_rows"], state)
 
         for key, values in arrays.items():
             kind, _, name = key.partition(":")
@@ -2151,6 +2192,118 @@ class Group(CallRecorder):
         saved = [main / p for p in batch["report_mcor"]]
         self.report_parts["mmap"].extend(str(p) for p in saved)
         self.resumed_files.update(saved)
+
+    def _write_full_report(self, settings: None | dict = None) -> list[Path]:
+        """
+        The report on every acquisition (`_full_report`, see
+        `mcor_report.FullReport`) into `full/` of the test folder, with every
+        frame's shift from the full run's numbers when there.
+        """
+        from .mcor_report import SHIFTS_SUMMARY
+
+        folder = self.mcor_test_folder() / FULL_FOLDER
+        shifts = counts = None
+
+        try:
+            with np.load(folder / SHIFTS_SUMMARY) as summary:
+                shifts = np.stack([summary["dy"], summary["dx"]], axis=1)
+                counts = summary["frame_counts"]
+        except (OSError, KeyError, ValueError):  # corrected before it was written
+            pass
+
+        max_shifts = getattr(getattr(self, "mc", None), "max_shifts", None)
+        paths = self._full_report.write(
+            folder,
+            shifts,
+            counts,
+            max_shifts,
+            None if settings is None else jsonable(settings),
+        )
+        logger.info(f"Wrote the report on every acquisition to {folder}")
+
+        return paths
+
+    @record_call
+    def full_report(self) -> Path:
+        """
+        The report on every acquisition of the saved final correction, as a
+        whole correction writes it now (see `mcor_report.FullReport`), for one
+        corrected before: in `full/` of the test folder.
+
+        **USAGE**
+        ```python
+        group = db.groups[some_index]
+        folder = group.full_report()
+        ```
+
+        Reads every raw and corrected file once, so run it on the cluster
+        (`python -m odyn.cluster <main_folder> full-report --group 7`). Needs
+        the group's saved reference (`reference_group_<id>.tif`), which every
+        correction since 2026-10 aligned to. Each frame's shift comes from the
+        full run's numbers (`full/shifts_summary.npz`) when they are there.
+        """
+        from .mcor_report import FullReport, frame_correlations
+
+        reference_path = self._reference_path()
+
+        if not reference_path.is_file():
+            raise FileNotFoundError(
+                f"No saved reference for group {self.group_id} ({reference_path}): "
+                "correct it again first."
+            )
+
+        files = self.mcor_files
+        acquisitions = self.acquisitions
+
+        if files.empty:
+            raise ValueError(f"Group {self.group_id} has no saved correction.")
+
+        reference = tifffile.imread(reference_path)
+        margin = self._report_margin()
+        report = FullReport(reference, margin)
+        main = self.db.main_folder
+
+        for position, acq_id in enumerate(acquisitions.index):
+            if acq_id not in files.index:
+                logger.warning(f"Acquisition {acq_id} has no saved correction.")
+                continue
+
+            raw_path = main / str(acquisitions.loc[acq_id, "raw_path"])
+            raw = tifffile.imread(raw_path)
+            movie = tifffile.imread(main / str(files.loc[acq_id, "mcor_path"]))
+            report.add(
+                position,
+                int(acq_id),
+                raw_path.name,
+                raw.mean(axis=0, dtype=np.float64),
+                movie.mean(axis=0, dtype=np.float64),
+                frame_correlations(raw, reference, margin),
+                frame_correlations(movie, reference, margin),
+            )
+            del raw, movie
+
+        self._full_report = report
+        paths = self._write_full_report()
+
+        for path in paths:
+            self.add_output_file(path)
+
+        self._full_report = None
+        folder = paths[0].parent
+        self.set_output({"folder": folder.relative_to(main).as_posix()})
+
+        return folder
+
+    def _report_margin(self) -> int:
+        """
+        The edge left out of the measures: the largest shift allowed (px), as
+        the last whole correction's report says, and 2 more.
+        """
+        try:
+            metrics = json.loads((self.mcor_test_folder() / "metrics.json").read_text())
+            return max(int(v) for v in metrics["settings"]["max_shifts_px"]) + 2
+        except (OSError, ValueError, KeyError, TypeError):
+            return DEFAULT_REPORT_MARGIN_PX
 
     def _progress_finished(self) -> None:
         self.progress["finished"] = True
@@ -2343,12 +2496,22 @@ class Group(CallRecorder):
 
                 margin = self.full_margin
                 parts = self.full_parts
-                parts.setdefault("raw_corr", []).append(
-                    frame_correlations(raw, reference, margin)
-                )
-                parts.setdefault("corr", []).append(
-                    frame_correlations(movie, reference, margin)
-                )
+                raw_corr = frame_correlations(raw, reference, margin)
+                corr = frame_correlations(movie, reference, margin)
+                parts.setdefault("raw_corr", []).append(raw_corr)
+                parts.setdefault("corr", []).append(corr)
+                report = getattr(self, "_full_report", None)
+
+                if report is not None:
+                    report.add(
+                        self.full_positions.get(int(acq_id), -1),
+                        int(acq_id),
+                        raw_path.name,
+                        raw.mean(axis=0, dtype=np.float64),
+                        movie.mean(axis=0, dtype=np.float64),
+                        raw_corr,
+                        corr,
+                    )
 
             del raw
 
