@@ -74,7 +74,10 @@ def caiman(monkeypatch, tmp_path):
     module = types.ModuleType("caiman")
     module.cluster = types.SimpleNamespace(setup_cluster=lambda **_: (None, None, None))
     module.stop_server = lambda **_: None
-    module.load = lambda path: np.load(path)
+    # caiman reads its own files and TIFFs alike
+    module.load = lambda path: (
+        tifffile.imread(path) if str(path).endswith(".tif") else np.load(path)
+    )
     motion = types.ModuleType("caiman.motion_correction")
     motion.MotionCorrect = MotionCorrect
     # A stand-in high-pass filter, recognizable in what caiman is given
@@ -189,6 +192,99 @@ def test_a_whole_test_saves_every_acquisition_and_reports_on_the_test_ones(
     assert len(full["acq_ids"]) == 8
     assert len(full["dy"]) == len(full["corr"]) == len(full["raw_corr"]) == 8 * 56
     assert "dy_p10" not in full  # rigid
+
+
+def test_a_whole_correction_stopped_partway_goes_on_from_there(tmp_path, caiman):
+    db, group_id = a_loop(tmp_path)
+    group = db.groups[group_id]
+    motion = sys.modules["caiman.motion_correction"].MotionCorrect
+    correct = motion.motion_correct
+    calls = []
+
+    def stopped_at_the_second(self, **kwargs):
+        calls.append(1)
+
+        if len(calls) == 2:  # the job's time limit, say
+            raise RuntimeError("time limit")
+
+        return correct(self, **kwargs)
+
+    motion.motion_correct = stopped_at_the_second
+
+    with pytest.raises(RuntimeError, match="time limit"):
+        group.test_motion_correction(test_acqs=4, movie=False, whole=True, batch_acqs=3)
+
+    # The first batch saved and written down, by the reference
+    progress_file = group._progress_path()
+    assert progress_file.name == f"progress_group_{group_id}.json"
+    assert progress_file.parent == group._reference_path().parent
+    progress = json.loads(progress_file.read_text())
+    assert [b["batch"] for b in progress["done"]] == [1]
+    assert not progress["finished"] and progress["batches"] == 3
+    assert len(db.groups[group_id].mcor_files) == 3
+
+    # Again, the same: only the batches left, and every number as if whole
+    motion.motion_correct = correct
+    caiman["batches"].clear()
+    folder = db.groups[group_id].test_motion_correction(
+        test_acqs=4, movie=False, whole=True, batch_acqs=3
+    )
+
+    assert [len(names) for names in caiman["batches"]] == [3, 2]
+    assert len(db.groups[group_id].mcor_files) == 8
+    summary = pd.read_csv(folder / "summary.csv")
+    assert summary["position"].tolist() == spread_acquisitions(8, 4)
+    assert summary["dy_median"].tolist() == [0.5] * 4
+    full = np.load(folder / "full" / "shifts_summary.npz")
+    assert full["frame_counts"].tolist() == [56] * 8
+    assert len(full["dy"]) == len(full["corr"]) == 8 * 56
+    progress = json.loads(progress_file.read_text())
+    assert [b["batch"] for b in progress["done"]] == [1, 2, 3]
+    assert progress["finished"] and len(progress["call_ids"]) == 2
+    with db._locked() as con:
+        used = con.execute(
+            "SELECT parameters_used FROM method_calls WHERE method_name ="
+            " 'Group.run_motion_correction' ORDER BY method_call_id DESC"
+        ).fetchone()[0]
+    assert json.loads(used)["resumed_after_batch"] == 1
+
+    # The final files the report read instead of caiman's are kept
+    files = db.groups[group_id].mcor_files["mcor_path"]
+    assert all((tmp_path / path).is_file() for path in files)
+
+    # Finished: a run again starts over, as do other settings
+    caiman["batches"].clear()
+    db.groups[group_id].test_motion_correction(
+        test_acqs=4, movie=False, whole=True, batch_acqs=3
+    )
+    assert [len(names) for names in caiman["batches"]] == [3, 3, 2]
+
+    motion.motion_correct = stopped_at_the_second
+    calls.clear()
+    with pytest.raises(RuntimeError):
+        db.groups[group_id].test_motion_correction(
+            test_acqs=4, movie=False, whole=True, batch_acqs=3
+        )
+    motion.motion_correct = correct
+    caiman["batches"].clear()
+    db.groups[group_id].test_motion_correction(
+        test_acqs=4, movie=False, whole=True, batch_acqs=4
+    )
+    assert [len(names) for names in caiman["batches"]] == [4, 4]
+
+    # And asked to: resume=False
+    motion.motion_correct = stopped_at_the_second
+    calls.clear()
+    with pytest.raises(RuntimeError):
+        db.groups[group_id].test_motion_correction(
+            test_acqs=4, movie=False, whole=True, batch_acqs=3
+        )
+    motion.motion_correct = correct
+    caiman["batches"].clear()
+    db.groups[group_id].test_motion_correction(
+        test_acqs=4, movie=False, whole=True, batch_acqs=3, resume=False
+    )
+    assert [len(names) for names in caiman["batches"]] == [3, 3, 2]
 
 
 def group_folder(db, group_id):

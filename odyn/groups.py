@@ -6,6 +6,7 @@ import os
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum, IntFlag
 from typing import cast, Final, TYPE_CHECKING
 
@@ -42,6 +43,7 @@ from .utils import (
     Object,
     TableSpec,
     clamp,
+    jsonable,
     logger,
     memorize_params,
     record_call,
@@ -88,6 +90,7 @@ MCOR_TESTS_FOLDER = "mcor-tests"
 RAW_PREVIEW_FOLDER = "raw"
 RAW_LEVELS_FILE = "levels.json"
 FULL_FOLDER = "full"  # the full run: every acquisition, previews and plots
+PARTS_FOLDER = "parts"  # in it: each saved batch's numbers, to resume
 FULL_SIZE = 0.5  # the full run's videos, from the movies' size
 DEFAULT_OVERLAP_UM = [96.0, 96.0]
 DEFAULT_MAX_SHIFT_UM = [80.0, 80.0]
@@ -1646,6 +1649,7 @@ class Group(CallRecorder):
         reuse_reference: bool = False,
         batch_acqs: int = FINAL_BATCH_ACQS,
         report_positions: Sequence[int] = (),
+        resume: bool = True,
     ) -> None:
         """
         Method that does test/final motion correction
@@ -1686,6 +1690,12 @@ class Group(CallRecorder):
         position) a report is written from afterwards: their temporary files
         are kept, and their files and every frame's shift are left in
         `report_parts` (see `test_motion_correction(whole=True)`)
+        - `resume`: a final correction stopped partway (a job's time limit,
+        say) goes on from the batch after the last one saved, when it runs
+        again with the same settings and reference. Each batch, once saved,
+        is written down in `progress_group_<id>.json` beside the reference,
+        with its frames' shifts in `full/parts/` of the test folder, which a
+        resumed run picks up. `False` starts over.
 
         *CaImAn motion correction parameters (before metadata adjustments)*
         - `border_nan`: copy along the boundary (if `True`, fill in with NaN)
@@ -1812,7 +1822,11 @@ class Group(CallRecorder):
         template = None
         saved = self._reference_path()
 
-        if reference_acqs > 0 and reuse_reference and saved.is_file():
+        # A final correction stopped partway was aligned to the saved
+        # reference: so are the batches left
+        resuming = not is_test and resume and self._stopped_with(saved)
+
+        if reference_acqs > 0 and (reuse_reference or resuming) and saved.is_file():
             logger.info(f"Using the reference saved in {saved.name}.")
             template = tifffile.imread(saved)
             self.update_parameters_used(
@@ -1863,8 +1877,35 @@ class Group(CallRecorder):
             "patch_dx": [],
         }
 
+        # A final correction stopped partway goes on from where it stopped
+        done = 0
+        self.resumed_files: set[Path] = set()
+
+        if not is_test and template is not None:
+            done = self._start_progress(
+                {
+                    "settings": jsonable(settings),
+                    "reference_sha1": _sha1(saved),
+                    "acq_ids": [int(i) for i in acquisitions_slice.index],
+                    "batch_acqs": batch,
+                },
+                len(batches),
+                resume,
+            )
+
+            if done:
+                min_mov = self.progress.get("min_mov")
+                logger.info(
+                    f"Resuming: batches 1 to {done} of {len(batches)} were saved "
+                    "before."
+                )
+                self.update_parameters_used({"resumed_after_batch": done})
+
         try:
             for number, positions_in in enumerate(batches, start=1):
+                if number <= done:
+                    continue
+
                 if len(batches) > 1:
                     logger.info(
                         f"Batch {number} of {len(batches)}: acquisitions "
@@ -1887,6 +1928,7 @@ class Group(CallRecorder):
 
                 if not is_test:
                     mmaps = list(self.mc.mmap_file)
+                    marks = self._part_marks()
                     self._keep_for_report(positions_in, acquisitions_slice, kept)
                     self._keep_full_shifts(positions_in, acquisitions_slice)
                     self._save_mcor_files(
@@ -1897,6 +1939,9 @@ class Group(CallRecorder):
                             mmaps[k] for k, i in enumerate(positions_in) if i in kept
                         },
                     )
+
+                    if template is not None:
+                        self._batch_saved(number, positions_in, marks, min_mov)
 
         # Always stop the server after motion correction
         finally:
@@ -1919,10 +1964,198 @@ class Group(CallRecorder):
             )
             self._write_full_summary()
 
+            if template is not None:
+                self._progress_finished()
+
         if is_test:
             # Record what caiman wrote so save_preview_movie can find it after a restart
             self.set_output({"mmap_names": [Path(p).name for p in self.mc.mmap_file]})
             self.test_mmap_paths = [Path(p) for p in self.mc.mmap_file]
+
+    # --- Resuming a final correction (see `run_motion_correction`) --- #
+
+    def _progress_path(self) -> Path:
+        """Where a final correction writes down its batches: by the reference."""
+        return self._reference_path().with_name(f"progress_group_{self.group_id}.json")
+
+    def _parts_folder(self) -> Path:
+        """Each saved batch's per-frame numbers, for a resumed run."""
+        return self.mcor_test_folder() / FULL_FOLDER / PARTS_FOLDER
+
+    def _stopped_with(self, reference: Path) -> bool:
+        """
+        Whether a final correction stopped partway, aligned to `reference` as
+        it is now (its SHA-1 unchanged since).
+        """
+        try:
+            before = json.loads(self._progress_path().read_text())
+        except (OSError, ValueError):
+            return False
+
+        return (
+            not before.get("finished")
+            and bool(before.get("done"))
+            and reference.is_file()
+            and before.get("key", {}).get("reference_sha1") == _sha1(reference)
+        )
+
+    def _start_progress(self, key: dict, batches: int, resume: bool) -> int:
+        """
+        Pick up what an earlier run of the same correction (`key`: settings,
+        reference, acquisitions, batch size) saved, when `resume` and it did
+        not finish, and return how many batches it saved: their numbers are
+        put back in `full_parts` and `report_parts`. Otherwise start over: a
+        new progress file, no parts. Kept when finished, as a record.
+        """
+        path = self._progress_path()
+
+        try:
+            before = json.loads(path.read_text())
+        except (OSError, ValueError):
+            before = None
+
+        if (
+            resume
+            and before is not None
+            and not before.get("finished")
+            and before.get("key") == key
+            and before.get("batches") == batches
+            and before.get("done")
+        ):
+            self.progress = before
+
+            for batch in before["done"]:
+                self._load_batch(batch)
+
+            return len(before["done"])
+
+        for old in self._parts_folder().glob("batch_*.npz"):
+            old.unlink(missing_ok=True)
+
+        self.progress = {
+            "group_id": self.group_id,
+            "key": key,
+            "batches": batches,
+            "done": [],
+            "min_mov": None,
+            "finished": False,
+            "started_at": _now(),
+            "call_ids": [],
+        }
+        self._write_progress()
+
+        return 0
+
+    def _write_progress(self) -> None:
+        """The progress file, written whole, then put in place."""
+        self.progress.setdefault("call_ids", [])
+
+        if self.current_call_id not in self.progress["call_ids"]:
+            self.progress["call_ids"].append(self.current_call_id)
+
+        path = self._progress_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_name(f".{path.name}.{os.getpid()}.partial")
+        partial.write_text(json.dumps(jsonable(self.progress), indent=2))
+        os.replace(partial, path)
+
+    def _part_marks(self) -> dict[str, int]:
+        """How long each list of parts is, before a batch adds its own."""
+        return {
+            **{f"full:{k}": len(v) for k, v in self.full_parts.items()},
+            **{f"report:{k}": len(v) for k, v in self.report_parts.items()},
+        }
+
+    def _batch_saved(
+        self, number: int, positions_in: list[int], marks: dict, min_mov
+    ) -> None:
+        """
+        Write down batch `number`, saved: its per-frame numbers (what it
+        added to the parts since `marks`), then its line in the progress file.
+        """
+        arrays = {}
+
+        for k, values in self.full_parts.items():
+            new = values[marks.get(f"full:{k}", 0) :]
+
+            if k in ("acq_ids", "frame_counts"):
+                arrays[f"full:{k}"] = np.asarray(new, np.int64)
+            else:
+                arrays[f"full:{k}"] = (
+                    np.concatenate(new).astype(np.float32)
+                    if new
+                    else np.zeros(0, np.float32)
+                )
+                arrays[f"full_lengths:{k}"] = np.asarray([len(v) for v in new])
+
+        for k in ("shifts", "patch_dy", "patch_dx"):
+            new = self.report_parts[k][marks.get(f"report:{k}", 0) :]
+
+            if new:
+                arrays[f"report:{k}"] = np.concatenate(new)
+                arrays[f"report_lengths:{k}"] = np.asarray([len(v) for v in new])
+
+        folder = self._parts_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        file = folder / f"batch_{number:03d}.npz"
+        np.savez(file, **arrays)
+
+        # The report reads these acquisitions' corrected files as saved
+        start = marks.get("report:raw", 0)
+        raw = [Path(p) for p in self.report_parts["raw"][start:]]
+        main = self.db.main_folder
+        self.progress["done"].append(
+            {
+                "batch": number,
+                "parts": file.name,
+                "acq_ids": [
+                    int(i) for i in self.full_parts["acq_ids"][-len(positions_in) :]
+                ],
+                "report_raw": [p.relative_to(main).as_posix() for p in raw],
+                "report_mcor": [
+                    _mcor_path(p).relative_to(main).as_posix() for p in raw
+                ],
+                "saved_at": _now(),
+            }
+        )
+        self.progress["min_mov"] = None if min_mov is None else float(min_mov)
+        self._write_progress()
+
+    def _load_batch(self, batch: dict) -> None:
+        """Put back the per-frame numbers of a batch saved by an earlier run."""
+        with np.load(self._parts_folder() / batch["parts"]) as content:
+            arrays = {key: content[key] for key in content.files}
+
+        def split(values, lengths):
+            edges = np.concatenate([[0], np.cumsum(lengths)]).astype(int)
+            return [values[a:b] for a, b in zip(edges[:-1], edges[1:])]
+
+        for key, values in arrays.items():
+            kind, _, name = key.partition(":")
+
+            if kind == "full":
+                if name in ("acq_ids", "frame_counts"):
+                    self.full_parts.setdefault(name, []).extend(int(v) for v in values)
+                else:
+                    self.full_parts.setdefault(name, []).extend(
+                        split(values, arrays[f"full_lengths:{name}"])
+                    )
+            elif kind == "report":
+                self.report_parts[name].extend(
+                    split(values, arrays[f"report_lengths:{name}"])
+                )
+
+        main = self.db.main_folder
+        self.report_parts["raw"].extend(main / p for p in batch["report_raw"])
+        # caiman's temporary files went with the job: the saved files instead
+        saved = [main / p for p in batch["report_mcor"]]
+        self.report_parts["mmap"].extend(str(p) for p in saved)
+        self.resumed_files.update(saved)
+
+    def _progress_finished(self) -> None:
+        self.progress["finished"] = True
+        self.progress["finished_at"] = _now()
+        self._write_progress()
 
     def _keep_full_shifts(
         self, positions_in: list[int], acquisitions: pd.DataFrame
@@ -2094,9 +2327,8 @@ class Group(CallRecorder):
             total=len(mmap_paths),
         ):
             raw_path = Path(raw_path)
-            mcor_folder = raw_path.parent.parent / "processed" / "mcor"
-            mcor_folder.mkdir(parents=True, exist_ok=True)
-            mcor_path = mcor_folder / (raw_path.stem + "_mcor.tif")
+            mcor_path = _mcor_path(raw_path)
+            mcor_path.parent.mkdir(parents=True, exist_ok=True)
 
             raw = tifffile.imread(raw_path)
             movie, clipped = as_raw(np.asarray(cm.load(mmap_path)), raw)
@@ -2184,6 +2416,7 @@ class Group(CallRecorder):
         reuse_reference: bool = False,
         whole: bool = False,
         batch_acqs: int = FINAL_BATCH_ACQS,
+        resume: bool = True,
     ) -> Path:
         """
         A test motion correction, and the files to judge it by
@@ -2236,7 +2469,8 @@ class Group(CallRecorder):
         - `whole`: correct every acquisition and save them, as the final
         correction (`run_motion_correction(is_test=False)`), and write the
         report and videos from the same `test_acqs` acquisitions as a test,
-        `batch_acqs` at a time (see `run_motion_correction`)
+        `batch_acqs` at a time (see `run_motion_correction`); with `resume`,
+        a whole correction stopped partway goes on from where it stopped
         """
         import caiman as cm
 
@@ -2262,6 +2496,7 @@ class Group(CallRecorder):
             reuse_reference=reuse_reference,
             report_positions=positions if whole else (),
             batch_acqs=batch_acqs,
+            resume=resume,
         )
 
         settings = {
@@ -2361,9 +2596,13 @@ class Group(CallRecorder):
             _add_to_json(folder / "metrics.json", {"movie_levels": list(levels)})
 
         if whole:
-            # The final TIFFs are saved: the report's copies can go
+            # The final TIFFs are saved: the report's copies can go (not the
+            # final files a resumed run read instead)
+            resumed = getattr(self, "resumed_files", set())
+
             for path in self.test_mmap_paths:
-                path.unlink(missing_ok=True)
+                if path not in resumed:
+                    path.unlink(missing_ok=True)
 
             if movie:
                 paths += self.save_full_previews(label=title)
@@ -3982,3 +4221,14 @@ def _sha1(path: Path) -> str:
             digest.update(chunk)
 
     return digest.hexdigest()
+
+
+def _mcor_path(raw_path: Path) -> Path:
+    """Where a raw file's final correction is saved: `processed/mcor/`."""
+    raw_path = Path(raw_path)
+
+    return raw_path.parent.parent / "processed" / "mcor" / f"{raw_path.stem}_mcor.tif"
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
