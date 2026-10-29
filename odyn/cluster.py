@@ -69,6 +69,7 @@ import inspect
 import json
 import os
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -163,6 +164,9 @@ class ClusterConfig:
     # per objective instead: {"20": grid, "10": grid} (see `sweep_grid_for`)
     sweep_grid: None | dict = None
     sweep_time: None | str = None
+    # Days after an approval its tests are kept on the share, before the tick
+    # keeps their numbers in `processed/mcor/report/` and deletes the rest
+    keep_tests_days: float = 7.0
     tick_cpus: int = 1
     tick_memory: str = "8G"
     tick_time: str = "0:30:00"
@@ -368,7 +372,9 @@ def tick(
     they added (unless `test_new_experiments` is off in `ClusterConfig`; a
     whole one, which saves every acquisition, with `whole_new_experiments`)
     and a sweep of it (with `sweep_grid`), submit a whole correction with each
-    test picked in the app (`submit_picks`), process the sync files that
+    test picked in the app (`submit_picks`), keep the numbers of the tests
+    of experiments approved a while ago and delete the rest
+    (`archive_approved`), process the sync files that
     arrived (or changed) since they were last processed, write the heartbeat
     and, with `chain`, submit the next tick.
 
@@ -406,6 +412,7 @@ def tick(
 
     submit_picks(db, project, report, dry_run)
     submit_reruns(db, project, report, dry_run)
+    archive_approved(db, report, dry_run, config.keep_tests_days)
 
     if not dry_run:
         record_job_states(main_folder, project)
@@ -715,6 +722,157 @@ def latest_picks(db: Database) -> dict[int, dict]:
             }
 
     return picks
+
+
+# What an approved experiment keeps of its tests, in `processed/mcor/report/`:
+# the full run's numbers, and each test's (the videos and the rest go)
+FULL_REPORT_FILES = (
+    "summary.csv",
+    "metrics.json",
+    "flow_average.tif",
+    "flow_worst.tif",
+    "shifts_summary.npz",
+)
+TEST_REPORT_FILES = ("summary.csv", "metrics.json")
+REPORT_FOLDER = "report"
+
+
+def latest_approvals(db: Database) -> dict[int, dict]:
+    """
+    Each group's latest `approve_mcor_files` that worked: `call_id`, `user`,
+    `called_at` and the acquisitions `excluded`.
+    """
+    calls = db.method_calls
+
+    if calls.empty:
+        return {}
+
+    approvals: dict[int, dict] = {}
+
+    approved = calls[calls["method_name"] == "Group.approve_mcor_files"]
+
+    for call_id, call in approved.sort_index().iterrows():
+        output = call["call_output"]
+
+        if isinstance(output, dict) and output.get("approved"):
+            approvals[int(call["group_id"])] = {
+                "call_id": int(call_id),
+                "user": str(call["user"]),
+                "called_at": call["called_at"],
+                "excluded": list(output.get("excluded") or []),
+            }
+
+    return approvals
+
+
+def archive_approved(
+    db: Database, report: TickReport, dry_run: bool, keep_days: float
+) -> None:
+    """
+    For each group approved more than `keep_days` ago (and not picked again
+    since), keep its tests' numbers in `processed/mcor/report/` of its first
+    experiment (`archive_tests`) and delete its test folder from the share.
+    Nothing is deleted unless every copy checks out; the next tick tries
+    again.
+    """
+    picks = latest_picks(db)
+    now = datetime.now()
+
+    for group_id, approval in sorted(latest_approvals(db).items()):
+        pick = picks.get(group_id)
+
+        if pick is not None and pick["call_id"] > approval["call_id"]:
+            continue  # picked again since: being checked again
+
+        approved_at = pd.Timestamp(approval["called_at"]).to_pydatetime()
+
+        if (now - approved_at).total_seconds() < keep_days * 86400:
+            continue
+
+        group = db.groups[group_id]
+        tests = group.mcor_test_folder()
+
+        if not tests.is_dir():
+            continue
+
+        what = f"group {group_id} ({', '.join(group.experiments['exp_path'])})"
+
+        if dry_run:
+            report.tests.append(f"{what}: would keep its tests' numbers, delete them")
+            continue
+
+        try:
+            kept = archive_tests(group, approval, pick)
+            shutil.rmtree(tests)
+            report.tests.append(
+                f"{what}: tests' numbers kept in {kept.relative_to(db.main_folder)}"
+                ", tests deleted"
+            )
+        except Exception as error:  # the next tick tries again
+            report.errors.append(f"{what}: archive: {type(error).__name__}: {error}")
+
+
+def archive_tests(group, approval: dict, pick: None | dict = None) -> Path:
+    """
+    Copy what is worth keeping of `group`'s tests into `report/` beside its
+    reference (`processed/mcor/` of its first experiment): the full run's
+    report (`FULL_REPORT_FILES`), each test's numbers (`TEST_REPORT_FILES`,
+    in `tests/<run>/`; the whole correction's in `tests/final/`) and
+    `approval.json` (who approved what, when, and from which pick). Each
+    copy is checked by size. Returns the folder.
+    """
+    from .groups import FULL_FOLDER
+
+    tests = group.mcor_test_folder()
+    reference = group._reference_path()
+    folder = reference.parent / REPORT_FOLDER
+    copies: list[tuple[Path, Path]] = [
+        (tests / FULL_FOLDER / name, folder / name) for name in FULL_REPORT_FILES
+    ]
+    runs = [("final", tests)] + [
+        (run.name, run)
+        for run in sorted(tests.iterdir())
+        if run.is_dir()
+        and run.name != FULL_FOLDER  # copied above, as the full run's
+        and (run / "metrics.json").is_file()
+    ]
+
+    for name, run in runs:
+        copies += [(run / f, folder / "tests" / name / f) for f in TEST_REPORT_FILES]
+
+    for source, target in copies:
+        if not source.is_file():
+            continue
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+
+        if target.stat().st_size != source.stat().st_size:
+            raise OSError(f"{target} was not copied whole")
+
+    record = {
+        "group_id": group.group_id,
+        "experiments": list(group.experiments["exp_path"]),
+        "approved_by": approval["user"],
+        "approved_at": str(approval["called_at"]),
+        "approval_call_id": approval["call_id"],
+        "excluded_acq_ids": approval["excluded"],
+        "picked_run": None if pick is None else pick["run"],
+        "picked_settings": None if pick is None else pick["settings"],
+        "reference": reference.name,
+        "archived_at": datetime.now().strftime(TIME_FORMAT),
+    }
+
+    try:
+        from .groups import _sha1
+
+        record["reference_sha1"] = _sha1(reference)
+    except OSError:
+        pass
+
+    _write_json(folder / "approval.json", record)
+
+    return folder
 
 
 def pick_candidate(

@@ -1232,3 +1232,67 @@ def test_old_experiments_are_corrected_in_batches(tmp_path, slurm):
     sent = json.loads((cluster_folder(tmp_path) / "mcor" / "3.json").read_text())
     assert sent["user"] == "bob"
     assert slurm.read_text().count("sbatch") == 6
+
+
+def test_an_approved_experiment_keeps_its_tests_numbers_only(tmp_path, caiman):
+    from odyn.cluster import TickReport, archive_approved
+
+    db, group_id = a_loop(tmp_path)
+    group = db.groups[group_id]
+    tests = group.test_motion_correction(
+        test_acqs=4, movie=False, whole=True, batch_acqs=4
+    )
+    group.test_motion_correction(
+        test_acqs=4,
+        movie=False,
+        pw_rigid=True,
+        strides_um=[24, 24],
+        overlap_um=[12, 12],
+        max_deviation_um=3,
+        run="s24_o12_d3",
+        reuse_reference=True,
+    )
+    (tests / "big_video.avi").write_bytes(b"x" * 1000)
+    db.groups[group_id].approve_mcor_files(exclude_acq_ids=[])
+
+    def archive(days):
+        report = TickReport(started_at="now", dry_run=False)
+        archive_approved(Database(tmp_path), report, False, days)
+        return report
+
+    # Kept a week after the approval, in case it was a mistake
+    assert archive(7).tests == [] and tests.is_dir()
+
+    # Picked again since: being checked again, kept, until approved again
+    db.groups[group_id].pick_mcor_candidate(run="rigid", settings=RIGID)
+    assert archive(0).tests == [] and tests.is_dir()
+    db.groups[group_id].approve_mcor_files(exclude_acq_ids=[])
+
+    report = archive(0)
+    assert report.errors == []
+    assert report.tests[0].startswith(f"group {group_id} (20260304/m1/e1)")
+    assert not tests.exists()
+
+    # Beside the reference: the full run's numbers, each test's, the approval
+    kept = group._reference_path().parent / "report"
+    assert sorted(p.name for p in kept.iterdir()) == [
+        "approval.json",
+        "flow_average.tif",
+        "flow_worst.tif",
+        "metrics.json",
+        "shifts_summary.npz",
+        "summary.csv",
+        "tests",
+    ]
+    assert sorted(p.name for p in (kept / "tests").iterdir()) == [
+        "final",
+        "s24_o12_d3",
+    ]
+    assert len(pd.read_csv(kept / "summary.csv")) == 8
+    approval = json.loads((kept / "approval.json").read_text())
+    assert approval["approved_by"] == "alice" and approval["excluded_acq_ids"] == []
+    assert len(approval["reference_sha1"]) == 40
+    assert group._progress_path().is_file()  # the record of the batches stays
+
+    # Nothing left to do
+    assert archive(0).tests == []
