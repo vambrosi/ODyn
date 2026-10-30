@@ -279,16 +279,14 @@ def my_recordings(db, user: None | str, everyone: bool = False) -> pd.DataFrame:
 
 def _exp_sync_flags(db) -> dict[tuple[str, int], str]:
     """Each experiment's latest `process_sync`, decoded or refused."""
-    calls = db.latest_calls("process_sync")
+    calls = db.calls  # cached, unlike `latest_calls`, which reads every column
+    calls = calls[calls["method_name"].str.endswith("process_sync")]
     flags: dict[tuple[str, int], str] = {}
 
-    if calls.empty or "input_exp_id" not in calls:
-        return flags
+    for _, call in calls.sort_index(ascending=False).iterrows():  # newest first
+        exp_id = (call["parameters_used"] or {}).get("exp_id")
 
-    for _, call in calls.iterrows():  # newest first
-        exp_id = call["input_exp_id"]
-
-        if not pd.isna(exp_id) and ("experiment", int(exp_id)) not in flags:
+        if exp_id is not None and ("experiment", int(exp_id)) not in flags:
             flags[("experiment", int(exp_id))] = sync_flags(int(call["call_flag"]))
 
     return flags

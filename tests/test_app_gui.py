@@ -981,6 +981,13 @@ def test_qc_lists_every_kind_of_recording_this_user_submitted(tmp_path):
     assert mine.loc[("zstack", stack_id), "sync"] == ""
     assert my_recordings(db, "someone else").empty
 
+    # Its latest sync processing, decoded: here refused, for want of a file
+    with pytest.raises(RuntimeError, match="No sync file"):
+        db.process_sync(exp_id=exp_id)
+
+    synced = my_recordings(db, "alice").loc[("experiment", exp_id), "sync"]
+    assert synced == "FAILED, NO_SYNC_FILE"
+
     # A key made required afterwards asks for it on what is already in, in
     # the order of the submissions
     db.update_annotation_key(applies_to="experiment", key="goal", required=True)
