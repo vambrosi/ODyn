@@ -1153,7 +1153,7 @@ def test_qc_lists_the_tests_of_this_users_experiments(tmp_path, monkeypatch):
         my_experiments(
             tests, db.main_folder, tmp_path / "base", {group_id: pick}, None, approved
         )["status"].iloc[0]
-        for approved in ({group_id: 7}, {group_id: 3}, None)
+        for approved in ({group_id: {"call_id": 7}}, {group_id: {"call_id": 3}}, None)
     ]
     assert status == ["approved", "ready for final check", "ready for final check"]
     row = experiments.iloc[0]

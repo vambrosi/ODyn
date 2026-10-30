@@ -48,6 +48,7 @@ from ..cluster import (
     CORRECTION_RUN,
     ClusterConfig,
     heartbeat,
+    latest_approvals,
     latest_picks,
     mcor_sweep_runs,
     mcor_tests,
@@ -57,7 +58,7 @@ from ..cluster import (
     send_request,
 )
 from ..database import SyncFlag
-from ..groups import FULL_FOLDER, RAW_PREVIEW_FOLDER
+from ..groups import FULL_FOLDER, RAW_PREVIEW_FOLDER, mcor_test_folder
 from ..mcor_sweep import run_numbers
 from . import cache
 from .context import Context
@@ -225,7 +226,7 @@ def my_recordings(db, user: None | str, everyone: bool = False) -> pd.DataFrame:
     newest first, with its sync flags once its sync file was processed.
     Indexed by `(kind, id)`, as annotations name their target.
     """
-    calls = db.method_calls
+    calls = db.calls
 
     if calls.empty:
         return pd.DataFrame(columns=[*COLUMNS, "user"])
@@ -344,8 +345,8 @@ def my_tests(
     links = db.group_experiments
     paths = db.experiments["exp_path"]
     rows = []
-    groups = None
-    tops: dict[int, Path] = {}  # each group's test folder, asked once
+    acquisitions = None  # every group's, read once
+    tops: dict[int, Path] = {}  # each group's test folder
 
     for job in jobs:
         group_id = int(job["group_id"])
@@ -360,8 +361,8 @@ def my_tests(
             continue
 
         if group_id not in tops:
-            groups = groups if groups is not None else db.groups
-            tops[group_id] = groups[group_id].mcor_test_folder()
+            acquisitions = acquisitions if acquisitions is not None else db.acquisitions
+            tops[group_id] = mcor_test_folder(db, group_id, acquisitions)
 
         top = tops[group_id]
         folder = top / job["run"] if job["run"] else top
@@ -441,7 +442,7 @@ def my_experiments(
     base: None | Path = None,
     picks: None | dict[int, dict] = None,
     checks: None | dict[int, list[int]] = None,
-    approvals: None | dict[int, int] = None,
+    approvals: None | dict[int, dict] = None,
     listing: None | cache.Listing = None,
 ) -> pd.DataFrame:
     """
@@ -481,7 +482,7 @@ def my_experiments(
         if pick is not None:
             status = _picked_status(pick, runs[runs["folder"] == str(top)])
 
-        approved = (approvals or {}).get(int(group_id))
+        approved = (approvals or {}).get(int(group_id), {}).get("call_id")
 
         if approved is not None and (pick is None or approved > pick["call_id"]):
             status = APPROVED
@@ -541,7 +542,7 @@ def my_experiments(
 
 def latest_raw_checks(db) -> dict[int, list[int]]:
     """Each group's latest `check_raw`: the acquisitions it excluded."""
-    calls = db.method_calls
+    calls = db.calls
 
     if calls.empty:
         return {}
@@ -554,25 +555,6 @@ def latest_raw_checks(db) -> dict[int, list[int]]:
 
         if isinstance(output, dict):  # not one that failed
             latest[int(call["group_id"])] = list(output.get("excluded", []))
-
-    return latest
-
-
-def latest_approvals(db) -> dict[int, int]:
-    """Each group's latest `approve_mcor_files` that worked: its call id."""
-    calls = db.method_calls
-
-    if calls.empty:
-        return {}
-
-    approvals = calls[calls["method_name"] == "Group.approve_mcor_files"]
-    latest: dict[int, int] = {}
-
-    for call_id, call in approvals.sort_index().iterrows():
-        if isinstance(call["call_output"], dict) and call["call_output"].get(
-            "approved"
-        ):
-            latest[int(call["group_id"])] = int(call_id)
 
     return latest
 
@@ -951,6 +933,10 @@ class QcPane(QWidget):
         everyone = self.everyone.isChecked()
 
         def load(db):
+            with db.frozen():  # each table read once
+                return gather(db)
+
+        def gather(db):
             listing = cache.Listing()  # each folder looked at once
             mine = my_recordings(db, user, everyone)
             users = db.users

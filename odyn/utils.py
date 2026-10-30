@@ -382,6 +382,21 @@ METHOD_CALLS = TableSpec(
         "consumed_calls",
     ),
 )
+# `method_calls` without the long columns (the log, the code, the
+# environment): what a page scanning who called what needs, read fast
+_CALL_COLUMNS = """
+    method_call_id, group_id, user, called_at, method_name, module,
+    parameter_inputs, parameters_used, consumed_calls, call_flag,
+    call_output, ended_at
+"""
+CALLS = TableSpec(
+    "calls",
+    "method_call_id",
+    f"SELECT {_CALL_COLUMNS} FROM method_calls;",
+    f"SELECT {_CALL_COLUMNS} FROM method_calls WHERE group_id = ?;",
+    dates=("called_at", "ended_at"),
+    json=("parameter_inputs", "parameters_used", "call_output", "consumed_calls"),
+)
 OUTPUTS = TableSpec(
     "outputs",
     "output_id",
@@ -625,8 +640,9 @@ def record_call(func):
         logger.info(f"Recorded method call to db (method_call_id = {call_id}).")
 
         # A recorded call is a new row in method_calls, for both views
-        self._tables.pop("method_calls", None)
-        db._tables.pop("method_calls", None)
+        for tables in (self._tables, db._tables):
+            tables.pop("method_calls", None)
+            tables.pop("calls", None)
 
         frame = CallFrame(call_id, used=dict(parameters_used))
         self._call_stack.append(frame)
@@ -667,6 +683,11 @@ def record_call(func):
                         call_id,
                     ],
                 )
+
+            # Its end is news to both views too (a flag, an output)
+            for tables in (self._tables, db._tables):
+                tables.pop("method_calls", None)
+                tables.pop("calls", None)
 
     # NOTE: This is to make memorize_params work
     wrapper.__kwdefaults__ = func.__kwdefaults__

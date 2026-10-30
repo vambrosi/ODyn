@@ -82,7 +82,7 @@ def call_tables(db) -> list[str]:
     One `method_calls:<Class.method>` entry per method ever called, the
     JSON inputs and outputs spread into `input_*`/`output_*` columns.
     """
-    calls = db.method_calls
+    calls = db.calls
 
     if calls.empty:
         return []

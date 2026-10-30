@@ -1061,7 +1061,7 @@ def test_the_raw_check_records_what_is_left_out(tmp_path):
 
 
 def test_an_approval_is_found_for_the_qc_page(tmp_path, caiman):
-    from odyn.app.pane_qc import latest_approvals
+    from odyn.cluster import latest_approvals
 
     db, group_id = a_loop(tmp_path)
     group = db.groups[group_id]
@@ -1073,7 +1073,9 @@ def test_an_approval_is_found_for_the_qc_page(tmp_path, caiman):
     acq_ids = [int(i) for i in group.acquisitions.index]
     group.approve_mcor_files(exclude_acq_ids=[acq_ids[0]])
     calls = db.latest_calls("approve_mcor_files")
-    assert latest_approvals(db) == {group_id: int(calls.index[0])}
+    approval = latest_approvals(db)[group_id]
+    assert approval["call_id"] == int(calls.index[0])
+    assert approval["user"] == "alice" and approval["excluded"] == [acq_ids[0]]
     assert len(db.groups[group_id].approved_mcor_files) == len(acq_ids) - 1
 
 

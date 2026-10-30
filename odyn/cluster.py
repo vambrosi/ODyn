@@ -695,7 +695,7 @@ def latest_picks(db: Database) -> dict[int, dict]:
     The latest `pick_mcor_candidate` call of each group: `call_id`, `user`,
     `run`, `settings` and `correct` (whether it needs a whole correction).
     """
-    calls = db.method_calls
+    calls = db.calls
 
     if calls.empty:
         return {}
@@ -742,7 +742,7 @@ def latest_approvals(db: Database) -> dict[int, dict]:
     Each group's latest `approve_mcor_files` that worked: `call_id`, `user`,
     `called_at` and the acquisitions `excluded`.
     """
-    calls = db.method_calls
+    calls = db.calls
 
     if calls.empty:
         return {}
@@ -939,7 +939,7 @@ def pick_repeats(db: Database, group_id: int, folder: str | Path) -> tuple[bool,
 
 def latest_reruns(db: Database) -> dict[int, dict]:
     """Each group's latest `Group.run_again` call: `call_id`, `user`, `runs`."""
-    calls = db.method_calls
+    calls = db.calls
 
     if calls.empty:
         return {}

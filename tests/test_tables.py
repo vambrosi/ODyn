@@ -95,3 +95,25 @@ def test_a_group_view_is_the_same_reader_restricted(db):
     assert list(group.experiments.index) == [2]
     assert list(group.sessions.index) == [1]
     assert list(group.experiments.columns) == list(db.experiments.columns)
+
+
+def test_calls_leave_the_log_out(db):
+    db.add_odor(odor_id=99, odor_name="x")
+
+    assert "call_log" in db.method_calls.columns
+    assert "call_log" not in db.calls.columns
+    assert db.calls.loc[db.method_calls.index[0], "parameter_inputs"] == {
+        "odor_id": 99,
+        "odor_name": "x",
+    }
+
+
+def test_frozen_tables_stay_put_while_others_write(db, tmp_path):
+    other = Database(tmp_path, user="bob")
+    db.odors
+
+    with db.frozen():
+        other.add_odor(odor_id=99, odor_name="x")
+        assert 99 not in db.odors.index  # read before, kept
+
+    assert 99 in db.odors.index  # looked at again on the way out

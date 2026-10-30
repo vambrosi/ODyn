@@ -308,6 +308,9 @@ class Group(CallRecorder):
         """The cached DataFrame of `spec`, restricted to this group."""
         assert spec.in_group is not None, f"{spec.name} has no per-group view"
 
+        if self.db._frozen and spec.name in self._tables:  # see `Database.frozen`
+            return self._tables[spec.name]
+
         with self.db._locked() as con:
             self.db._refresh_if_stale()
 
@@ -358,13 +361,7 @@ class Group(CallRecorder):
         `20260811_m357_e1`), by `exp_id`: what caiman names its temp files
         after, and how output files say which experiment they came from.
         """
-        stems = (
-            self.acquisitions.sort_values("acq_start")
-            .groupby("exp_id")["raw_path"]
-            .first()
-        )
-
-        return stems.map(lambda path: Path(path).stem.rsplit("_", 1)[0])
+        return exp_names(self.acquisitions)
 
     @property
     def sessions(self) -> pd.DataFrame:
@@ -2823,8 +2820,7 @@ class Group(CallRecorder):
         Where `test_motion_correction` writes a test (`run`'s, when given):
         `cache/mcor-tests/<experiment>_g<group>[/<run>]` in the files folder.
         """
-        name = f"{self.exp_names.iloc[0]}_g{self.group_id}"
-        folder = self.db.files_folder / CACHE_FOLDER / MCOR_TESTS_FOLDER / name
+        folder = mcor_test_folder(self.db, self.group_id, self.acquisitions)
 
         return folder if run is None else folder / run
 
@@ -4395,3 +4391,27 @@ def _mcor_path(raw_path: Path) -> Path:
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def exp_names(acquisitions: pd.DataFrame) -> pd.Series:
+    """
+    Each experiment's TIFF name without its acquisition number, by `exp_id`,
+    from its `acquisitions` (see `Group.exp_names`).
+    """
+    stems = acquisitions.sort_values("acq_start").groupby("exp_id")["raw_path"].first()
+
+    return stems.map(lambda path: Path(path).stem.rsplit("_", 1)[0])
+
+
+def mcor_test_folder(db, group_id: int, acquisitions: pd.DataFrame) -> Path:
+    """
+    Where group `group_id`'s tests go (see `Group.mcor_test_folder`), from
+    the group's `acquisitions`: for many groups at once, `db.acquisitions`
+    (read once) instead of each group's.
+    """
+    links = db.group_experiments
+    exp_ids = set(links.loc[[group_id], "exp_id"].astype(int))
+    mine = acquisitions[acquisitions["exp_id"].astype(int).isin(exp_ids)]
+    name = f"{exp_names(mine).iloc[0]}_g{group_id}"
+
+    return db.files_folder / CACHE_FOLDER / MCOR_TESTS_FOLDER / name
