@@ -3630,7 +3630,8 @@ class Group(CallRecorder):
         if files.empty:
             raise RuntimeError(
                 f"{self!r} recorded a 'save_roi_traces' call but no file. The "
-                "call may have failed; check its 'call_log' and run it again."
+                "call may have failed; check its log (`db.call_log(id)`) and run it "
+                "again."
             )
 
         # latest_calls comes back newest first, so the newest call that still

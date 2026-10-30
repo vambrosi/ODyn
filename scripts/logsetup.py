@@ -14,8 +14,8 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
     interleaves them out of order. One stream keeps them in sequence (with
     PYTHONUNBUFFERED=1 set by the job script).
 
-    `record_call` adds and removes its own handler around each call, so what
-    the database stores in `call_log` is unaffected by any of this.
+    `record_call` adds and removes its own handler around each call, so each
+    call's log file (`db.call_log(id)`) is unaffected by any of this.
     """
     from odyn.utils import logger
 

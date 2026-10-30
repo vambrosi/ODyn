@@ -1,4 +1,4 @@
--- CREATE DATABASE WITH SCHEMA v6
+-- CREATE DATABASE WITH SCHEMA v7
 --
 -- The tier organization described below explains the overall DB structure.
 -- What tier the metadata belongs to should be considered before adding fields.
@@ -568,6 +568,8 @@ CREATE INDEX IF NOT EXISTS annotations_target
 -- actually read (makes message passing reconstructable).
 -- - `call_output` serve as message passing between functions.
 -- - `ended_at` is NULL while the call runs, or if its process died.
+-- - Each call's log is a file in `.odyn/logs`, not a column (see
+-- `call_log_path` in `utils.py`; `db.call_log(id)` prints one).
 CREATE TABLE IF NOT EXISTS method_calls
     ( method_call_id    INTEGER PRIMARY KEY
     , group_id          INTEGER NOT NULL
@@ -580,7 +582,6 @@ CREATE TABLE IF NOT EXISTS method_calls
     , parameter_inputs  TEXT NOT NULL CHECK(json_valid(parameter_inputs))
     , parameters_used   TEXT NOT NULL CHECK(json_valid(parameters_used))
     , consumed_calls    TEXT CHECK(consumed_calls IS NULL OR json_valid(consumed_calls))
-    , call_log          TEXT NOT NULL DEFAULT ''
     , call_flag         INTEGER NOT NULL DEFAULT 0
     , call_output       TEXT CHECK(call_output IS NULL OR json_valid(call_output))
     , ended_at          TEXT CHECK(ended_at IS NULL OR datetime(ended_at) IS NOT NULL)

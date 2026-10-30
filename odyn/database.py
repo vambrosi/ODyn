@@ -65,6 +65,7 @@ from .utils import (
     Object,
     TableSpec,
     Value,
+    call_log_path,
     database_path,
     get_user,
     logger,
@@ -590,8 +591,8 @@ class Database(CallRecorder):
     @property
     def calls(self) -> pd.DataFrame:
         """
-        `method_calls` without the logs, code and environment: quick to read,
-        for who called what (`call_log` prints a call's log)
+        `method_calls` without the code and environment: quick to read, for
+        who called what (`call_log` prints a call's log, kept in a file)
         """
         return self._table(CALLS)
 
@@ -926,13 +927,26 @@ class Database(CallRecorder):
         db.call_log(1332)
         ```
         """
-        calls = self.method_calls
+        path = self.call_log_file(call_id)
 
-        if call_id not in calls.index:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            logger.warning(f"Call {call_id} has no log file ('{path}').")
+            return
+
+        text = plain(text).rstrip("\n")  # `plain`: old logs may hold colors
+        print(colored(text) if _shows_color(sys.stdout) else text)
+
+    def call_log_file(self, call_id: int) -> Path:
+        """
+        The file of recorded call `call_id`'s log (see `call_log_path`): there
+        from the call's start, complete once it ended.
+        """
+        if call_id not in self.calls.index:
             raise ValueError(f"There is no recorded call {call_id}.")
 
-        text = plain(str(calls.loc[call_id, "call_log"] or "")).rstrip("\n")
-        print(colored(text) if _shows_color(sys.stdout) else text)
+        return call_log_path(self.main_folder, self.project, call_id)
 
     def latest_calls(self, method_name: str) -> pd.DataFrame:
         """

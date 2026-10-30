@@ -1,18 +1,24 @@
--- NO MIGRATION v5 -> v6
+-- MIGRATION v6 -> v7
 --
--- v6 is a rebuild, not a migration, so this file holds no statements and
--- `migrate.py` refuses (`MIGRATES_FROM = None`) before it would be read.
+-- Each call's log leaves the database for a file
+-- (`.odyn/logs/<project or main>/<thousands>/<call id>.log`, see
+-- `call_log_path`).
 --
--- The previous migration is still in the history:
---     git log -p odyn/latest.sql
+-- WHY:
+-- The logs were half the database (11 MB of 22 MB in October 2026, mostly
+-- caiman's lines) and grew by about that much a month. SQLite reads a file
+-- a page (4 KB) at a time, and on a network share each page is a round trip:
+-- every read of `method_calls` walked each log's pages, even when it asked
+-- only for the columns after it (`call_flag`, `call_output`, `ended_at`). A
+-- lean database is also one a reader can copy whole, in one go.
 --
--- WHY THERE IS NO MIGRATION:
--- No v5 database was ever in use: `main-sync` held test data only. v6
--- renames `loops` to `experiments` (`loop_id` to `exp_id`, `group_loops` to
--- `group_experiments`, `loop_vials` to `experiment_vials`, the `loop`
--- annotation target to `experiment`).
+-- BEFORE THIS SCRIPT:
+-- `migrate.py` (`export_call_logs`) writes each call's `call_log` to its
+-- file and reads it back, after the backup and before this script. A file
+-- already there must hold the same text, or the migration stops.
 --
--- WHAT TO DO INSTEAD:
--- Start the database again from `create.sql`
--- (`Database(main_folder, project="main-sync", can_create=True)`) and add the
--- users and panels back.
+-- AFTER THIS SCRIPT:
+-- `migrate.py` runs VACUUM, which gives the room of the logs back (dropping
+-- a column only frees pages inside the file).
+
+ALTER TABLE method_calls DROP COLUMN call_log;

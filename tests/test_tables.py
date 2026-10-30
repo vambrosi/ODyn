@@ -97,11 +97,11 @@ def test_a_group_view_is_the_same_reader_restricted(db):
     assert list(group.experiments.columns) == list(db.experiments.columns)
 
 
-def test_calls_leave_the_log_out(db):
+def test_calls_leave_the_long_columns_out(db):
     db.add_odor(odor_id=99, odor_name="x")
 
-    assert "call_log" in db.method_calls.columns
-    assert "call_log" not in db.calls.columns
+    assert {"code", "environment"} <= set(db.method_calls.columns)
+    assert not {"code", "environment"} & set(db.calls.columns)
     assert db.calls.loc[db.method_calls.index[0], "parameter_inputs"] == {
         "odor_id": 99,
         "odor_name": "x",

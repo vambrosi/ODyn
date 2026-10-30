@@ -101,34 +101,30 @@ def test_migration_matches_fresh_schema(tmp_path):
     con.close()
 
 
-# Minimal FK-valid chains. `migrate` runs PRAGMA foreign_key_check afterwards,
-# so orphan rows would fail the migration rather than the assertion.
+# Minimal FK-valid chains, in the previous schema. `migrate` runs PRAGMA
+# foreign_key_check afterwards, so orphan rows would fail the migration
+# rather than the assertion. Call 2 logged nothing; call 3 was written on
+# Windows (its line ends are kept as they are).
 SEED = r"""
-INSERT INTO groups (group_id) VALUES (0);
+INSERT OR IGNORE INTO groups (group_id) VALUES (0);
 
 INSERT INTO method_calls
-    ( method_call_id, group_id, method_name
-    , parameter_inputs, git_commit, parameters_used
-    , ended_at
+    ( method_call_id, group_id, user, method_name, module, code
+    , parameter_inputs, parameters_used, call_log, ended_at
     ) VALUES
-        ( 1, 0, 'Group.run_motion_correction'
-        , '{"is_test": true}', 'abc123', '{}'
+        ( 1, 0, 'alice', 'Group.run_motion_correction', 'odyn.groups', '{}'
+        , '{}', '{}', 'line one' || char(10) || 'line two' || char(10)
         , '2026-09-16 10:00:00'
         ),
 
-        ( 2, 0, 'Database.add_experiment'
-        , '{}', 'unknown-hash', '{}'
-        , '2026-09-16 10:00:00'
+        ( 2, 0, 'alice', 'Database.add_experiment', 'odyn.database', '{}'
+        , '{}', '{}', '', '2026-09-16 10:00:00'
         ),
 
-        ( 3, 0, 'Group.outcome_count'
-        , '{}', 'abc123', '{}'
-        , NULL
+        ( 1234, 0, 'bob', 'Database.set_mouse', 'odyn.database', '{}'
+        , '{}', '{}', 'on Windows' || char(13) || char(10)
+        , '2026-09-16 10:00:00'
         );
-
-UPDATE method_calls
-    SET called_at = '2020-01-01 00:00:00'
-    WHERE ended_at IS NULL;
 
 INSERT INTO outputs (method_call_id, file_path, removed)
     VALUES (1, 'a.png', FALSE);
@@ -160,6 +156,7 @@ def stand_in_migration(tmp_path, monkeypatch):
     no_op.write_text("SELECT 1;")
     monkeypatch.setattr("odyn.migrate.LATEST_MIGRATION", no_op)
     monkeypatch.setattr("odyn.migrate.MIGRATES_FROM", SCHEMA_VERSION - 1)
+    monkeypatch.setattr("odyn.migrate.BEFORE_SQL", None)
 
 
 def test_a_rebuild_refuses_to_migrate(tmp_path, monkeypatch):
@@ -179,9 +176,9 @@ def test_a_rebuild_refuses_to_migrate(tmp_path, monkeypatch):
 
 
 def migrated_db(tmp_path):
-    """An old DB with one recorded call, walked forward one version."""
+    """An old DB with a few recorded calls, walked forward one version."""
     main_folder = tmp_path / "main"
-    (main_folder / ODYN_FOLDER).mkdir(parents=True)
+    (main_folder / ODYN_FOLDER).mkdir(parents=True, exist_ok=True)
 
     old = main_folder / ODYN_FOLDER / "odyn.db"
     build(old, PREVIOUS_SCHEMA, MIGRATES_FROM)
@@ -199,56 +196,82 @@ def migrated_db(tmp_path):
     return old
 
 
+def a_log(db_path, call_id):
+    folder = db_path.parent / "logs" / "main" / f"{call_id // 1000:04d}"
+    path = folder / f"{call_id}.log"
+
+    return path.read_bytes() if path.exists() else None
+
+
 @needs_migration
-def test_migration_keeps_calls_and_moves_the_commit_into_code(tmp_path):
-    """What was never recorded is left unknown rather than made up."""
-    con = sqlite3.connect(migrated_db(tmp_path))
+def test_migration_moves_each_log_into_its_file(tmp_path):
+    db_path = migrated_db(tmp_path)
+    con = sqlite3.connect(db_path)
 
     try:
-        rows = con.execute("""
-            SELECT method_call_id, user, module, code
-                 , environment, consumed_calls
-                 , parameter_inputs, ended_at
-                FROM method_calls ORDER BY method_call_id;
-        """).fetchall()
-
+        columns = {row[1] for row in con.execute("PRAGMA table_info(method_calls);")}
+        calls = con.execute("SELECT method_call_id FROM method_calls;").fetchall()
         outputs = con.execute("SELECT method_call_id FROM outputs;").fetchall()
     finally:
         con.close()
 
-    assert rows == [
-        (
-            1,
-            "unknown",
-            "odyn.groups",
-            '{"odyn":{"commit":"abc123","dirty":null}}',
-            None,
-            None,
-            '{"is_test": true}',
-            "2026-09-16 10:00:00",
-        ),
-        (
-            2,
-            "unknown",
-            "odyn.database",
-            '{"odyn":{"commit":null,"dirty":null}}',
-            None,
-            None,
-            "{}",
-            "2026-09-16 10:00:00",
-        ),
-        (
-            3,
-            "unknown",
-            "odyn.groups",
-            '{"odyn":{"commit":"abc123","dirty":null}}',
-            None,
-            None,
-            "{}",
-            None,
-        ),
-    ]
-    assert outputs == [(1,)]
+    assert "call_log" not in columns
+    assert calls == [(1,), (2,), (1234,)] and outputs == [(1,)]
+    assert a_log(db_path, 1) == b"line one\nline two\n"
+    assert a_log(db_path, 2) is None  # nothing logged, no file
+    assert a_log(db_path, 1234) == b"on Windows\r\n"
+
+
+@needs_migration
+def test_a_migration_tried_again_finds_its_files(tmp_path):
+    folder = tmp_path / "main" / ODYN_FOLDER / "logs" / "main" / "0000"
+    folder.mkdir(parents=True)
+    (folder / "1.log").write_bytes(b"line one\nline two\n")
+
+    assert a_log(migrated_db(tmp_path), 1) == b"line one\nline two\n"
+
+
+@needs_migration
+def test_another_log_in_the_way_stops_the_migration(tmp_path):
+    folder = tmp_path / "main" / ODYN_FOLDER / "logs" / "main" / "0000"
+    folder.mkdir(parents=True)
+    (folder / "1.log").write_bytes(b"someone else's")
+
+    with pytest.raises(RuntimeError, match="holds another log than call 1's"):
+        migrated_db(tmp_path)
+
+    con = sqlite3.connect(tmp_path / "main" / ODYN_FOLDER / "odyn.db")
+
+    try:
+        assert con.execute("PRAGMA user_version;").fetchone()[0] == MIGRATES_FROM
+        (kept,) = con.execute(
+            "SELECT call_log FROM method_calls WHERE method_call_id = 1;"
+        ).fetchone()
+        assert kept == "line one\nline two\n"
+    finally:
+        con.close()
+
+
+@needs_migration
+def test_the_room_of_the_logs_is_given_back(tmp_path):
+    main_folder = tmp_path / "main"
+    (main_folder / ODYN_FOLDER).mkdir(parents=True)
+    db_path = main_folder / ODYN_FOLDER / "odyn.db"
+    build(db_path, PREVIOUS_SCHEMA, MIGRATES_FROM)
+
+    con = sqlite3.connect(db_path)
+    con.executescript(SEED)
+    con.execute(
+        "UPDATE method_calls SET call_log = ? WHERE method_call_id = 1;", ["x" * 2**20]
+    )
+    con.commit()
+    con.close()
+    before = db_path.stat().st_size
+
+    migrate(main_folder)
+
+    assert db_path.stat().st_size < before - 2**19
+    assert len(a_log(db_path, 1)) == 2**20
 
 
 @needs_migration

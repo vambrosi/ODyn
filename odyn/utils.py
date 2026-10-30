@@ -11,8 +11,10 @@ import platform
 import re
 import subprocess
 import sys
+import threading
 import time
 
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import IntFlag
@@ -53,6 +55,12 @@ OUTPUTS_FOLDER = "outputs"
 # Default wait before "database locked"
 DB_TIMEOUT_S = 30
 
+# Each recorded call's log is a file, in
+# '<main_folder>/.odyn/logs/<project or main>/<thousands>/<call id>.log' (see
+# `call_log_path`), saved every few seconds while the call runs
+LOGS_FOLDER = "logs"
+CALL_LOG_FLUSH_S = 5.0
+
 
 def check_name(kind: str, name: str) -> None:
     """
@@ -86,6 +94,20 @@ def database_path(main_folder: str | Path, project: None | str = None) -> Path:
         raise ValueError(f"'main' is reserved for the main database, got {project!r}.")
 
     return odyn_folder / PROJECTS_FOLDER / f"{project}.db"
+
+
+def call_log_path(main_folder: str | Path, project: None | str, call_id: int) -> Path:
+    """
+    Where recorded call `call_id` of a database keeps its log:
+    `.odyn/logs/<project or main>/<call_id // 1000>/<call_id>.log`, named like
+    the backups. A folder for each thousand calls, since a folder of many
+    thousand files is slow to list on a share.
+    """
+    database_path(main_folder, project)  # checks the project name
+    label = "main" if project is None else project
+    folder = Path(main_folder) / ODYN_FOLDER / LOGS_FOLDER / label
+
+    return folder / f"{call_id // 1000:04d}" / f"{call_id}.log"
 
 
 def backup_path(main_folder: str | Path, project: None | str, kind: str) -> Path:
@@ -382,8 +404,8 @@ METHOD_CALLS = TableSpec(
         "consumed_calls",
     ),
 )
-# `method_calls` without the long columns (the log, the code, the
-# environment): what a page scanning who called what needs, read fast
+# `method_calls` without the long columns (the code, the environment): what
+# a page scanning who called what needs, read fast
 _CALL_COLUMNS = """
     method_call_id, group_id, user, called_at, method_name, module,
     parameter_inputs, parameters_used, consumed_calls, call_flag,
@@ -582,8 +604,8 @@ def record_call(func):
     """
     Decorator for Database/Group methods that should be tracked in method_calls.
 
-    Records the call, captures all log output during execution, and saves it
-    to call_log when the method returns (even on exception).
+    Records the call and writes its log lines to a file (`call_log_path`, see
+    `_CallLog`), complete when the method returns (even on exception).
 
     Pushes a CallFrame onto self._call_stack for the duration of the call, so
     the function body can read self.current_call_id (e.g. for a foreign key) and
@@ -596,11 +618,6 @@ def record_call(func):
     def wrapper(self, **kwargs):
         # Support both Database (db = self) and Group (db = self.db)
         db = getattr(self, "db", self)
-
-        buf = StringIO()
-        handler = logging.StreamHandler(buf)
-        handler.setFormatter(_plain_formatter)
-        logger.addHandler(handler)
 
         # parameters_used starts as defaults plus whatever was passed.
         # methods may change them during the call.
@@ -637,6 +654,8 @@ def record_call(func):
             )
             call_id = cur.lastrowid
 
+        handler = _CallLog(call_log_path(db.main_folder, db.project, call_id))
+        _start_log(handler)
         logger.info(f"Recorded method call to db (method_call_id = {call_id}).")
 
         # A recorded call is a new row in method_calls, for both views
@@ -656,7 +675,7 @@ def record_call(func):
 
         finally:
             self._call_stack.pop()
-            logger.removeHandler(handler)
+            _end_log(handler)
 
             call_output = (
                 json.dumps(jsonable(frame.output)) if frame.output is not None else None
@@ -666,8 +685,7 @@ def record_call(func):
                 con.execute(
                     """
                     UPDATE method_calls
-                        SET call_log = ?
-                          , call_flag = ?
+                        SET call_flag = ?
                           , call_output = ?
                           , parameters_used = ?
                           , consumed_calls = ?
@@ -675,7 +693,6 @@ def record_call(func):
                         WHERE method_call_id = ?
                     """,
                     [
-                        buf.getvalue(),
                         int(frame.flag),
                         call_output,
                         json.dumps(jsonable(frame.used)),
@@ -801,6 +818,105 @@ def _shows_color(stream) -> bool:
         return stream.isatty()
     except (AttributeError, ValueError):  # no stream, or a closed one
         return False
+
+
+# Threads running a recorded call, with how many (nested calls each count)
+_calling: Counter[int] = Counter()
+
+
+class _CallLog(logging.StreamHandler):
+    """
+    One recorded call's log, in its file at `path`: written as it goes and
+    saved every `CALL_LOG_FLUSH_S` seconds and at the end, so a killed job
+    keeps all but its last few seconds. Kept in memory when the file cannot
+    be opened, and tried again at the end.
+
+    Its lines: those of the thread that runs the call, and of threads that
+    run no call of their own (helpers), never another call's. Nothing from
+    another process: a worker forked by caiman inherits this handler, and
+    its copy of the lines not yet saved would be written twice.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.pid = os.getpid()
+        self.thread = threading.get_ident()
+        self.saved = time.monotonic()
+        self.error: None | OSError = None
+
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # newline="": the same bytes from every OS (all read the share)
+            stream = open(path, "a", encoding="utf-8", newline="")
+        except OSError as error:
+            stream, self.error = StringIO(), error
+
+        super().__init__(stream)
+        self.setFormatter(_plain_formatter)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.process != self.pid:
+            return False
+
+        if record.thread != self.thread and _calling[record.thread]:
+            return False  # another call's
+
+        return bool(super().filter(record))
+
+    def flush(self) -> None:
+        """Saved now and then: on a share each save is a round trip."""
+        if (
+            os.getpid() == self.pid
+            and time.monotonic() - self.saved >= CALL_LOG_FLUSH_S
+        ):
+            self.save()
+
+    def save(self) -> None:
+        with self.lock:
+            self.stream.flush()
+
+        self.saved = time.monotonic()
+
+    def finish(self) -> None:
+        """The whole log in its file, and the file closed."""
+        try:
+            if isinstance(self.stream, StringIO):  # tried once more
+                kept = self.stream.getvalue()
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+
+                with open(self.path, "a", encoding="utf-8", newline="") as file:
+                    file.write(kept)
+            else:
+                self.save()
+                self.stream.close()
+
+        except OSError as error:
+            logger.warning(
+                f"Could not save the log of this call in '{self.path}': {error}"
+            )
+
+        super().close()
+
+
+def _start_log(handler: _CallLog) -> None:
+    logger.addHandler(handler)
+    _calling[handler.thread] += 1
+
+    if handler.error is not None:
+        logger.warning(
+            f"Could not open the log file '{handler.path}' ({handler.error}): "
+            "kept in memory until the call ends."
+        )
+
+
+def _end_log(handler: _CallLog) -> None:
+    logger.removeHandler(handler)
+    _calling[handler.thread] -= 1
+
+    if _calling[handler.thread] <= 0:
+        del _calling[handler.thread]
+
+    handler.finish()
 
 
 class _ToOdyn(logging.Handler):

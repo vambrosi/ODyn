@@ -7,31 +7,47 @@ To inspect older migrations run:
 
 A migration:
 - Backs up DB to `.odyn/backups/<time>-<project or main>-snapshot-v<OLD>.db`
+- Runs `BEFORE_SQL`, when the migration needs Python too (files to write)
 - Applies `latest.sql` migration to DB
 - Updates `user_version`
+- Runs VACUUM, when `VACUUM_AFTER` (to give back the room of dropped data)
 """
 
 from __future__ import annotations
 
+import os
 import sqlite3
 
+from collections.abc import Callable
 from pathlib import Path
 
 from .locking import DatabaseLock
-from .utils import DB_TIMEOUT_S, backup_path, database_path, logger
+from .utils import DB_TIMEOUT_S, backup_path, call_log_path, database_path, logger
 
 # When adding a new migration you should:
 # - Overwrite latest.sql with the latest migration;
 # - Overwrite create.sql with compatible DB schema;
 # - Bump the SCHEMA_VERSION to match, and set MIGRATES_FROM;
+# - Set BEFORE_SQL and VACUUM_AFTER (None and False unless needed);
+# - Copy the previous create.sql to tests/previous_schema.sql;
 # - Run test_migration.py, then `python -m odyn.tools diagram`.
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Which version `latest.sql` upgrades from, or None when a version is a rebuild
 # rather than a migration: a new database is started from `create.sql` and the
 # old one stays readable with the tagged older code. v5 and v6 are rebuilds.
-MIGRATES_FROM: None | int = None
+MIGRATES_FROM: None | int = 6
+
+# What the migration does outside SQL, before `latest.sql`: given the open
+# connection, the main folder and the project. v7: the logs into their files.
+BEFORE_SQL: None | Callable[[sqlite3.Connection, Path, None | str], None] = (
+    None  # set below
+)
+
+# VACUUM after the migration: rewrites the whole file, to give back the room
+# of what was dropped. Needs room for a copy of the database.
+VACUUM_AFTER = True
 
 # Calls running for longer than this limit are probably dead
 RUNNING_FOR_AT_MOST = "-2 days"
@@ -100,6 +116,9 @@ def migrate(
 
             logger.info(f"Backed up database to '{backup}'.")
 
+            if BEFORE_SQL is not None:
+                BEFORE_SQL(con, Path(main_folder), project)
+
             # Dropping tables can violate FOREIGN KEY contraints
             migration_script = LATEST_MIGRATION.read_text()
             con.execute("PRAGMA foreign_keys = OFF;")
@@ -131,6 +150,14 @@ def migrate(
             check_foreign_keys(con)
 
             logger.info(f"Migrated database to v{SCHEMA_VERSION}.")
+
+            if VACUUM_AFTER:
+                before = db_path.stat().st_size
+                con.execute("VACUUM;")
+                after = db_path.stat().st_size
+                logger.info(
+                    f"Vacuumed: {before / 2**20:.1f} MB -> {after / 2**20:.1f} MB."
+                )
 
         finally:
             con.close()
@@ -197,3 +224,57 @@ def check_foreign_keys(con: sqlite3.Connection) -> None:
 
     if violations:
         raise RuntimeError(f"Foreign key violations: {violations}")
+
+
+def export_call_logs(
+    con: sqlite3.Connection, main_folder: Path, project: None | str
+) -> None:
+    """
+    v6 -> v7: each call's `call_log` into its file (see `call_log_path`), read
+    back to check. A file already there (a migration tried before) must hold
+    the same text, or this stops before anything is dropped.
+    """
+    rows = con.execute("""
+        SELECT method_call_id, call_log
+            FROM method_calls
+            WHERE call_log != ''
+            ORDER BY method_call_id;
+    """)
+    written = there = 0
+
+    for call_id, text in rows:
+        path = call_log_path(main_folder, project, call_id)
+
+        if path.exists():
+            if _read(path) != text:
+                raise RuntimeError(
+                    f"'{path}' is there but holds another log than call "
+                    f"{call_id}'s. Move it away and migrate again."
+                )
+
+            there += 1
+            continue
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(f"{path.name}.tmp")
+
+        # newline="": the same bytes from every OS (the share is read by all)
+        with open(temp, "w", encoding="utf-8", newline="") as file:
+            file.write(text)
+
+        os.replace(temp, path)
+
+        if _read(path) != text:
+            raise RuntimeError(f"'{path}' does not read back as call {call_id}'s log.")
+
+        written += 1
+
+    logger.info(f"Wrote {written} call logs to files ({there} already there).")
+
+
+def _read(path: Path) -> str:
+    with open(path, encoding="utf-8", newline="") as file:
+        return file.read()
+
+
+BEFORE_SQL = export_call_logs
