@@ -49,3 +49,7 @@ The app updates itself: at every launch it pulls the `main` branch of its clone 
 Create a notebook file (extension `.ipynb`) in VS Code, and run `from odyn import Database, Group` in a cell. You will get more instructions after that. You will also need to select `caiman` as your _Python Environment_ and install the Jupyter extension (you will get prompts after you try to run a notebook cell).
 
 Check the `notebooks` folder to get more detailed examples.
+
+## Design notes
+
+- [How ODyn uses its database](docs/database.md): the lock, the caches, the call logs, the migrations, and what they assume about the lab that uses them.
