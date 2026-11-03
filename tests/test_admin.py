@@ -11,7 +11,7 @@ import pytest
 
 from odyn import Database
 from odyn.admin import Admin, main
-from odyn.locking import DatabaseLock
+from odyn.locking import FileLock
 from odyn.migrate import SCHEMA_VERSION
 from test_locking import watch
 
@@ -174,7 +174,7 @@ def test_snapshot_is_replaced_each_time(admin):
 
 
 def test_copies_wait_for_the_lock(admin):
-    other = DatabaseLock(admin.path)
+    other = FileLock(admin.path)
     released = []
 
     def hold():
@@ -242,7 +242,7 @@ def test_status_lists_calls_that_have_not_ended(admin):
 
 
 def test_unlock_needs_yes(admin):
-    lock = DatabaseLock(admin.path)
+    lock = FileLock(admin.path)
     lock.path.write_text(
         json.dumps({"token": "t", "user": "u", "host": "h", "since": time.time()})
     )

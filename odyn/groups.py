@@ -50,6 +50,7 @@ from .utils import (
     um_to_pixels,
 )
 from .utils import _method_calls_dataframe, _read_table
+from .shared import read_json, write_json
 
 # caiman is imported where it is used, since it is slow to import.
 if TYPE_CHECKING:
@@ -2001,7 +2002,7 @@ class Group(CallRecorder):
         it is now (its SHA-1 unchanged since).
         """
         try:
-            before = json.loads(self._progress_path().read_text())
+            before = read_json(self._progress_path())
         except (OSError, ValueError):
             return False
 
@@ -2023,7 +2024,7 @@ class Group(CallRecorder):
         path = self._progress_path()
 
         try:
-            before = json.loads(path.read_text())
+            before = read_json(path)
         except (OSError, ValueError):
             before = None
 
@@ -2066,11 +2067,7 @@ class Group(CallRecorder):
         if self.current_call_id not in self.progress["call_ids"]:
             self.progress["call_ids"].append(self.current_call_id)
 
-        path = self._progress_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        partial = path.with_name(f".{path.name}.{os.getpid()}.partial")
-        partial.write_text(json.dumps(jsonable(self.progress), indent=2))
-        os.replace(partial, path)
+        write_json(self._progress_path(), jsonable(self.progress))
 
     def _part_marks(self) -> dict[str, int]:
         """How long each list of parts is, before a batch adds its own."""
@@ -2297,7 +2294,7 @@ class Group(CallRecorder):
         the last whole correction's report says, and 2 more.
         """
         try:
-            metrics = json.loads((self.mcor_test_folder() / "metrics.json").read_text())
+            metrics = read_json(self.mcor_test_folder() / "metrics.json")
             return max(int(v) for v in metrics["settings"]["max_shifts_px"]) + 2
         except (OSError, ValueError, KeyError, TypeError):
             return DEFAULT_REPORT_MARGIN_PX
@@ -2790,7 +2787,7 @@ class Group(CallRecorder):
         saved = folder / RAW_LEVELS_FILE
 
         if saved.is_file():
-            known = json.loads(saved.read_text())
+            known = read_json(saved)
 
             if known.get("acq_ids") == acq_ids and list(folder.glob("*_raw.*")):
                 return [float(v) for v in known["movie_levels"]]
@@ -2807,7 +2804,7 @@ class Group(CallRecorder):
             size=size,
         )
         levels = [float(v) for v in self.preview_levels]
-        saved.write_text(json.dumps({"movie_levels": levels, "acq_ids": acq_ids}))
+        write_json(saved, {"movie_levels": levels, "acq_ids": acq_ids})
         self.add_output_file(saved)
 
         if path.is_file():
@@ -3117,7 +3114,7 @@ class Group(CallRecorder):
         path = self.mcor_test_folder() / "metrics.json"
 
         try:
-            settings = json.loads(path.read_text()).get("settings") or {}
+            settings = read_json(path).get("settings") or {}
         except (OSError, ValueError):
             return None
 
@@ -4357,9 +4354,9 @@ def _tiff_shape(path: Path, expected_frames: int) -> tuple[tuple[int, int], int]
 
 def _add_to_json(path: Path, values: dict) -> None:
     """Add `values` to the JSON object in `path`."""
-    content = json.loads(path.read_text()) if path.is_file() else {}
+    content = read_json(path) if path.is_file() else {}
     content.update(values)
-    path.write_text(json.dumps(content, indent=2))
+    write_json(path, content)
 
 
 def _filtered(template: None | np.ndarray, gsig_filt: None | list[int]):

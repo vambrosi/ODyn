@@ -45,7 +45,6 @@ No Qt in here: the cluster runs it, and the app only reads the states.
 
 from __future__ import annotations
 
-import json
 import os
 import socket
 
@@ -61,6 +60,7 @@ from ..sync import decode
 from ..utils import logger
 from .draft import Draft
 from .submit import RAW_FOLDER, check_files, ingest
+from ..shared import read_json, write_json
 
 QUEUE_FOLDER = "submissions"
 DONE_FOLDER = "done"
@@ -129,7 +129,7 @@ def enqueue(
         "submitted_on": socket.gethostname(),
         "draft_file": draft.path.name,
     }
-    _write_json(path, content)
+    write_json(path, content, sort_keys=True)
     _state_path(path).unlink(missing_ok=True)
 
     return path
@@ -173,13 +173,13 @@ def take_back(path: Path, drafts: Path) -> Path:
     What an earlier ingest added stays in the database, and is skipped when
     the draft comes back.
     """
-    content = json.loads(path.read_text())
+    content = read_json(path)
     local = Path(drafts) / str(content.get("draft_file") or path.name)
 
     for key in QUEUE_KEYS:
         content.pop(key, None)
 
-    _write_json(local, content)
+    write_json(local, content, sort_keys=True)
 
     withdrawn = path.parent / WITHDRAWN_FOLDER
     withdrawn.mkdir(exist_ok=True)
@@ -498,7 +498,7 @@ def _now_path(path: Path) -> Path:
 
 def _read_state(path: Path) -> None | Submission:
     try:
-        content = json.loads(_state_path(path).read_text())
+        content = read_json(_state_path(path))
     except (OSError, ValueError):
         return None
 
@@ -508,15 +508,7 @@ def _read_state(path: Path) -> None | Submission:
 
 
 def _write_state(path: Path, state: Submission) -> None:
-    _write_json(_state_path(path), asdict(state))
-
-
-def _write_json(path: Path, content: dict) -> None:
-    """Write under a hidden name, then rename (readers see all or nothing)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    hidden = path.parent / f".{path.name}.partial"
-    hidden.write_text(json.dumps(content, indent=2, sort_keys=True, default=str))
-    os.replace(hidden, path)
+    write_json(_state_path(path), asdict(state), sort_keys=True)
 
 
 def _time(text: str) -> datetime:

@@ -67,6 +67,8 @@ from datetime import date as Date, datetime
 from pathlib import Path
 from typing import Any
 
+from ..shared import read_json, write_json
+
 # Bumped when the stored shape changes in a way a reader must notice.
 # A draft written by a newer app is refused rather than half-read; an older
 # one is brought up to date as it is read (`_upgrade`).
@@ -252,7 +254,7 @@ class Draft:
         than reading what it recognizes and silently dropping the rest.
         """
         path = Path(path)
-        data = json.loads(path.read_text())
+        data = read_json(path)
         version = data.get("version")
 
         if version is None or version > DRAFT_VERSION:
@@ -648,11 +650,7 @@ class Draft:
         crash midway leaves the previous save intact rather than a half file.
         """
         self.data["saved_at"] = datetime.now().isoformat(sep=" ", timespec="seconds")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-
-        temporary = self.path.with_suffix(".json.writing")
-        temporary.write_text(json.dumps(self.data, indent=2, sort_keys=True))
-        os.replace(temporary, self.path)
+        write_json(self.path, self.data, sort_keys=True)
 
         return self
 
@@ -774,7 +772,7 @@ class Removals:
 
     def _read(self) -> list[dict[str, Any]]:
         try:
-            entries = json.loads(self.path.read_text())
+            entries = read_json(self.path)
         except (OSError, json.JSONDecodeError):
             return []
 
@@ -785,17 +783,14 @@ class Removals:
         )
 
     def _write(self, entries: list[dict[str, Any]]) -> None:
-        self.folder.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".json.writing")
-        temporary.write_text(json.dumps(entries, indent=2))
-        os.replace(temporary, self.path)
+        write_json(self.path, entries)
 
 
 def _draft_files(folder: Path | str) -> list[Path]:
     """
     The draft files in a folder, ignoring anything else that lives there.
 
-    Only names of the expected shape, so a half-written `.writing` file or
+    Only names of the expected shape, so a half-written `.partial` file or
     the `removed.json` stack is never mistaken for one.
     """
     folder = Path(folder)

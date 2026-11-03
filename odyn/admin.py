@@ -40,7 +40,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .database import Database, _has_database
-from .locking import DatabaseLock, _describe
+from .locking import _describe, file_lock
 from .migrate import SCHEMA_VERSION, migrate, open_calls
 from .utils import (
     BACKUPS_FOLDER,
@@ -221,9 +221,8 @@ class Admin(CallRecorder):
     @contextmanager
     def _raw_connection(self) -> Generator[sqlite3.Connection]:
         # A plain connection under the lock, so copies work whatever the
-        # schema version. Never nested inside `self.db._locked()`: two lock
-        # objects on one file in one process would wait for each other.
-        with DatabaseLock(self.path):
+        # schema version
+        with file_lock(self.path):
             con = sqlite3.connect(self.path, timeout=DB_TIMEOUT_S)
 
             try:
@@ -237,7 +236,7 @@ class Admin(CallRecorder):
 
     def status(self) -> dict:
         """Log and return the schema version, who holds the lock, and the copies."""
-        holder = DatabaseLock(self.path)._read_holder()
+        holder = file_lock(self.path)._read_holder()
 
         with self._raw_connection() as con:
             version = con.execute("PRAGMA user_version;").fetchone()[0]
@@ -300,7 +299,7 @@ class Admin(CallRecorder):
         **RETURNS**
         Whether a lock file was deleted.
         """
-        lock = DatabaseLock(self.path)
+        lock = file_lock(self.path)
         holder = lock._read_holder()
 
         if holder is None:
@@ -454,7 +453,7 @@ def main(argv: None | list[str] = None) -> int:
             admin.unlock(yes=True)
 
         # Shows who holds it before asking
-        elif not admin.unlock() and DatabaseLock(admin.path).path.exists():
+        elif not admin.unlock() and file_lock(admin.path).path.exists():
             if input("Delete the lock file? [y/N] ").strip().lower() == "y":
                 admin.unlock(yes=True)
 

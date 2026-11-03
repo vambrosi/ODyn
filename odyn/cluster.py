@@ -87,6 +87,7 @@ import pandas as pd
 from .database import SYNC_FOLDER, Database, SyncFlag
 from .groups import candidate_settings
 from .utils import ODYN_FOLDER, database_path, get_user, logger
+from .shared import read_json, write_json
 
 CLUSTER_FOLDER = "cluster"
 CONFIG_FILE = "cluster.json"
@@ -188,7 +189,7 @@ class ClusterConfig:
         if not path.is_file():
             return cls()
 
-        given = json.loads(path.read_text())
+        given = read_json(path)
         known = {f.name for f in fields(cls)}
         unknown = sorted(set(given) - known)
 
@@ -240,7 +241,7 @@ def send_request(
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = folder / f"{stamp}-{method}-{uuid.uuid4().hex[:8]}.json"
 
-    _write_json(path, request)  # a tick never reads half a file
+    write_json(path, request)  # a tick never reads half a file
 
     return path
 
@@ -275,7 +276,7 @@ def _apply(
 ) -> None:
     """Run one request, then move it to `done/` or `rejected/`."""
     try:
-        request = json.loads(path.read_text())
+        request = read_json(path)
         method, kwargs = request["method"], dict(request.get("kwargs") or {})
         user = str(request["user"])
         _check_request(method, kwargs)
@@ -308,9 +309,9 @@ def _file_away(path: Path, folder: str, extra: dict[str, Any]) -> None:
     target.mkdir(exist_ok=True)
 
     try:
-        content = json.loads(path.read_text())
+        content = read_json(path)
         content.update(extra)
-        (target / path.name).write_text(json.dumps(content, indent=2, default=str))
+        write_json(target / path.name, content)
         path.unlink()
 
     except (OSError, ValueError):
@@ -432,7 +433,7 @@ def tick(
 
         report.processed.append(work.what)
         seen[work.key] = work.state
-        _write_json(folder / SEEN_FILE, seen)
+        write_json(folder / SEEN_FILE, seen)
 
     if chain and not dry_run:
         if (folder / STOP_FILE).exists():
@@ -646,7 +647,7 @@ def mcor_backfill(
 def _sweep_sent(folder: Path, group_id: int) -> bool:
     """Whether a sweep of `group_id` was submitted (its jobs recorded)."""
     try:
-        sweep = json.loads((folder / SWEEPS_FOLDER / f"g{group_id}.json").read_text())
+        sweep = read_json(folder / SWEEPS_FOLDER / f"g{group_id}.json")
     except (OSError, ValueError):
         return False
 
@@ -870,7 +871,7 @@ def archive_tests(group, approval: dict, pick: None | dict = None) -> Path:
     except OSError:
         pass
 
-    _write_json(folder / "approval.json", record)
+    write_json(folder / "approval.json", record)
 
     return folder
 
@@ -911,7 +912,7 @@ def pick_candidate(
     metrics = Path(folder) / "metrics.json"
 
     try:
-        settings = json.loads(metrics.read_text()).get("settings") or {}
+        settings = read_json(metrics).get("settings") or {}
     except (OSError, ValueError) as error:
         raise ValueError(f"No settings of {run} to pick ({error}).") from None
 
@@ -927,7 +928,7 @@ def pick_repeats(db: Database, group_id: int, folder: str | Path) -> tuple[bool,
     again), and whether that last one was rigid (or none was run).
     """
     try:
-        settings = json.loads((Path(folder) / "metrics.json").read_text())
+        settings = read_json(Path(folder) / "metrics.json")
     except (OSError, ValueError):
         settings = {}
 
@@ -979,7 +980,7 @@ def submit_reruns(
 
         try:
             if CORRECTION_RUN in names and sent_path.is_file():
-                sent = json.loads(sent_path.read_text())
+                sent = read_json(sent_path)
 
                 if sent.get("rerun_call_id") != call_id:
                     what = f"group {group_id}: {sent.get('label') or 'test'} again"
@@ -997,12 +998,12 @@ def submit_reruns(
                             label=sent.get("label"),
                             pick_call_id=sent.get("pick_call_id"),
                         )
-                        again = json.loads(sent_path.read_text())
-                        _write_json(sent_path, again | {"rerun_call_id": call_id})
+                        again = read_json(sent_path)
+                        write_json(sent_path, again | {"rerun_call_id": call_id})
                         report.tests.append(f"{what} submitted (job {job_id})")
 
             if names - {CORRECTION_RUN} and sweep_path.is_file():
-                sweep = json.loads(sweep_path.read_text())
+                sweep = read_json(sweep_path)
 
                 if sweep.get("rerun_call_id") != call_id:
                     what = f"group {group_id}: sweep runs again"
@@ -1011,8 +1012,8 @@ def submit_reruns(
                         report.tests.append(f"would submit {what}")
                     else:
                         jobs = rerun_sweep(db.main_folder, project, sweep, names)
-                        sweep = json.loads(sweep_path.read_text())
-                        _write_json(
+                        sweep = read_json(sweep_path)
+                        write_json(
                             sweep_path,
                             sweep
                             | {
@@ -1107,7 +1108,7 @@ def submit_picks(
             continue
 
         try:
-            sent = json.loads((folder / f"{group_id}.json").read_text())
+            sent = read_json(folder / f"{group_id}.json")
         except (OSError, ValueError):
             sent = {}
 
@@ -1232,7 +1233,7 @@ def _modified_after(path: Path, when: pd.Timestamp) -> bool:
 
 def _read_seen(folder: Path) -> dict[str, str]:
     try:
-        seen = json.loads((folder / SEEN_FILE).read_text())
+        seen = read_json(folder / SEEN_FILE)
     except (OSError, ValueError):
         return {}
 
@@ -1257,14 +1258,6 @@ def _sbatch(arguments: list[str], dry_run: bool) -> None | str:
     return done.stdout.strip().split(";")[0]
 
 
-def _write_json(path: Path, content: Any) -> None:
-    """Write `content` under a hidden name, then rename (readers see all or none)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    hidden = path.parent / f".{path.name}.partial"
-    hidden.write_text(json.dumps(content, indent=2, default=str))
-    os.replace(hidden, path)
-
-
 def _write_heartbeat(folder: Path, report: TickReport) -> None:
     beat = {
         **asdict(report),
@@ -1272,7 +1265,7 @@ def _write_heartbeat(folder: Path, report: TickReport) -> None:
         "user": get_user(),
         "job_id": os.environ.get("SLURM_JOB_ID"),
     }
-    _write_json(folder / HEARTBEAT_FILE, beat)
+    write_json(folder / HEARTBEAT_FILE, beat)
 
     with open(folder / LOG_FILE, "a") as log:
         log.write(report.summary() + "\n")
@@ -1283,7 +1276,7 @@ def heartbeat(main_folder: str | Path, project: None | str = None) -> None | dic
     path = cluster_folder(main_folder, project) / HEARTBEAT_FILE
 
     try:
-        return json.loads(path.read_text())
+        return read_json(path)
     except (OSError, ValueError):
         return None
 
@@ -1554,7 +1547,7 @@ def submit_mcor_test(
         print(script.read_text())
         return None
 
-    _write_json(
+    write_json(
         folder / MCOR_FOLDER / f"{group_id}.json",
         {
             "group_id": group_id,
@@ -1655,7 +1648,7 @@ def submit_mcor_sweep(
         "keep_patch_shifts": bool(grid.get("keep_patch_shifts", False)),
         "runs": runs,
     }
-    _write_json(sweep, content)
+    write_json(sweep, content)
 
     name = f"odyn-sweep-{project or 'main'}-g{group_id}"
     command = [
@@ -1703,7 +1696,7 @@ def submit_mcor_sweep(
         "array_job": array,
         "submitted_at": datetime.now().strftime(TIME_FORMAT),
     }
-    _write_json(sweep, content)
+    write_json(sweep, content)
     logger.info(
         f"Submitted the sweep of group {group_id}: the baseline as job "
         f"{baseline}, then {len(runs)} piecewise runs as job {array}."
@@ -1785,7 +1778,7 @@ def run_mcor_sweep(sweep: str | Path, task: int) -> Path:
     What a sweep's job runs: run `task` of the sweep in `sweep` (0 is the
     baseline), recorded as the sweep's user. Returns its folder.
     """
-    content = json.loads(Path(sweep).read_text())
+    content = read_json(sweep)
     db = Database(
         content["main_folder"], project=content["project"], user=content["user"]
     )
@@ -1881,7 +1874,7 @@ def mcor_tests(main_folder: str | Path, project: None | str = None) -> list[dict
     tests = []
 
     for path in (folder / MCOR_FOLDER).glob("*.json"):
-        test = json.loads(path.read_text())
+        test = read_json(path)
         recorded = test.get("state")
         name = f"odyn-mcor-{project or 'main'}-g{test['group_id']}"
         log = f"{name}-{test['job_id']}.out"
@@ -1905,7 +1898,7 @@ def mcor_sweep_runs(main_folder: str | Path, project: None | str = None) -> list
     sweeps = []
 
     for path in (folder / SWEEPS_FOLDER).glob("g*.json"):
-        sweep = json.loads(path.read_text())
+        sweep = read_json(path)
 
         if "baseline_job" in sweep:  # not a dry run
             sweeps.append(sweep)
@@ -1991,7 +1984,7 @@ def record_job_states(main_folder: str | Path, project: None | str) -> int:
     changed = 0
 
     for path in (folder / MCOR_FOLDER).glob("*.json"):
-        test = json.loads(path.read_text())
+        test = read_json(path)
         name = f"odyn-mcor-{project or 'main'}-g{test['group_id']}"
         log = logs / f"{name}-{test['job_id']}.out"
         state = _job_state(
@@ -1999,11 +1992,11 @@ def record_job_states(main_folder: str | Path, project: None | str) -> int:
         )
 
         if test.get("state") != state:
-            _write_json(path, test | {"state": state})
+            write_json(path, test | {"state": state})
             changed += 1
 
     for path in (folder / SWEEPS_FOLDER).glob("g*.json"):
-        sweep = json.loads(path.read_text())
+        sweep = read_json(path)
 
         if "baseline_job" not in sweep:
             continue
@@ -2018,7 +2011,7 @@ def record_job_states(main_folder: str | Path, project: None | str) -> int:
             )
 
         if sweep.get("states") != states:
-            _write_json(path, sweep | {"states": states})
+            write_json(path, sweep | {"states": states})
             changed += 1
 
     return changed
@@ -2397,7 +2390,7 @@ def main(argv: None | list[str] = None) -> int:
             args.main_folder,
             args.project,
             args.group,
-            json.loads(args.grid.read_text()),
+            read_json(args.grid),
             user=args.user,
             time=args.time,
             dry_run=args.dry_run,

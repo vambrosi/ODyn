@@ -21,7 +21,7 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
-from .locking import DatabaseLock
+from .locking import file_lock
 from .utils import DB_TIMEOUT_S, backup_path, call_log_path, database_path, logger
 
 # When adding a new migration you should:
@@ -71,7 +71,7 @@ def migrate(
 
     # Held for the whole migration, including the checks before and after:
     # everything else that opens the database waits until it is done.
-    with DatabaseLock(db_path):
+    with file_lock(db_path):
         # Can wait longer than usual and manages transactions explicitly
         con = sqlite3.connect(db_path, timeout=DB_TIMEOUT_S * 4)
         con.isolation_level = None

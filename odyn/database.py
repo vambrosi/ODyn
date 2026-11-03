@@ -19,7 +19,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from .groups import Group
-from .locking import DatabaseLock
+from .locking import file_lock
 from .migrate import SCHEMA_VERSION
 from .sync import DecodedSync, decode, summary
 from .utils import (
@@ -263,7 +263,7 @@ class Database(CallRecorder):
         # Every use of the connection goes through `_locked()`.
         # See `locking.py` for more details.
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = DatabaseLock(self.path)
+        self._lock = file_lock(self.path)
         self._schema_checked = False
 
         with self._lock:

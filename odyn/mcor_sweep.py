@@ -35,7 +35,6 @@ tile(folder, ["raw", "rigid", "s128_o64_d6"], columns=3)
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import sys
 
@@ -48,6 +47,7 @@ import pandas as pd
 from .cluster import BASELINE_RUN
 from .groups import RAW_PREVIEW_FOLDER
 from .utils import logger
+from .shared import read_json
 
 RAW = "raw"
 TABLE_FILE = "sweep.csv"
@@ -117,7 +117,7 @@ def run_numbers(folder: str | Path) -> dict:
     (`flow_p90_worst_acq_id`), as a median of medians hides a bad spot.
     """
     folder = Path(folder)
-    metrics = json.loads((folder / "metrics.json").read_text())
+    metrics = read_json(folder / "metrics.json")
     settings = metrics.get("settings") or {}
     row = {
         "run": settings.get("run") or folder.name,

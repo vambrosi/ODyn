@@ -1,0 +1,62 @@
+"""
+The JSON files the programs share: written all or nothing, the same bytes
+from every OS, and replaced even while a reader has the old one open.
+"""
+
+import json
+
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from odyn import shared
+from odyn.shared import read_json, write_json
+
+
+def test_a_file_reads_back_as_written(tmp_path):
+    path = write_json(tmp_path / "a" / "b.json", {"mark": "✔", "on": date(2026, 11, 3)})
+
+    assert read_json(path) == {"mark": "✔", "on": "2026-11-03"}  # a date as text
+    assert path.read_bytes() == json.dumps(
+        {"mark": "✔", "on": "2026-11-03"}, indent=2
+    ).encode(
+        "utf-8"
+    )  # UTF-8, `\n` line ends, on every OS
+
+
+def test_a_failed_write_leaves_the_old_file_and_no_partial(tmp_path):
+    path = write_json(tmp_path / "b.json", {"n": 1})
+
+    with pytest.raises(ValueError):
+        write_json(path, {"n": float("nan")}, allow_nan=False)
+
+    assert read_json(path) == {"n": 1}
+    assert [p.name for p in tmp_path.iterdir()] == ["b.json"]
+
+
+def test_a_rename_is_tried_again_while_a_reader_holds_the_file(tmp_path, monkeypatch):
+    path = write_json(tmp_path / "c.json", {"n": 1})
+    tries = []
+    real = shared.os.replace
+
+    def busy_twice(source, target):
+        tries.append(target)
+
+        if len(tries) < 3:
+            raise PermissionError("in use")
+
+        real(source, target)
+
+    monkeypatch.setattr(shared.os, "replace", busy_twice)
+    monkeypatch.setattr(shared.time, "sleep", lambda _: None)
+    write_json(path, {"n": 2})
+
+    assert len(tries) == 3 and read_json(path) == {"n": 2}
+
+
+def test_a_listing_never_takes_a_partial_file_for_a_json_one(tmp_path):
+    hidden = tmp_path / ".d.json.0123abcd.partial"  # what a write in progress is
+    hidden.write_text("{")
+
+    assert list(Path(tmp_path).glob("*.json")) == []

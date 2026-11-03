@@ -14,7 +14,7 @@ import time
 import pytest
 
 from odyn import Database
-from odyn.locking import STALE_AFTER_S, DatabaseLock
+from odyn.locking import STALE_AFTER_S, FileLock
 from odyn.migrate import SCHEMA_VERSION
 from test_add_mcor_files import build, write_mcor
 
@@ -24,7 +24,7 @@ from test_add_mcor_files import build, write_mcor
 
 
 def test_file_exists_only_while_held(tmp_path):
-    lock = DatabaseLock(tmp_path / "odyn.db")
+    lock = FileLock(tmp_path / "odyn.db")
 
     with lock:
         holder = json.loads(lock.path.read_text())
@@ -34,7 +34,7 @@ def test_file_exists_only_while_held(tmp_path):
 
 
 def test_nested_uses_take_the_file_once(tmp_path):
-    lock = DatabaseLock(tmp_path / "odyn.db")
+    lock = FileLock(tmp_path / "odyn.db")
 
     with lock as outer:
         token = json.loads(lock.path.read_text())["token"]
@@ -50,9 +50,7 @@ def test_nested_uses_take_the_file_once(tmp_path):
 
 def test_a_second_holder_waits_for_the_first(tmp_path):
     # Two instances stand in for two processes: they share only the file.
-    first, second = DatabaseLock(tmp_path / "odyn.db"), DatabaseLock(
-        tmp_path / "odyn.db"
-    )
+    first, second = FileLock(tmp_path / "odyn.db"), FileLock(tmp_path / "odyn.db")
     events = []
 
     def other():
@@ -70,7 +68,7 @@ def test_a_second_holder_waits_for_the_first(tmp_path):
 
 
 def test_a_stale_lock_is_taken_over(tmp_path, odyn_log):
-    lock = DatabaseLock(tmp_path / "odyn.db")
+    lock = FileLock(tmp_path / "odyn.db")
     lock.path.write_text(
         json.dumps(
             {
@@ -92,9 +90,7 @@ def test_a_stale_lock_is_taken_over(tmp_path, odyn_log):
 
 
 def test_a_fresh_lock_is_not_taken_over(tmp_path):
-    first, second = DatabaseLock(tmp_path / "odyn.db"), DatabaseLock(
-        tmp_path / "odyn.db"
-    )
+    first, second = FileLock(tmp_path / "odyn.db"), FileLock(tmp_path / "odyn.db")
     acquired = threading.Event()
 
     def other():
@@ -111,7 +107,7 @@ def test_a_fresh_lock_is_not_taken_over(tmp_path):
 
 
 def test_a_holder_does_not_delete_a_lock_taken_over_from_it(tmp_path, odyn_log):
-    lock = DatabaseLock(tmp_path / "odyn.db")
+    lock = FileLock(tmp_path / "odyn.db")
 
     with lock:
         # Someone decided this holder was dead and took the file.
@@ -163,7 +159,7 @@ def test_an_uncommitted_write_is_not_left_open(tmp_path, odyn_log):
 
 def test_reads_wait_for_another_holder(tmp_path):
     db = Database(tmp_path, can_create=True)
-    other = DatabaseLock(db.path)
+    other = FileLock(db.path)
     released = []
 
     def hold():
@@ -188,7 +184,7 @@ def test_nothing_is_left_behind(tmp_path):
     group.add_mcor_files()
     db.from_query("SELECT * FROM experiments;")
 
-    assert not DatabaseLock(db.path).path.exists()
+    assert not FileLock(db.path).path.exists()
 
 
 def test_a_migration_while_open_stops_the_next_use(tmp_path):
@@ -196,7 +192,7 @@ def test_a_migration_while_open_stops_the_next_use(tmp_path):
     db = Database(tmp_path, can_create=True)
     db.experiments
 
-    with DatabaseLock(db.path):
+    with FileLock(db.path):
         con = sqlite3.connect(db.path)
         con.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1};")
         con.close()
@@ -313,3 +309,17 @@ def test_mcor_writes_run_under_the_lock(tmp_path):
     group.approve_mcor_files(exclude_acq_ids=[2])
 
     assert unlocked == []
+
+
+def test_one_lock_object_per_file_in_a_process(tmp_path):
+    from odyn.locking import file_lock
+
+    first = file_lock(tmp_path / "odyn.db")
+
+    assert file_lock(tmp_path / "x" / ".." / "odyn.db") is first
+    assert file_lock(tmp_path / "qc.json") is not first
+
+    with first, file_lock(tmp_path / "odyn.db"):  # re-enters, never waits
+        assert first.path.exists()
+
+    assert not first.path.exists()

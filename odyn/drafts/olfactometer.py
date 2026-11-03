@@ -26,7 +26,6 @@ No Qt in here: `submit` and `check` call it on the database thread.
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 
@@ -37,6 +36,7 @@ from typing import Any
 
 from ..database import OLFACTOMETER_FOLDER
 from .draft import FOLDER_NAME, Draft
+from ..shared import read_json
 
 SETTINGS_FILE = "settings.json"
 
@@ -72,7 +72,7 @@ class OlfactometerFolders:
         settings: dict[str, Any] = {}
 
         if path.is_file():
-            loaded = json.loads(path.read_text())
+            loaded = read_json(path)
             settings = loaded if isinstance(loaded, dict) else {}
 
         def folder(key: str) -> Path:

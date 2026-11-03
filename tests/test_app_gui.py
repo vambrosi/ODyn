@@ -214,12 +214,12 @@ def test_after_a_change_only_the_page_on_screen_reloads(window, monkeypatch):
 
 
 def test_a_short_job_takes_the_lock_once(window, monkeypatch):
-    from odyn.locking import DatabaseLock
+    from odyn.locking import FileLock
 
     taken = []
-    original = DatabaseLock._acquire_file
+    original = FileLock._acquire_file
     monkeypatch.setattr(
-        DatabaseLock,
+        FileLock,
         "_acquire_file",
         lambda self: taken.append(1) or original(self),
     )

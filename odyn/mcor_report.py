@@ -78,13 +78,14 @@ paths = write_report(
 from __future__ import annotations
 
 import csv
-import json
 
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
 import numpy as np
 import tifffile
+
+from .shared import write_json
 
 # The plot of shifts' title, unless told which test it is
 TITLE = "Test motion correction"
@@ -245,7 +246,7 @@ def write_report(
         del written["side_by_side"]
 
     _write_csv(written["summary"], rows)
-    written["metrics"].write_text(json.dumps(metrics, indent=2))
+    write_json(written["metrics"], metrics)
 
     lengths = [np.hypot(flow[..., 0], flow[..., 1]) for flow in flows]
     tifffile.imwrite(
@@ -451,7 +452,7 @@ class FullReport:
         else:
             del written["summary"]
 
-        written["metrics"].write_text(json.dumps(metrics, indent=2))
+        write_json(written["metrics"], metrics)
 
         if self.flow_sum is not None:
             tifffile.imwrite(written["flow_average"], self.flow_sum / count)

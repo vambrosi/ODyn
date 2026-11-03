@@ -1,13 +1,18 @@
 """
-One lock per database file, shared by every process on every machine.
+One lock per shared file (the database, or any other file several programs
+write), shared by every process on every machine.
 
 Workstations and cluster nodes do not see each other SQLite's locks, so either
 side can corrupt the file by just reading while the other writes. (The reader
 that sees a journal an no lock "recovers" the journal into the file.) Creating
 a file that does not already exist is a single step, so both sides see holds.
 
-The lock sits next to the database, e.g. `.odyn/odyn.db.lock`, and holds who
-took it. It must be held for every use of the connection, reads included.
+The lock sits next to its file, e.g. `.odyn/odyn.db.lock`, and holds who
+took it. The database lock must be held for every use of the connection,
+reads included.
+
+Get a lock with `file_lock(path)`: one object per file in each process, since
+two would wait for each other (each in-process lock re-enters only itself).
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ import uuid
 from pathlib import Path
 
 from .utils import logger
+from .shared import read_json
 
 # Holds are meant to be short, so and old lock more likely than not
 # belongs to processess that died holding.
@@ -33,12 +39,12 @@ STALE_AFTER_S = 120
 REPORT_AFTER_S = 5
 
 
-class DatabaseLock:
+class FileLock:
     """
-    Re-entrant lock on one database file, across threads and processes.
+    Re-entrant lock on one file, across threads and processes.
 
     ```python
-    lock = DatabaseLock(Path(".odyn/odyn.db"))
+    lock = file_lock(Path(".odyn/odyn.db"))
     with lock:
         ...  # every read and write of the database goes here
     ```
@@ -46,8 +52,8 @@ class DatabaseLock:
     Only the outermost `with` takes the file, so nested uses are free.
     """
 
-    def __init__(self, db_path: Path):
-        self.path = db_path.with_name(db_path.name + ".lock")
+    def __init__(self, path: Path):
+        self.path = path.with_name(path.name + ".lock")
 
         # Threads in this process wait here; other processes wait on the file.
         self._thread_lock = threading.RLock()
@@ -156,7 +162,7 @@ class DatabaseLock:
     def _read_holder(self) -> None | dict:
         """What the lock file says, or None if it is gone or half written."""
         try:
-            holder = json.loads(self.path.read_text())
+            holder = read_json(self.path)
 
         except (OSError, ValueError):
             # Being created or deleted right now. Fall back to its age on disk,
@@ -183,7 +189,7 @@ class DatabaseLock:
         # Between reading the stale holder and renaming, another process may
         # have taken it over and created a fresh lock. Put that one back.
         try:
-            moved_holder = json.loads(moved.read_text())
+            moved_holder = read_json(moved)
 
         except (OSError, ValueError):
             moved_holder = {}
@@ -206,6 +212,22 @@ class DatabaseLock:
 
         except OSError:
             pass
+
+
+# One lock object per file in this process (see `file_lock`)
+_LOCKS: dict[str, FileLock] = {}
+_LOCKS_LOCK = threading.Lock()
+
+
+def file_lock(path: str | Path) -> FileLock:
+    """The lock of the file at `path`, the same object each time in a process."""
+    key = os.path.abspath(path)
+
+    with _LOCKS_LOCK:
+        if key not in _LOCKS:
+            _LOCKS[key] = FileLock(Path(key))
+
+        return _LOCKS[key]
 
 
 def _describe(holder: None | dict) -> str:

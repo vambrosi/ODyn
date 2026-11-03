@@ -42,7 +42,7 @@ second.
 flowchart TB
     code["Code: db.experiments, group.run_motion_correction(...)"]
     cache["Table caches<br/>(one DataFrame per table, per Database object)"]
-    lock["DatabaseLock<br/>(lock file beside the database)"]
+    lock["file_lock(database)<br/>(lock file beside the database)"]
     con["sqlite3 connection<br/>(one per Database object)"]
     file[("SQLite file on the share")]
     code --> cache --> lock --> con --> file
@@ -281,8 +281,9 @@ time, and views for pages that only read.
 - **Written whole, then renamed** over the old one. A reader sees the old
   file or the new one, never half of each. So **readers take no lock**.
 - **A lock per file when it has more than one writer:** the database lock,
-  generalized to `FileLock(path)`, a `<file>.lock` beside it. One lock
-  object per file in each process (two would wait for each other).
+  generalized to `file_lock(path)` (`odyn/locking.py`), a `<file>.lock`
+  beside it. One lock object per file in each process (two would wait for
+  each other).
 - **A rename is retried** for a moment when it fails: Windows refuses to
   replace a file another program has open, and readers hold one for
   milliseconds.
@@ -294,7 +295,8 @@ time, and views for pages that only read.
   times kept, and a program that needs the server's "now" writes a small
   file and reads its time back. No machine's own clock is compared with
   another's.
-- **One module** reads and writes all of them, with one set of tests.
+- **One module** reads and writes all of them (`odyn/shared.py`:
+  `read_json`, `write_json`), with one set of tests.
 
 ### The inbox
 
