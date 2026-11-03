@@ -1,7 +1,8 @@
 # How ODyn uses its database
 
 This page explains how ODyn reads and writes its database: the lock, the
-caches, the call logs and the migrations. It also lists what the design
+caches, the call logs and the migrations, and how programs pass messages
+through small files on the share (planned). It also lists what the design
 assumes about the lab that uses it. If your lab works differently, the
 section [When the assumptions change](#when-the-assumptions-change) says
 what would have to change.
@@ -250,6 +251,135 @@ The schema version is `PRAGMA user_version`, checked against
 - `tests/test_migration.py` checks that an old database walked forward has
   exactly the schema of a new one.
 
+## Files as messages (planned)
+
+> Agreed in November 2026, not built yet. The QC page is the first user.
+
+The QC page shows a few KB: four short tables and the files to download.
+They change only when someone makes a QC decision or a cluster job ends.
+Yet a load rebuilt them from about 285 folder listings, 95 file reads and
+several database reads (about a minute over a VPN), only to learn whether
+anything had changed. There is no server to ask, so the answer has to be a
+file that is already computed. This section generalizes that into one
+model for every file the programs share.
+
+### Records and views
+
+- **Records** are written once and are the source of truth: the database
+  (decisions, provenance, history), the cluster's test and sweep records,
+  requests, queued drafts, and claims (below).
+- **Views** are built from records, by one function, and can always be
+  rebuilt: `qc.json`, the heartbeat, the job states the tick writes. A view
+  can be stale, never wrong for long. Deleting one is always safe.
+
+Decisions and provenance stay in the database: they need transactions and
+history. Files carry messages between programs that never run at the same
+time, and views for pages that only read.
+
+### Rules for every shared file
+
+- **Written whole, then renamed** over the old one. A reader sees the old
+  file or the new one, never half of each. So **readers take no lock**.
+- **A lock per file when it has more than one writer:** the database lock,
+  generalized to `FileLock(path)`, a `<file>.lock` beside it. One lock
+  object per file in each process (two would wait for each other).
+- **A rename is retried** for a moment when it fails: Windows refuses to
+  replace a file another program has open, and readers hold one for
+  milliseconds.
+- **Versioned JSON:** a reader that finds another version falls back
+  instead of misreading it.
+- **Times come from the storage server:** a file's modification time is
+  set by the server that keeps the share, so files written from every
+  machine share one clock. Files are created, never copied in with their
+  times kept, and a program that needs the server's "now" writes a small
+  file and reads its time back. No machine's own clock is compared with
+  another's.
+- **One module** reads and writes all of them, with one set of tests.
+
+### The inbox
+
+Programs ask the cluster for work by dropping a file in a folder the tick
+works through, oldest first, moving each to `done/`, or to `failed/` with
+the reason. Three kinds, one mechanism:
+
+| Folder | Written by | Asks for |
+|---|---|---|
+| `queue/` | the app, on submit | adding a session's experiments |
+| `requests/` | the app, scripts | a recorded call on the cluster (sync, previews) |
+| `claims/` | the app, on a QC decision | recording that decision, and what follows it |
+
+### QC decisions: claims
+
+A decision is a claim file, one per group and step, created with the same
+exclusive create the lock uses:
+
+```
+.odyn/cluster/<project>/claims/g42-approve.json
+    {"user": "alice", "step": "approve", "excluded": [3, 7]}
+```
+
+```mermaid
+sequenceDiagram
+    participant A as App (alice)
+    participant B as App (bob)
+    participant S as Share
+    participant T as Tick
+    A->>S: create claims/g42-approve.json (exclusive)
+    B->>S: list claims/ (next load)
+    S-->>B: g42 approved by alice, waiting for the cluster
+    B->>S: create claims/g42-approve.json (exclusive)
+    S-->>B: exists: alice approved it at 11:20
+    T->>S: claims, oldest first
+    T->>S: check it in the database, record the call as alice
+    T->>S: start what follows (a whole correction after a pick)
+    T->>S: claim to done/ (or failed/ with the reason)
+    T->>S: rebuild qc.json
+```
+
+- **The race is settled when the file is written:** a second claim on the
+  same step fails at once and says who made the first. No later process
+  has to choose between two decisions.
+- **Steps** are the raw check, the pick, the approval and running again.
+  The claim's time, from the server, orders different steps of one group.
+- **Undo before the tick** is deleting one's own claim.
+- **What waits for the tick:** the database record, its checks, and the
+  next steps (submitting jobs, moving files). The app checks what it can
+  from `qc.json` before writing the claim, so a claim that fails later is
+  rare. Its author sees why on the page, as with a failed draft.
+
+### The QC view: `qc.json`
+
+`.odyn/cluster/<project>/qc.json` holds everything the QC page shows, for
+every user: each experiment still in review (owner, paths, status, raw
+check, latest pick and approval, its runs with their state and numbers),
+the files of each downloadable folder with their sizes and times, the
+recordings, the missing annotations, the queue, and when it was built.
+Approved experiments keep a status line only.
+
+- **Written only on the cluster,** by one function, `qc_summary(db)`: in
+  full by each tick, and again as each test or sweep job ends. Listing the
+  share there is quick, and `squeue` is at hand. Writers take its lock;
+  readers do not.
+- **Read by the app** off the database thread: the file's time (one round
+  trip) on each load and every ~30 s while the page is on screen; the file
+  itself only when that time changed; the list of `claims/` and any new
+  claim. Two to five round trips, a few KB.
+- **Computed in the app:** "Show all users" (a filter), and whether each
+  folder is downloaded and how much is left (the file lists against the
+  local copy, on this disk).
+- **Shown with its age** ("as of 11:20"). When the file is missing or of
+  another version, the page offers to build it here, with the same
+  function, which takes as long as a load did before.
+
+| | Before | Planned |
+|---|---|---|
+| Folder listings per load | ~285 | 1 (`claims/`) |
+| File reads per load | ~95 | 0 to 2, plus new claims |
+| Database reads per load | 1 to 9 lock takes | none |
+| A QC decision | a recorded call from the app | one file created |
+| Others see a decision | after their next reload | on their next load, or within ~30 s |
+| A finished run shows | on the next reload | when the job ends (by the tick at the latest) |
+
 ## Assumptions
 
 The design is reasonable because of how the lab works. These are the
@@ -264,7 +394,9 @@ assumptions, and what depends on each.
 | People mostly work on different experiments, and care about the end result of a call, not its progress. | Views may be one reload old. `frozen()` ignores others' commits for the length of a view. |
 | Writes are mostly new records (calls, picks, approvals), rarely edits of the same row by two people. | No conflict detection: the latest record wins. |
 | Everything that writes runs ODyn's code. | The lock and the schema check protect the file only from programs that take them. |
-| The share keeps a file created with `O_CREAT \| O_EXCL` exclusive across clients. | The lock itself. Some old NFS setups do not. |
+| The share keeps a file created with `O_CREAT \| O_EXCL` exclusive across clients. | The lock itself, and claims. Some old NFS setups do not. |
+| QC decisions and finished runs can take up to a tick (30 min by default) to be recorded or shown. Most QC happens a day or more after the experiment. | Claims recorded by the tick; `qc.json` rebuilt by the cluster only. |
+| The storage server sets file times. | Ordering claims; file ages, with no machine's own clock compared with another's. |
 
 ## Pitfalls
 
@@ -283,9 +415,17 @@ assumptions, and what depends on each.
   bypasses the lock. Use a snapshot.
 - **Logs and backups:** a backup copies the database, not the log files.
   The logs stay in `.odyn/logs`.
-- **Clocks:** times are written by each machine's clock (`localtime`), and
-  the stale-lock age compares the lock writer's clock with the reader's.
-  Machines should agree to within seconds.
+- **Clocks:** times in the database are written by each machine's clock
+  (`localtime`), and the stale-lock age compares the lock writer's clock
+  with the reader's, so machines should agree to within seconds. The
+  planned files use the storage server's times instead (see above), and
+  the lock can do the same.
+- **A view no one rebuilds** (planned files): a writer that forgets to
+  rebuild `qc.json` leaves the page stale until the next tick, silently.
+  Each writer needs a test that its change shows in the view.
+- **The tick as the hub** (planned files): if the cluster stops, claims
+  wait and the view ages. The page shows its age, and the cluster line
+  warns when ticks stop.
 
 ## When the assumptions change
 
@@ -293,7 +433,9 @@ assumptions, and what depends on each.
 |---|---|
 | Many more users or jobs at once | Lock waits grow. Consider a database server (PostgreSQL) instead of a file on a share. The `Database` class is the only place that talks to SQLite. |
 | Holds must last longer (large writes) | Raise `STALE_AFTER_S`, or split the writes into short transactions. Never let a hold run past it. |
-| Several people work on the same experiments at once | Check the current state when writing a decision (a pick, an approval), under the lock, and refuse when it changed since it was shown. |
+| Several people work on the same experiments at once | Claims already refuse a second decision on the same step. Also make the tick refuse a claim made on a view older than the latest decision. |
+| Decisions must be recorded at once | Have the app record the call after writing the claim, as it did before, and leave the tick only the next steps. |
+| The cluster is not always there | Build `qc.json` in the app too (`qc_summary` is the same function), on a timer, under its lock. |
 | The database grows large (hundreds of MB) | Whole-table reads and whole-file copies get slow. Read only the rows a view needs (per group, or newer than the last read), and keep large text in files, as the logs are. |
 | Commits become very frequent | Empty caches per table or per group instead of all at once: a small table of counters, bumped by each write, read in one query (see below). |
 | The share is far (a VPN, another site) | Read from a local copy of the database, refreshed when it changed (see below). |
@@ -308,10 +450,9 @@ These follow the same assumptions and are not built yet.
   file to local disk under the lock, then read everything from the copy.
   That is one sequential read instead of a page at a time, and a true
   snapshot for every view. It depends on the database staying small.
-- **Counters of finished results.** A small table holds a counter for the
-  whole database and one per group. A write outside a call bumps them at
-  once; a call bumps them when it ends. Views that care about results
-  (most of them) compare the counters instead of `data_version`, so
-  progress written by running calls never empties their caches, and a
-  view of one group ignores the others. Views of what is running (the
-  cluster status) keep using `data_version`.
+- **Counters of finished results,** for database readers that remain
+  (notebooks, the registry pages): a small table holds a counter for the
+  whole database and one per group, bumped by writes outside calls at
+  once and by calls when they end. Readers compare them instead of
+  `data_version`, so progress written by running calls never empties
+  their caches. Less needed once pages read views.
