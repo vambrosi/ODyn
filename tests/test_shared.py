@@ -4,6 +4,8 @@ from every OS, and replaced even while a reader has the old one open.
 """
 
 import json
+import os
+import time
 
 from datetime import date
 from pathlib import Path
@@ -11,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from odyn import shared
-from odyn.shared import read_json, write_json
+from odyn.shared import read_json, server_now, write_json
 
 
 def test_a_file_reads_back_as_written(tmp_path):
@@ -60,3 +62,11 @@ def test_a_listing_never_takes_a_partial_file_for_a_json_one(tmp_path):
     hidden.write_text("{")
 
     assert list(Path(tmp_path).glob("*.json")) == []
+
+
+def test_now_is_read_from_the_server_and_leaves_nothing(tmp_path):
+    before = os.stat(tmp_path).st_mtime
+
+    assert abs(server_now(tmp_path) - time.time()) < 5  # here, one machine
+    assert list(tmp_path.iterdir()) == []
+    assert before <= os.stat(tmp_path).st_mtime

@@ -8,7 +8,9 @@ that sees a journal an no lock "recovers" the journal into the file.) Creating
 a file that does not already exist is a single step, so both sides see holds.
 
 The lock sits next to its file, e.g. `.odyn/odyn.db.lock`, and holds who
-took it. The database lock must be held for every use of the connection,
+took it. Its age is the lock file time against the server clock
+(`server_now`), so machines whose clocks disagree still agree on which
+lock is stale. The database lock must be held for every use of the connection,
 reads included.
 
 Get a lock with `file_lock(path)`: one object per file in each process, since
@@ -29,7 +31,7 @@ import uuid
 from pathlib import Path
 
 from .utils import logger
-from .shared import read_json
+from .shared import read_json, server_now
 
 # Holds are meant to be short, so and old lock more likely than not
 # belongs to processess that died holding.
@@ -100,6 +102,7 @@ class FileLock:
 
         start = time.monotonic()
         reported = False
+        offset = None  # server clock minus this one, asked once per wait
 
         while True:
             try:
@@ -108,13 +111,20 @@ class FileLock:
             # Windows reports a file that is still being deleted as
             # PermissionError rather than FileExistsError.
             except (FileExistsError, PermissionError):
-                other = self._read_holder()
+                if offset is None:
+                    offset = self._clock_offset()
 
-                if other is not None and time.time() - other["since"] > STALE_AFTER_S:
-                    self._take_over(other)
-                    continue
+                age = self._file_age(offset)
+
+                if age is not None and age > STALE_AFTER_S:
+                    other = self._read_holder()
+
+                    if other is not None:
+                        self._take_over(other)
+                        continue
 
                 if not reported and time.monotonic() - start > REPORT_AFTER_S:
+                    other = self._read_holder()
                     logger.info(f"Waiting for the database, {_describe(other)}...")
                     reported = True
 
@@ -158,6 +168,24 @@ class FileLock:
                 if time.monotonic() > give_up:
                     raise
                 time.sleep(0.01)
+
+    def age(self) -> None | float:
+        """How long ago the lock was taken, in seconds, or `None` if it is free."""
+        return self._file_age(self._clock_offset())
+
+    def _clock_offset(self) -> float:
+        """The server clock minus this machine's (see `server_now`)."""
+        try:
+            return server_now(self.path.parent) - time.time()
+        except OSError:  # a folder this user cannot write: this clock, then
+            return 0.0
+
+    def _file_age(self, offset: float) -> None | float:
+        """The lock file age by the server clock, or `None` if it is gone."""
+        try:
+            return time.time() + offset - self.path.stat().st_mtime
+        except OSError:
+            return None
 
     def _read_holder(self) -> None | dict:
         """What the lock file says, or None if it is gone or half written."""

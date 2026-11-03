@@ -9,6 +9,10 @@ therefore take no lock; a file with several writers takes `file_lock(path)`
 around its read-modify-write. Files are UTF-8 with `\\n` line ends on every
 OS, so a file written on Windows reads the same on the cluster.
 
+File times are set by the server that keeps the share, so files written from
+every machine share one clock; `server_now` reads that clock. Compare a file
+time with it, never with this machine's own clock.
+
 **USAGE**
 ```python
 write_json(folder / "heartbeat.json", {"started_at": "2026-11-03 12:00:00"})
@@ -62,6 +66,21 @@ def write_json(path: str | Path, content: Any, **dump: Any) -> Path:
         raise
 
     return path
+
+
+def server_now(folder: str | Path) -> float:
+    """
+    The time now on the clock of the server that keeps `folder`, as a Unix
+    time: a small file is written there, its time read back, and the file
+    deleted (three round trips).
+    """
+    probe = Path(folder) / f".now.{uuid.uuid4().hex[:8]}"
+
+    try:
+        probe.write_bytes(b"")
+        return probe.stat().st_mtime
+    finally:
+        probe.unlink(missing_ok=True)
 
 
 def replace(source: str | Path, target: str | Path) -> None:

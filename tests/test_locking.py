@@ -7,13 +7,14 @@ test is the one that matters most: it watches every statement SQLite runs.
 """
 
 import json
+import os
 import sqlite3
 import threading
 import time
 
 import pytest
 
-from odyn import Database
+from odyn import Database, locking
 from odyn.locking import STALE_AFTER_S, FileLock
 from odyn.migrate import SCHEMA_VERSION
 from test_add_mcor_files import build, write_mcor
@@ -80,6 +81,8 @@ def test_a_stale_lock_is_taken_over(tmp_path, odyn_log):
             }
         )
     )
+    old = time.time() - STALE_AFTER_S - 1  # the file time, by the server clock
+    os.utime(lock.path, (old, old))
 
     with lock:
         assert json.loads(lock.path.read_text())["token"] != "dead"
@@ -87,6 +90,18 @@ def test_a_stale_lock_is_taken_over(tmp_path, odyn_log):
     assert "Took over a stale database lock" in odyn_log.text
     assert not lock.path.exists()
     assert not list(tmp_path.glob("*.stale-*"))
+
+
+def test_the_age_of_a_lock_is_by_the_server_clock(tmp_path, monkeypatch):
+    """A machine whose clock runs an hour ahead still sees a fresh lock."""
+    lock = FileLock(tmp_path / "odyn.db")
+    lock.path.write_text(json.dumps({"token": "live", "since": time.time()}))
+    ahead = time.time
+
+    monkeypatch.setattr(locking.time, "time", lambda: ahead() + 3600)
+
+    assert lock.age() < 5
+    assert FileLock(tmp_path / "missing.db").age() is None
 
 
 def test_a_fresh_lock_is_not_taken_over(tmp_path):

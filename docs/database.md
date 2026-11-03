@@ -91,7 +91,9 @@ Details:
 - **Re-entrant:** only the outermost `with` takes the file. Threads of one
   process wait on an in-process lock first.
 - **Stale locks:** a lock older than `STALE_AFTER_S` (120 s) is taken over.
-  Holds are meant to last well under that. A process that took longer and
+  Its age is the lock file time against the server clock (`server_now`),
+  so machines whose clocks disagree agree on it. Holds are meant to last
+  well under that. A process that took longer and
   finds its lock taken over logs an error and asks for an integrity check.
 - **Cost:** taking and releasing the lock is four or five round trips.
   On the lab network that was about 0.3 s per take, before any query.
@@ -293,8 +295,8 @@ time, and views for pages that only read.
   set by the server that keeps the share, so files written from every
   machine share one clock. Files are created, never copied in with their
   times kept, and a program that needs the server's "now" writes a small
-  file and reads its time back. No machine's own clock is compared with
-  another's.
+  file and reads its time back (`server_now` in `odyn/shared.py`). No
+  machine's own clock is compared with another's.
 - **One module** reads and writes all of them (`odyn/shared.py`:
   `read_json`, `write_json`), with one set of tests.
 
@@ -398,7 +400,7 @@ assumptions, and what depends on each.
 | Everything that writes runs ODyn's code. | The lock and the schema check protect the file only from programs that take them. |
 | The share keeps a file created with `O_CREAT \| O_EXCL` exclusive across clients. | The lock itself, and claims. Some old NFS setups do not. |
 | QC decisions and finished runs can take up to a tick (30 min by default) to be recorded or shown. Most QC happens a day or more after the experiment. | Claims recorded by the tick; `qc.json` rebuilt by the cluster only. |
-| The storage server sets file times. | Ordering claims; file ages, with no machine's own clock compared with another's. |
+| The storage server sets file times. | Stale-lock ages; ordering claims; file ages, with no machine's own clock compared with another's. |
 
 ## Pitfalls
 
@@ -417,11 +419,10 @@ assumptions, and what depends on each.
   bypasses the lock. Use a snapshot.
 - **Logs and backups:** a backup copies the database, not the log files.
   The logs stay in `.odyn/logs`.
-- **Clocks:** times in the database are written by each machine's clock
-  (`localtime`), and the stale-lock age compares the lock writer's clock
-  with the reader's, so machines should agree to within seconds. The
-  planned files use the storage server's times instead (see above), and
-  the lock can do the same.
+- **Clocks:** times in the database (`called_at`, `ended_at`) are written
+  by each machine's clock (`localtime`), so they agree only as well as the
+  clocks do. The lock and the planned files use the storage server's times
+  instead (see above).
 - **A view no one rebuilds** (planned files): a writer that forgets to
   rebuild `qc.json` leaves the page stale until the next tick, silently.
   Each writer needs a test that its change shows in the view.

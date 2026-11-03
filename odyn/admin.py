@@ -306,7 +306,7 @@ class Admin(CallRecorder):
             logger.info("The database is not locked.")
             return False
 
-        age_min = (time.time() - holder["since"]) / 60
+        age_min = (lock.age() or 0) / 60
         logger.warning(f"The lock is {_describe(holder)} ({age_min:.0f} min ago).")
 
         if not yes:
