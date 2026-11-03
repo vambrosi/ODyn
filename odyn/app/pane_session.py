@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 
 from ..utils import CHECK, CROSS
 from .context import Context
-from .draft import (
+from ..drafts.draft import (
     EXP_TYPES,
     FOLDER_OF,
     PART_SETTINGS,
@@ -41,12 +41,12 @@ from .draft import (
     Draft,
     Removals,
 )
-from .fields import Field, annotation_fields, form_fields
+from ..drafts.fields import Field, annotation_fields, form_fields
 from .forms import Form, FormRows, GrabTimingForm, PanelPicker, TimingForm, fit_row
 from .pane_registry import current_vials
-from .recordings import make_part_folders
+from ..drafts.recordings import make_part_folders
 from .style import COMBO_EXTRA_PX, PAGE_MAX_PX, required_label, text_style
-from .submit import Problem, check, report, running, submit
+from ..drafts.submit import Problem, check, report, running, submit
 
 TIMING_KEYS = (
     "block_baseline_s",

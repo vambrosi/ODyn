@@ -32,7 +32,7 @@ import tempfile
 
 from pathlib import Path
 
-from .draft import FOLDER_NAME
+from ..drafts.draft import FOLDER_NAME
 
 ASSETS = Path(__file__).parent / "assets"
 ICON_PNG = ASSETS / "odyn.png"

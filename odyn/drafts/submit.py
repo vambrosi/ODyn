@@ -15,7 +15,7 @@ annotations, each experiment (ingested, annotated, its sync file processed,
 and a loop's vials recorded), then the z-stacks (each TIFF ingested, and the
 notes of each z-stack listed given to its TIFF by order, `match_stacks`, then
 linked to its experiment). The cluster runs it once the recordings are on the
-share (`odyn.app.submissions`).
+share (`odyn.drafts.submissions`).
 
 `submit` is the app's part: it copies the files only this computer has, runs
 `check`, puts the draft in the cluster's queue, and moves it aside. It writes

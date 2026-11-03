@@ -13,8 +13,8 @@ from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 from shiboken6 import isValid
 
-from .olfactometer import OlfactometerFolders
-from .recordings import LOCAL_FOLDER
+from ..drafts.olfactometer import OlfactometerFolders
+from ..drafts.recordings import LOCAL_FOLDER
 from .worker import DatabaseWorker, Job
 
 

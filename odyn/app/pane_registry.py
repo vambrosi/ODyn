@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 
 from ..database import WILD_TYPE
 from .context import Context
-from .fields import COLUMN_FIELDS, ODOR_FIELDS, PANEL_FIELDS
+from ..drafts.fields import COLUMN_FIELDS, ODOR_FIELDS, PANEL_FIELDS
 from .forms import Form, FormRows, RecipeForm, fit_row
 from .style import BUTTON_SPACING_PX, COMBO_EXTRA_PX, FORM_PX, text_style
 from .symbols import icon

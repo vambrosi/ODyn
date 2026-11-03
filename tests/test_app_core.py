@@ -10,11 +10,11 @@ from datetime import datetime, timedelta
 import pytest
 
 from odyn import Database
-from odyn.app.draft import Draft, Removals
-from odyn.app.fields import Field, form_fields, missing_required
+from odyn.drafts.draft import Draft, Removals
+from odyn.drafts.fields import Field, form_fields, missing_required
 from odyn.app.panel import ANSI
-from odyn.app.submissions import queue_folder
-from odyn.app.submit import Problem, check, check_files, ingest, report, submit
+from odyn.drafts.submissions import queue_folder
+from odyn.drafts.submit import Problem, check, check_files, ingest, report, submit
 from generate_data import generate
 from generate_sync import generate_sync
 
@@ -730,7 +730,7 @@ def test_a_version_5_draft_lists_its_zstacks_in_the_order_of_their_files(tmp_pat
 
 
 def test_zstacks_take_their_tiffs_by_number():
-    from odyn.app.submit import match_stacks
+    from odyn.drafts.submit import match_stacks
 
     files = ["a_00010.tif", "a_00002.tif", "a_00001.tif"]
 
@@ -880,7 +880,7 @@ def test_ingest_adds_the_grab_and_zstacks_with_their_notes(a_day):
 
 
 def test_an_error_reads_as_odyn_wrote_it():
-    from odyn.app.submit import described
+    from odyn.drafts.submit import described
 
     assert described(RuntimeError("The TIFFs x_* were recorded as m2.")) == (
         "The TIFFs x_* were recorded as m2"

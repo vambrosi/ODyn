@@ -62,11 +62,11 @@ from ..groups import FULL_FOLDER, RAW_PREVIEW_FOLDER, mcor_test_folder
 from ..mcor_sweep import run_numbers
 from . import cache
 from .context import Context
-from .draft import Draft
+from ..drafts.draft import Draft
 from .mcor_window import McorWindow, Run
 from .models import FrameModel, fit_columns, sortable
 from .style import text_style
-from .submissions import add_now, queued, submit_again, take_back
+from ..drafts.submissions import add_now, queued, submit_again, take_back
 
 # The calls that add recordings, the kind each adds, and the output key listing
 # the ids it added

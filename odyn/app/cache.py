@@ -26,7 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .draft import FOLDER_NAME
+from ..drafts.draft import FOLDER_NAME
 
 CACHE_FOLDER = "cache"
 

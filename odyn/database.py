@@ -1909,8 +1909,9 @@ class Database(CallRecorder):
         # each file an acquisition (same start), `acquisitions.frame_count`
         # from `SI.hScan2D.logFramesPerFile` (the last file the rest), the sync
         # burst split at the file boundaries in `process_sync` (one
-        # `sync_blocks` row per file), and the queue (`odyn.app.submissions`)
-        # waiting for ceil(framesPerSlice / logFramesPerFile) files.
+        # `sync_blocks` row per file), and the queue
+        # (`odyn.drafts.submissions`) waiting for ceil(framesPerSlice /
+        # logFramesPerFile) files.
         if exp_type == "grab" and len(acquisitions) > 1:
             self.fail(
                 IngestFlag.SPLIT_GRAB,

@@ -11,15 +11,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from odyn.app.draft import Draft
-from odyn.app.olfactometer import (
+from odyn.drafts.draft import Draft
+from odyn.drafts.olfactometer import (
     DEFAULT_FOLDERS,
     OlfactometerFolders,
     copy_for_loop,
     recording_window,
     run_start,
 )
-from odyn.app.submit import copy_olfactometer
+from odyn.drafts.submit import copy_olfactometer
 from generate_sync import generate_sync
 
 DAY = datetime(2026, 8, 11)

@@ -1,6 +1,6 @@
 """
 The queue of submitted drafts: what the cluster's tick waits for, adds, and
-refuses (`odyn.app.submissions`).
+refuses (`odyn.drafts.submissions`).
 """
 
 import json
@@ -8,8 +8,8 @@ import json
 from datetime import datetime, timedelta
 
 from odyn import Database
-from odyn.app.draft import Draft
-from odyn.app.submissions import (
+from odyn.drafts.draft import Draft
+from odyn.drafts.submissions import (
     add_now,
     enqueue,
     process_submissions,

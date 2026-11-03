@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from ..utils import ANNOTATION_TARGETS
 from .context import Context
-from .fields import Field, annotation_fields
+from ..drafts.fields import Field, annotation_fields
 from .forms import Form
 from .models import FrameModel, fit_columns, show, sortable
 from .pane_registry import FORM_MARGINS_PX, TableAndForm

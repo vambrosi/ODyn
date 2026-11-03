@@ -5,12 +5,12 @@ them and does what the database is waiting for.
 Workstations cannot start cluster jobs (logging in takes a password and Duo),
 so anything that has to run there is left as a request file on the share,
 and a short `tick` on the cluster applies it. A tick also adds the submitted
-drafts whose recordings finished copying (`odyn.app.submissions`), submits a
-test motion correction of each experiment it added (`submit_mcor_test`),
-processes the sync files that arrived since their experiment was added,
-writes a heartbeat, and (as a chain) submits the next tick. Everything a tick
-does is safe to repeat, so a tick that ran twice, or not at all for a day, only
-delays work.
+drafts whose recordings finished copying (`odyn.drafts.submissions`),
+submits a test motion correction of each experiment it added
+(`submit_mcor_test`), processes the sync files that arrived since their
+experiment was added, writes a heartbeat, and (as a chain) submits the next
+tick. Everything a tick does is safe to repeat, so a tick that ran twice, or
+not at all for a day, only delays work.
 
 Files, per database (`main` or the project's name), in
 `<main_folder>/.odyn/cluster/<name>/`:
@@ -368,8 +368,8 @@ def tick(
     """
     One round of the cluster's work: apply the waiting requests, add the
     submitted drafts whose recordings are complete (see
-    `odyn.app.submissions`), submit a test motion correction of each experiment
-    they added (unless `test_new_experiments` is off in `ClusterConfig`; a
+    `odyn.drafts.submissions`), submit a test motion correction of each
+    experiment they added (unless `test_new_experiments` is off in `ClusterConfig`; a
     whole one, which saves every acquisition, with `whole_new_experiments`)
     and a sweep of it (with `sweep_grid`), submit a whole correction with each
     test picked in the app (`submit_picks`), keep the numbers of the tests
@@ -402,7 +402,7 @@ def tick(
             _apply(path, main_folder, project, report)
 
     # Imported here: the queue belongs to the app (no Qt in it)
-    from .app.submissions import process_submissions
+    from .drafts.submissions import process_submissions
 
     report.submissions = process_submissions(main_folder, project, dry_run=dry_run)
 
@@ -655,11 +655,11 @@ def _sweep_sent(folder: Path, group_id: int) -> bool:
 
 def _added_groups(db: Database, project: None | str) -> list[tuple[int, str]]:
     """
-    The experiments the queue added (`odyn.app.submissions.added`): the group
-    each experiment started as, and the experiment's path.
+    The experiments the queue added (`odyn.drafts.submissions.added`): the
+    group each experiment started as, and the experiment's path.
     """
     # Imported here: the queue belongs to the app (no Qt in it)
-    from .app.submissions import added
+    from .drafts.submissions import added
 
     exp_ids = {
         int(exp_id)
@@ -2221,7 +2221,7 @@ def status(main_folder: str | Path, project: None | str = None) -> str:
         for error in beat.get("errors", []):
             lines.append(f"  error     {error}")
 
-    from .app.submissions import queued
+    from .drafts.submissions import queued
 
     lines.append(f"Requests:   {len(pending_requests(main_folder, project))} waiting")
     states = [state.state for _, state in queued(main_folder, project)]

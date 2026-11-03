@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
 
 from ..utils import logger
 from .context import Context
-from .draft import Draft
+from ..drafts.draft import Draft
 from .recorder import (
     RATE,
     RESP_HP_DEFAULT,
@@ -57,7 +57,7 @@ from .recorder import (
     minmax_decimate,
     sync_file_name,
 )
-from .recordings import (
+from ..drafts.recordings import (
     copy_to_share,
     hide_on_share,
     local_path,

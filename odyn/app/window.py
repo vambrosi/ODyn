@@ -39,7 +39,7 @@ from ..utils import logger
 from . import style
 from .cache import cache_folder, cache_size, human_size
 from .context import Context
-from .draft import FOLDER_OF, Draft, drafts_folder
+from ..drafts.draft import FOLDER_OF, Draft, drafts_folder
 from .forms import WheelGuard
 from .guide import Guide
 from .pane_qc import QcPane

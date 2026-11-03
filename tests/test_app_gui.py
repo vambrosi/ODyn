@@ -26,7 +26,7 @@ except ImportError as error:  # a missing shared library is not a missing module
     pytest.skip(f"Qt cannot load here: {error}", allow_module_level=True)
 
 from odyn import Database  # noqa: E402
-from odyn.app.draft import Draft  # noqa: E402
+from odyn.drafts.draft import Draft  # noqa: E402
 from odyn.app.models import FrameModel  # noqa: E402
 from odyn.app.pane_recorder import RecorderPane, recording_path  # noqa: E402
 from odyn.app.pane_session import ExperimentForm, ZStacksForm  # noqa: E402
@@ -831,7 +831,7 @@ def test_qc_pane_lists_nothing_for_a_new_user(window):
 
 
 def test_qc_lists_the_drafts_waiting_for_the_cluster(window, tmp_path, monkeypatch):
-    from odyn.app.submissions import enqueue
+    from odyn.drafts.submissions import enqueue
 
     main = tmp_path / "data"
     draft = Draft.start(tmp_path / "elsewhere", mouse_id=3, date="2026-10-07")
@@ -1845,7 +1845,7 @@ def test_tables_pane_lists_every_method_called(window):
 
 
 def test_a_boolean_field_is_a_box_that_starts_unchecked(app):
-    from odyn.app.fields import Field
+    from odyn.drafts.fields import Field
     from odyn.app.forms import Form
 
     form = Form([Field(key="flag", label="Flag", value_type="boolean", description="")])
@@ -2274,7 +2274,7 @@ def test_check_opens_the_panel_and_the_log_follows_the_database(window):
 
 
 def test_the_submit_report_ends_with_where_the_draft_went(window, tmp_path):
-    from odyn.app.submit import Problem, SubmitResult
+    from odyn.drafts.submit import Problem, SubmitResult
 
     window._add_session()
     draft = window.sessions.current
