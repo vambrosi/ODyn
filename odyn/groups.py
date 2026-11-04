@@ -309,9 +309,6 @@ class Group(CallRecorder):
         """The cached DataFrame of `spec`, restricted to this group."""
         assert spec.in_group is not None, f"{spec.name} has no per-group view"
 
-        if self.db._frozen and spec.name in self._tables:  # see `Database.frozen`
-            return self._tables[spec.name]
-
         with self.db._locked() as con:
             self.db._refresh_if_stale()
 

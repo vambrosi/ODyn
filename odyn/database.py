@@ -250,7 +250,6 @@ class Database(CallRecorder):
         # Initialize "private" variables
         self._call_stack: list[CallFrame] = []
         self._tables: dict[str, pd.DataFrame] = {}
-        self._frozen = 0  # inside `frozen`: no refresh of the caches
         self._groups: dict[int, Group] = {}  # Caches groups one-by-one
 
         # Checked before anything to not leave traces due to a typo.
@@ -417,9 +416,6 @@ class Database(CallRecorder):
 
     def _table(self, spec: TableSpec) -> pd.DataFrame:
         """The cached DataFrame of `spec`, read on first use."""
-        if self._frozen and spec.name in self._tables:  # no lock to take
-            return self._tables[spec.name]
-
         with self._locked() as con:
             self._refresh_if_stale()
 
@@ -798,32 +794,8 @@ class Database(CallRecorder):
     def _read_tiff(self, path: Path) -> None | tuple[Object, Object]:
         return read_tiff(path, self.main_folder)
 
-    @contextmanager
-    def frozen(self) -> Generator["Database"]:
-        """
-        Read every table as it is now, for a while: its cache is not emptied
-        by others' commits inside (a page reading several tables to show one
-        view, while cluster jobs write). Looked at once on the way in.
-
-        **USAGE**
-        ```python
-        with db.frozen():
-            picks, calls = latest_picks(db), db.calls
-        ```
-        """
-        self._refresh_if_stale()
-        self._frozen += 1
-
-        try:
-            yield self
-        finally:
-            self._frozen -= 1
-
     def _refresh_if_stale(self) -> None:
         """Reset caches if another connection has committed since the last check."""
-        if self._frozen:
-            return
-
         with self._locked() as con:
             version = con.execute("PRAGMA data_version;").fetchone()[0]
 

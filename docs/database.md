@@ -113,9 +113,7 @@ have changed it.
 
 ```mermaid
 flowchart TB
-    read["db.some_table"] --> frozen{"inside db.frozen()<br/>and cached?"}
-    frozen -- yes --> hit["cached DataFrame<br/>(no lock, no query)"]
-    frozen -- no --> take["take the lock"]
+    read["db.some_table"] --> take["take the lock"]
     take --> version{"PRAGMA data_version<br/>changed since last look?"}
     version -- yes --> empty["empty every cache"] --> cached
     version -- no --> cached{"cached?"}
@@ -135,28 +133,11 @@ What empties the caches:
 `db.calls` is `method_calls` without its long columns (the code and the
 environment), for readers that only need who called what and when.
 
-### Reading a view: `db.frozen()`
-
-A page that shows one view reads many tables, often while cluster jobs
-commit. Without care, each commit empties the caches mid-view and the next
-table read starts over.
-
-```python
-with db.frozen():
-    picks, approvals = latest_picks(db), latest_approvals(db)
-```
-
-Inside `frozen()`, the database is checked once on the way in. After that,
-a cached table is returned without the lock or a query. A table first read
-inside the block is read normally, at that moment. Commits by others take
-effect on the next `frozen()` or normal read. Writes made inside still
-empty the caches.
-
-This makes a view consistent per table, not a true snapshot: two tables
-read at different moments inside the block can disagree, if a job commits
-in between. A true snapshot would need one SQLite read transaction across
-the block, which holds back every writer on the share for as long as the
-view takes to build.
+A page that shows many tables at once does not read them from the
+database: it reads a view built where reading is quick (see "Files as
+messages", `qc.json`). Each commit by a cluster job empties every cache,
+so a page reading table after table while jobs commit would start over
+again and again.
 
 ## Writing: recorded calls
 
@@ -411,7 +392,7 @@ assumptions, and what depends on each.
 | Each hold of the lock lasts well under 120 s. | Stale-lock takeover. A hold longer than that can be taken over and lead to corruption. |
 | Round trips cost more than bytes. | Whole-table reads into caches. Holding the lock once for many reads. |
 | The database stays small (about 10 MB). | Reading whole tables. Copying the whole file for backups and snapshots. |
-| People mostly work on different experiments, and care about the end result of a call, not its progress. | Views may be one reload old. `frozen()` ignores others' commits for the length of a view. |
+| People mostly work on different experiments, and care about the end result of a call, not its progress. | Pages show views up to a tick old; decisions are claims the tick records. |
 | Writes are mostly new records (calls, picks, approvals), rarely edits of the same row by two people. | No conflict detection: the latest record wins. |
 | Everything that writes runs ODyn's code. | The lock and the schema check protect the file only from programs that take them. |
 | The share keeps a file created with `O_CREAT \| O_EXCL` exclusive across clients. | The lock itself, and claims. Some old NFS setups do not. |
@@ -422,10 +403,10 @@ assumptions, and what depends on each.
 
 - **Any commit empties every cache.** A cluster job finishing a call makes
   the next read of `acquisitions` start over, though it did not change.
-- **A view in `frozen()` is not a snapshot.** See above.
 - **Decisions on stale data.** Two people looking at the same group can
-  both act on a view that is one reload old. Picks and approvals are
-  records, and the latest one wins.
+  both act on a view a tick old. A claim refuses a second decision on the
+  same step until the tick records the first; after that, a new decision
+  is a new record, and the latest one wins.
 - **Holding the lock during slow work** (listing folders, reading TIFFs)
   holds back every other process, and past 120 s risks a takeover. Read
   what is needed, release, then work.
@@ -439,12 +420,12 @@ assumptions, and what depends on each.
   by each machine's clock (`localtime`), so they agree only as well as the
   clocks do. The lock and the shared files use the storage server's times
   instead (see above).
-- **A view no one rebuilds:** a writer that forgets to
-  rebuild `qc.json` leaves the page stale until the next tick, silently.
-  Each writer needs a test that its change shows in the view.
-- **The tick as the hub:** if the cluster stops, claims
-  wait and the view ages. The page shows its age, and the cluster line
-  warns when ticks stop.
+- **A view no one rebuilds:** a writer that forgets to rebuild `qc.json`
+  leaves the page stale until the next tick, silently. Each writer needs a
+  test that its change shows in the view.
+- **The tick as the hub:** if the cluster stops, claims wait and the view
+  ages. The cluster line at the top of the page says when the tick last
+  ran, and warns when ticks stop.
 
 ## When the assumptions change
 

@@ -106,14 +106,3 @@ def test_calls_leave_the_long_columns_out(db):
         "odor_id": 99,
         "odor_name": "x",
     }
-
-
-def test_frozen_tables_stay_put_while_others_write(db, tmp_path):
-    other = Database(tmp_path, user="bob")
-    db.odors
-
-    with db.frozen():
-        other.add_odor(odor_id=99, odor_name="x")
-        assert 99 not in db.odors.index  # read before, kept
-
-    assert 99 in db.odors.index  # looked at again on the way out
