@@ -514,3 +514,92 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def a_tested_experiment(main, user="tester") -> tuple:
+    """
+    An experiment of `user`'s with the cluster's test finished, and a sweep
+    whose baseline finished and whose one piecewise run did not.
+    """
+    import json
+    from datetime import datetime
+
+    import pandas as pd
+
+    from odyn.cluster import cluster_folder
+
+    generate(
+        main,
+        acquisitions=2,
+        frames=56,
+        height=32,
+        width=40,
+        start=datetime(2026, 3, 4, 9),
+    )
+    from odyn import Database
+
+    db = Database(main, can_create=True, user=user)
+    db.set_mouse(mouse_id=1)
+    session_id = db.add_session(mouse_id=1, session_date="2026-03-04")
+    exp_id = db.add_experiment(
+        session_id=session_id, exp_path="20260304/m1/e1", objective=20
+    )
+    links = db.group_experiments
+    group_id = int(links.index[links["exp_id"] == exp_id][0])
+    group = db.groups[group_id]
+    cluster = cluster_folder(main)
+    jobs = cluster / "jobs"
+    jobs.mkdir(parents=True)
+
+    def report(folder, corr, **metrics):
+        folder.mkdir(parents=True)
+        (folder / "metrics.json").write_text(
+            json.dumps({"frames_at_limit": 0.0, **metrics})
+        )
+        pd.DataFrame(
+            {
+                "acq_id": [1, 2],
+                "test_corr_with_ref": [corr, corr],
+                "test_flow_median_px": [0.5, 0.7],
+                "test_flow_p90_px": [1.5, 2.5],
+            }
+        ).to_csv(folder / "summary.csv", index=False)
+        (folder / "shifts.png").write_bytes(b"png")
+        (folder / "Group_1_e1_raw_test.avi").write_bytes(b"avi")
+
+    # The cluster's test, and someone else's (not listed)
+    (cluster / "mcor").mkdir()
+    for group, job_id, who in [(group_id, "11", user), (999, "12", "someone")]:
+        (cluster / "mcor" / f"{group}.json").write_text(
+            json.dumps(
+                {
+                    "group_id": group,
+                    "job_id": job_id,
+                    "user": who,
+                    "submitted_at": "2026-10-13 09:00:00",
+                }
+            )
+        )
+    (jobs / f"odyn-mcor-main-g{group_id}-11.out").write_text("...\nfinished now\n")
+    report(db.groups[group_id].mcor_test_folder(), 0.9)
+
+    # A sweep, submitted later
+    (cluster / "sweeps").mkdir()
+    (cluster / "sweeps" / f"g{group_id}.json").write_text(
+        json.dumps(
+            {
+                "group_id": group_id,
+                "user": user,
+                "baseline_job": "20",
+                "array_job": "21",
+                "submitted_at": "2026-10-13 10:00:00",
+                "runs": [{"run": "s128_o64_d6"}],
+            }
+        )
+    )
+    name = f"odyn-sweep-main-g{group_id}"
+    (jobs / f"{name}-20.out").write_text("finished now\n")
+    (jobs / f"{name}-21_1.out").write_text("started  ...\n")
+    report(db.groups[group_id].mcor_test_folder("rigid"), 0.8)
+
+    return db, group_id

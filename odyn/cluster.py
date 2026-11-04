@@ -424,10 +424,24 @@ def tick(
 
     if not dry_run:
         _write_heartbeat(folder, report)
+        write_qc_view(db)
 
     logger.info(report.summary())
 
     return report
+
+
+def write_qc_view(db: Database) -> None:
+    """
+    Rebuild the QC page's view (`odyn.qc`). A failure is logged, never raised:
+    the page then shows the view before, and the next tick tries again.
+    """
+    from .qc import write_qc_summary  # it imports this module
+
+    try:
+        write_qc_summary(db)
+    except Exception as error:
+        logger.warning(f"Could not write the QC view: {type(error).__name__}: {error}")
 
 
 def _submit_tests(
@@ -1468,6 +1482,7 @@ echo "cores    ${{SLURM_CPUS_PER_TASK:-?}}, temporary files in $CAIMAN_TEMP"
 echo "started  $(date --iso-8601=seconds)"
 {command}
 echo "finished $(date --iso-8601=seconds)"
+{shlex.join(_odyn_command(main_folder, project))} qc-view >/dev/null 2>&1 || true
 """
 
 
@@ -1932,13 +1947,15 @@ def _job_state(
     if in_queue is None and recorded in ENDED:  # over: its log says no more
         return recorded
 
+    # Before `squeue`: a job still in it can be past its work (updating the
+    # QC view at its end)
+    if log is not None and _last_line(log).startswith("finished"):
+        return "finished"
+
     queued = None if in_queue is None else _queued(job_id, in_queue)
 
     if queued is not None:
         return queued.lower()
-
-    if log is not None and _last_line(log).startswith("finished"):
-        return "finished"
 
     if in_queue is None:
         return recorded or "unknown"
@@ -2264,6 +2281,7 @@ def main(argv: None | list[str] = None) -> int:
 
     commands.add_parser("stop", help="stop the chain of ticks")
     commands.add_parser("status", help="last tick, queue and requests")
+    commands.add_parser("qc-view", help="rebuild the QC page's view (qc.json)")
 
     test = commands.add_parser(
         "mcor-test", help="submit a test motion correction of a group as a job"
@@ -2352,6 +2370,9 @@ def main(argv: None | list[str] = None) -> int:
 
     elif args.command == "status":
         print(status(args.main_folder, args.project))
+
+    elif args.command == "qc-view":
+        write_qc_view(Database(args.main_folder, project=args.project))
 
     elif args.command == "mcor-test":
         submit_mcor_test(

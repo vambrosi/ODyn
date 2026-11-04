@@ -6,9 +6,9 @@ import pytest
 
 from pathlib import Path
 
+from odyn.qc import Listing, remote_size
 from odyn.app.cache import (
     HERE,
-    Listing,
     NEWER,
     NOT_HERE,
     cache_root,
@@ -17,7 +17,6 @@ from odyn.app.cache import (
     download,
     human_size,
     local_folder,
-    remote_size,
     small_files,
     state,
 )
@@ -75,15 +74,20 @@ def test_only_a_tests_own_small_files_are_copied(tmp_path):
 
 def test_a_reload_lists_each_folder_on_the_share_once(tmp_path, monkeypatch):
     import odyn.app.cache as module
+    import odyn.qc as shared_listing
 
     main, base = tmp_path / "share", tmp_path / ".odyn"
     folder = a_test(main)
     download(main, folder, base)
     listed = []
     scan = module._scan
-    monkeypatch.setattr(
-        module, "_scan", lambda path: listed.append(Path(path)) or scan(path)
-    )
+
+    def counted(path):
+        listed.append(Path(path))
+        return scan(path)
+
+    monkeypatch.setattr(module, "_scan", counted)  # the copy here
+    monkeypatch.setattr(shared_listing, "_scan", counted)  # the share
 
     # Every question about the folder, from one listing of it on the share
     listing = Listing()

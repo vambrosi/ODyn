@@ -2,7 +2,7 @@
 
 This page explains how ODyn reads and writes its database: the lock, the
 caches, the call logs and the migrations, and how programs pass messages
-through small files on the share (planned). It also lists what the design
+through small files on the share. It also lists what the design
 assumes about the lab that uses it. If your lab works differently, the
 section [When the assumptions change](#when-the-assumptions-change) says
 what would have to change.
@@ -253,9 +253,11 @@ The schema version is `PRAGMA user_version`, checked against
 - `tests/test_migration.py` checks that an old database walked forward has
   exactly the schema of a new one.
 
-## Files as messages (planned)
+## Files as messages
 
-> Agreed in November 2026, not built yet. The QC page is the first user.
+> Agreed in November 2026. Built: the shared-file rules (`odyn/shared.py`,
+> `file_lock`), the inbox and the QC view. Planned: claims. The QC page is
+> the first user.
 
 The QC page shows a few KB: four short tables and the files to download.
 They change only when someone makes a QC decision or a cluster job ends.
@@ -357,32 +359,36 @@ sequenceDiagram
 
 ### The QC view: `qc.json`
 
-`.odyn/cluster/<project>/qc.json` holds everything the QC page shows, for
-every user: each experiment still in review (owner, paths, status, raw
-check, latest pick and approval, its runs with their state and numbers),
-the files of each downloadable folder with their sizes and times, the
-recordings, the missing annotations, the queue, and when it was built.
-Approved experiments keep a status line only.
+`.odyn/cluster/<project>/qc.json` (`odyn/qc.py`) holds what the QC page
+shows, for every user: the recordings and the missing annotations (each
+row saying whose), each experiment's tests with their state and numbers,
+each group's latest pick, raw check and approval, the users' names, what
+the cluster did last, and the file list (names, sizes, times) of every
+folder a download takes. Paths in it are inside the main folder, which
+each machine mounts elsewhere.
 
-- **Written only on the cluster,** by one function, `qc_summary(db)`: in
-  full by each tick, and again as each test or sweep job ends. Listing the
-  share there is quick, and `squeue` is at hand. Writers take its lock;
-  readers do not.
-- **Read by the app** off the database thread: the file's time (one round
-  trip) on each load and every ~30 s while the page is on screen; the file
-  itself only when that time changed; the list of `claims/` and any new
-  claim. Two to five round trips, a few KB.
-- **Computed in the app:** "Show all users" (a filter), and whether each
-  folder is downloaded and how much is left (the file lists against the
-  local copy, on this disk).
-- **Shown with its age** ("as of 11:20"). When the file is missing or of
-  another version, the page offers to build it here, with the same
-  function, which takes as long as a load did before.
+- **Written on the cluster,** by one function, `qc_summary(db)`: in full by
+  each tick, and again by each test or sweep job as it ends (`python -m
+  odyn.cluster ... qc-view`). Listing the share there is quick, and `squeue`
+  is at hand. Writers build and write it under its lock, so an older build
+  never lands after a newer one; readers take no lock.
+- **Read by the app** off the database thread: the file time (one round
+  trip) on each load and every 30 s while the page is on screen, and the
+  file itself only when that time changed.
+- **Computed in the app:** one user's rows (or everyone's), and whether
+  each folder is downloaded (the file lists in the view against the copy
+  on this disk). The queue tab lists `submissions/` itself, so a draft
+  just submitted shows at once.
+- **Built in the app** only when there is no view yet or it is of another
+  version (`QC_VERSION`), and after a QC decision made here until claims
+  are built: as slow as a load used to be.
+- **Its age** is the cluster line at the top of the page (when the tick
+  last ran).
 
-| | Before | Planned |
+| | Before | With the view (claims planned) |
 |---|---|---|
-| Folder listings per load | ~285 | 1 (`claims/`) |
-| File reads per load | ~95 | 0 to 2, plus new claims |
+| Folder listings per load | ~285 | 1 (`submissions/`), 2 with `claims/` |
+| File reads per load | ~95 | 0 to 1, plus queued drafts and new claims |
 | Database reads per load | 1 to 9 lock takes | none |
 | A QC decision | a recorded call from the app | one file created |
 | Others see a decision | after their next reload | on their next load, or within ~30 s |
@@ -425,12 +431,12 @@ assumptions, and what depends on each.
   The logs stay in `.odyn/logs`.
 - **Clocks:** times in the database (`called_at`, `ended_at`) are written
   by each machine's clock (`localtime`), so they agree only as well as the
-  clocks do. The lock and the planned files use the storage server's times
+  clocks do. The lock and the shared files use the storage server's times
   instead (see above).
-- **A view no one rebuilds** (planned files): a writer that forgets to
+- **A view no one rebuilds:** a writer that forgets to
   rebuild `qc.json` leaves the page stale until the next tick, silently.
   Each writer needs a test that its change shows in the view.
-- **The tick as the hub** (planned files): if the cluster stops, claims
+- **The tick as the hub:** if the cluster stops, claims
   wait and the view ages. The page shows its age, and the cluster line
   warns when ticks stop.
 

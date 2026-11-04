@@ -161,7 +161,7 @@ def test_a_chained_tick_submits_the_next_one(tmp_path, slurm):
     report = tick(tmp_path, chain=True)
 
     assert report.next_tick is not None
-    sbatch = slurm.read_text().splitlines()[-1]
+    sbatch = last_sbatch(slurm)
     assert "--dependency=singleton" in sbatch and "--begin=now+30minutes" in sbatch
 
     script = (cluster_folder(tmp_path) / "jobs" / "tick.sh").read_text()
@@ -182,7 +182,7 @@ def test_starting_the_chain_once(tmp_path, slurm):
 
     assert start_chain(tmp_path) == "4242"
     assert not (cluster_folder(tmp_path) / "STOP").exists()
-    assert "--begin" not in slurm.read_text().splitlines()[-1]  # starts now
+    assert "--begin" not in last_sbatch(slurm)  # starts now
 
     # A tick already in the queue: nothing more
     (tmp_path / "queue.txt").write_text("4242 PENDING 2026-10-08T23:00:00\n")
@@ -230,3 +230,8 @@ def test_a_jobs_state_off_the_cluster_reads_little(tmp_path, monkeypatch):
     monkeypatch.setattr("odyn.cluster._last_line", no)
     assert _job_state("7", log, None, recorded="stopped") == "stopped"
     assert _job_state("7", log, None, recorded="finished") == "finished"
+
+
+def last_sbatch(slurm) -> str:
+    """The last `sbatch` call (the QC view asks `squeue` after it)."""
+    return [line for line in slurm.read_text().splitlines() if "sbatch" in line][-1]

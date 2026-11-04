@@ -1033,7 +1033,8 @@ def test_the_full_previews_share_the_raw_levels(tmp_path, monkeypatch):
 
 
 def test_the_raw_check_records_what_is_left_out(tmp_path):
-    from odyn.app.pane_qc import _raw_check_line, latest_raw_checks
+    from odyn.app.pane_qc import _raw_check_line
+    from odyn.qc import latest_raw_checks
 
     db, group_id = a_loop(tmp_path)
     group = db.groups[group_id]

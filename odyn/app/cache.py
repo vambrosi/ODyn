@@ -23,26 +23,12 @@ import hashlib
 import os
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..drafts.draft import FOLDER_NAME
+from ..qc import Listing, _scan
 
 CACHE_FOLDER = "cache"
-
-# The files of a test folder worth having here (as `Path.match` patterns)
-SMALL_FILES = (
-    "*.avi",
-    "*.mp4",
-    "shifts.png",
-    "reference.tif",
-    "flow_average.tif",
-    "flow_worst.tif",
-    "summary.csv",
-    "metrics.json",
-    "shifts_summary.npz",
-    "*.frames.csv",
-)
 
 # How much a download copies at a time, between two progress reports
 CHUNK_BYTES = 4 * 1024 * 1024
@@ -78,67 +64,11 @@ def local_folder(main_folder: str | Path, folder: str | Path, base=None) -> Path
     return cache_root(main, base) / inside
 
 
-@dataclass
-class Listing:
-    """
-    One look at each folder, kept for a while (one reload of the QC page): on
-    a network share, every question about a file is a round trip, so each
-    folder is listed once, with its files' sizes and times, and every later
-    question is answered from that. On Windows the listing brings the sizes
-    and times along; elsewhere it costs one more call per file, once.
-
-    Not for a download: what it copies is looked at then (`pending`).
-    """
-
-    seen: dict[str, dict[str, tuple[int, float]]] = field(default_factory=dict)
-
-    def files(self, folder: str | Path) -> dict[str, tuple[int, float]]:
-        """Test `folder`'s small files: `{name: (size, modified)}`."""
-        key = str(folder)
-
-        if key not in self.seen:
-            self.seen[key] = _scan(folder)
-
-        return self.seen[key]
-
-
-def _scan(folder: str | Path) -> dict[str, tuple[int, float]]:
-    """A folder's small files, `{name: (size, modified)}`, in one listing."""
-    found = {}
-
-    try:
-        entries = list(os.scandir(folder))
-    except OSError:  # not there (yet)
-        return found
-
-    for entry in entries:
-        name = entry.name
-
-        if name.startswith(".") or not any(
-            Path(name).match(pattern) for pattern in SMALL_FILES
-        ):
-            continue
-
-        try:
-            if entry.is_file():
-                info = entry.stat()
-                found[name] = (info.st_size, info.st_mtime)
-        except OSError:  # gone since the listing
-            continue
-
-    return found
-
-
 def small_files(folder: str | Path, listing: None | Listing = None) -> list[Path]:
     """The files of test `folder` that get copied, by name."""
     files = (listing or Listing()).files(folder)
 
     return [Path(folder) / name for name in sorted(files)]
-
-
-def remote_size(folder: str | Path, listing: None | Listing = None) -> int:
-    """How many bytes downloading test `folder` copies (all of it)."""
-    return sum(size for size, _ in (listing or Listing()).files(folder).values())
 
 
 def _same_stat(theirs: tuple[int, float], ours: None | tuple[int, float]) -> bool:

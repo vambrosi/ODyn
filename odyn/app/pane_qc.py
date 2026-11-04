@@ -20,6 +20,8 @@ it until the user changes.
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import replace
 from pathlib import Path
 
@@ -39,27 +41,25 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from PySide6.QtCore import QElapsedTimer, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QElapsedTimer, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 
-from datetime import datetime
-
-from ..cluster import (
-    CORRECTION_RUN,
-    ClusterConfig,
-    heartbeat,
-    latest_approvals,
-    latest_picks,
-    mcor_sweep_runs,
-    mcor_tests,
-    pending_requests,
-    pick_candidate,
-    pick_repeats,
-    send_request,
+from ..cluster import pick_candidate, pick_repeats, send_request
+from ..groups import FULL_FOLDER
+from ..qc import (
+    COLUMNS,
+    EXPERIMENT_FOLDERS,
+    MISSING_COLUMNS,
+    TEST_COLUMNS,
+    TEST_HIDDEN,
+    TEST_NUMBERS,
+    Listing,
+    cluster_line,
+    qc_path,
+    qc_summary,
+    read_qc_summary,
+    remote_size,
 )
-from ..database import SyncFlag
-from ..groups import FULL_FOLDER, RAW_PREVIEW_FOLDER, mcor_test_folder
-from ..mcor_sweep import run_numbers
 from . import cache
 from .context import Context
 from ..drafts.draft import Draft
@@ -68,42 +68,7 @@ from .models import FrameModel, fit_columns, sortable
 from .style import text_style
 from ..drafts.submissions import add_now, queued, submit_again, take_back
 
-# The calls that add recordings, the kind each adds, and the output key listing
-# the ids it added
-INGEST_METHODS = {
-    "add_experiment": ("experiment", "exp_ids"),
-    "add_zstacks": ("zstack", "zstack_ids"),
-}
-
-# Where each kind's folder (an experiment) or file (the others) is
-PATH_COLUMN = {"experiment": "exp_path", "zstack": "raw_path"}
-COLUMNS = ["submitted_at", "kind", "path", "objective", "sync"]
 QUEUE_COLUMNS = ["submitted_at", "session", "state", "progress"]
-TEST_COLUMNS = [
-    "submitted_at",
-    "path",
-    "run",
-    "state",
-    "local",
-    "corr_with_ref",
-    "flow_px",
-    "flow_worst_px",
-    "jitter_px",
-    "at_limit",
-    "finished_at",
-]
-
-TEST_HIDDEN = [
-    "folder",
-    "bytes",
-    "group_id",
-    "experiment_folder",
-    "pick_call_id",
-    "flow_worst_acq",
-    "job",
-    "whole",
-    "user",
-]
 EXPERIMENT_COLUMNS = [
     "submitted_at",
     "path",
@@ -136,28 +101,9 @@ CORRECTION_STOPPED = "correction with {run} stopped"
 FINAL_CHECK = "ready for final check"
 APPROVED = "approved"
 
-# The folders of an experiment's tests downloaded with it, beside the runs'
-EXPERIMENT_FOLDERS = (RAW_PREVIEW_FOLDER, FULL_FOLDER)
-
 # An experiment some of whose files are downloaded (see `cache.state`)
 PARTLY = "partly"
 TO_DOWNLOAD = (cache.NOT_HERE, PARTLY, cache.NEWER)
-
-# The numbers shown for a test, from `mcor_sweep.run_numbers`: medians over
-# the acquisitions, the whole test numbers, and the worst flow (the largest
-# 90th percentile among the acquisitions, and which one)
-TEST_NUMBERS = {
-    "corr_with_ref": "test_corr_with_ref_median",
-    "flow_px": "test_flow_median_px_median",
-    "flow_worst_px": "test_flow_p90_px_max",
-    "flow_worst_acq": "flow_p90_worst_acq_id",
-    "jitter_px": "patch_jitter_median_px",
-    "at_limit": "frames_at_limit",
-}
-
-# A job's state in words for the page ("unknown": no `squeue` here, so the
-# job is either still in the cluster's queue or ended without finishing)
-TEST_STATES = {"pending": "waiting", "unknown": "not finished"}
 
 
 def my_queue(
@@ -194,246 +140,6 @@ def my_queue(
     return pd.DataFrame(rows, columns=[*QUEUE_COLUMNS, "path", "user"])
 
 
-def cluster_line(db, now: None | datetime = None) -> tuple[str, str]:
-    """
-    When the cluster last ran its tick, as `(text, kind)` for the QC page. The
-    kind is `warning` when the cluster looks stopped (no tick for twice
-    its interval), else `computed`.
-    """
-    beat = heartbeat(db.main_folder, db.project)
-    waiting = len(pending_requests(db.main_folder, db.project))
-    plural = "" if waiting == 1 else "s"
-    tail = "" if not waiting else f", {waiting} request{plural} waiting"
-
-    if beat is None:
-        return f"The cluster has not run yet{tail}", "computed"
-
-    started = datetime.strptime(beat["started_at"], "%Y-%m-%d %H:%M:%S")
-    minutes = ((now or datetime.now()) - started).total_seconds() / 60
-    every = ClusterConfig.read(db.main_folder).every_minutes
-    ago = f"{minutes:.0f} min" if minutes < 90 else f"{minutes / 60:.0f} h"
-    text = f"The cluster last ran at {beat['started_at'][:16]} ({ago} ago){tail}"
-
-    if minutes > 2 * every:
-        return f"{text}; it may have stopped", "warning"
-
-    return text, "computed"
-
-
-def my_recordings(db, user: None | str, everyone: bool = False) -> pd.DataFrame:
-    """
-    One row per experiment or z-stack `user` submitted (`everyone`: anyone),
-    newest first, with its sync flags once its sync file was processed.
-    Indexed by `(kind, id)`, as annotations name their target.
-    """
-    calls = db.calls
-
-    if calls.empty:
-        return pd.DataFrame(columns=[*COLUMNS, "user"])
-
-    method = calls["method_name"].map(lambda m: str(m).rsplit(".", 1)[-1])
-    mine = calls[
-        method.isin(list(INGEST_METHODS)) & (everyone or (calls["user"] == user))
-    ]
-    added: dict[tuple[str, int], pd.Timestamp] = {}
-
-    for call_id, call in mine.iterrows():
-        kind, key = INGEST_METHODS[method[call_id]]
-        output = call["call_output"]
-        ids = output.get(key, []) if isinstance(output, dict) else []
-
-        for row_id in ids:
-            if isinstance(row_id, int) and (kind, row_id) not in added:
-                added[(kind, row_id)] = (call["called_at"], call["user"])
-
-    tables = {"experiment": db.experiments, "zstack": db.zstacks}
-    flags = _exp_sync_flags(db)
-    rows = []
-
-    for (kind, row_id), (submitted, by) in added.items():
-        table = tables[kind]
-
-        if row_id not in table.index:
-            continue
-
-        processed = flags.get((kind, row_id))
-        rows.append(
-            {
-                "kind": kind,
-                "id": row_id,
-                "path": table.loc[row_id, PATH_COLUMN[kind]],
-                "objective": table.loc[row_id, "objective"],
-                "submitted_at": submitted,
-                "sync": processed or ("" if kind == "zstack" else "not processed"),
-                "user": by,
-            }
-        )
-
-    frame = pd.DataFrame(rows, columns=["id", *COLUMNS, "user"])
-    frame = frame.set_index(["kind", "id"], drop=False).drop(columns="id")
-
-    # Newest first: the rows are in the order of the calls (and of the ids
-    # within one), so reversed they break ties of `submitted_at` the same way
-    return frame.iloc[::-1].sort_values("submitted_at", ascending=False, kind="stable")
-
-
-def _exp_sync_flags(db) -> dict[tuple[str, int], str]:
-    """Each experiment's latest `process_sync`, decoded or refused."""
-    calls = db.calls  # cached, unlike `latest_calls`, which reads every column
-    calls = calls[calls["method_name"].str.endswith("process_sync")]
-    flags: dict[tuple[str, int], str] = {}
-
-    for _, call in calls.sort_index(ascending=False).iterrows():  # newest first
-        exp_id = (call["parameters_used"] or {}).get("exp_id")
-
-        if exp_id is not None and ("experiment", int(exp_id)) not in flags:
-            flags[("experiment", int(exp_id))] = sync_flags(int(call["call_flag"]))
-
-    return flags
-
-
-def sync_flags(call_flag: int) -> str:
-    """The names of the bits set on a `process_sync` call, or `succeeded`."""
-    names = [flag.name for flag in SyncFlag if call_flag & int(flag) and flag.name]
-
-    if call_flag & 1:
-        names.insert(0, "FAILED")
-
-    return ", ".join(names) or "succeeded"
-
-
-def my_tests(
-    db,
-    user: None | str,
-    mine: pd.DataFrame,
-    base: None | Path = None,
-    everyone: bool = False,
-    listing: None | cache.Listing = None,
-) -> pd.DataFrame:
-    """
-    The test motion corrections of `user`'s experiments (`everyone`: of every
-    user's), each with its `user`: who added the experiment (not who ran a
-    job of it since), the newest submitted
-    first (as in `mine`, from `my_recordings`): the cluster's test of each
-    ("test") and the runs of each sweep (the baseline first), with the job's
-    state and, once a report is there, a few of its numbers and whether it
-    is downloaded (`local`, see `cache.state`; `base` is where the cache
-    is). `folder` is where the report is, `bytes` what downloading it copies,
-    `experiment_folder` where the experiment's tests are. `listing` keeps
-    what was seen of each folder for this reload (see `cache.Listing`).
-    """
-    listing = listing or cache.Listing()
-    # Whose an experiment's tests are: whoever added it (`mine`), never who
-    # ran a job since (a pick made for someone else is recorded as its
-    # maker's, the experiment stays its owner's)
-    owners = {
-        int(row_id): who
-        for (kind, row_id), who in mine["user"].items()
-        if kind == "experiment"
-    }
-    jobs = [
-        {**test, "run": None} for test in mcor_tests(db.main_folder, db.project)
-    ] + mcor_sweep_runs(db.main_folder, db.project)
-    jobs.sort(key=lambda job: job["submitted_at"], reverse=True)  # stable
-    submitted = {
-        int(row_id): when
-        for (kind, row_id), when in mine["submitted_at"].items()
-        if kind == "experiment"
-    }
-    links = db.group_experiments
-    paths = db.experiments["exp_path"]
-    rows = []
-    acquisitions = None  # every group's, read once
-    tops: dict[int, Path] = {}  # each group's test folder
-
-    for job in jobs:
-        group_id = int(job["group_id"])
-
-        if group_id not in links.index:
-            continue
-
-        exp_ids = links.loc[[group_id], "exp_id"].astype(int)
-        owner = next((owners[i] for i in exp_ids if i in owners), None)
-
-        if owner is None and not everyone:  # not this user's experiment
-            continue
-
-        if group_id not in tops:
-            acquisitions = acquisitions if acquisitions is not None else db.acquisitions
-            tops[group_id] = mcor_test_folder(db, group_id, acquisitions)
-
-        top = tops[group_id]
-        folder = top / job["run"] if job["run"] else top
-        times = [submitted[i] for i in exp_ids if i in submitted]
-        row = {
-            "submitted_at": max(times) if times else None,
-            "path": ", ".join(str(paths.get(i, i)) for i in exp_ids),
-            "run": job["run"]
-            or job.get("label")
-            or ("rigid (all)" if job.get("whole") else "test"),
-            "state": TEST_STATES.get(job["state"], job["state"]),
-            "local": "",
-            **dict.fromkeys(TEST_NUMBERS),
-            "finished_at": "",
-            "folder": str(folder),
-            "bytes": 0,
-            "group_id": group_id,
-            "experiment_folder": str(top),
-            "pick_call_id": job.get("pick_call_id"),
-            # What `Group.run_again` calls it
-            "job": job["run"] or CORRECTION_RUN,
-            "whole": bool(job.get("whole")),
-            "user": owner or job["user"],  # (added before calls were recorded)
-        }
-
-        files = listing.files(folder) if job["state"] == "finished" else {}
-
-        if "metrics.json" in files:
-            local = cache.state(db.main_folder, folder, base, listing)
-            # Read from this computer's copy when it is the same
-            read = (
-                cache.local_folder(db.main_folder, folder, base)
-                if local == cache.HERE
-                else folder
-            )
-            numbers = _run_numbers(read, files)
-            row |= {key: numbers.get(name) for key, name in TEST_NUMBERS.items()}
-            written = files["metrics.json"][1]
-            row["finished_at"] = datetime.fromtimestamp(written).strftime(
-                "%Y-%m-%d %H:%M"
-            )
-            row["local"] = local
-            row["bytes"] = cache.remote_size(folder, listing)
-
-        rows.append(row)
-
-    # By experiment, newest first, keeping the jobs' order within one (stable)
-    rows.sort(key=lambda row: str(row["submitted_at"] or ""), reverse=True)
-
-    return pd.DataFrame(rows, columns=[*TEST_COLUMNS, *TEST_HIDDEN])
-
-
-# A run's numbers, by folder and its files' sizes and times: read once
-_NUMBERS: dict[tuple, dict] = {}
-
-
-def _run_numbers(folder: Path, files: dict[str, tuple[int, float]]) -> dict:
-    """`run_numbers` of `folder`, read again only when its files changed."""
-    key = (
-        str(folder),
-        files.get("metrics.json"),
-        files.get("summary.csv"),
-    )
-
-    if key not in _NUMBERS:
-        try:
-            _NUMBERS[key] = run_numbers(folder)
-        except (OSError, ValueError):
-            return {}
-
-    return _NUMBERS[key]
-
-
 def my_experiments(
     tests: pd.DataFrame,
     main_folder: Path,
@@ -441,7 +147,7 @@ def my_experiments(
     picks: None | dict[int, dict] = None,
     checks: None | dict[int, list[int]] = None,
     approvals: None | dict[int, dict] = None,
-    listing: None | cache.Listing = None,
+    listing: None | Listing = None,
 ) -> pd.DataFrame:
     """
     One row per experiment of `tests` (from `my_tests`, with the same
@@ -459,7 +165,7 @@ def my_experiments(
     `finished`, its finished test runs (as `Run`s, with folders on the
     share), the cluster test first; not the whole corrections.
     """
-    listing = listing or cache.Listing()
+    listing = listing or Listing()
     rows = []
 
     for group_id, runs in tests.groupby("group_id", sort=False):
@@ -500,7 +206,7 @@ def my_experiments(
         candidates = [top, *(top / name for name in EXPERIMENT_FOLDERS)]
         candidates += [run.folder for run in finished if run.folder != top]
         folders = [folder for folder in candidates if listing.files(folder)]
-        size = sum(cache.remote_size(folder, listing) for folder in folders)
+        size = sum(remote_size(folder, listing) for folder in folders)
         here = {cache.state(main_folder, folder, base, listing) for folder in folders}
 
         if not here:
@@ -536,25 +242,6 @@ def my_experiments(
         )
 
     return pd.DataFrame(rows, columns=[*EXPERIMENT_COLUMNS, *EXPERIMENT_HIDDEN])
-
-
-def latest_raw_checks(db) -> dict[int, list[int]]:
-    """Each group's latest `check_raw`: the acquisitions it excluded."""
-    calls = db.calls
-
-    if calls.empty:
-        return {}
-
-    checks = calls[calls["method_name"] == "Group.check_raw"].sort_index()
-    latest: dict[int, list[int]] = {}
-
-    for _, call in checks.iterrows():
-        output = call["call_output"]
-
-        if isinstance(output, dict):  # not one that failed
-            latest[int(call["group_id"])] = list(output.get("excluded", []))
-
-    return latest
 
 
 def _raw_check_line(excluded: None | list[int]) -> str:
@@ -700,41 +387,6 @@ def _duration(seconds: float) -> str:
     return f"{hours} h {minutes} min"
 
 
-def my_missing(db, mine: pd.DataFrame) -> pd.DataFrame:
-    """
-    The required annotations still empty on `mine`'s recordings, in the order
-    of `mine` (newest first), each with `waiting_since`: when its recording
-    was submitted, and `user`: who submitted it.
-    """
-    missing = db.missing_annotations()
-
-    if missing.empty or mine.empty:
-        return missing.iloc[0:0].assign(waiting_since=None, user=None)[
-            ["waiting_since", *missing.columns, "user"]
-        ]
-
-    rank = {target: position for position, target in enumerate(mine.index)}
-    order = [
-        rank.get((kind, int(row_id)))
-        for kind, row_id in zip(missing["target_type"], missing["target_id"])
-    ]
-    missing = missing.assign(_rank=order).dropna(subset="_rank")
-    missing = missing.sort_values("_rank", kind="stable").drop(columns="_rank")
-    since = [
-        mine["submitted_at"].get((kind, int(row_id)))
-        for kind, row_id in zip(missing["target_type"], missing["target_id"])
-    ]
-
-    whose = [
-        mine["user"].get((kind, int(row_id))) if "user" in mine else None
-        for kind, row_id in zip(missing["target_type"], missing["target_id"])
-    ]
-
-    return missing.reset_index(drop=True).assign(waiting_since=since, user=whose)[
-        ["waiting_since", *missing.columns, "user"]
-    ]
-
-
 def saved_folder(main_folder: Path, paths: str) -> Path:
     """
     Where an experiment's corrected files and reference are saved: the first
@@ -743,6 +395,92 @@ def saved_folder(main_folder: Path, paths: str) -> Path:
     first = str(paths).split(", ")[0]
 
     return Path(main_folder) / first / "processed" / "mcor"
+
+
+# How often the page looks for a newer view while on screen
+POLL_MS = 30_000
+
+
+def qc_view(
+    summary: dict,
+    main_folder: Path,
+    user: None | str,
+    everyone: bool = False,
+    base: None | Path = None,
+):
+    """
+    One user's rows of the QC view `summary` (`odyn.qc.qc_summary`), or every
+    user's: the display name, the recordings (indexed by `(kind, id)`), the
+    missing annotations, the experiments (`my_experiments`, their downloads
+    checked against the file lists in the view and the copies in `base`),
+    and the cluster line. Reads only this computer's disk.
+    """
+    main = Path(main_folder)
+    listing = Listing(
+        seen={
+            str(main / folder): {name: tuple(stat) for name, stat in files.items()}
+            for folder, files in summary["files"].items()
+        },
+        scan=False,
+    )
+
+    mine = pd.DataFrame(summary["recordings"], columns=["id", *COLUMNS, "user"])
+    mine = mine.set_index(["kind", "id"], drop=False).drop(columns="id")
+    missing = pd.DataFrame(summary["missing"], columns=MISSING_COLUMNS)
+    tests = pd.DataFrame(summary["tests"], columns=[*TEST_COLUMNS, *TEST_HIDDEN])
+
+    for column in ("folder", "experiment_folder"):
+        tests[column] = [str(main / folder) for folder in tests[column]]
+
+    for column in TEST_NUMBERS:
+        tests[column] = pd.to_numeric(tests[column], errors="coerce")
+
+    if not everyone:
+        mine = mine[mine["user"] == user]
+        missing = missing[missing["user"] == user]
+        tests = tests[tests["user"] == user]
+
+    # Whether each finished test is downloaded here
+    tests = tests.reset_index(drop=True)
+
+    for index, row in tests.iterrows():
+        if "metrics.json" in listing.files(row["folder"]):
+            tests.at[index, "local"] = cache.state(main, row["folder"], base, listing)
+
+    def by_group(name):
+        return {int(group): value for group, value in summary[name].items()}
+
+    experiments = my_experiments(
+        tests,
+        main,
+        base,
+        by_group("picks"),
+        by_group("raw_checks"),
+        by_group("approvals"),
+        listing,
+    )
+    name = summary["users"].get(user) or user
+
+    return name, mine, missing, experiments, cluster_line(summary)
+
+
+class _Job(QThread):
+    """Runs a function on a thread of its own and hands back its result."""
+
+    result = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, function, parent=None):
+        super().__init__(parent)
+        self.function = function
+
+    def run(self) -> None:  # noqa: D102 (Qt's)
+        try:
+            outcome = self.function()
+        except Exception as error:
+            self.failed.emit(f"{type(error).__name__}: {error}")
+        else:
+            self.result.emit(outcome)
 
 
 class QcPane(QWidget):
@@ -764,18 +502,22 @@ class QcPane(QWidget):
         self.experiments = pd.DataFrame(
             columns=[*EXPERIMENT_COLUMNS, *EXPERIMENT_HIDDEN]
         )
-        self.main_folder = context.main_folder  # as the database has it
+        self.main_folder = Path(context.main_folder).resolve()  # as the database
         self.downloads: None | Downloads = None
         self.windows: dict[str, McorWindow] = {}  # open, by experiment folder
         self.tab_names: list[str] = []
         self.tab_picked = False  # by the user, since the user last changed
         self.loading = 0  # the latest reload: an older one's rows are dropped
+        self.summary: None | dict = None  # the QC view (`odyn.qc`) last read
+        self.stamp: None | float = None  # its file time, then
+        self.rebuild = False  # build it here at the next reload (see `reload`)
+        self.jobs: set[_Job] = set()  # reading it, off the database thread
 
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
         self.who = QLabel("")
         reload = QPushButton("Reload")
-        reload.clicked.connect(self.reload)
+        reload.clicked.connect(lambda: self.reload())
         # Every tab, every user's: to take over someone's QC
         self.everyone = QCheckBox("Show all users")
         self.everyone.setStatusTip(
@@ -884,6 +626,12 @@ class QcPane(QWidget):
         context.follow_changes(self, self.reload)
         context.user_changed.connect(self._user_changed)
         self._enable()
+
+        # Looks for a newer view while on screen (one round trip each time)
+        self.poll = QTimer(self)
+        self.poll.setInterval(POLL_MS)
+        self.poll.timeout.connect(lambda: self.isVisible() and self.reload())
+        self.poll.start()
         self.reload()
 
     def _table(
@@ -920,6 +668,12 @@ class QcPane(QWidget):
         return view
 
     def reload(self) -> None:
+        """
+        Show the view again: read the view file when it changed since the last
+        look (one round trip when not), and the queue; then pick this user's
+        rows and check the downloads here. Off the database thread, which the
+        page needs only to build the view itself (see `_build_here`).
+        """
         user = self.context.user
         self.loading += 1
         loading = self.loading
@@ -929,87 +683,141 @@ class QcPane(QWidget):
 
         base = self.context.cache_base
         everyone = self.everyone.isChecked()
+        main, project = self.main_folder, self.context.worker.project
+        stamp, summary = self.stamp, self.summary
+        rebuild, self.rebuild = self.rebuild, False
 
-        def load(db):
-            with db.frozen():  # each table read once
-                return gather(db)
+        def load():
+            try:
+                changed = os.stat(qc_path(main, project)).st_mtime != stamp
+            except OSError:  # none yet
+                changed = True
 
-        def gather(db):
-            listing = cache.Listing()  # each folder looked at once
-            mine = my_recordings(db, user, everyone)
-            users = db.users
-            named = users.loc[users["user_name"] == user, "display_name"]
-            name = str(named.iloc[0]) if len(named) else user
-            queue = my_queue(db.main_folder, db.project, user, everyone)
+            read = read_qc_summary(main, project) if changed else summary
+            queue = my_queue(main, project, user, everyone)
 
-            return (
-                name,
-                queue,
-                mine,
-                my_missing(db, mine),
-                my_experiments(
-                    my_tests(db, user, mine, base, everyone, listing),
-                    db.main_folder,
-                    base,
-                    latest_picks(db),
-                    latest_raw_checks(db),
-                    latest_approvals(db),
-                    listing,
-                ),
-                cluster_line(db),
-                db.main_folder,
-            )
+            if read is None:  # no view yet, or of another version
+                return None, queue, None
+
+            return read, queue, qc_view(read, main, user, everyone, base)
 
         def loaded(result):
             if loading != self.loading:  # a later reload is on its way
                 return
 
-            name, queue, mine, missing, experiments, (cluster, kind), main = result
-            self.main_folder = main
+            read, queue, view = result
+
+            if read is None or rebuild:
+                self._build_here(queue, user, everyone, base)
+                return
+
+            if read is not self.summary:
+                self.summary = read
+                self.stamp = self._stamp()
+
+            self._fill(view, queue, everyone, user)
+
+        self._background(load, loaded)
+
+    def _build_here(self, queue, user, everyone, base) -> None:
+        """
+        Build the view on this computer, for want of one from the cluster (none
+        yet, or of another version), or after a change made here: slow over a
+        network, as it lists every test folder.
+        """
+        loading = self.loading
+        main = self.main_folder
+        self.cluster.setText("Looking at the tests on the share (this is slow)...")
+
+        def build(db):
+            summary = qc_summary(db)
+            return summary, qc_view(summary, main, user, everyone, base)
+
+        def built(result):
+            if loading != self.loading:
+                return
+
+            self.summary, view = result
+            self.stamp = None  # the cluster view is read again when it changes
+            self._fill(view, queue, everyone, user)
+
+        self.context.run(build, built, "build the QC view")
+
+    def _stamp(self) -> None | float:
+        try:
+            return os.stat(
+                qc_path(self.main_folder, self.context.worker.project)
+            ).st_mtime
+        except OSError:
+            return None
+
+    def _background(self, function, done) -> None:
+        """Run `function()` on a thread of its own, then `done(result)` here."""
+        job = _Job(function, self)
+        self.jobs.add(job)
+        self.context._busy(+1)  # counted with the database jobs (the cursor)
+
+        def finished(result):
+            try:
+                done(result)
+            finally:
+                self.jobs.discard(job)
+                self.context._busy(-1)
+
+        def failed(message):
+            self.jobs.discard(job)
+            self.context._busy(-1)
+            self.context.report("Load QC failed", message)
+
+        job.result.connect(finished)
+        job.failed.connect(failed)
+        job.start()
+
+    def _fill(self, view, queue, everyone, user) -> None:
+        """Put one view (from `qc_view`) and the queue in the tables."""
+        name, mine, missing, experiments, (cluster, kind) = view
+
+        if everyone:
+            self.who.setText("To-do list of all users")
+        elif user:
+            self.who.setText(f"To-do list for {name}")
+
+        self.cluster.setText(cluster)
+        self.cluster.setStyleSheet(text_style(kind))
+
+        self.queue = queue.reset_index(drop=True)
+        self.mine = mine.reset_index(drop=True)
+        self.mine_ids = [int(row_id) for _, row_id in mine.index]
+
+        def shown(frame, columns):
+            """`columns`, and whose each row is when showing all users."""
+            columns = list(columns)
 
             if everyone:
-                self.who.setText("To-do list of all users")
-            elif user:
-                self.who.setText(f"To-do list for {name}")
+                columns.insert(1, "user")
 
-            self.cluster.setText(cluster)
-            self.cluster.setStyleSheet(text_style(kind))
+            return frame[columns]
 
-            self.queue = queue.reset_index(drop=True)
-            self.mine = mine.reset_index(drop=True)
-            self.mine_ids = [int(row_id) for _, row_id in mine.index]
+        self._model(self.queue_view).set_frame(shown(self.queue, QUEUE_COLUMNS))
+        self._model(self.recordings_view).set_frame(shown(self.mine, COLUMNS))
+        self._model(self.missing_view).set_frame(
+            shown(missing, [c for c in missing.columns if c != "user"])
+        )
+        self.experiments = experiments.reset_index(drop=True)
+        columns = list(EXPERIMENT_COLUMNS)
 
-            def shown(frame, columns):
-                """`columns`, and whose each row is when showing all users."""
-                columns = list(columns)
+        if everyone:  # whose each is
+            columns.insert(columns.index("path") + 1, "user")
 
-                if everyone:
-                    columns.insert(1, "user")
+        self._model(self.tests_view).set_frame(self.experiments[columns])
 
-                return frame[columns]
-
-            self._model(self.queue_view).set_frame(shown(self.queue, QUEUE_COLUMNS))
-            self._model(self.recordings_view).set_frame(shown(self.mine, COLUMNS))
-            self._model(self.missing_view).set_frame(
-                shown(missing, [c for c in missing.columns if c != "user"])
-            )
-            self.experiments = experiments.reset_index(drop=True)
-            columns = list(EXPERIMENT_COLUMNS)
-
-            if everyone:  # whose each is
-                columns.insert(columns.index("path") + 1, "user")
-
-            self._model(self.tests_view).set_frame(self.experiments[columns])
-
-            for _, row in self.experiments.iterrows():
-                if str(row["folder"]) in self.windows:
-                    self.windows[str(row["folder"])].set_status(
-                        _window_status(row), row["status"] == FINAL_CHECK
-                    )
-            self._count_tabs()
-            self._enable()
-
-        self.context.run(load, loaded, "load QC")
+        for _, row in self.experiments.iterrows():
+            if str(row["folder"]) in self.windows:
+                self.windows[str(row["folder"])].set_status(
+                    _window_status(row), row["status"] == FINAL_CHECK
+                )
+        self._count_tabs()
+        self._enable()
 
     def _count_tabs(self) -> None:
         """Each tab's name with its row count; the first with rows shown."""
@@ -1231,6 +1039,7 @@ class QcPane(QWidget):
             )
             self.context.cache_changed.emit()
 
+        self.rebuild = True  # the view here shows it at once
         self.context.run(approve, approved, "approve", writes=True)
 
     def _run_again(self) -> None:
@@ -1265,6 +1074,7 @@ class QcPane(QWidget):
                 f"{label}: {listed} will run again at the cluster's next run"
             )
 
+        self.rebuild = True  # the view here shows it at once
         self.context.run(ask, asked, "run again", writes=True)
 
     def _check_raw(self, key: str, excluded: list[int]) -> None:
@@ -1306,6 +1116,7 @@ class QcPane(QWidget):
                 + (f" ({len(result)} excluded)" if result else "")
             )
 
+        self.rebuild = True  # the view here shows it at once
         self.context.run(check, checked, "raw check", writes=True)
 
     def _pick(self, key: str, run: str, aside: list[str] = ()) -> None:
@@ -1346,6 +1157,7 @@ class QcPane(QWidget):
                 "Pick",
                 parent=window,
             ):
+                self.rebuild = True  # the view here shows it at once
                 self.context.run(pick, picked, "pick candidate", writes=True)
 
         def pick(db):
@@ -1488,6 +1300,11 @@ class QcPane(QWidget):
         """
         for window in list(self.windows.values()):
             window.close()
+
+        self.poll.stop()
+
+        for job in list(self.jobs):
+            job.wait()
 
         if self.downloads is not None:
             self.downloads.requestInterruption()
