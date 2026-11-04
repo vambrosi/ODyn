@@ -304,11 +304,15 @@ time, and views for pages that only read.
 
 Programs ask the cluster for work by dropping a file in a folder the tick
 works through, oldest first, moving each to `done/`, or to `failed/` with
-the reason. Three kinds, one mechanism:
+the reason. Three kinds, one mechanism (`Inbox` in `odyn/shared.py`; the
+queue and the requests use it, claims are planned). A message keeps its
+own small files beside it, moved with it (a submitted draft keeps its
+`.state.json`, since adding it can wait several ticks for its TIFFs).
+All are in `.odyn/cluster/<project or main>/`:
 
 | Folder | Written by | Asks for |
 |---|---|---|
-| `queue/` | the app, on submit | adding a session's experiments |
+| `submissions/` | the app, on submit | adding a session's experiments |
 | `requests/` | the app, scripts | a recorded call on the cluster (sync, previews) |
 | `claims/` | the app, on a QC decision | recording that decision, and what follows it |
 

@@ -45,7 +45,6 @@ No Qt in here: the cluster runs it, and the app only reads the states.
 
 from __future__ import annotations
 
-import os
 import socket
 
 from dataclasses import asdict, dataclass, field, fields
@@ -60,13 +59,15 @@ from ..sync import decode
 from ..utils import logger
 from .draft import Draft
 from .submit import RAW_FOLDER, check_files, ingest
-from ..shared import read_json, write_json
+from ..shared import DONE_FOLDER, Inbox, read_json, write_json
 
 QUEUE_FOLDER = "submissions"
-DONE_FOLDER = "done"
 WITHDRAWN_FOLDER = "withdrawn"
 STATE_SUFFIX = ".state.json"
 NOW_SUFFIX = ".now"
+
+# Beside each queued draft, and moved with it (see `Inbox`)
+SIDECARS = (STATE_SUFFIX, NOW_SUFFIX)
 
 # What `enqueue` adds to a draft, taken off again when it comes back to edit
 QUEUE_KEYS = ("submitted_by", "submitted_at", "submitted_on", "draft_file")
@@ -106,6 +107,11 @@ def queue_folder(main_folder: str | Path, project: None | str = None) -> Path:
     return cluster_folder(main_folder, project) / QUEUE_FOLDER
 
 
+def queue(main_folder: str | Path, project: None | str = None) -> Inbox:
+    """The submitted drafts, each with its state beside it (see `Submission`)."""
+    return Inbox(queue_folder(main_folder, project), SIDECARS)
+
+
 def enqueue(
     draft: Draft,
     main_folder: str | Path,
@@ -120,8 +126,6 @@ def enqueue(
     """
     # A draft's name is when it was started on its computer, so two people's
     # can match: the queued copy also says whose it is (and stays in order)
-    folder = queue_folder(main_folder, project)
-    path = folder / f"{draft.path.stem}-{user}.json"
     content = {
         **draft.data,
         "submitted_by": user,
@@ -129,7 +133,9 @@ def enqueue(
         "submitted_on": socket.gethostname(),
         "draft_file": draft.path.name,
     }
-    write_json(path, content, sort_keys=True)
+    path = queue(main_folder, project).put(
+        f"{draft.path.stem}-{user}", content, sort_keys=True
+    )
     _state_path(path).unlink(missing_ok=True)
 
     return path
@@ -139,21 +145,20 @@ def queued(
     main_folder: str | Path, project: None | str = None
 ) -> list[tuple[Path, Submission]]:
     """The drafts still in the queue (waiting or failed), oldest first."""
-    folder = queue_folder(main_folder, project)
-
-    if not folder.is_dir():
-        return []
-
-    return [(path, _read_state(path) or Submission()) for path in _drafts(folder)]
+    return [
+        (path, _read_state(path) or Submission())
+        for path in queue(main_folder, project).items()
+    ]
 
 
 def added(
     main_folder: str | Path, project: None | str = None
 ) -> list[tuple[Path, Submission]]:
     """The drafts the queue added (in `done/`), oldest first."""
-    folder = queue_folder(main_folder, project) / DONE_FOLDER
-
-    return [(path, _read_state(path) or Submission()) for path in _drafts(folder)]
+    return [
+        (path, _read_state(path) or Submission())
+        for path in queue(main_folder, project).items(DONE_FOLDER)
+    ]
 
 
 def add_now(path: Path) -> None:
@@ -180,13 +185,7 @@ def take_back(path: Path, drafts: Path) -> Path:
         content.pop(key, None)
 
     write_json(local, content, sort_keys=True)
-
-    withdrawn = path.parent / WITHDRAWN_FOLDER
-    withdrawn.mkdir(exist_ok=True)
-
-    for source in (path, _state_path(path), _now_path(path)):
-        if source.exists():
-            os.replace(source, withdrawn / source.name)
+    Inbox(path.parent, SIDECARS).file(path, WITHDRAWN_FOLDER)
 
     return local
 
@@ -210,7 +209,7 @@ def process_submissions(
     stamp = now.strftime(TIME_FORMAT)
     lines = []
 
-    for path in _drafts(queue_folder(main_folder, project)):
+    for path in queue(main_folder, project).items():
         state = _read_state(path) or Submission(
             first_seen_at=stamp, last_change_at=stamp
         )
@@ -318,7 +317,7 @@ def _ingest(
     state.message = "; ".join([f"added as session {written.session_id}", *refused])
     state.updated_at = stamp
     _write_state(path, state)
-    _move_to_done(path)
+    Inbox(path.parent, SIDECARS).file(path, DONE_FOLDER)
     logger.info(f"Added {draft.where} for {user}: {state.message}.")
 
     return f"{draft.where}: {state.message}"
@@ -331,15 +330,6 @@ def _fail(path: Path, state: Submission, stamp: str, message: str, retry: bool) 
     state.updated_at = stamp
     _write_state(path, state)
     logger.warning(f"Submission '{path.name}' failed: {message}")
-
-
-def _move_to_done(path: Path) -> None:
-    done = path.parent / DONE_FOLDER
-    done.mkdir(exist_ok=True)
-
-    for source in (path, _state_path(path), _now_path(path)):
-        if source.exists():
-            os.replace(source, done / source.name)
 
 
 # --------------------------------------------------------------------------- #
@@ -472,20 +462,6 @@ def _listed(parts: dict[str, str]) -> str:
 # --------------------------------------------------------------------------- #
 # Files
 # --------------------------------------------------------------------------- #
-
-
-def _drafts(folder: Path) -> list[Path]:
-    """The queued drafts, oldest first (their names start with when they began)."""
-    if not folder.is_dir():
-        return []
-
-    return sorted(
-        p
-        for p in folder.glob("*.json")
-        if p.is_file()
-        and not p.name.startswith(".")
-        and not p.name.endswith(STATE_SUFFIX)
-    )
 
 
 def _state_path(path: Path) -> Path:

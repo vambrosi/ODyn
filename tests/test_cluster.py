@@ -73,7 +73,7 @@ def test_requests_for_anything_else_are_refused(tmp_path):
     report = tick(tmp_path)
 
     assert report.rejected and "cannot be requested" in report.rejected[0]
-    rejected = json.loads((folder / "rejected" / "by-hand.json").read_text())
+    rejected = json.loads((folder / "failed" / "by-hand.json").read_text())
     assert "cannot be requested" in rejected["reason"]
 
 

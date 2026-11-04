@@ -13,7 +13,14 @@ from pathlib import Path
 import pytest
 
 from odyn import shared
-from odyn.shared import read_json, server_now, write_json
+from odyn.shared import (
+    DONE_FOLDER,
+    FAILED_FOLDER,
+    Inbox,
+    read_json,
+    server_now,
+    write_json,
+)
 
 
 def test_a_file_reads_back_as_written(tmp_path):
@@ -70,3 +77,38 @@ def test_now_is_read_from_the_server_and_leaves_nothing(tmp_path):
     assert abs(server_now(tmp_path) - time.time()) < 5  # here, one machine
     assert list(tmp_path.iterdir()) == []
     assert before <= os.stat(tmp_path).st_mtime
+
+
+def test_an_inbox_lists_its_messages_oldest_first(tmp_path):
+    inbox = Inbox(tmp_path, sidecars=(".state.json",))
+    later = inbox.put("20261103-120500-bob", {"n": 2})
+    first = inbox.put("20261103-120000-alice", {"n": 1})
+    (tmp_path / "20261103-120000-alice.state.json").write_text("{}")  # its own
+    (tmp_path / ".20261103-121000-carol.json.ab12cd34.partial").write_text("{")
+
+    assert inbox.items() == [first, later]
+    assert Inbox(tmp_path / "none").items() == []
+
+
+def test_a_message_is_filed_with_what_belongs_to_it(tmp_path):
+    inbox = Inbox(tmp_path, sidecars=(".state.json", ".now"))
+    path = inbox.put("20261103-120000-alice", {"n": 1})
+    (tmp_path / "20261103-120000-alice.state.json").write_text("{}")
+    (tmp_path / "20261103-120000-alice.now").write_text("")
+
+    done = inbox.file(path, DONE_FOLDER, {"applied_at": "2026-11-03 12:05:00"})
+
+    assert read_json(done) == {"n": 1, "applied_at": "2026-11-03 12:05:00"}
+    assert sorted(p.name for p in done.parent.iterdir()) == [
+        "20261103-120000-alice.json",
+        "20261103-120000-alice.now",
+        "20261103-120000-alice.state.json",
+    ]
+    assert inbox.items() == [] and inbox.items(DONE_FOLDER) == [done]
+
+    # One that does not read is filed as it is
+    broken = tmp_path / "20261103-130000-bob.json"
+    broken.write_text("{")
+    failed = inbox.file(broken, FAILED_FOLDER, {"reason": "unreadable"})
+
+    assert failed.read_text() == "{"

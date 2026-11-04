@@ -15,7 +15,7 @@ not at all for a day, only delays work.
 Files, per database (`main` or the project's name), in
 `<main_folder>/.odyn/cluster/<name>/`:
 - `requests/` holds the requests waiting, `requests/done/` the applied ones
-and `requests/rejected/` the refused ones, each with the reason;
+and `requests/failed/` the refused ones, each with the reason;
 - `submissions/` holds the submitted drafts not added yet, each with its
 state, and `submissions/done/` the ones added;
 - `heartbeat.json` says when the last tick ran and what it did, and
@@ -87,13 +87,11 @@ import pandas as pd
 from .database import SYNC_FOLDER, Database, SyncFlag
 from .groups import candidate_settings
 from .utils import ODYN_FOLDER, database_path, get_user, logger
-from .shared import read_json, write_json
+from .shared import DONE_FOLDER, FAILED_FOLDER, Inbox, read_json, write_json
 
 CLUSTER_FOLDER = "cluster"
 CONFIG_FILE = "cluster.json"
 REQUESTS_FOLDER = "requests"
-DONE_FOLDER = "done"
-REJECTED_FOLDER = "rejected"
 JOBS_FOLDER = "jobs"
 HEARTBEAT_FILE = "heartbeat.json"
 LOG_FILE = "tick.log"
@@ -229,8 +227,6 @@ def send_request(
     here rather than at the tick.
     """
     _check_request(method, kwargs)
-    folder = cluster_folder(main_folder, project) / REQUESTS_FOLDER
-    folder.mkdir(parents=True, exist_ok=True)
     request = {
         "method": method,
         "kwargs": kwargs,
@@ -239,23 +235,20 @@ def send_request(
         "requested_on": socket.gethostname(),
     }
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = folder / f"{stamp}-{method}-{uuid.uuid4().hex[:8]}.json"
 
-    write_json(path, request)  # a tick never reads half a file
+    return requests(main_folder, project).put(
+        f"{stamp}-{method}-{uuid.uuid4().hex[:8]}", request
+    )
 
-    return path
+
+def requests(main_folder: str | Path, project: None | str = None) -> Inbox:
+    """Where the requests to the cluster wait (`requests/`)."""
+    return Inbox(cluster_folder(main_folder, project) / REQUESTS_FOLDER)
 
 
 def pending_requests(main_folder: str | Path, project: None | str = None) -> list[Path]:
     """The requests waiting for a tick, oldest first."""
-    folder = cluster_folder(main_folder, project) / REQUESTS_FOLDER
-
-    if not folder.is_dir():
-        return []
-
-    return sorted(
-        p for p in folder.glob("*.json") if p.is_file() and not p.name.startswith(".")
-    )
+    return requests(main_folder, project).items()
 
 
 def _check_request(method: str, kwargs: dict[str, Any]) -> None:
@@ -274,7 +267,7 @@ def _check_request(method: str, kwargs: dict[str, Any]) -> None:
 def _apply(
     path: Path, main_folder: Path, project: None | str, report: TickReport
 ) -> None:
-    """Run one request, then move it to `done/` or `rejected/`."""
+    """Run one request, then move it to `done/` or `failed/`."""
     try:
         request = read_json(path)
         method, kwargs = request["method"], dict(request.get("kwargs") or {})
@@ -282,7 +275,7 @@ def _apply(
         _check_request(method, kwargs)
 
     except (OSError, ValueError, KeyError, TypeError) as error:
-        _file_away(path, REJECTED_FOLDER, {"reason": str(error)})
+        Inbox(path.parent).file(path, FAILED_FOLDER, {"reason": str(error)})
         report.rejected.append(f"{path.name}: {error}")
         logger.warning(f"Rejected the request '{path.name}': {error}")
         return
@@ -299,23 +292,8 @@ def _apply(
         outcome["error"] = f"{type(error).__name__}: {error}"
         report.errors.append(f"{path.name}: {outcome['error']}")
 
-    _file_away(path, DONE_FOLDER, outcome)
+    Inbox(path.parent).file(path, DONE_FOLDER, outcome)
     report.applied.append(f"{method}({_arguments(kwargs)}) for {user}")
-
-
-def _file_away(path: Path, folder: str, extra: dict[str, Any]) -> None:
-    """Move a request into `folder`, with `extra` added to it when readable."""
-    target = path.parent / folder
-    target.mkdir(exist_ok=True)
-
-    try:
-        content = read_json(path)
-        content.update(extra)
-        write_json(target / path.name, content)
-        path.unlink()
-
-    except (OSError, ValueError):
-        os.replace(path, target / path.name)
 
 
 def _arguments(kwargs: dict[str, Any]) -> str:
@@ -2232,8 +2210,8 @@ def status(main_folder: str | Path, project: None | str = None) -> str:
     runs = mcor_sweep_runs(main_folder, project)
     lines += _job_lines("Sweeps:", runs, lambda run: run["run"], "runs")
 
-    rejected = sorted((folder / REQUESTS_FOLDER / REJECTED_FOLDER).glob("*.json"))
-    lines.append(f"Rejected:   {len(rejected)} in total")
+    failed = requests(main_folder, project).items(FAILED_FOLDER)
+    lines.append(f"Failed:     {len(failed)} requests in total")
     lines.append(f"Stopped:    {'yes' if (folder / STOP_FILE).exists() else 'no'}")
 
     try:

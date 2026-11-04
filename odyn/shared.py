@@ -18,6 +18,9 @@ time with it, never with this machine's own clock.
 write_json(folder / "heartbeat.json", {"started_at": "2026-11-03 12:00:00"})
 beat = read_json(folder / "heartbeat.json")
 ```
+
+Messages that a program works through (requests to the cluster, submitted
+drafts, QC claims) wait in an `Inbox`.
 """
 
 from __future__ import annotations
@@ -96,3 +99,88 @@ def replace(source: str | Path, target: str | Path) -> None:
                 raise
 
             time.sleep(0.05)
+
+
+# --------------------------------------------------------------------------- #
+# Inboxes
+# --------------------------------------------------------------------------- #
+
+DONE_FOLDER = "done"
+FAILED_FOLDER = "failed"
+
+
+class Inbox:
+    """
+    A folder of messages a program works through, oldest first: requests to
+    the cluster, submitted drafts, QC claims. Each is a JSON file whose name
+    sorts by age; the program files each away when done with it (`done/`,
+    `failed/`, or another folder), together with its `sidecars`: files
+    beside it named `<its name><suffix>` (a submitted draft has its
+    `.state.json`).
+
+    **USAGE**
+    ```python
+    inbox = Inbox(folder)
+    path = inbox.put("20261103-120000-alice", {"step": "approve"})
+
+    for path in inbox.items():
+        ...
+        inbox.file(path, DONE_FOLDER, {"applied_at": "2026-11-03 12:05:00"})
+    ```
+    """
+
+    def __init__(self, folder: str | Path, sidecars: tuple[str, ...] = ()):
+        self.folder = Path(folder)
+        self.sidecars = sidecars
+
+    def items(self, folder: None | str = None) -> list[Path]:
+        """The messages waiting (or those filed in `folder`), oldest first."""
+        where = self.folder if folder is None else self.folder / folder
+
+        try:
+            names = sorted(entry.name for entry in os.scandir(where))
+        except OSError:  # no message yet
+            return []
+
+        return [
+            where / name
+            for name in names
+            if name.endswith(".json")
+            and not name.startswith(".")  # being written (`write_json`)
+            and not name.endswith(self.sidecars)
+        ]
+
+    def put(self, name: str, content: Any, **dump: Any) -> Path:
+        """Leave the message `<name>.json`, replacing one of that name."""
+        return write_json(self.folder / f"{name}.json", content, **dump)
+
+    def file(
+        self, path: Path, folder: str, extra: None | dict[str, Any] = None
+    ) -> Path:
+        """
+        Move the message at `path` and its sidecars into `folder`, with
+        `extra` added to the message when it reads. Returns its new path.
+        """
+        target = path.parent / folder
+        target.mkdir(exist_ok=True)
+        moved = target / path.name
+
+        try:
+            if extra is None:
+                raise ValueError
+
+            write_json(moved, {**read_json(path), **extra})
+            path.unlink()
+
+        except (OSError, ValueError, TypeError):  # unreadable: moved as it is
+            replace(path, moved)
+
+        stem = path.name[: -len(".json")]
+
+        for suffix in self.sidecars:
+            sidecar = path.parent / f"{stem}{suffix}"
+
+            if sidecar.exists():
+                replace(sidecar, target / sidecar.name)
+
+        return moved
