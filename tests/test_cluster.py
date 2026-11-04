@@ -203,7 +203,7 @@ def test_the_command_line(tmp_path, capsys):
 
 
 def test_an_arrays_waiting_tasks_are_found_in_squeues_list():
-    from odyn.cluster import _queued
+    from odyn.cluster.slurm import _queued
 
     queue = {"21_1": "RUNNING", "21_[2-5,9%4]": "PENDING", "30": "RUNNING"}
 
@@ -216,7 +216,7 @@ def test_an_arrays_waiting_tasks_are_found_in_squeues_list():
 
 
 def test_a_jobs_state_off_the_cluster_reads_little(tmp_path, monkeypatch):
-    from odyn.cluster import _job_state, _last_line
+    from odyn.cluster.slurm import _job_state, _last_line
 
     # Only the end of a long log is read
     log = tmp_path / "odyn-mcor-main-g1-7.out"
@@ -227,7 +227,7 @@ def test_a_jobs_state_off_the_cluster_reads_little(tmp_path, monkeypatch):
     def no(*_):
         raise AssertionError("read the log")
 
-    monkeypatch.setattr("odyn.cluster._last_line", no)
+    monkeypatch.setattr("odyn.cluster.slurm._last_line", no)
     assert _job_state("7", log, None, recorded="stopped") == "stopped"
     assert _job_state("7", log, None, recorded="finished") == "finished"
 

@@ -28,7 +28,7 @@ gui = ["PySide6"]
 test = ["pytest", "scikit-image"]
 
 [tool.setuptools]
-packages = ["odyn", "odyn.app", "odyn.drafts"]
+packages = ["odyn", "odyn.app", "odyn.cluster", "odyn.drafts"]
 
 [tool.setuptools.package-data]
 odyn = ["*.sql"]

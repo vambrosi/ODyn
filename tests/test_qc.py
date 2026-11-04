@@ -8,7 +8,7 @@ import os
 
 from generate_data import a_tested_experiment
 
-from odyn.cluster import _job_state
+from odyn.cluster.slurm import _job_state
 from odyn.qc import (
     QC_VERSION,
     qc_path,
