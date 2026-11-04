@@ -1268,18 +1268,31 @@ def test_a_test_is_picked_from_the_window(window, tmp_path, monkeypatch):
         "This will overwrite the rigid run files."
     )
     assert action == "Pick" and parent is mcor
-    assert qc.experiments["status"].tolist() == ["correcting with rigid"]
+
+    # Claimed: shown at once, recorded by the cluster later
+    assert qc.experiments["status"].tolist() == [
+        "rigid picked by tester, waiting for the cluster"
+    ]
+    claimed = cluster_folder(tmp_path / "data") / "claims" / f"g{group_id}-pick.json"
+    assert json.loads(claimed.read_text())["set_aside"] == ["test"]
 
     # Sent to the cluster: said over the window
     boxes = [box for box in mcor.findChildren(QMessageBox) if box.isVisible()]
     assert len(boxes) == 1 and boxes[0].text().startswith("Sent to the cluster")
     boxes[0].close()
 
-    # What was set aside goes with the pick
+    # The tick records it as the person who picked, with what was set aside
     from odyn import Database
+    from odyn.cluster import TickReport, apply_claims
 
+    apply_claims(tmp_path / "data", None, TickReport())
+    assert not claimed.exists()
     calls = Database(tmp_path / "data").latest_calls("pick_mcor_candidate")
     assert calls["input_set_aside"].iloc[0] == ["test"]
+    assert calls["user"].iloc[0] == "tester"
+    qc.reload()
+    settle(window.context)
+    assert qc.experiments["status"].tolist() == ["correcting with rigid"]
     assert mcor.state.text().startswith("Status: correcting with rigid;")
 
     # Refused while a whole correction has not ended
@@ -1287,6 +1300,8 @@ def test_a_test_is_picked_from_the_window(window, tmp_path, monkeypatch):
     sent.write_text(json.dumps({**json.loads(sent.read_text()), "whole": True}))
     log = sent.parent.parent / "jobs" / f"odyn-mcor-main-g{group_id}-11.out"
     log.write_text("started  ...\n")
+    qc.reload()
+    settle(window.context)
     mcor.pick_action.trigger()
     settle(window.context)
     boxes = [box for box in mcor.findChildren(QMessageBox) if box.isVisible()]
@@ -2707,6 +2722,14 @@ def test_stopped_jobs_are_run_again_from_the_qc_page(window, tmp_path, monkeypat
     qc.run_again.click()
     settle(window.context)
     assert asked == ["Run again the stopped jobs of 20260304/m1/e1: s128_o64_d6, test?"]
+    assert qc.experiments["status"].iloc[0] == (
+        "run again by tester, waiting for the cluster"
+    )
+
+    # Recorded by the cluster as the person who asked
+    from odyn.cluster import TickReport, apply_claims
+
+    apply_claims(tmp_path / "data", None, TickReport())
     calls = Database(tmp_path / "data").latest_calls("run_again")
     assert calls["user"].iloc[0] == "tester"
     assert calls["output_runs"].iloc[0] == ["correction", "s128_o64_d6"]

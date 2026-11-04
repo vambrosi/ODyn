@@ -256,8 +256,8 @@ The schema version is `PRAGMA user_version`, checked against
 ## Files as messages
 
 > Agreed in November 2026. Built: the shared-file rules (`odyn/shared.py`,
-> `file_lock`), the inbox and the QC view. Planned: claims. The QC page is
-> the first user.
+> `file_lock`), the inbox, the QC view and claims. The QC page is the
+> first user.
 
 The QC page shows a few KB: four short tables and the files to download.
 They change only when someone makes a QC decision or a cluster job ends.
@@ -307,7 +307,7 @@ time, and views for pages that only read.
 Programs ask the cluster for work by dropping a file in a folder the tick
 works through, oldest first, moving each to `done/`, or to `failed/` with
 the reason. Three kinds, one mechanism (`Inbox` in `odyn/shared.py`; the
-queue and the requests use it, claims are planned). A message keeps its
+queue, the requests and the claims use it). A message keeps its
 own small files beside it, moved with it (a submitted draft keeps its
 `.state.json`, since adding it can wait several ticks for its TIFFs).
 All are in `.odyn/cluster/<project or main>/`:
@@ -320,8 +320,8 @@ All are in `.odyn/cluster/<project or main>/`:
 
 ### QC decisions: claims
 
-A decision is a claim file, one per group and step, created with the same
-exclusive create the lock uses:
+A decision is a claim file (`odyn/claims.py`), one per group and step,
+created with the same exclusive create the lock uses:
 
 ```
 .odyn/cluster/<project>/claims/g42-approve.json
@@ -342,7 +342,7 @@ sequenceDiagram
     T->>S: claims, oldest first
     T->>S: check it in the database, record the call as alice
     T->>S: start what follows (a whole correction after a pick)
-    T->>S: claim to done/ (or failed/ with the reason)
+    T->>S: claim to done/ (or kept, with the reason)
     T->>S: rebuild qc.json
 ```
 
@@ -351,11 +351,18 @@ sequenceDiagram
   has to choose between two decisions.
 - **Steps** are the raw check, the pick, the approval and running again.
   The claim's time, from the server, orders different steps of one group.
-- **Undo before the tick** is deleting one's own claim.
-- **What waits for the tick:** the database record, its checks, and the
-  next steps (submitting jobs, moving files). The app checks what it can
-  from `qc.json` before writing the claim, so a claim that fails later is
-  rare. Its author sees why on the page, as with a failed draft.
+- **Deciding again before the tick** replaces one's own claim.
+- **What waits for the tick** (`cluster.apply_claims`, right after the
+  requests): the database record, its checks, and the next steps
+  (submitting jobs, moving files). The app checks what it can from
+  `qc.json` before writing the claim (a pick while a whole correction
+  still runs is refused at once), so a claim that fails later is rare. It
+  then stays in `claims/` with why, shown on the experiment row, until
+  someone decides that step again; recorded ones go to `claims/done/`,
+  one file per decision.
+- **On the page** a claim shows at once on its experiment row ("approved
+  by alice, waiting for the cluster"), read with the `claims/` listing at
+  each load.
 
 ### The QC view: `qc.json`
 
@@ -380,15 +387,14 @@ each machine mounts elsewhere.
   on this disk). The queue tab lists `submissions/` itself, so a draft
   just submitted shows at once.
 - **Built in the app** only when there is no view yet or it is of another
-  version (`QC_VERSION`), and after a QC decision made here until claims
-  are built: as slow as a load used to be.
+  version (`QC_VERSION`): as slow as a load used to be.
 - **Its age** is the cluster line at the top of the page (when the tick
   last ran).
 
-| | Before | With the view (claims planned) |
+| | Before | With the view and claims |
 |---|---|---|
-| Folder listings per load | ~285 | 1 (`submissions/`), 2 with `claims/` |
-| File reads per load | ~95 | 0 to 1, plus queued drafts and new claims |
+| Folder listings per load | ~285 | 2 (`submissions/`, `claims/`) |
+| File reads per load | ~95 | 0 to 1, plus queued drafts and claims |
 | Database reads per load | 1 to 9 lock takes | none |
 | A QC decision | a recorded call from the app | one file created |
 | Others see a decision | after their next reload | on their next load, or within ~30 s |

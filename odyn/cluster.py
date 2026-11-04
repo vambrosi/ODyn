@@ -313,6 +313,7 @@ class TickReport:
     dry_run: bool = False
     applied: list[str] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)
+    claims: list[str] = field(default_factory=list)
     submissions: list[str] = field(default_factory=list)
     tests: list[str] = field(default_factory=list)
     processed: list[str] = field(default_factory=list)
@@ -324,6 +325,7 @@ class TickReport:
         parts = [
             f"{len(self.applied)} requests applied",
             f"{len(self.rejected)} rejected",
+            f"{len(self.claims)} QC decisions recorded",
             f"{len(self.submissions)} submissions looked at",
             f"{len(self.tests)} tests submitted",
             f"{len(self.processed)} sync files processed",
@@ -380,7 +382,10 @@ def tick(
         else:
             _apply(path, main_folder, project, report)
 
-    # Imported here: the queue belongs to the app (no Qt in it)
+    if not dry_run:
+        apply_claims(main_folder, project, report)
+
+    # Imported here: it imports this module
     from .drafts.submissions import process_submissions
 
     report.submissions = process_submissions(main_folder, project, dry_run=dry_run)
@@ -429,6 +434,70 @@ def tick(
     logger.info(report.summary())
 
     return report
+
+
+def apply_claims(main_folder: Path, project: None | str, report: TickReport) -> None:
+    """
+    Record each QC decision claimed in the app (`odyn.claims`), oldest first,
+    as the person who made it, then file it in `claims/done/`. A decision
+    that no longer applies (a pick while the last whole correction still
+    runs, say) stays, with why, for its author to see.
+    """
+    from .claims import claims  # it imports this module
+
+    inbox = claims(main_folder, project)
+    stamp = datetime.now().strftime(TIME_FORMAT)
+
+    def age(path):
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    for path in sorted(inbox.items(), key=age):
+        try:
+            content = read_json(path)
+            group_id, step = int(content["group_id"]), str(content["step"])
+            user = str(content["user"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue  # being written: the next tick
+
+        if content.get("failed"):
+            continue  # until its author decides again
+
+        db = Database(main_folder, project=project, user=user)
+        group = db.groups[group_id]
+
+        try:
+            if step == "raw":
+                group.check_raw(exclude_acq_ids=content.get("excluded") or [])
+            elif step == "approve":
+                group.approve_mcor_files(exclude_acq_ids=content.get("excluded") or [])
+            elif step == "again":
+                group.run_again(runs=content["runs"])
+            elif step == "pick":
+                pick_candidate(
+                    db,
+                    group_id,
+                    content["run"],
+                    main_folder / content["folder"],
+                    content.get("set_aside") or [],
+                )
+            else:
+                raise ValueError(f"Unknown QC step {step!r}")
+
+        except Exception as error:  # refused: kept, with why, for its author
+            reason = str(error) or type(error).__name__
+            write_json(path, {**content, "failed": reason, "failed_at": stamp})
+            report.rejected.append(f"{path.name}: {reason}")
+            logger.warning(
+                f"The {step} of group {group_id} for {user} failed: {reason}"
+            )
+            continue
+
+        done = f"{path.stem}-{datetime.now():%Y%m%d-%H%M%S}"  # one per decision
+        inbox.file(path, DONE_FOLDER, {"applied_at": stamp}, name=done)
+        report.claims.append(f"{step} of group {group_id} for {user}")
 
 
 def write_qc_view(db: Database) -> None:
@@ -913,19 +982,23 @@ def pick_candidate(
     )
 
 
-def pick_repeats(db: Database, group_id: int, folder: str | Path) -> tuple[bool, bool]:
+def pick_repeats(folder: str | Path, top: str | Path) -> tuple[bool, bool]:
     """
     Whether picking the test in `folder` repeats the settings of the last
-    whole correction of `group_id` (its files kept then, not corrected
-    again), and whether that last one was rigid (or none was run).
+    whole correction, whose report is in `top` (the experiment's test folder,
+    on the share or its copy here), and whether that last one was rigid (or
+    none was run). Its files are kept then, not corrected again.
     """
-    try:
-        settings = read_json(Path(folder) / "metrics.json")
-    except (OSError, ValueError):
-        settings = {}
 
-    picked = candidate_settings(settings.get("settings") or {})
-    last = db.groups[group_id].last_whole_settings()
+    def settings(where: Path) -> dict:
+        try:
+            return read_json(Path(where) / "metrics.json").get("settings") or {}
+        except (OSError, ValueError):
+            return {}
+
+    picked = candidate_settings(settings(folder))
+    whole = settings(top)
+    last = candidate_settings(whole) if whole.get("whole") else None
 
     return last == picked, last is None or not last.get("pw_rigid")
 

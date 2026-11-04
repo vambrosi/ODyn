@@ -86,3 +86,38 @@ def test_the_page_reads_the_view_not_the_share(tmp_path, monkeypatch):
     assert experiments["bytes"].iloc[0] > 0  # sizes from the file lists
     assert [run.name for run in experiments.iloc[0]["finished"]] == ["test", "rigid"]
     assert not os.path.exists(top)
+
+
+def test_a_decision_shows_until_the_cluster_records_it():
+    import pandas as pd
+    import pytest
+
+    pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    from odyn.app.pane_qc import with_claims
+
+    experiments = pd.DataFrame(
+        {
+            "group_id": [1, 2, 3],
+            "status": ["ready to compare"] * 3,
+            "raw check": ["not yet"] * 3,
+            "excluded": [[], [], []],
+        }
+    )
+    claimed = {
+        (1, "raw"): {"user": "bob", "excluded": [4]},
+        (1, "pick"): {"user": "bob", "run": "rigid"},
+        (2, "approve"): {"user": "alice"},
+        (3, "pick"): {"user": "carol", "run": "s64", "failed": "still correcting"},
+    }
+
+    shown = with_claims(experiments, claimed)
+
+    assert shown["status"].tolist() == [
+        "rigid picked by bob, waiting for the cluster",
+        "approved by alice, waiting for the cluster",
+        "pick by carol refused: still correcting",
+    ]
+    assert (
+        shown["raw check"].tolist()[0] == "done, 1 excluded (waiting for the cluster)"
+    )
+    assert shown["excluded"].tolist()[0] == [4]

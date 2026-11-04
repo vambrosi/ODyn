@@ -10,8 +10,8 @@ files as they play (too long to hold), with the acquisition shown and the
 plots over every frame. Two steps show it, on the same page:
 
 **Raw check** shows the raw video alone. E excludes the acquisition shown;
-Finished raw check, at the foot of the bar, records the list
-(`Group.check_raw`) and goes on to the tests. The window opens on it until
+Finished raw check, at the foot of the bar, claims the list (the cluster
+records it as `Group.check_raw`) and goes on to the tests. The window opens on it until
 the raw check is done.
 
 **Final check** shows raw | corrected, once the picked correction is saved

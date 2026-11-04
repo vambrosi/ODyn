@@ -891,6 +891,7 @@ def test_the_window_knows_if_a_pick_repeats_the_last_whole_run(tmp_path):
     from odyn.cluster import pick_repeats
 
     db, group_id = a_loop(tmp_path)
+    top = db.groups[group_id].mcor_test_folder()  # the last whole report
     folders = {}
 
     for run, settings in (("rigid", RIGID), ("s128", PIECEWISE)):
@@ -901,16 +902,16 @@ def test_the_window_knows_if_a_pick_repeats_the_last_whole_run(tmp_path):
         )
 
     # Nothing whole yet: a pick corrects (said as over the rigid run)
-    assert pick_repeats(db, group_id, folders["rigid"]) == (False, True)
+    assert pick_repeats(folders["rigid"], top) == (False, True)
 
     # The rigid full run: picking rigid again goes on to the final check
     a_whole_report(db, group_id, **RIGID)
-    assert pick_repeats(db, group_id, folders["rigid"]) == (True, True)
-    assert pick_repeats(db, group_id, folders["s128"]) == (False, True)
+    assert pick_repeats(folders["rigid"], top) == (True, True)
+    assert pick_repeats(folders["s128"], top) == (False, True)
 
     # After a piecewise one: rigid overwrites its files
     a_whole_report(db, group_id, **PIECEWISE)
-    assert pick_repeats(db, group_id, folders["rigid"]) == (False, False)
+    assert pick_repeats(folders["rigid"], top) == (False, False)
 
 
 def test_the_tick_corrects_with_the_test_picked_once(tmp_path, slurm, monkeypatch):

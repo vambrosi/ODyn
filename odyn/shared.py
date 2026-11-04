@@ -155,15 +155,20 @@ class Inbox:
         return write_json(self.folder / f"{name}.json", content, **dump)
 
     def file(
-        self, path: Path, folder: str, extra: None | dict[str, Any] = None
+        self,
+        path: Path,
+        folder: str,
+        extra: None | dict[str, Any] = None,
+        name: None | str = None,
     ) -> Path:
         """
         Move the message at `path` and its sidecars into `folder`, with
-        `extra` added to the message when it reads. Returns its new path.
+        `extra` added to the message when it reads, as `<name>.json` when
+        given (for messages whose names come back). Returns its new path.
         """
         target = path.parent / folder
         target.mkdir(exist_ok=True)
-        moved = target / path.name
+        moved = target / (path.name if name is None else f"{name}.json")
 
         try:
             if extra is None:
@@ -176,11 +181,12 @@ class Inbox:
             replace(path, moved)
 
         stem = path.name[: -len(".json")]
+        new_stem = moved.name[: -len(".json")]
 
         for suffix in self.sidecars:
             sidecar = path.parent / f"{stem}{suffix}"
 
             if sidecar.exists():
-                replace(sidecar, target / sidecar.name)
+                replace(sidecar, target / f"{new_stem}{suffix}")
 
         return moved

@@ -44,8 +44,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QElapsedTimer, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 
-from ..cluster import pick_candidate, pick_repeats, send_request
+from ..claims import STEPS, ClaimTaken, claim, pending_claims
+from ..cluster import ENDED, pick_repeats, send_request
 from ..groups import FULL_FOLDER
+from ..utils import get_user
 from ..qc import (
     COLUMNS,
     EXPERIMENT_FOLDERS,
@@ -86,6 +88,7 @@ EXPERIMENT_HIDDEN = [
     "finished",
     "excluded",
     "stopped",
+    "correcting",
     "user",
 ]
 
@@ -238,6 +241,10 @@ def my_experiments(
                 "stopped": [
                     (str(run["job"]), str(run["run"])) for _, run in stopped.iterrows()
                 ],
+                # A whole correction not over: picking again waits for it
+                "correcting": bool(
+                    (runs["whole"].astype(bool) & ~runs["state"].isin(ENDED)).any()
+                ),
             }
         )
 
@@ -407,12 +414,14 @@ def qc_view(
     user: None | str,
     everyone: bool = False,
     base: None | Path = None,
+    claimed: None | dict[tuple[int, str], dict] = None,
 ):
     """
     One user's rows of the QC view `summary` (`odyn.qc.qc_summary`), or every
     user's: the display name, the recordings (indexed by `(kind, id)`), the
     missing annotations, the experiments (`my_experiments`, their downloads
-    checked against the file lists in the view and the copies in `base`),
+    checked against the file lists in the view and the copies in `base`,
+    with the decisions `claimed` and not recorded yet, see `with_claims`),
     and the cluster line. Reads only this computer's disk.
     """
     main = Path(main_folder)
@@ -460,8 +469,57 @@ def qc_view(
         listing,
     )
     name = summary["users"].get(user) or user
+    experiments = with_claims(experiments, claimed or {})
 
     return name, mine, missing, experiments, cluster_line(summary)
+
+
+# What a row says of a decision the cluster has not recorded yet, the
+# strongest first (an approval says more than the pick before it)
+CLAIMED = {
+    "approve": "approved by {user}, waiting for the cluster",
+    "pick": "{run} picked by {user}, waiting for the cluster",
+    "again": "run again by {user}, waiting for the cluster",
+}
+WAITING_NOTE = " (waiting for the cluster)"
+
+
+def with_claims(
+    experiments: pd.DataFrame, claimed: dict[tuple[int, str], dict]
+) -> pd.DataFrame:
+    """
+    `experiments` with the decisions `claimed` (`odyn.claims.pending_claims`)
+    in their status and raw check: decided, waiting for the cluster, or
+    refused by it (and why).
+    """
+    status, raw_check = list(experiments["status"]), list(experiments["raw check"])
+    excluded = list(experiments["excluded"])
+
+    for index, group_id in enumerate(experiments["group_id"]):
+        mine = {
+            step: found for (group, step), found in claimed.items() if group == group_id
+        }
+        refused = [(step, found) for step, found in mine.items() if found.get("failed")]
+
+        if refused:
+            step, found = refused[-1]
+            status[index] = (
+                f"{STEPS[step]} by {found['user']} refused: {found['failed']}"
+            )
+            continue
+
+        if "raw" in mine:
+            excluded[index] = list(mine["raw"].get("excluded") or [])
+            raw_check[index] = _raw_check_line(excluded[index]) + WAITING_NOTE
+
+        for step, text in CLAIMED.items():
+            if step in mine:
+                status[index] = text.format(**mine[step])
+                break
+
+    return experiments.assign(
+        status=status, **{"raw check": raw_check}, excluded=excluded
+    )
 
 
 class _Job(QThread):
@@ -510,7 +568,6 @@ class QcPane(QWidget):
         self.loading = 0  # the latest reload: an older one's rows are dropped
         self.summary: None | dict = None  # the QC view (`odyn.qc`) last read
         self.stamp: None | float = None  # its file time, then
-        self.rebuild = False  # build it here at the next reload (see `reload`)
         self.jobs: set[_Job] = set()  # reading it, off the database thread
 
         layout = QVBoxLayout(self)
@@ -685,7 +742,6 @@ class QcPane(QWidget):
         everyone = self.everyone.isChecked()
         main, project = self.main_folder, self.context.worker.project
         stamp, summary = self.stamp, self.summary
-        rebuild, self.rebuild = self.rebuild, False
 
         def load():
             try:
@@ -695,11 +751,12 @@ class QcPane(QWidget):
 
             read = read_qc_summary(main, project) if changed else summary
             queue = my_queue(main, project, user, everyone)
+            claimed = pending_claims(main, project)
 
             if read is None:  # no view yet, or of another version
                 return None, queue, None
 
-            return read, queue, qc_view(read, main, user, everyone, base)
+            return read, queue, qc_view(read, main, user, everyone, base, claimed)
 
         def loaded(result):
             if loading != self.loading:  # a later reload is on its way
@@ -707,7 +764,7 @@ class QcPane(QWidget):
 
             read, queue, view = result
 
-            if read is None or rebuild:
+            if read is None:
                 self._build_here(queue, user, everyone, base)
                 return
 
@@ -722,8 +779,8 @@ class QcPane(QWidget):
     def _build_here(self, queue, user, everyone, base) -> None:
         """
         Build the view on this computer, for want of one from the cluster (none
-        yet, or of another version), or after a change made here: slow over a
-        network, as it lists every test folder.
+        yet, or of another version): slow over a network, as it lists every
+        test folder.
         """
         loading = self.loading
         main = self.main_folder
@@ -731,7 +788,9 @@ class QcPane(QWidget):
 
         def build(db):
             summary = qc_summary(db)
-            return summary, qc_view(summary, main, user, everyone, base)
+            claimed = pending_claims(main, db.project)
+
+            return summary, qc_view(summary, main, user, everyone, base, claimed)
 
         def built(result):
             if loading != self.loading:
@@ -994,9 +1053,10 @@ class QcPane(QWidget):
 
     def _approve(self, key: str, excluded: list[int]) -> None:
         """
-        Once confirmed, approve the motion corrected files of the experiment
-        with tests in `key`, leaving out `excluded` (`approve_mcor_files`),
-        then delete its local copy: its checking is done.
+        Once confirmed, claim the approval of the motion corrected files of
+        the experiment with tests in `key`, leaving out `excluded` (the
+        cluster records it as `approve_mcor_files`), then delete its local
+        copy: its checking is done.
         """
         window = self.windows.get(key)
         rows = self.experiments[self.experiments["folder"] == key]
@@ -1022,12 +1082,9 @@ class QcPane(QWidget):
         ):
             return
 
-        group_id, folders = int(row["group_id"]), list(row["folders"])
+        folders = list(row["folders"])
 
-        def approve(db):
-            db.groups[group_id].approve_mcor_files(exclude_acq_ids=excluded)
-
-        def approved(_):
+        def approved():
             window.close()  # its videos are about to go
             freed = sum(
                 cache.delete(self.main_folder, folder, self.context.cache_base)
@@ -1039,13 +1096,12 @@ class QcPane(QWidget):
             )
             self.context.cache_changed.emit()
 
-        self.rebuild = True  # the view here shows it at once
-        self.context.run(approve, approved, "approve", writes=True)
+        self._claim(row, "approve", approved, window, excluded=list(excluded))
 
     def _run_again(self) -> None:
         """
-        Once confirmed, ask the cluster to run the selected experiment's
-        stopped jobs again (`Group.run_again`).
+        Once confirmed, claim running the selected experiment's stopped jobs
+        again (the cluster records it as `Group.run_again`).
         """
         picked = self._picked()
 
@@ -1063,24 +1119,18 @@ class QcPane(QWidget):
         ):
             return
 
-        group_id = int(row["group_id"])
-        jobs = [job for job, _ in stopped]
-
-        def ask(db):
-            return db.groups[group_id].run_again(runs=jobs)
-
-        def asked(_):
+        def asked():
             self.context.status.emit(
                 f"{label}: {listed} will run again at the cluster's next run"
             )
 
-        self.rebuild = True  # the view here shows it at once
-        self.context.run(ask, asked, "run again", writes=True)
+        self._claim(row, "again", asked, runs=[job for job, _ in stopped])
 
     def _check_raw(self, key: str, excluded: list[int]) -> None:
         """
-        Once confirmed, record the raw check of the experiment with tests in
-        `key`, leaving out the acquisitions `excluded` (`Group.check_raw`).
+        Once confirmed, claim the raw check of the experiment with tests in
+        `key`, leaving out the acquisitions `excluded` (the cluster records it
+        as `Group.check_raw`).
         """
         window = self.windows.get(key)
         rows = self.experiments[self.experiments["folder"] == key]
@@ -1104,26 +1154,21 @@ class QcPane(QWidget):
         ):
             return
 
-        group_id = int(row["group_id"])
-
-        def check(db):
-            return db.groups[group_id].check_raw(exclude_acq_ids=excluded)
-
-        def checked(result):
+        def checked():
             window.raw_check_done()  # on to the tests
             self.context.status.emit(
-                f"Raw check of {row['path']} recorded"
-                + (f" ({len(result)} excluded)" if result else "")
+                f"Raw check of {row['path']} done"
+                + (f" ({len(excluded)} excluded)" if excluded else "")
             )
 
-        self.rebuild = True  # the view here shows it at once
-        self.context.run(check, checked, "raw check", writes=True)
+        self._claim(row, "raw", checked, window, excluded=sorted(set(excluded)))
 
     def _pick(self, key: str, run: str, aside: list[str] = ()) -> None:
         """
-        Once confirmed, pick test `run` to correct every acquisition of the
-        experiment with tests in `key` (`cluster.pick_candidate`), with the
-        runs set `aside`, first to last.
+        Once confirmed, claim the pick of test `run` to correct every
+        acquisition of the experiment with tests in `key`, with the runs set
+        `aside`, first to last (the cluster records it with
+        `cluster.pick_candidate`).
         """
         window = self.windows.get(key)
         rows = self.experiments[self.experiments["folder"] == key]
@@ -1137,10 +1182,30 @@ class QcPane(QWidget):
         if not found:
             return
 
-        group_id, folder = int(row["group_id"]), found[0].folder
+        folder = found[0].folder
 
-        def ask(db):
-            return pick_repeats(db, group_id, folder)
+        def warn(text: str) -> None:
+            box = QMessageBox(
+                QMessageBox.Icon.Warning, "Pick candidate", text, parent=window
+            )
+            box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            box.open()
+
+        if row["correcting"]:
+            warn(
+                f"The last motion correction of every acquisition of {row['path']} "
+                "has not finished yet; pick again once it has."
+            )
+            return
+
+        main, base = self.main_folder, self.context.cache_base
+
+        def ask():
+            # The copies here when there are, else the share: two small files
+            here = [cache.local_folder(main, where, base) for where in (folder, key)]
+            there = [Path(folder), Path(key)]
+
+            return pick_repeats(*(here if here[0].is_dir() else there))
 
         def asked(result):
             repeats, rigid = result
@@ -1151,29 +1216,23 @@ class QcPane(QWidget):
                 "run files."
             )
 
-            if self.context.confirm(
+            if not self.context.confirm(
                 "Pick candidate",
                 f"Are you sure you want to pick {run}?\n\n{then}",
                 "Pick",
                 parent=window,
             ):
-                self.rebuild = True  # the view here shows it at once
-                self.context.run(pick, picked, "pick candidate", writes=True)
+                return
 
-        def pick(db):
-            try:
-                return pick_candidate(db, group_id, run, folder, list(aside))
-            except ValueError as error:  # refused: said over the window
-                return str(error)
+            def picked():
+                if repeats:  # already corrected so: on to the final check
+                    self.context.status.emit(
+                        f"The last correction of {row['path']} already used "
+                        f"{run}'s settings"
+                    )
+                    window.final_check()
+                    return
 
-        def picked(result):
-            if isinstance(result, str):
-                box = QMessageBox(
-                    QMessageBox.Icon.Warning, "Pick candidate", result, parent=window
-                )
-                box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-                box.open()
-            elif result:
                 self.context.status.emit(
                     f"{row['path']} will be corrected with {run} at the next "
                     "cluster run"
@@ -1187,14 +1246,54 @@ class QcPane(QWidget):
                 )
                 box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
                 box.open()
-            else:  # already corrected so: on to the final check
-                self.context.status.emit(
-                    f"The last correction of {row['path']} already used {run}'s "
-                    "settings"
-                )
-                window.final_check()
 
-        self.context.run(ask, asked, "pick candidate")
+            self._claim(
+                row,
+                "pick",
+                picked,
+                window,
+                run=run,
+                folder=Path(folder).relative_to(main).as_posix(),
+                set_aside=list(aside),
+            )
+
+        self._background(ask, asked)
+
+    def _claim(self, row, step: str, done, window=None, **details) -> None:
+        """
+        Claim `step` of the experiment in `row` (`odyn.claims`) for the user,
+        with `details` for the cluster to record it, then `done()`. Someone
+        else claiming it first is said over `window`.
+        """
+        main, project = self.main_folder, self.context.worker.project
+        user = self.context.user or get_user()
+        group_id = int(row["group_id"])
+
+        def make():
+            try:
+                claim(main, project, group_id, step, user, **details)
+            except ClaimTaken as taken:
+                return str(taken)
+
+            return None
+
+        def made(taken):
+            if taken is not None:
+                box = QMessageBox(
+                    QMessageBox.Icon.Warning,
+                    STEPS[step].capitalize(),
+                    f"The {STEPS[step]} of {row['path']}: {taken}, and the "
+                    "cluster has not recorded it yet.",
+                    parent=window or self,
+                )
+                box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+                box.open()
+                return
+
+            done()
+            self.reload()
+
+        self._background(make, made)
 
     def _picked(self) -> list[tuple[str, pd.Series]]:
         """The selected experiments, as `(what to call it, row)`, in view order."""
