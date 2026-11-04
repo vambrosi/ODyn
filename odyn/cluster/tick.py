@@ -381,6 +381,57 @@ def _write_heartbeat(folder: Path, report: TickReport) -> None:
         log.write(report.summary() + "\n")
 
 
+def record_crash(
+    main_folder: str | Path, project: None | str, error: BaseException
+) -> None:
+    """
+    Note that a tick failed with `error`: a `crash` entry in the heartbeat,
+    which keeps what the last good tick wrote (the next one drops it), a line
+    in `tick.log`, and the heartbeat in the QC view, so `status` and the QC
+    page say so. Never raises: the tick's own error is the one to see.
+    """
+    from ..locking import file_lock
+    from ..qc import qc_path  # it imports this module
+
+    try:
+        folder = cluster_folder(main_folder, project)
+        text = f"{type(error).__name__}: {error}".strip().splitlines()[0]
+        crash = {
+            "at": datetime.now().strftime(TIME_FORMAT),
+            "error": text[:300],
+            "host": socket.gethostname(),
+            "job_id": os.environ.get("SLURM_JOB_ID"),
+        }
+        beat = {**(heartbeat(main_folder, project) or {}), "crash": crash}
+        write_json(folder / HEARTBEAT_FILE, beat)
+
+        with open(folder / LOG_FILE, "a") as log:
+            log.write(f"{crash['at']}  CRASHED: {crash['error']}\n")
+
+        # Only the heartbeat changes: no database needed, which may be what
+        # failed
+        path = qc_path(main_folder, project)
+
+        with file_lock(path):
+            if path.is_file():
+                write_json(path, {**read_json(path), "heartbeat": beat})
+
+    except Exception as failure:
+        logger.warning(
+            f"Could not record the crash: {type(failure).__name__}: {failure}"
+        )
+
+
+def crashed(beat: None | dict) -> None | dict:
+    """The heartbeat's `crash`, if no tick finished after it."""
+    crash = (beat or {}).get("crash")
+
+    if crash and crash["at"] >= beat.get("started_at", ""):
+        return crash
+
+    return None
+
+
 def heartbeat(main_folder: str | Path, project: None | str = None) -> None | dict:
     """What the last tick wrote, or `None` if no tick has run."""
     path = cluster_folder(main_folder, project) / HEARTBEAT_FILE
@@ -543,26 +594,42 @@ def stop_chain(main_folder: str | Path, project: None | str = None) -> None:
     logger.info("Stopped the chain (a tick already running finishes first).")
 
 
-def status(main_folder: str | Path, project: None | str = None) -> str:
+def status(
+    main_folder: str | Path, project: None | str = None, *, color: bool = False
+) -> str:
     """
     The chain's state, as text: last tick, requests, submitted drafts, tests,
-    `STOP` and the queue.
+    `STOP` and the queue. With `color`, what needs a look is in red: a tick
+    that crashed or is late (no tick for twice the interval), its errors,
+    failed submissions, and an empty queue while the chain is not stopped.
     """
+    red = _red if color else lambda text: text
     folder = cluster_folder(main_folder, project)
     beat = heartbeat(main_folder, project)
+    crash = crashed(beat)
     lines = []
 
-    if beat is None:
-        lines.append("Last tick:  never")
+    if beat is None or "started_at" not in beat:
+        lines.append(red("Last tick:  never") if crash else "Last tick:  never")
     else:
-        lines.append(
-            f"Last tick:  {beat['started_at']} on {beat['host']} as {beat['user']}"
+        started = datetime.strptime(beat["started_at"], TIME_FORMAT)
+        minutes = (datetime.now() - started).total_seconds() / 60
+        late = minutes > 2 * ClusterConfig.read(main_folder).every_minutes
+        ago = f"{minutes:.0f} min" if minutes < 90 else f"{minutes / 60:.0f} h"
+        line = (
+            f"Last tick:  {beat['started_at']} ({ago} ago) on {beat['host']} as "
+            f"{beat['user']}"
             + (f" (job {beat['job_id']})" if beat.get("job_id") else "")
         )
+        lines.append(red(line) if crash or late else line)
         lines.append(f"            {TickReport(**_report_fields(beat)).summary()}")
 
         for error in beat.get("errors", []):
-            lines.append(f"  error     {error}")
+            lines.append(red(f"  error     {error}"))
+
+    if crash:
+        job = f" (job {crash['job_id']})" if crash.get("job_id") else ""
+        lines.append(red(f"  crashed   {crash['at']}{job}: {crash['error']}"))
 
     from ..drafts.submissions import queued
 
@@ -575,7 +642,7 @@ def status(main_folder: str | Path, project: None | str = None) -> str:
 
     for path, state in queued(main_folder, project):
         if state.state == "failed":
-            lines.append(f"  failed    {path.name}: {state.message}")
+            lines.append(red(f"  failed    {path.name}: {state.message}"))
 
     tests = mcor_tests(main_folder, project)
     lines += _job_lines("Tests:", tests, lambda test: test_name(test))
@@ -584,15 +651,22 @@ def status(main_folder: str | Path, project: None | str = None) -> str:
 
     failed = requests(main_folder, project).items(FAILED_FOLDER)
     lines.append(f"Failed:     {len(failed)} requests in total")
-    lines.append(f"Stopped:    {'yes' if (folder / STOP_FILE).exists() else 'no'}")
+    stopped = (folder / STOP_FILE).exists()
+    lines.append(f"Stopped:    {'yes' if stopped else 'no'}")
 
     try:
         queued = queued_ticks(project)
-        lines.append(f"Queued:     {'; '.join(queued) or 'none'}")
+        line = f"Queued:     {'; '.join(queued) or 'none'}"
+        lines.append(line if queued or stopped else red(line))
     except FileNotFoundError:  # not on the cluster
         lines.append("Queued:     unknown (no squeue here)")
 
     return "\n".join(lines)
+
+
+def _red(text: str) -> str:
+    """`text` in bold red, for a terminal."""
+    return f"\033[1;31m{text}\033[0m"
 
 
 def _report_fields(beat: dict) -> dict:

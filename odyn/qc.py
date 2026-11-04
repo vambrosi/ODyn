@@ -30,6 +30,7 @@ from .cluster import (
     CORRECTION_RUN,
     ClusterConfig,
     cluster_folder,
+    crashed,
     heartbeat,
     latest_approvals,
     latest_picks,
@@ -530,13 +531,21 @@ def read_qc_summary(main_folder: str | Path, project: None | str = None) -> None
 def cluster_line(summary: dict, now: None | datetime = None) -> tuple[str, str]:
     """
     When the cluster last ran its tick, as `(text, kind)` for the QC page. The
-    kind is `warning` when the cluster looks stopped (no tick for twice its
-    interval), else `computed`.
+    kind is `warning` when the last tick crashed (`record_crash`) or the
+    cluster looks stopped (no tick for twice its interval), else `computed`.
     """
     beat = summary.get("heartbeat")
     waiting = int(summary.get("requests_waiting") or 0)
     plural = "" if waiting == 1 else "s"
     tail = "" if not waiting else f", {waiting} request{plural} waiting"
+
+    crash = crashed(beat)
+
+    if crash:
+        error = crash["error"]
+        error = error if len(error) <= 100 else error[:99] + "…"
+
+        return f"The last tick failed at {crash['at'][:16]}: {error}{tail}", "warning"
 
     if beat is None:
         return f"The cluster has not run yet{tail}", "computed"

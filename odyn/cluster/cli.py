@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,14 @@ from .mcor import (
 )
 from .messages import REQUESTABLE, send_request
 from .records import experiment_owner, groups_without_full_report
-from .tick import start_chain, status, stop_chain, tick, write_qc_view
+from .tick import (
+    record_crash,
+    start_chain,
+    status,
+    stop_chain,
+    tick,
+    write_qc_view,
+)
 
 
 def _value(text: str) -> Any:
@@ -120,9 +128,14 @@ def main(argv: None | list[str] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "tick":
-        report = tick(
-            args.main_folder, args.project, dry_run=args.dry_run, chain=args.chain
-        )
+        try:
+            report = tick(
+                args.main_folder, args.project, dry_run=args.dry_run, chain=args.chain
+            )
+        except Exception as error:
+            if not args.dry_run:  # for `status` and the QC page
+                record_crash(args.main_folder, args.project, error)
+            raise
 
         for line in [
             *report.applied,
@@ -144,7 +157,8 @@ def main(argv: None | list[str] = None) -> int:
         stop_chain(args.main_folder, args.project)
 
     elif args.command == "status":
-        print(status(args.main_folder, args.project))
+        color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+        print(status(args.main_folder, args.project, color=color))
 
     elif args.command == "qc-view":
         write_qc_view(Database(args.main_folder, project=args.project))

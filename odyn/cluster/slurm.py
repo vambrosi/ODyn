@@ -17,8 +17,17 @@ from .config import ClusterConfig, ENDED, JOBS_FOLDER, SHARE_UMASK, cluster_fold
 
 
 def _sbatch(arguments: list[str], dry_run: bool) -> None | str:
-    """Run `sbatch` with `arguments`; the job id (`None` in a dry run)."""
-    command = ["sbatch", "--parsable", *arguments]
+    """
+    Run `sbatch` with `arguments`; the job id (`None` in a dry run).
+
+    Jobs start from a clean environment (`--export=NONE`), as each script
+    sets up its own. Inherited, it grows with every tick of the chain:
+    importing `cv2` and activating conda add entries to `LD_LIBRARY_PATH`
+    and `XML_CATALOG_FILES` without checking for them, and after a few
+    weeks a variable passes the 128 KB a program accepts (`Argument list too
+    long`).
+    """
+    command = ["sbatch", "--parsable", "--export=NONE", *arguments]
 
     if dry_run:
         logger.info(f"Would run: {shlex.join(command)}")

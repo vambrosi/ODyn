@@ -18,8 +18,8 @@ Files, per database (`main` or the project's name), in
 and `requests/failed/` the refused ones, each with the reason;
 - `submissions/` holds the submitted drafts not added yet, each with its
 state, and `submissions/done/` the ones added;
-- `heartbeat.json` says when the last tick ran and what it did, and
-`tick.log` keeps a line per tick;
+- `heartbeat.json` says when the last tick ran and what it did (and, after
+a crash, the error: `record_crash`), and `tick.log` keeps a line per tick;
 - `claims/` holds the QC decisions made in the app, waiting for the tick to
 record them (`odyn.claims`), and `claims/done/` the recorded ones;
 - `qc.json` is what the QC page shows (`odyn.qc`), rebuilt by each tick and
@@ -106,7 +106,16 @@ from .mcor import (
     sweep_grid_for,
     sweep_runs,
 )
-from .tick import heartbeat, start_chain, status, stop_chain, tick, tick_script
+from .tick import (
+    crashed,
+    heartbeat,
+    record_crash,
+    start_chain,
+    status,
+    stop_chain,
+    tick,
+    tick_script,
+)
 from .cli import main
 
 __all__ = [
@@ -120,6 +129,7 @@ __all__ = [
     "apply_claims",
     "archive_approved",
     "cluster_folder",
+    "crashed",
     "experiment_owner",
     "groups_without_full_report",
     "heartbeat",
@@ -132,6 +142,7 @@ __all__ = [
     "pending_requests",
     "pick_candidate",
     "pick_repeats",
+    "record_crash",
     "record_job_states",
     "run_mcor_sweep",
     "run_mcor_test",

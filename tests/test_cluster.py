@@ -7,6 +7,7 @@ for `sbatch`, `squeue` and `scancel`).
 import json
 import os
 import shutil
+import sys
 import time
 
 import pytest
@@ -163,6 +164,7 @@ def test_a_chained_tick_submits_the_next_one(tmp_path, slurm):
     assert report.next_tick is not None
     sbatch = last_sbatch(slurm)
     assert "--dependency=singleton" in sbatch and "--begin=now+30minutes" in sbatch
+    assert "--export=NONE" in sbatch  # the environment would grow every tick
 
     script = (cluster_folder(tmp_path) / "jobs" / "tick.sh").read_text()
     assert "--job-name=odyn-tick-main" in script
@@ -200,6 +202,76 @@ def test_the_command_line(tmp_path, capsys):
     assert main([str(tmp_path), "tick"]) == 0
     assert "process_sync(exp_id=1)" in capsys.readouterr().out
     assert len(db.streams) == 1
+
+
+def test_a_tick_that_crashes_says_so(tmp_path, monkeypatch, slurm):
+    from odyn.qc import cluster_line, read_qc_summary
+
+    a_loop(tmp_path)
+    tick(tmp_path)
+    before = heartbeat(tmp_path)
+
+    def crash(*_):
+        raise OSError(7, "Argument list too long", "squeue")
+
+    # The module (`odyn.cluster.tick` is the function the package exports)
+    monkeypatch.setattr(sys.modules["odyn.cluster.tick"], "record_job_states", crash)
+
+    with pytest.raises(OSError):
+        main([str(tmp_path), "tick", "--chain"])
+
+    # The last good tick is kept, with the crash
+    beat = heartbeat(tmp_path)
+    assert beat["started_at"] == before["started_at"]
+    assert beat["crash"]["error"] == (
+        "OSError: [Errno 7] Argument list too long: 'squeue'"
+    )
+    log = (cluster_folder(tmp_path) / "tick.log").read_text().splitlines()
+    assert "CRASHED: OSError" in log[-1]
+    assert "sbatch" not in slurm.read_text()  # the chain stops
+
+    text = status(tmp_path)
+    assert "crashed" in text and "Argument list too long" in text
+    assert "Queued:     none" in text
+
+    # The QC page says so without a new build
+    line, kind = cluster_line(read_qc_summary(tmp_path))
+    assert line.startswith("The last tick failed at") and kind == "warning"
+
+    # A dry run records nothing
+    (cluster_folder(tmp_path) / "tick.log").write_text("")
+    monkeypatch.setattr(sys.modules["odyn.cluster.tick"], "_submit_tests", crash)
+    with pytest.raises(OSError):
+        main([str(tmp_path), "tick", "--dry-run"])
+    assert (cluster_folder(tmp_path) / "tick.log").read_text() == ""
+
+    # The next good tick clears it
+    monkeypatch.undo()
+    tick(tmp_path)
+    assert "crash" not in heartbeat(tmp_path)
+    assert "crashed" not in status(tmp_path)
+
+
+def test_status_shows_problems_in_red(tmp_path, slurm):
+    red = "\033[1;31m"
+    a_loop(tmp_path)
+    tick(tmp_path)
+
+    # Nothing queued while the chain runs
+    text = status(tmp_path, color=True)
+    assert f"{red}Queued:     none" in text
+    assert f"{red}Last tick" not in text
+    assert red not in status(tmp_path)  # not without color
+
+    # Stopped on purpose: an empty queue is expected
+    stop_chain(tmp_path)
+    assert red not in status(tmp_path, color=True)
+
+    # A late tick (no tick for twice the interval)
+    beat = heartbeat(tmp_path)
+    beat["started_at"] = "2026-01-01 00:00:00"
+    (cluster_folder(tmp_path) / "heartbeat.json").write_text(json.dumps(beat))
+    assert f"{red}Last tick:  2026-01-01 00:00:00" in status(tmp_path, color=True)
 
 
 def test_an_arrays_waiting_tasks_are_found_in_squeues_list():
