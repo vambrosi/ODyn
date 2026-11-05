@@ -306,14 +306,16 @@ def a_restarted_loop(tmp_path, **again) -> tuple[Database, int]:
     """
     A loop of 3 TIFFs and, in the same folder, numbered on, 2 more from the
     loop started again 20 min later (as on 2026-11-04, after a full disk),
-    with `again` changing the settings of the second loop.
+    with `again` changing the settings of the second loop. Its frame rate is
+    a hair off, as ScanImage measures it at each start.
     """
     first = datetime(2026, 3, 4, 9, 0, 0)
     size = dict(frames=56, height=32, width=40)
     generate(tmp_path, acquisitions=3, start=first, acqs_per_loop=6, **size)
     other = tmp_path / "again"
     later = first + timedelta(minutes=20)
-    generate(other, acquisitions=2, start=later, **(size | again))
+    rate = dict(frame_rate=14.0014)  # 0.01% off the first loop
+    generate(other, acquisitions=2, start=later, **(size | rate | again))
     raw = tmp_path / "20260304/m1/e1/raw"
 
     for n, path in enumerate(sorted((other / "20260304/m1/e1/raw").glob("*.tif"))):
@@ -335,7 +337,10 @@ def test_a_loop_started_again_in_its_folder(tmp_path, odyn_log):
     assert exp_id is not None
     call = db.latest_calls("add_experiment").iloc[0]
     assert call["call_flag"] & IngestFlag.LOOP_RESTARTED
-    assert "TIFFs 1-3 from 09:00:00; TIFFs 4-5 from 09:20:00" in odyn_log.text
+    assert (
+        "TIFFs 1-3 from 09:00:00 (14.0000 Hz); TIFFs 4-5 from 09:20:00 "
+        "(14.0014 Hz)" in odyn_log.text
+    )
 
     acquisitions = db.acquisitions.sort_values("acq_start")
     assert len(acquisitions) == 5
@@ -344,8 +349,11 @@ def test_a_loop_started_again_in_its_folder(tmp_path, odyn_log):
     assert gap > pd.Timedelta(minutes=15)
 
 
-def test_a_loop_started_again_with_other_settings_is_refused(tmp_path):
-    db, session_id = a_restarted_loop(tmp_path, height=36)
+@pytest.mark.parametrize(
+    "again", [dict(height=36), dict(frame_rate=14.14)], ids=["lines", "rate"]
+)
+def test_a_loop_started_again_with_other_settings_is_refused(tmp_path, again):
+    db, session_id = a_restarted_loop(tmp_path, **again)
 
     exp_id = db.add_experiment(
         session_id=session_id, exp_path="20260304/m1/e1", objective=20

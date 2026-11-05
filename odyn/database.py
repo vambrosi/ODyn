@@ -85,6 +85,10 @@ DT_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 # Tolerance for ScanImage settings silent rounding
 WHOLE_TOLERANCE = 0.01
 
+# How far apart, in relative terms, the frame rates of restarted loops in the
+# same folder may be (0.007% measured)
+FRAME_RATE_TOLERANCE = 1e-3
+
 # How close, as a fraction of the usual spacing (30 s between trials), an
 # acquisition and a burst (or a trial and an odor burst) must be once the
 # clock offset is out to be paired: far from the next one, and clear of
@@ -1846,6 +1850,7 @@ class Database(CallRecorder):
         # in the same folder (a loop stopped by a full disk, say) writes TIFFs
         # with a new start and the same settings
         loops: dict[datetime, list[int]] = {}
+        rates: dict[datetime, float] = {}
 
         for path in tqdm(tiffs, desc="Loading TIFF Metadata"):
             read = self._read_kind(path, exp_type)
@@ -1854,13 +1859,12 @@ class Database(CallRecorder):
                 continue
 
             recording, acquisition = read
-            settings = {k: v for k, v in recording.items() if k != "start"}
 
             if experiment is None:
                 experiment = recording
 
             # Several grabs in one folder are refused: each has its own start
-            elif settings != {k: v for k, v in experiment.items() if k != "start"} or (
+            elif not _same_recording(recording, experiment) or (
                 exp_type != "loop" and recording["start"] != experiment["start"]
             ):
                 checks_failed += 1
@@ -1871,6 +1875,7 @@ class Database(CallRecorder):
 
             acquisitions.append(acquisition)
             loops.setdefault(recording["start"], []).append(acquisition_number(path))
+            rates[recording["start"]] = recording["frame_rate"]
 
         if checks_failed > 0:
             logger.error(
@@ -1920,7 +1925,8 @@ class Database(CallRecorder):
         if len(loops) > 1:
             self.add_flag(IngestFlag.LOOP_RESTARTED)
             starts = "; ".join(
-                f"TIFFs {number_spans(sorted(numbers))} from {start:%H:%M:%S}"
+                f"TIFFs {number_spans(sorted(numbers))} from {start:%H:%M:%S} "
+                f"({rates[start]:.4f} Hz)"
                 for start, numbers in sorted(loops.items())
             )
             logger.warning(
@@ -3230,6 +3236,20 @@ def _date_string(value: Value) -> str:
 def _parse_dt(value: str) -> datetime:
     """A recording table's time (DT_FORMAT) back as a datetime."""
     return datetime.strptime(value, DT_FORMAT)
+
+
+def _same_recording(one: Object, other: Object) -> bool:
+    """
+    Whether two TIFFs come from the same recording settings, whatever their
+    start. The frame rate may differ by `FRAME_RATE_TOLERANCE`: ScanImage
+    measures it from the resonant scanner at each start, so a loop started
+    again has a rate a little off (22.6388 and 22.6404 Hz on 2026-11-04).
+    """
+    keys = (set(one) | set(other)) - {"start", "frame_rate"}
+
+    return all(one.get(k) == other.get(k) for k in keys) and math.isclose(
+        one["frame_rate"], other["frame_rate"], rel_tol=FRAME_RATE_TOLERANCE
+    )
 
 
 def _pair_by_time(

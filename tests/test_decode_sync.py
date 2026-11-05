@@ -295,7 +295,9 @@ def test_what_cannot_be_paired_is_refused_before_writing(tmp_path):
 
     # A TIFF with no burst at its time
     db = build(tmp_path, truth, late_acquisitions=1)
-    with pytest.raises(RuntimeError, match="Acquisitions 5 of 5 have no frame"):
+    with pytest.raises(
+        RuntimeError, match="Acquisitions 5 of 5 have no corresponding"
+    ):
         db.process_sync(exp_id=1)
     assert len(db.streams) == 0
     assert (

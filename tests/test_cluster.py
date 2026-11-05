@@ -111,7 +111,7 @@ def test_a_file_that_does_not_match_is_tried_once(tmp_path):
 
     report = tick(tmp_path)
     assert report.processed == [SYNC]
-    assert "no frame burst at their time" in report.errors[0]
+    assert "no corresponding frame bursts" in report.errors[0]
 
     assert tick(tmp_path).processed == []
     assert len(db.latest_calls("process_sync")) == 1
