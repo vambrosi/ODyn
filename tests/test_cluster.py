@@ -107,11 +107,11 @@ def test_a_sync_file_still_arriving_waits(tmp_path):
 
 
 def test_a_file_that_does_not_match_is_tried_once(tmp_path):
-    db = a_loop(tmp_path, acquisitions=2)  # the file has 4 bursts
+    db = a_loop(tmp_path, late_acquisitions=1)  # a TIFF with no burst
 
     report = tick(tmp_path)
     assert report.processed == [SYNC]
-    assert "cannot be matched" in report.errors[0]
+    assert "no frame burst at their time" in report.errors[0]
 
     assert tick(tmp_path).processed == []
     assert len(db.latest_calls("process_sync")) == 1

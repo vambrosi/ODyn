@@ -30,8 +30,12 @@ LOW_V = 0.0
 
 BASELINE_S = 1.5  # burst start to valve open
 ODOR_S = 1.0
-INTERVAL_S = 3.0  # burst end to the next burst start
+INTERVAL_S = 3.0  # burst end to the next burst start (fragments, z-stacks)
 LEAD_S = 2.0  # recording start to the first burst
+# Acquisition starts apart, as the ScanImage loop interval: the same as
+# `generate_data.LOOP_INTERVAL_S`, so a sync file and TIFFs made with the
+# defaults agree in time, as on the rig
+EVERY_S = 10.0
 CAMERA_HZ = 20.0
 
 
@@ -49,6 +53,7 @@ def generate_sync(
     interrupted: bool = False,
     camera_until: None | float = None,
     missing_pulse_in: tuple[int, ...] = (),
+    every_s: float = EVERY_S,
 ) -> dict:
     """Write the file and return where each burst and pulse landed, in samples."""
     path = Path(path)
@@ -78,6 +83,9 @@ def generate_sync(
         return record
 
     for index in range(acquisitions):
+        # Each acquisition starts on the loop schedule (or after the
+        # fragments before it, when they leave no room)
+        cursor = max(cursor, int((LEAD_S + index * every_s) * RATE_HZ))
         burst(frames, with_pulse=index not in missing_pulse_in)
 
         # A fragment right after an acquisition: a stray trigger

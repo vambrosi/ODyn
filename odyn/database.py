@@ -14,6 +14,7 @@ from sqlite3 import Cursor
 from tifffile import TiffFile, TiffPage
 from typing import Final
 
+import numpy as np
 import pandas as pd
 
 from tqdm.auto import tqdm
@@ -65,10 +66,12 @@ from .utils import (
     Object,
     TableSpec,
     Value,
+    acquisition_number,
     call_log_path,
     database_path,
     get_user,
     logger,
+    number_spans,
     record_call,
 )
 from .utils import _method_calls_dataframe, _read_table, _shows_color, colored, plain
@@ -81,6 +84,12 @@ DT_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 
 # Tolerance for ScanImage settings silent rounding
 WHOLE_TOLERANCE = 0.01
+
+# How close, as a fraction of the usual spacing (30 s between trials), an
+# acquisition and a burst (or a trial and an odor burst) must be once the
+# clock offset is out to be paired: far from the next one, and clear of
+# clock drift and steps during a session
+PAIR_FRACTION = 0.25
 
 # TIFF metadata that is tier 3 in `create.sql`: recorded, but read by nothing in
 # odyn, so it is stored as annotations instead of columns. Read out of the same
@@ -142,6 +151,7 @@ class IngestFlag(IntFlag):
     NO_PROGRAM_CONFIG = 1 << 8  # a program has no olfactometer definition
     STACK_LOOP = 1 << 9  # a loop of z-stacks, which cannot be processed yet
     SPLIT_GRAB = 1 << 10  # a grab saved in several files, which cannot be added yet
+    LOOP_RESTARTED = 1 << 11  # the loop was started again in the same folder
 
 
 class SyncFlag(IntFlag):
@@ -162,6 +172,8 @@ class SyncFlag(IntFlag):
     NO_CAMERA = 1 << 9  # an acquisition without camera strobes (no pupil)
     FRAME_COUNT = 1 << 10  # frames in a burst differ from its TIFF's
     NO_TRIALS = 1 << 11  # the experiment has no trials to match the odor bursts to
+    UNMATCHED_BURSTS = 1 << 12  # frame bursts with no TIFF at their time
+    NO_ACQ_TRIALS = 1 << 13  # trials with no acquisition (no TIFF, no burst)
 
 
 class TrialPhase(IntEnum):
@@ -1830,6 +1842,10 @@ class Database(CallRecorder):
         experiment: None | Object = None
         acquisitions: list[Object] = []
         checks_failed = 0
+        # The TIFF numbers of each start of the loop: ScanImage started again
+        # in the same folder (a loop stopped by a full disk, say) writes TIFFs
+        # with a new start and the same settings
+        loops: dict[datetime, list[int]] = {}
 
         for path in tqdm(tiffs, desc="Loading TIFF Metadata"):
             read = self._read_kind(path, exp_type)
@@ -1838,11 +1854,15 @@ class Database(CallRecorder):
                 continue
 
             recording, acquisition = read
+            settings = {k: v for k, v in recording.items() if k != "start"}
 
             if experiment is None:
                 experiment = recording
 
-            elif recording != experiment:
+            # Several grabs in one folder are refused: each has its own start
+            elif settings != {k: v for k, v in experiment.items() if k != "start"} or (
+                exp_type != "loop" and recording["start"] != experiment["start"]
+            ):
                 checks_failed += 1
                 logger.warning(
                     f"'{path.relative_to(self.main_folder)}' metadata"
@@ -1850,6 +1870,7 @@ class Database(CallRecorder):
                 )
 
             acquisitions.append(acquisition)
+            loops.setdefault(recording["start"], []).append(acquisition_number(path))
 
         if checks_failed > 0:
             logger.error(
@@ -1895,6 +1916,17 @@ class Database(CallRecorder):
         # which mouse and day ScanImage was told, and a disagreement means the
         # folder is not what the caller thinks it is.
         _check_session(experiment, session, self)
+
+        if len(loops) > 1:
+            self.add_flag(IngestFlag.LOOP_RESTARTED)
+            starts = "; ".join(
+                f"TIFFs {number_spans(sorted(numbers))} from {start:%H:%M:%S}"
+                for start, numbers in sorted(loops.items())
+            )
+            logger.warning(
+                f"The loop was started {len(loops)} times in this folder, with "
+                f"the same settings: {starts}."
+            )
 
         logger.info(f"Passed all TIFF metadata checks! {CHECK}")
 
@@ -2222,19 +2254,25 @@ class Database(CallRecorder):
         - `sync_path` is the H5 file, relative to the `main_folder`. Left out,
         it is the one file in `<experiment>/sync/`
         - `max_skew_s` is how far the ScanImage and olfactometer clocks may
-        disagree before the call is flagged (the match itself is by order, so
-        this is a sanity check, not a tolerance)
+        disagree before the call is flagged (the clock offset is measured and
+        taken out before pairing, so this is a sanity check, not a tolerance)
 
         **EXAMPLE**
         ```python
         db.process_sync(exp_id=12)
         ```
 
-        Frame-clock bursts are matched to the experiment's acquisitions in
-        order and, for a loop, the bursts with an odor pulse to its trials in
-        order, which fills `trials.acq_id` (a grab has one acquisition, so one
-        burst, and no odor). Running it again replaces what the earlier run
-        wrote, so a sync file copied late or a corrected one is not a problem.
+        Frame-clock bursts are paired with the experiment acquisitions by
+        time and, for a loop, the bursts with an odor pulse with its trials by
+        time, which fills `trials.acq_id` (a grab has one acquisition, so one
+        burst, and no odor). By time rather than by order, so a burst without
+        a TIFF (a partial acquisition deleted, a full disk) or a trial without
+        imaging (the olfactometer went on after ScanImage stopped) is left
+        unpaired and flagged instead of shifting every pair after it. An
+        acquisition or an odor burst with nothing at its time is refused. A file
+        without a start time is paired by order, when the counts agree.
+        Running it again replaces what the earlier run wrote, so a sync file
+        copied late or a corrected one is not a problem.
         """
         with self._locked() as con:
             experiment = con.execute(
@@ -2264,53 +2302,53 @@ class Database(CallRecorder):
 
         # Read without the lock: a file is hundreds of megabytes
         decoded = decode(path)
+        loop = experiment["exp_type"] == "loop"
 
-        self._check_sync(decoded, acquisitions, trials, experiment["exp_type"])
+        self._check_sync(decoded, loop)
 
         blocks = decoded.blocks
-        acq_ids = [row["acq_id"] for row in acquisitions]
-        odor_blocks = [(i, b) for i, b in enumerate(blocks) if b.odor_pulses]
+        acquired = self._pair_acquisitions(decoded, acquisitions, max_skew_s)
+        presented = self._pair_trials(decoded, trials, loop, max_skew_s)
 
-        # Clock skew between the two computers, one number per acquisition.
-        # Wall clock on the olfactometer side needs the file's start time.
-        skews: list[None | float] = []
+        # Clock skew between the two computers, one number per pair
+        skews: dict[int, None | float] = {}
 
-        for block, row in zip(blocks, acquisitions):
-            started = decoded.time_at(block.start_sample)
-            acq_start = datetime.strptime(row["acq_start"], DT_FORMAT)
-
-            skews.append(
+        for index, row_index in acquired.items():
+            started = decoded.time_at(blocks[index].start_sample)
+            acq_start = _parse_dt(acquisitions[row_index]["acq_start"])
+            skews[index] = (
                 None
                 if started is None
                 else (acq_start - started).total_seconds() * 1000
             )
 
-        finite = [abs(s) for s in skews if s is not None]
+        finite = [abs(s) for s in skews.values() if s is not None]
+        self._check_frame_counts(blocks, acquisitions, acquired)
 
-        if finite and max(finite) > max_skew_s * 1000:
-            self.add_flag(SyncFlag.CLOCK_SKEW)
+        # A trial whose burst has no TIFF was imaged only in part
+        acq_of_trial = {
+            trial: acquisitions[acquired[index]]["acq_id"]
+            for trial, index in presented.items()
+            if index in acquired
+        }
+        unimaged = [n + 1 for n in range(len(trials)) if n not in acq_of_trial]
+
+        if loop and trials and unimaged:
+            self.add_flag(SyncFlag.NO_ACQ_TRIALS)
+            partial = [
+                f"{n + 1} (burst {blocks[i].sync_block})"
+                for n, i in sorted(presented.items())
+                if i not in acquired
+            ]
             logger.warning(
-                f"ScanImage and olfactometer clocks differ by up to "
-                f"{max(finite) / 1000:.1f} s. {CROSS}"
-            )
-
-        # Trials share the olfactometer's clock with the sync file, so their
-        # odor onsets should agree to well under a second.
-        trial_skews = []
-
-        for (_, block), row in zip(odor_blocks, trials):
-            assert block.odor_on_sample is not None
-            valve = decoded.time_at(block.odor_on_sample)
-
-            if valve is not None:
-                logged = datetime.strptime(row["trial_odor_start"], DT_FORMAT)
-                trial_skews.append(abs((logged - valve).total_seconds()))
-
-        if trial_skews and max(trial_skews) > max_skew_s:
-            self.add_flag(SyncFlag.CLOCK_SKEW)
-            logger.warning(
-                f"Olfactometer and sync file odor onsets differ by up to "
-                f"{max(trial_skews):.1f} s. {CROSS}"
+                f"Trials {number_spans(unimaged)} of {len(trials)} have no "
+                "acquisition"
+                + (
+                    f", among them {', '.join(partial)} whose burst has no TIFF"
+                    if partial
+                    else ""
+                )
+                + "."
             )
 
         with self._writing() as cur:
@@ -2329,16 +2367,20 @@ class Database(CallRecorder):
                 stream_id,
                 decoded,
                 [
-                    (block, {"acq_id": acq_id}, skew)
-                    for block, acq_id, skew in zip(blocks, acq_ids, skews)
+                    (
+                        blocks[index],
+                        {"acq_id": acquisitions[row_index]["acq_id"]},
+                        skews[index],
+                    )
+                    for index, row_index in sorted(acquired.items())
                 ],
             )
 
             cur.executemany(
                 "UPDATE trials SET acq_id = ? WHERE trial_id = ?;",
                 [
-                    (acq_ids[index], row["trial_id"])
-                    for (index, _), row in zip(odor_blocks, trials)
+                    (acq_id, trials[trial]["trial_id"])
+                    for trial, acq_id in sorted(acq_of_trial.items())
                 ],
             )
 
@@ -2346,15 +2388,162 @@ class Database(CallRecorder):
             {
                 **summary(decoded),
                 "stream_id": stream_id,
-                "matched_trials": len(trials),
+                "matched_trials": len(acq_of_trial),
+                "unpaired_blocks": [
+                    b.sync_block for i, b in enumerate(blocks) if i not in acquired
+                ],
+                "unimaged_trials": unimaged if trials else [],
                 "clock_offset_ms": None if not finite else max(finite),
             }
         )
 
         logger.info(
-            f"Processed {len(blocks)} acquisitions and matched {len(trials)} "
-            f"trials. {CHECK}"
+            f"Processed {len(acquired)} acquisitions and matched "
+            f"{len(acq_of_trial)} trials. {CHECK}"
         )
+
+    def _pair_acquisitions(
+        self, decoded: DecodedSync, acquisitions: list, max_skew_s: float
+    ) -> dict[int, int]:
+        """
+        Each acquisition burst, as `{burst index: acquisition index}`, by
+        time; a burst left over is flagged, an acquisition left over refused.
+        """
+        blocks = decoded.blocks
+        paired = _pair_by_time(
+            [_parse_dt(row["acq_start"]) for row in acquisitions],
+            [decoded.time_at(b.start_sample) for b in blocks],
+        )
+
+        if paired is None:  # no start time in the file: by order
+            if len(blocks) != len(acquisitions):
+                self.fail(
+                    SyncFlag.BLOCK_COUNT_MISMATCH,
+                    f"The sync file has {len(blocks)} frame bursts but the "
+                    f"experiment has {len(acquisitions)} acquisitions, and without "
+                    "a start time in the file they can only be paired by order.",
+                )
+
+            return {i: i for i in range(len(blocks))}
+
+        pairs, offset_s = paired
+        alone = [n + 1 for n in range(len(acquisitions)) if n not in pairs]
+
+        if alone:
+            self.fail(
+                SyncFlag.BLOCK_COUNT_MISMATCH,
+                f"Acquisitions {number_spans(alone)} of {len(acquisitions)} have no "
+                f"corresponding frame bursts ({len(blocks)} bursts in the sync file).",
+            )
+
+        if abs(offset_s) > max_skew_s:
+            self.add_flag(SyncFlag.CLOCK_SKEW)
+            logger.warning(
+                f"ScanImage and olfactometer clocks differ by {abs(offset_s):.1f} "
+                f"s. {CROSS}"
+            )
+
+        acquired = {burst: acquisition for acquisition, burst in pairs.items()}
+        extra = [b for i, b in enumerate(blocks) if i not in acquired]
+
+        if extra:
+            self.add_flag(SyncFlag.UNMATCHED_BURSTS)
+            listed = ", ".join(
+                f"{b.sync_block} ({b.frame_count} frames)" for b in extra
+            )
+            logger.warning(
+                f"Bursts {listed} have no corresponding TIFF, so they are left "
+                "out (the call output lists them)."
+            )
+
+        return acquired
+
+    def _pair_trials(
+        self, decoded: DecodedSync, trials: list, loop: bool, max_skew_s: float
+    ) -> dict[int, int]:
+        """
+        The odor burst of each trial, as `{trial index: burst index}`, by time; a
+        trial left over is left without (the caller flags it), an odor burst
+        left over refused.
+        """
+        blocks = decoded.blocks
+        odor = [i for i, b in enumerate(blocks) if b.odor_pulses]
+
+        if not loop:
+            return {}
+
+        if not trials:
+            self.add_flag(SyncFlag.NO_TRIALS)
+            logger.warning(
+                "The loop has no trials (no olfactometer Events file was "
+                "processed), so the odor bursts are stored without matches."
+            )
+            return {}
+
+        valve: list[None | datetime] = []
+
+        for index in odor:
+            sample = blocks[index].odor_on_sample
+            assert sample is not None
+            valve.append(decoded.time_at(sample))
+
+        paired = _pair_by_time(
+            [_parse_dt(row["trial_odor_start"]) for row in trials], valve
+        )
+
+        if paired is None:  # no start time in the file: by order
+            if len(odor) != len(trials):
+                self.fail(
+                    SyncFlag.TRIAL_COUNT_MISMATCH,
+                    f"{len(odor)} bursts have an odor pulse but the loop has "
+                    f"{len(trials)} trials, and without a start time in the file "
+                    "they can only be paired by order.",
+                )
+
+            return {n: odor[n] for n in range(len(trials))}
+
+        pairs, offset_s = paired
+        taken = set(pairs.values())
+        alone = [blocks[odor[k]].sync_block for k in range(len(odor)) if k not in taken]
+
+        if alone:
+            self.fail(
+                SyncFlag.TRIAL_COUNT_MISMATCH,
+                f"Bursts {number_spans(alone)} have an odor pulse but no trial at "
+                f"that time ({len(trials)} trials).",
+            )
+
+        # Trials share the olfactometer clock with the sync file, so their
+        # odor onsets should agree to well under a second
+        if abs(offset_s) > max_skew_s:
+            self.add_flag(SyncFlag.CLOCK_SKEW)
+            logger.warning(
+                f"Olfactometer and sync file odor onsets differ by "
+                f"{abs(offset_s):.1f} s. {CROSS}"
+            )
+
+        return {trial: odor[k] for trial, k in pairs.items()}
+
+    def _check_frame_counts(
+        self, blocks: list, acquisitions: list, acquired: dict[int, int]
+    ) -> None:
+        wrong = [
+            (blocks[i], acquisitions[a])
+            for i, a in sorted(acquired.items())
+            if blocks[i].frame_count != acquisitions[a]["frame_count"]
+        ]
+
+        if wrong:
+            bursts = ", ".join(str(b.sync_block) for b, _ in wrong)
+            found = ", ".join(str(b.frame_count) for b, _ in wrong)
+            expected = ", ".join(
+                str(n) for n in sorted({int(row["frame_count"]) for _, row in wrong})
+            )
+            self.add_flag(SyncFlag.FRAME_COUNT)
+            logger.warning(
+                f"Frame counts disagree: bursts {bursts} have {found} frames, but "
+                f"their TIFFs have {expected}."
+            )
 
     def _insert_stream(
         self,
@@ -2445,16 +2634,9 @@ class Database(CallRecorder):
 
         return _absolute(found[0])
 
-    def _check_sync(
-        self,
-        decoded: DecodedSync,
-        acquisitions: list,
-        trials: list,
-        exp_type: str,
-    ) -> None:
-        """Flag what is off about a sync file, and refuse what cannot be matched."""
+    def _check_sync(self, decoded: DecodedSync, loop: bool) -> None:
+        """Flag what is off about a sync file on its own."""
         blocks = decoded.blocks
-        loop = exp_type == "loop"
 
         if decoded.header.interrupted:
             self.add_flag(SyncFlag.INTERRUPTED)
@@ -2465,14 +2647,6 @@ class Database(CallRecorder):
             sizes = [f.frame_count for f in decoded.fragments]
             logger.warning(f"Ignored {len(sizes)} short bursts of {sizes} frames.")
 
-        if len(blocks) != len(acquisitions):
-            self.fail(
-                SyncFlag.BLOCK_COUNT_MISMATCH,
-                f"The sync file has {len(blocks)} frame bursts but the experiment "
-                f"has {len(acquisitions)} acquisitions, so they cannot be matched "
-                "by order.",
-            )
-
         # A loop presents one odor per acquisition, a grab none
         odd = [b.sync_block for b in blocks if b.odor_pulses != int(loop)]
 
@@ -2482,41 +2656,6 @@ class Database(CallRecorder):
                 f"Bursts {odd} have more or less than one odor presentation."
                 if loop
                 else f"Bursts {odd} have an odor presentation (a grab has none)."
-            )
-
-        with_odor = sum(1 for b in blocks if b.odor_pulses)
-
-        if loop and not trials:
-            self.add_flag(SyncFlag.NO_TRIALS)
-            logger.warning(
-                "The loop has no trials (no olfactometer Events file was "
-                "processed), so the odor bursts are stored without matches."
-            )
-
-        elif loop and with_odor != len(trials):
-            self.fail(
-                SyncFlag.TRIAL_COUNT_MISMATCH,
-                f"{with_odor} bursts have an odor pulse but the loop has "
-                f"{len(trials)} trials, so they cannot be matched by order.",
-            )
-
-        # Paired by order (their counts agree, or the call failed above)
-        wrong = [
-            (b, row)
-            for b, row in zip(blocks, acquisitions)
-            if b.frame_count != row["frame_count"]
-        ]
-
-        if wrong:
-            bursts = ", ".join(str(b.sync_block) for b, _ in wrong)
-            found = ", ".join(str(b.frame_count) for b, _ in wrong)
-            expected = ", ".join(
-                str(n) for n in sorted({int(row["frame_count"]) for _, row in wrong})
-            )
-            self.add_flag(SyncFlag.FRAME_COUNT)
-            logger.warning(
-                f"Frame counts disagree: bursts {bursts} have {found} frames, but "
-                f"their TIFFs have {expected}."
             )
 
         no_camera = [b.sync_block for b in blocks if not b.camera_frames]
@@ -3091,6 +3230,77 @@ def _date_string(value: Value) -> str:
 def _parse_dt(value: str) -> datetime:
     """A recording table's time (DT_FORMAT) back as a datetime."""
     return datetime.strptime(value, DT_FORMAT)
+
+
+def _pair_by_time(
+    times: list[datetime], targets: list[None | datetime]
+) -> None | tuple[dict[int, int], float]:
+    """
+    Pair each of `times` with the one of `targets` at the same time once a
+    constant offset (two computer clocks) is out: `{index in times: index
+    in targets}`, one-to-one, and the offset in seconds (`times` minus
+    `targets`). What has nothing within `PAIR_FRACTION` of the targets'
+    usual spacing stays unpaired. `None` when a target has no time (a sync
+    file without a start time).
+
+    The offset is not assumed small: the ScanImage computer clock drifts
+    about a second a day, so it can be several times the spacing. It is the
+    one that pairs the most, among the differences between the first few of
+    each side and every one of the other (whichever side is the one fully
+    paired, its first is in a pair); a tie goes to the smaller offset.
+    """
+    if any(t is None for t in targets):
+        return None
+
+    if not times or not targets:
+        return {}, 0.0
+
+    epoch = min(t for t in targets if t is not None)
+    ours = np.array([(t - epoch).total_seconds() for t in times])
+    theirs = np.array([(t - epoch).total_seconds() for t in targets if t is not None])
+    order = np.argsort(theirs, kind="stable")
+    sorted_theirs = theirs[order]
+    spacing = float(np.median(np.diff(sorted_theirs))) if len(order) > 1 else np.inf
+    tolerance = PAIR_FRACTION * spacing if np.isfinite(spacing) else np.inf
+
+    def nearest(offset: float) -> tuple[np.ndarray, np.ndarray]:
+        shifted = ours - offset
+        right = np.clip(np.searchsorted(sorted_theirs, shifted), 0, len(order) - 1)
+        left = np.clip(right - 1, 0, len(order) - 1)
+        to_left = np.abs(shifted - sorted_theirs[left])
+        to_right = np.abs(shifted - sorted_theirs[right])
+        found = np.where(to_left < to_right, left, right)
+
+        return found, np.minimum(to_left, to_right)
+
+    def score(offset: float) -> int:
+        found, residuals = nearest(offset)
+
+        return len(set(found[residuals <= tolerance].tolist()))
+
+    few = 3
+    candidates = {float(a - b) for a in ours[:few] for b in sorted_theirs} | {
+        float(a - b) for a in ours for b in sorted_theirs[:few]
+    }
+    offset = max(sorted(candidates, key=abs), key=score)
+    found, residuals = nearest(offset)
+
+    pairs: dict[int, int] = {}
+    taken: set[int] = set()
+
+    # The closest first, so a target two times are near goes to the closer
+    for i in np.argsort(residuals, kind="stable"):
+        j = int(found[i])
+
+        if residuals[i] <= tolerance and j not in taken:
+            pairs[int(i)] = int(order[j])
+            taken.add(j)
+
+    # The offset itself from every pair, not from the one that found it
+    if pairs:
+        offset = float(np.median([ours[i] - theirs[j] for i, j in pairs.items()]))
+
+    return pairs, offset
 
 
 def _optional_datetime_str(value: None | datetime) -> None | str:

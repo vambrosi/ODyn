@@ -1193,5 +1193,28 @@ def um_to_pixels(values_um, um_per_pixels):
     return [int(a / b) for (a, b) in zip(values_um, um_per_pixels)]
 
 
+def acquisition_number(path: str | Path) -> None | int:
+    """
+    The number ScanImage ends a TIFF's name with (`..._00003.tif` is 3), which
+    is how the rig counts acquisitions.
+    """
+    match = re.search(r"_(\d+)$", Path(path).stem)
+
+    return None if match is None else int(match.group(1))
+
+
+def number_spans(numbers: list[int]) -> str:
+    """`[3, 4, 5, 9]` as `'3-5, 9'`."""
+    spans: list[list[int]] = []
+
+    for n in numbers:
+        if spans and n == spans[-1][1] + 1:
+            spans[-1][1] = n
+        else:
+            spans.append([n, n])
+
+    return ", ".join(f"{a}-{b}" if a != b else f"{a}" for a, b in spans)
+
+
 def clamp(x, min_x, max_x):
     return max(min_x, min(x, max_x))

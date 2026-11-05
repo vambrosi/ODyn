@@ -38,14 +38,12 @@ comes back.
 
 from __future__ import annotations
 
-import re
-
 from collections.abc import Container
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..database import OLFACTOMETER_FOLDER, SYNC_FOLDER, read_tiff
-from ..utils import INFO_FOLDER, logger
+from ..utils import INFO_FOLDER, acquisition_number, logger, number_spans
 from .draft import EXP_TYPES, KINDS, PART_SETTINGS, STACK_SETTINGS, Draft
 from .fields import annotation_fields, form_fields, missing_required
 from .olfactometer import OlfactometerFolders, copy_for_loop, loop_window
@@ -402,16 +400,6 @@ def match_stacks(
     return matched, free
 
 
-def acquisition_number(path: str | Path) -> None | int:
-    """
-    The number ScanImage ends a TIFF's name with (`..._00003.tif` is 3), which
-    is how the rig counts acquisitions.
-    """
-    match = re.search(r"_(\d+)$", Path(path).stem)
-
-    return None if match is None else int(match.group(1))
-
-
 def _tiff_numbers(raw: Path) -> None | set[int]:
     """The acquisition numbers in a raw folder, or None while it has none."""
     numbers = {acquisition_number(p) for p in raw.glob("[!.]?*.tif")} - {None}
@@ -483,19 +471,6 @@ def _condition_tiff_problems(
             )
 
     return problems
-
-
-def number_spans(numbers: list[int]) -> str:
-    """`[3, 4, 5, 9]` as `'3-5, 9'`."""
-    spans: list[list[int]] = []
-
-    for n in numbers:
-        if spans and n == spans[-1][1] + 1:
-            spans[-1][1] = n
-        else:
-            spans.append([n, n])
-
-    return ", ".join(f"{a}-{b}" if a != b else f"{a}" for a, b in spans)
 
 
 def _olfactometer_problems(

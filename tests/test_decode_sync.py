@@ -112,11 +112,17 @@ def build(
     trials=None,
     frames_per_slice=FRAMES,
     exp_type="loop",
+    clock_ms=100,
+    drop=(),
+    late_acquisitions=0,
+    late_trials=0,
 ):
     """
     A database with one experiment whose acquisitions and trials line up with
     `truth`, as ScanImage and the olfactometer would have logged them (a grab
-    has no trials).
+    has no trials). The ScanImage clock runs `clock_ms` ahead; `drop` leaves
+    out the TIFFs of those bursts (by index); `late_acquisitions` and
+    `late_trials` add some after the last burst, with nothing in the file.
     """
     db = Database(tmp_path, can_create=True, user="tester")
     db.set_mouse(mouse_id=1)
@@ -138,6 +144,11 @@ def build(
     if trials is not None:
         pulses_at = pulses_at[:trials]
 
+    starts = [at for index, at in enumerate(starts) if index not in drop]
+    spacing = timedelta(minutes=1)
+    starts += [starts[-1] + spacing * (n + 1) for n in range(late_acquisitions)]
+    pulses_at += [pulses_at[-1] + spacing * (n + 1) for n in range(late_trials)]
+
     with db._writing() as cur:
         cur.execute(
             """
@@ -152,14 +163,13 @@ def build(
         )
 
         for index, at in enumerate(starts):
-            # ScanImage's clock runs 100 ms ahead of the olfactometer's
             cur.execute(
                 "INSERT INTO acquisitions "
                 "(acq_id, exp_id, acq_start, raw_path, frame_count) "
                 "VALUES (?, 1, ?, ?, ?);",
                 [
                     index + 1,
-                    (at + timedelta(milliseconds=100)).strftime(DT_FORMAT),
+                    (at + timedelta(milliseconds=clock_ms)).strftime(DT_FORMAT),
                     f"raw/{index}.tif",
                     frames_per_slice,
                 ],
@@ -279,12 +289,13 @@ def test_the_file_is_found_or_named(tmp_path):
         db.process_sync(exp_id=1)
 
 
-def test_mismatched_counts_are_refused_before_writing(tmp_path):
+def test_what_cannot_be_paired_is_refused_before_writing(tmp_path):
     sync = tmp_path / "20260101/m001/e1/sync/m001_e1.h5"
     truth = generate_sync(sync, acquisitions=4)
 
-    db = build(tmp_path, truth, acquisitions=3)
-    with pytest.raises(RuntimeError, match="4 frame bursts.*3 acquisitions"):
+    # A TIFF with no burst at its time
+    db = build(tmp_path, truth, late_acquisitions=1)
+    with pytest.raises(RuntimeError, match="Acquisitions 5 of 5 have no frame"):
         db.process_sync(exp_id=1)
     assert len(db.streams) == 0
     assert (
@@ -292,14 +303,51 @@ def test_mismatched_counts_are_refused_before_writing(tmp_path):
         & SyncFlag.BLOCK_COUNT_MISMATCH
     )
 
+    # An odor burst with no trial at its time
     db.path.unlink()
     db = build(tmp_path, truth, trials=3)
-    with pytest.raises(RuntimeError, match="4 bursts have an odor pulse.*3 trials"):
+    with pytest.raises(RuntimeError, match="Bursts 3 have an odor pulse but no"):
         db.process_sync(exp_id=1)
     assert (
         db.latest_calls("process_sync").iloc[0]["call_flag"]
         & SyncFlag.TRIAL_COUNT_MISMATCH
     )
+
+
+def test_a_burst_without_a_tiff_and_trials_without_imaging(tmp_path):
+    # As on 2026-11-04: a partial TIFF deleted (burst 2 has none), and the
+    # olfactometer going on after ScanImage stopped (two trials, no burst)
+    sync = tmp_path / "20260101/m001/e1/sync/m001_e1.h5"
+    truth = generate_sync(sync, acquisitions=5)
+    db = build(tmp_path, truth, drop=(2,), late_trials=2)
+
+    db.process_sync(exp_id=1)
+
+    call = db.latest_calls("process_sync").iloc[0]
+    assert call["call_flag"] & SyncFlag.UNMATCHED_BURSTS
+    assert call["call_flag"] & SyncFlag.NO_ACQ_TRIALS
+    assert call["output_unpaired_blocks"] == [2]
+    assert call["output_unimaged_trials"] == [3, 6, 7]
+    assert call["output_matched_trials"] == 4
+
+    # Every pair after the gap is the right one, not shifted
+    assert list(db.sync_blocks["sync_block"]) == [0, 1, 3, 4]
+    assert list(db.trials["acq_id"].fillna(0).astype(int)) == [1, 2, 0, 3, 4, 0, 0]
+
+
+def test_clocks_far_apart_still_pair_right(tmp_path):
+    # More than the spacing between bursts (the ScanImage clock drifts about a
+    # second a day): pairing by the nearest burst would shift every pair
+    sync = tmp_path / "20260101/m001/e1/sync/m001_e1.h5"
+    truth = generate_sync(sync, acquisitions=6)
+    db = build(tmp_path, truth, clock_ms=23_000, drop=(0,))
+
+    db.process_sync(exp_id=1)
+
+    assert list(db.sync_blocks["sync_block"]) == [1, 2, 3, 4, 5]
+    assert db.sync_blocks["clock_offset_ms"].round().eq(23_000).all()
+    call = db.latest_calls("process_sync").iloc[0]
+    assert call["call_flag"] & SyncFlag.CLOCK_SKEW
 
 
 def test_what_is_off_is_flagged_but_stored(tmp_path):

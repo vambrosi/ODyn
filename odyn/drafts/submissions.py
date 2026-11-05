@@ -8,11 +8,11 @@ database itself. A tick on the cluster then looks at each queued draft
 
 - **waiting** while the TIFFs are still arriving. A loop is complete when it
 has as many TIFFs as ScanImage was set to take (`SI.acqsPerLoop`, from the
-first TIFF's header), or as many as its sync file has bursts if that is fewer
-(the loop was stopped early). A grab is complete once it has TIFFs, and
-the z-stacks once they have a TIFF per z-stack listed (one at least). Then
-nothing may change for `SETTLE_S` (a TIFF may be half copied), and the newest
-TIFF must read.
+first TIFF's header), or as many as its sync file has full bursts if that
+is fewer (the loop was stopped early, or stopped and started again). A grab is
+complete once it has TIFFs, and the z-stacks once they have a TIFF per z-stack
+listed (one at least). Then nothing may change for `SETTLE_S` (a TIFF may be
+half copied), and the newest TIFF must read.
 - **failed** when nothing changed for `GIVE_UP_S` before the draft was
 complete (a copy that broke, a share that ran out of space), or when
 `ingest` refused it or stopped. A failure the files caused is tried again
@@ -386,7 +386,7 @@ def _progress(main_folder: Path, draft: Draft) -> tuple[bool, dict[str, str], st
             complete = False
             continue
 
-        # A loop stopped early has fewer bursts in its sync file
+        # A loop stopped early has fewer full bursts in its sync file
         if len(tiffs) < expected and len(syncs) == 1:
             bursts = _bursts(syncs[0])
 
@@ -448,11 +448,23 @@ def _reads(path: Path) -> bool:
 
 
 def _bursts(path: Path) -> None | int:
-    """How many acquisitions a sync file recorded, or `None` if it does not read."""
+    """
+    How many acquisitions a sync file recorded in full, or `None` if it does
+    not read. A burst cut short (ScanImage stopped by a full disk, say) may
+    have no TIFF, or one later deleted, so only the full ones count.
+    """
     try:
-        return len(decode(path).blocks)
+        blocks = decode(path).blocks
     except Exception:
         return None
+
+    if not blocks:
+        return 0
+
+    counts = [b.frame_count for b in blocks]
+    usual = max(set(counts), key=counts.count)  # the acquisition length
+
+    return sum(1 for b in blocks if b.frame_count >= usual)
 
 
 def _listed(parts: dict[str, str]) -> str:

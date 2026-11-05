@@ -6,8 +6,10 @@ refuses (`odyn.drafts.submissions`).
 import json
 
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from odyn import Database
+from odyn.database import SyncFlag
 from odyn.drafts.draft import Draft
 from odyn.drafts.submissions import (
     add_now,
@@ -168,12 +170,15 @@ def test_add_now_does_not_wait_for_the_tiffs(tmp_path):
     process_submissions(tmp_path, now=T0)
 
     # The loop stopped at 3 and the sync file says 5: the user knows better.
-    # The sync file is refused, the loop is still added.
+    # The loop is added, and the two bursts with no TIFF are left out.
     add_now(path)
     [line] = process_submissions(tmp_path, now=T0 + timedelta(minutes=1))
 
-    assert line.startswith("20260101/m1: added as session 1; sync file of e1 refused")
+    assert line == "20260101/m1: added as session 1"
     assert len(db.acquisitions) == 3
+    call = db.latest_calls("process_sync").iloc[0]
+    assert call["call_flag"] & SyncFlag.UNMATCHED_BURSTS
+    assert call["output_unpaired_blocks"] == [3, 4]
     assert not (queue_folder(tmp_path) / f"{path.stem}.now").exists()
 
 
@@ -368,3 +373,18 @@ def test_what_the_cluster_writes_stays_writable_by_the_lab(
     monkeypatch.setattr(os, "umask", lambda mask: set_to.append(mask) or 0o027)
     main([str(tmp_path), "stop"])
     assert set_to[0] == 0o007
+
+
+def test_a_burst_cut_short_is_not_waited_for(monkeypatch):
+    # As on 2026-11-04: the disk filled during a burst, whose partial TIFF
+    # was deleted; the loop is complete with the TIFFs of the full bursts
+    from odyn.drafts import submissions
+    from odyn.sync import DecodedSync, SyncBlock
+
+    blocks = [SyncBlock(n, 0, 455, 0.04, 1) for n in range(4)]
+    blocks.insert(2, SyncBlock(9, 0, 448, 0.04, 1))
+    monkeypatch.setattr(
+        submissions, "decode", lambda _: DecodedSync(header=None, blocks=blocks)
+    )
+
+    assert submissions._bursts(Path("sync.h5")) == 4

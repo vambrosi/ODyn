@@ -251,7 +251,9 @@ CREATE TABLE IF NOT EXISTS streams
     ) STRICT;
 
 -- Sync blocks are bursts of imaging frames from the sync stream, each the
--- frames of one acquisition.
+-- frames of one acquisition, paired with it by time. A burst with no TIFF at
+-- its time (a partial acquisition deleted) has no row: `process_sync` lists
+-- it in its output (`unpaired_blocks`).
 --
 -- The rows of one stream come from one processing call and are replaced as a
 -- whole when it is rerun, so the table can be filled after the recordings were
