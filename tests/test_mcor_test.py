@@ -1081,6 +1081,49 @@ def test_an_approval_is_found_for_the_qc_page(tmp_path, caiman):
     assert len(db.groups[group_id].approved_mcor_files) == len(acq_ids) - 1
 
 
+def test_the_mean_images_are_each_acquisitions_mean_and_their_average(tmp_path, caiman):
+    from odyn.cluster import groups_without_mean_images
+
+    db, group_id = a_loop(tmp_path)
+    group = db.groups[group_id]
+    group.run_motion_correction(use_gui_parameters=False, is_test=False, pw_rigid=False)
+    acq_ids = [int(i) for i in group.acquisitions.index]
+    assert groups_without_mean_images(db) == [(group_id, "20260304/m1/e1", False)]
+
+    # Before the approval only when asked for, and without what the raw
+    # check left out
+    with pytest.raises(ValueError, match="only_approved=False"):
+        db.groups[group_id].save_mean_images()
+    group.check_raw(exclude_acq_ids=[acq_ids[2]])
+    mean_path, means_path = db.groups[group_id].save_mean_images(only_approved=False)
+    assert tifffile.imread(means_path).shape == (7, 48, 40)
+    output = db.groups[group_id].latest_output("Group.save_mean_images")
+    assert output["acq_ids"] == acq_ids[:2] + acq_ids[3:]
+    assert groups_without_mean_images(db) == []
+
+    # Then the approved ones, in acquisition order, beside the reference
+    group.approve_mcor_files(exclude_acq_ids=[acq_ids[0]])
+    group = db.groups[group_id]
+    assert group.save_mean_images() == [mean_path, means_path]
+    assert mean_path.parent == group._reference_path().parent
+    files = group.mcor_files
+    expected = np.stack(
+        [
+            tifffile.imread(tmp_path / str(files.loc[a, "mcor_path"])).mean(axis=0)
+            for a in acq_ids[1:]
+        ]
+    )
+    means = tifffile.imread(means_path)
+    assert means.dtype == np.float32 and means.shape == (7, 48, 40)
+    np.testing.assert_allclose(means, expected, rtol=1e-6)
+    average = tifffile.imread(mean_path)
+    np.testing.assert_allclose(average, expected.mean(axis=0), rtol=1e-6)
+    output = group.latest_output("Group.save_mean_images")
+    assert output["acq_ids"] == acq_ids[1:]
+    assert output["mean"] == mean_path.relative_to(tmp_path).as_posix()
+    assert not list(mean_path.parent.glob(".*.partial"))
+
+
 def test_the_tick_records_which_jobs_stopped_for_the_app(tmp_path, slurm, monkeypatch):
     from odyn.cluster import mcor_tests, record_job_states
 

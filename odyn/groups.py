@@ -50,7 +50,7 @@ from .utils import (
     um_to_pixels,
 )
 from .utils import _method_calls_dataframe, _read_table
-from .shared import read_json, write_json
+from .shared import read_json, replace, write_json
 
 # caiman is imported where it is used, since it is slow to import.
 if TYPE_CHECKING:
@@ -2285,6 +2285,99 @@ class Group(CallRecorder):
 
         return folder
 
+    @record_call
+    def save_mean_images(self, *, only_approved: bool = True) -> list[Path]:
+        """
+        The mean image of each corrected acquisition, and their average.
+        Saved beside the group reference, in `processed/mcor/` of its first
+        experiment, as float32. `mean_group_<id>.tif` is the average and
+        `means_group_<id>.tif` has one page per acquisition, in the order of
+        the call output's `acq_ids`, to follow the field's drift.
+
+        **USAGE**
+        ```python
+        group = db.groups[some_index]
+        mean_path, means_path = group.save_mean_images()
+        ```
+
+        **PARAMETERS**
+        - `only_approved`: only the acquisitions approved for analysis
+        (`approved_mcor_files`). `False` takes every saved corrected file but
+        those the latest raw check left out.
+
+        Reads every corrected file once, and nothing else, so run it on the
+        cluster (`python -m odyn.cluster <main_folder> mean-images --group 7`).
+        """
+        files = self.approved_mcor_files if only_approved else self.mcor_files
+
+        if files.empty:
+            if only_approved:
+                raise ValueError(
+                    f"Group {self.group_id} has no approved corrected files. "
+                    "Approve them first, or pass only_approved=False."
+                )
+            raise ValueError(f"Group {self.group_id} has no saved correction.")
+
+        left_out = set() if only_approved else set(self.raw_exclusions() or [])
+        acq_ids = [
+            int(a)
+            for a in self.acquisitions.index
+            if a in files.index and int(a) not in left_out
+        ]
+
+        if not acq_ids:
+            raise ValueError(
+                f"Group {self.group_id}: the raw check left out every saved acquisition."
+            )
+        main = self.db.main_folder
+        paths = self._mean_image_paths()
+        paths[0].parent.mkdir(parents=True, exist_ok=True)
+        # Written under hidden names, then put in place: no reader finds half
+        hidden = [
+            path.parent / f".{path.name}.{self.current_call_id}.partial"
+            for path in paths
+        ]
+        total = None
+
+        try:
+            with tifffile.TiffWriter(hidden[1], bigtiff=True) as stack:
+                for count, acq_id in enumerate(acq_ids, start=1):
+                    movie = tifffile.imread(main / str(files.loc[acq_id, "mcor_path"]))
+                    mean = movie.mean(axis=0, dtype=np.float64)
+                    del movie
+                    stack.write(mean.astype(np.float32), contiguous=True)
+
+                    if total is None:
+                        total = mean
+                    else:
+                        total += mean
+
+                    if count % 20 == 0 or count == len(acq_ids):
+                        logger.info(f"Averaged {count} of {len(acq_ids)} acquisitions.")
+
+            tifffile.imwrite(hidden[0], (total / len(acq_ids)).astype(np.float32))
+
+            for temporary, path in zip(hidden, paths):
+                replace(temporary, path)
+
+        except BaseException:
+            for temporary in hidden:
+                temporary.unlink(missing_ok=True)
+            raise
+
+        for path in paths:
+            self.add_output_file(path)
+
+        self.set_output(
+            {
+                "mean": paths[0].relative_to(main).as_posix(),
+                "means": paths[1].relative_to(main).as_posix(),
+                "acq_ids": acq_ids,
+            }
+        )
+
+        return list(paths)
+
     def _report_margin(self) -> int:
         """
         The edge left out of the measures: the largest shift allowed (px), as
@@ -2861,6 +2954,18 @@ class Group(CallRecorder):
             / "processed"
             / "mcor"
             / f"reference_group_{self.group_id}.tif"
+        )
+
+    def _mean_image_paths(self) -> tuple[Path, Path]:
+        """
+        Where `save_mean_images` writes, beside the reference: the average and
+        the mean of each acquisition.
+        """
+        folder = self._reference_path().parent
+
+        return (
+            folder / f"mean_group_{self.group_id}.tif",
+            folder / f"means_group_{self.group_id}.tif",
         )
 
     @record_call

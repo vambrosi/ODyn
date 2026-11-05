@@ -331,6 +331,31 @@ def latest_reruns(db: Database) -> dict[int, dict]:
     return latest
 
 
+def groups_without_mean_images(db: Database) -> list[tuple[int, str, bool]]:
+    """
+    The groups whose every acquisition has a saved correction but no mean
+    images yet (`Group.save_mean_images`): `(group_id, experiment folders,
+    approved)`, `approved` saying whether any of it is approved for analysis.
+    """
+    corrected = set(db.mcor_files.index)
+    missing = []
+
+    for group_id in sorted(set(db.group_experiments.index)):
+        group = db.groups[int(group_id)]
+        acq_ids = set(group.acquisitions.index)
+
+        if not acq_ids or not acq_ids <= corrected:
+            continue
+
+        if group._mean_image_paths()[0].is_file():
+            continue
+
+        where = ", ".join(str(p) for p in group.experiments["exp_path"])
+        missing.append((int(group_id), where, not group.approved_mcor_files.empty))
+
+    return missing
+
+
 def groups_without_full_report(db: Database) -> list[tuple[int, str]]:
     """
     The groups whose correction is saved, aligned to a saved reference, but

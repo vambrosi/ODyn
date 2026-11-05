@@ -49,12 +49,16 @@ python -m odyn.cluster <main_folder> mcor-backfill --batch 4 [--objective 20]
 python -m odyn.cluster <main_folder> full-previews --group 7 --user ana
 python -m odyn.cluster <main_folder> full-report --group 7 [--group 8 ...]
 python -m odyn.cluster <main_folder> full-report --missing
+python -m odyn.cluster <main_folder> mean-images --group 7 [--group 8 ...] [--all-saved]
+python -m odyn.cluster <main_folder> mean-images --missing
 ```
 `full-previews` writes the full run's videos of a group corrected before
 they were written (`Group.save_full_previews`), and `full-report` the
 report on every acquisition (`Group.full_report`; `--missing` lists the
-groups without one); run them on a node (`srun`), as they read every
-acquisition.
+groups without one), and `mean-images` the mean image of each corrected
+acquisition and their average (`Group.save_mean_images`; `--missing` lists
+the groups without them, `--all-saved` takes the acquisitions not approved
+yet too); run them on a node (`srun`), as they read every acquisition.
 
 The code, by part: `config` (folders and settings), `slurm` (jobs and
 their states), `messages` (requests and claims), `records` (the test and
@@ -87,6 +91,7 @@ from .records import (
     archive_approved,
     experiment_owner,
     groups_without_full_report,
+    groups_without_mean_images,
     latest_approvals,
     latest_picks,
     mcor_sweep_runs,
@@ -132,6 +137,7 @@ __all__ = [
     "crashed",
     "experiment_owner",
     "groups_without_full_report",
+    "groups_without_mean_images",
     "heartbeat",
     "latest_approvals",
     "latest_picks",

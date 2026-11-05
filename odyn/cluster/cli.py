@@ -23,7 +23,11 @@ from .mcor import (
     submit_mcor_test,
 )
 from .messages import REQUESTABLE, send_request
-from .records import experiment_owner, groups_without_full_report
+from .records import (
+    experiment_owner,
+    groups_without_full_report,
+    groups_without_mean_images,
+)
 from .tick import (
     record_crash,
     start_chain,
@@ -121,6 +125,21 @@ def main(argv: None | list[str] = None) -> int:
     )
     full.add_argument("--user", help="whose (default: who added the experiment)")
 
+    means = commands.add_parser(
+        "mean-images",
+        help="write the mean image of each corrected acquisition, and their average",
+    )
+    means.add_argument("--group", type=int, action="append", default=[])
+    means.add_argument(
+        "--missing", action="store_true", help="list the groups without them"
+    )
+    means.add_argument(
+        "--all-saved",
+        action="store_true",
+        help="every saved acquisition, not only the approved ones",
+    )
+    means.add_argument("--user", help="whose (default: who added the experiment)")
+
     ask = commands.add_parser("request", help="leave a request for the next tick")
     ask.add_argument("method", choices=REQUESTABLE)
     ask.add_argument("arguments", nargs="*", help="key=value")
@@ -212,6 +231,21 @@ def main(argv: None | list[str] = None) -> int:
             user = args.user or experiment_owner(db, group_id)
             mine = Database(args.main_folder, project=args.project, user=user)
             print(f"Wrote {mine.groups[group_id].full_report()}")
+
+    elif args.command == "mean-images":
+        db = Database(args.main_folder, project=args.project)
+
+        if args.missing:
+            for group_id, where, approved in groups_without_mean_images(db):
+                note = "" if approved else " (nothing approved yet)"
+                print(f"  group {group_id}: {where}{note}")
+
+        for group_id in args.group:
+            user = args.user or experiment_owner(db, group_id)
+            mine = Database(args.main_folder, project=args.project, user=user)
+            group = mine.groups[group_id]
+            paths = group.save_mean_images(only_approved=not args.all_saved)
+            print("Wrote " + ", ".join(str(path) for path in paths))
 
     elif args.command == "run-mcor-sweep":
         folder = run_mcor_sweep(args.sweep, args.task)
