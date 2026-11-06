@@ -2292,7 +2292,7 @@ class Group(CallRecorder):
         Saved beside the group reference, in `processed/mcor/` of its first
         experiment, as float32. `mean_group_<id>.tif` is the average and
         `means_group_<id>.tif` has one page per acquisition, in the order of
-        the call output's `acq_ids`, to follow the field's drift.
+        `acq_ids` in the call output, to follow the field drift.
 
         **USAGE**
         ```python
