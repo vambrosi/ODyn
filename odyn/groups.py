@@ -1687,12 +1687,14 @@ class Group(CallRecorder):
         position) a report is written from afterwards: their temporary files
         are kept, and their files and every frame's shift are left in
         `report_parts` (see `test_motion_correction(whole=True)`)
-        - `resume`: a final correction stopped partway (a job's time limit,
+        - `resume`: a final correction stopped partway (a job time limit,
         say) goes on from the batch after the last one saved, when it runs
         again with the same settings and reference. Each batch, once saved,
         is written down in `progress_group_<id>.json` beside the reference,
-        with its frames' shifts in `full/parts/` of the test folder, which a
-        resumed run picks up. `False` starts over.
+        with the frame shifts in `full/parts/` of the test folder, which a
+        resumed run picks up. Every batch saved (the job stopped after them,
+        while writing the previews, say): only the steps after the batches
+        run again. `False` starts over.
 
         *CaImAn motion correction parameters (before metadata adjustments)*
         - `border_nan`: copy along the boundary (if `True`, fill in with NaN)
@@ -1820,9 +1822,9 @@ class Group(CallRecorder):
         template = None
         saved = self._reference_path()
 
-        # A final correction stopped partway was aligned to the saved
-        # reference: so are the batches left
-        resuming = not is_test and resume and self._stopped_with(saved)
+        # A final correction stopped partway (or after its last batch) was
+        # aligned to the saved reference: so are the batches left
+        resuming = not is_test and resume and self._saved_with(saved)
 
         if reference_acqs > 0 and (reuse_reference or resuming) and saved.is_file():
             logger.info(f"Using the reference saved in {saved.name}.")
@@ -1906,6 +1908,11 @@ class Group(CallRecorder):
                 logger.info(
                     f"Resuming: batches 1 to {done} of {len(batches)} were saved "
                     "before."
+                    + (
+                        " Only the steps after them run."
+                        if done == len(batches)
+                        else ""
+                    )
                 )
                 self.update_parameters_used({"resumed_after_batch": done})
 
@@ -1951,6 +1958,20 @@ class Group(CallRecorder):
                     if template is not None:
                         self._batch_saved(number, positions_in, marks, min_mov)
 
+            # Every batch saved before: what the steps after them read of
+            # the correction (its settings as caiman sets them, the
+            # reference), without correcting anything
+            if done == len(batches):
+                offset = {} if min_mov is None else {"min_mov": min_mov}
+                self.mc = MotionCorrect(
+                    [raw_paths[i] for i in batches[-1]],
+                    dview=dview,
+                    **settings,
+                    **offset,
+                )
+                self.mc_reference = template
+                self.mc_reference_file = None if template is None else saved
+
         # Always stop the server after motion correction
         finally:
             cm.stop_server(dview=dview)
@@ -1993,10 +2014,10 @@ class Group(CallRecorder):
         """Each saved batch's per-frame numbers, for a resumed run."""
         return self.mcor_test_folder() / FULL_FOLDER / PARTS_FOLDER
 
-    def _stopped_with(self, reference: Path) -> bool:
+    def _saved_with(self, reference: Path) -> bool:
         """
-        Whether a final correction stopped partway, aligned to `reference` as
-        it is now (its SHA-1 unchanged since).
+        Whether a final correction saved batches aligned to `reference` as it
+        is now (its SHA-1 unchanged since), finished or not.
         """
         try:
             before = read_json(self._progress_path())
@@ -2004,8 +2025,7 @@ class Group(CallRecorder):
             return False
 
         return (
-            not before.get("finished")
-            and bool(before.get("done"))
+            bool(before.get("done"))
             and reference.is_file()
             and before.get("key", {}).get("reference_sha1") == _sha1(reference)
         )
@@ -2013,10 +2033,12 @@ class Group(CallRecorder):
     def _start_progress(self, key: dict, batches: int, resume: bool) -> int:
         """
         Pick up what an earlier run of the same correction (`key`: settings,
-        reference, acquisitions, batch size) saved, when `resume` and it did
-        not finish, and return how many batches it saved: their numbers are
-        put back in `full_parts` and `report_parts`. Otherwise start over: a
-        new progress file, no parts. Kept when finished, as a record.
+        reference, acquisitions, batch size) saved, when `resume`, and return
+        how many batches it saved: their numbers are put back in `full_parts`
+        and `report_parts`. Finished too, so a run again after a job stopped
+        past the last batch (or to write the videos again) does not correct
+        everything again. Otherwise start over: a new progress file, no parts.
+        Kept when finished, as a record.
         """
         path = self._progress_path()
 
@@ -2028,15 +2050,20 @@ class Group(CallRecorder):
         if (
             resume
             and before is not None
-            and not before.get("finished")
             and before.get("key") == key
             and before.get("batches") == batches
             and before.get("done")
+            and all(
+                (self._parts_folder() / batch["parts"]).is_file()
+                for batch in before["done"]
+            )
         ):
-            self.progress = before
+            self.progress = before | {"finished": False}
 
             for batch in before["done"]:
                 self._load_batch(batch)
+
+            self._write_progress()
 
             return len(before["done"])
 

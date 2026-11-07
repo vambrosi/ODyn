@@ -47,9 +47,10 @@ def caiman(monkeypatch, tmp_path):
             self.shifts_opencv = settings["shifts_opencv"]
             self.gSig_filt = settings.get("gSig_filt")
             seen["settings"] = settings
-            seen.setdefault("batches", []).append([Path(f).name for f in fnames])
 
         def motion_correct(self, template=None, save_movie=False):
+            # The files each batch corrected
+            seen.setdefault("batches", []).append([Path(f).name for f in self.fname])
             seen["template"] = template
             seen.setdefault("templates", []).append(template)
             self.mmap_file, self.shifts_rig = [], []
@@ -279,18 +280,35 @@ def test_a_whole_correction_stopped_partway_goes_on_from_there(tmp_path, caiman)
     files = db.groups[group_id].mcor_files["mcor_path"]
     assert all((tmp_path / path).is_file() for path in files)
 
-    # Finished: a run again starts over, as do other settings
+    # Finished: a run again (a job stopped while writing the videos, say)
+    # corrects nothing again, and writes the same reports
     caiman["batches"].clear()
+    (folder / "summary.csv").unlink()
+    (folder / "full" / "summary.csv").unlink()
+    again = db.groups[group_id].test_motion_correction(
+        test_acqs=4, movie=False, whole=True, batch_acqs=3
+    )
+    assert caiman["batches"] == []
+    assert pd.read_csv(again / "summary.csv").equals(summary)
+    assert pd.read_csv(again / "full" / "summary.csv").equals(every)
+    progress = json.loads(progress_file.read_text())
+    assert progress["finished"] and len(progress["call_ids"]) == 3
+    assert len(db.groups[group_id].mcor_files) == 8
+
+    # Without its parts (deleted with the test folder), it starts over
+    for part in (folder / "full" / "parts").glob("batch_*.npz"):
+        part.unlink()
     db.groups[group_id].test_motion_correction(
         test_acqs=4, movie=False, whole=True, batch_acqs=3
     )
     assert [len(names) for names in caiman["batches"]] == [3, 3, 2]
 
+    # Other settings start over, even from a run stopped partway
     motion.motion_correct = stopped_at_the_second
     calls.clear()
     with pytest.raises(RuntimeError):
         db.groups[group_id].test_motion_correction(
-            test_acqs=4, movie=False, whole=True, batch_acqs=3
+            test_acqs=4, movie=False, whole=True, batch_acqs=3, resume=False
         )
     motion.motion_correct = correct
     caiman["batches"].clear()
