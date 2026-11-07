@@ -92,6 +92,11 @@ class ClusterConfig:
     whole_pw_time: str = "12:00:00"  # piecewise rigid, slower
     whole_disk_gb: int = 200
     scratch: str = "/mnt/scratch"
+    # Nodes motion correction jobs are not sent to, as Slurm writes them
+    # ("cnode-07-[21-29],cnode-08-[24-27,29-35]"): caiman ran about 4 times
+    # slower on those (2026-11-06), and whole corrections ran out of time.
+    # Every name must exist, or Slurm refuses the job
+    exclude_nodes: None | str = None
 
     @classmethod
     def read(cls, main_folder: str | Path) -> ClusterConfig:

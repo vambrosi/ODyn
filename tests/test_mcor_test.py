@@ -687,6 +687,24 @@ def test_a_video_takes_the_levels_and_the_title_it_is_given(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def test_jobs_keep_off_the_nodes_excluded(tmp_path, slurm):
+    _, group_id = a_loop(tmp_path)
+    slow = "cnode-07-[21-29],cnode-08-[24-27,29-35]"
+    (tmp_path / ".odyn" / "cluster.json").write_text(
+        json.dumps({"exclude_nodes": slow})
+    )
+
+    submit_mcor_test(tmp_path, None, group_id)
+
+    script = (
+        cluster_folder(tmp_path) / "jobs" / f"mcor-test-g{group_id}.sh"
+    ).read_text()
+    lines = script.splitlines()
+    assert f"#SBATCH --exclude={slow}" in lines
+    # With the other options, before the first command
+    assert lines.index(f"#SBATCH --exclude={slow}") < lines.index("set -euo pipefail")
+
+
 def test_a_test_is_a_job_of_its_own_for_who_added_the_loop(tmp_path, slurm):
     _, group_id = a_loop(tmp_path, user="alice")
 
@@ -698,6 +716,7 @@ def test_a_test_is_a_job_of_its_own_for_who_added_the_loop(tmp_path, slurm):
         cluster_folder(tmp_path) / "jobs" / f"mcor-test-g{group_id}.sh"
     ).read_text()
     assert "#SBATCH --gres=disk:128" in script
+    assert "--exclude" not in script  # unless asked
     assert 'CAIMAN_TEMP="/mnt/scratch/${SLURM_JOB_ID}"' in script
     assert "trap 'rm -rf \"$CAIMAN_TEMP\"' EXIT" in script
     assert f"run-mcor-test --group {group_id} --user alice" in script

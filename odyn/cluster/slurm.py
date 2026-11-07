@@ -71,9 +71,13 @@ def _mcor_script(
 ) -> str:
     """
     A job script that runs `command` with caiman's files on scratch
-    (`disk_gb` of it, `mcor_disk_gb` by default).
+    (`disk_gb` of it, `mcor_disk_gb` by default), on no node of
+    `exclude_nodes`.
     """
     logs = cluster_folder(Path(main_folder).resolve(), project) / JOBS_FOLDER
+    exclude = (
+        f"#SBATCH --exclude={config.exclude_nodes}\n" if config.exclude_nodes else ""
+    )
 
     return f"""#!/bin/bash
 #SBATCH --partition={config.partition}
@@ -84,7 +88,7 @@ def _mcor_script(
 #SBATCH --mem={config.mcor_memory}
 #SBATCH --time={time}
 #SBATCH --gres=disk:{disk_gb or config.mcor_disk_gb}
-
+{exclude}
 # {about}
 # caiman's temporary files go to the node's scratch disk, removed however the
 # job ends.
