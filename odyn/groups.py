@@ -50,7 +50,7 @@ from .utils import (
     um_to_pixels,
 )
 from .utils import _method_calls_dataframe, _read_table
-from .shared import read_json, replace, write_json
+from .shared import atomic_write, read_json, write_json
 
 # caiman is imported where it is used, since it is slow to import.
 if TYPE_CHECKING:
@@ -2358,16 +2358,10 @@ class Group(CallRecorder):
             )
         main = self.db.main_folder
         paths = self._mean_image_paths()
-        paths[0].parent.mkdir(parents=True, exist_ok=True)
-        # Written under hidden names, then put in place: no reader finds half
-        hidden = [
-            path.parent / f".{path.name}.{self.current_call_id}.partial"
-            for path in paths
-        ]
         total = None
 
-        try:
-            with tifffile.TiffWriter(hidden[1], bigtiff=True) as stack:
+        with atomic_write(paths[0]) as average, atomic_write(paths[1]) as each:
+            with tifffile.TiffWriter(each, bigtiff=True) as stack:
                 for count, acq_id in enumerate(acq_ids, start=1):
                     movie = tifffile.imread(main / str(files.loc[acq_id, "mcor_path"]))
                     mean = movie.mean(axis=0, dtype=np.float64)
@@ -2382,15 +2376,7 @@ class Group(CallRecorder):
                     if count % 20 == 0 or count == len(acq_ids):
                         logger.info(f"Averaged {count} of {len(acq_ids)} acquisitions.")
 
-            tifffile.imwrite(hidden[0], (total / len(acq_ids)).astype(np.float32))
-
-            for temporary, path in zip(hidden, paths):
-                replace(temporary, path)
-
-        except BaseException:
-            for temporary in hidden:
-                temporary.unlink(missing_ok=True)
-            raise
+            tifffile.imwrite(average, (total / len(acq_ids)).astype(np.float32))
 
         for path in paths:
             self.add_output_file(path)
@@ -2467,16 +2453,9 @@ class Group(CallRecorder):
         found.settings.update(um_per_px=list(um_per_px), tile_um=tile_um)
 
         path = self._candidates_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Written under a hidden name, then put in place: no reader finds half
-        hidden = path.parent / f".{path.name}.{self.current_call_id}.partial"
 
-        try:
+        with atomic_write(path) as hidden:
             found.write(hidden)
-            replace(hidden, path)
-        except BaseException:
-            hidden.unlink(missing_ok=True)
-            raise
 
         self.add_output_file(path)
         cells, basins = int(found.cells.size), int(found.basins.max())
@@ -3042,14 +3021,12 @@ class Group(CallRecorder):
         template = reference_image(frames, max_shifts)
 
         path = self._reference_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Written whole, then put in place: two jobs of the group can build
-        # it at once (a full correction and a sweep), and a run reusing it
-        # must never read half of one
-        partial = path.with_name(f".{path.name}.{os.getpid()}.part")
-        tifffile.imwrite(partial, template)
-        os.replace(partial, path)
+        # Two jobs of the group can build it at once (a full correction and a
+        # sweep), and a run reusing it must never read half of one
+        with atomic_write(path) as hidden:
+            tifffile.imwrite(hidden, template)
+
         self.add_output_file(path)
         self.update_parameters_used({"reference_acq_ids": acq_ids})
 

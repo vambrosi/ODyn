@@ -30,6 +30,8 @@ import os
 import time
 import uuid
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -51,24 +53,40 @@ def write_json(path: str | Path, content: Any, **dump: Any) -> Path:
     (a date, a `Path`) are written as text. `dump` goes to `json.dump`
     (`sort_keys=True`, ...). Returns `path`.
     """
+    with atomic_write(path) as hidden:
+        with open(hidden, "w", encoding="utf-8", newline="") as file:
+            json.dump(content, file, **{"indent": 2, "default": str, **dump})
+
+    return Path(path)
+
+
+@contextmanager
+def atomic_write(path: str | Path) -> Generator[Path]:
+    """
+    A hidden path beside `path` to write the file to, put in place of `path`
+    when the block ends, or deleted if the block raises: a reader finds the
+    old file or the new one, never half of either. Creates the folder if
+    needed.
+
+    **USAGE**
+    ```python
+    with atomic_write(folder / "mean.tif") as hidden:
+        tifffile.imwrite(hidden, image)
+    ```
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # A name of its own, so two writers never share a half-written file; not
-    # ending in `.json`, so no listing of the folder takes it for one
+    # ending as the file does, so no listing of the folder takes it for one
     hidden = path.parent / f".{path.name}.{uuid.uuid4().hex[:8]}.partial"
 
     try:
-        with open(hidden, "w", encoding="utf-8", newline="") as file:
-            json.dump(content, file, **{"indent": 2, "default": str, **dump})
-
+        yield hidden
         replace(hidden, path)
-
     except BaseException:
         hidden.unlink(missing_ok=True)
         raise
-
-    return path
 
 
 def server_now(folder: str | Path) -> float:

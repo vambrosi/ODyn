@@ -12,9 +12,9 @@ either copy says what it is without the draft. The draft keeps the link (one
 entry per recording, see `Draft.add_recording`), and the local copy is never
 deleted here.
 
-A copy is written under a hidden name (`.<name>.partial`) and renamed once its
-size matches, so a half-copied file never looks like a recording. A file on
-the share is never overwritten. A recording that was replaced by a newer one
+A copy is written under a hidden name (`.<name>.<random>.partial`) and
+renamed once its size matches, so a half-copied file never looks like a
+recording. A file on the share is never overwritten. A recording that was replaced by a newer one
 of the same part is hidden on the share (renamed with a leading dot,
 which `process_sync` ignores) rather than deleted.
 
@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from ..database import SYNC_FOLDER
+from ..shared import atomic_write
 from .draft import Draft
 
 LOCAL_FOLDER = "sync"  # beside the drafts folder: ~/.odyn/sync
@@ -78,13 +79,12 @@ def copy_to_share(local: Path, target: Path) -> None:
         raise FileExistsError(f"A different file is already at '{target}'")
 
     make_part_folders(target.parent.parent)
-    partial = target.with_name(f".{target.name}.partial")
-    shutil.copyfile(local, partial)
 
-    if partial.stat().st_size != size:
-        raise OSError(f"The copy of '{local.name}' came out incomplete.")
+    with atomic_write(target) as partial:
+        shutil.copyfile(local, partial)
 
-    os.replace(partial, target)
+        if partial.stat().st_size != size:
+            raise OSError(f"The copy of '{local.name}' came out incomplete.")
 
 
 def hide_on_share(target: Path) -> None:

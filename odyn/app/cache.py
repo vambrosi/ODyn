@@ -27,6 +27,7 @@ from pathlib import Path
 
 from ..drafts.draft import FOLDER_NAME
 from ..qc import Listing, _scan
+from ..shared import atomic_write
 
 CACHE_FOLDER = "cache"
 
@@ -138,24 +139,18 @@ def download(
         if progress is not None:
             progress(path.name, 0)
 
-        partial = target.with_name(f".{target.name}.part")
-
         def copied(count: int, name: str = path.name) -> None:
             if progress is not None:
                 progress(name, count)
 
-        try:
+        with atomic_write(target) as partial:
             _copy(path, partial, copied)
-        except BaseException:
-            partial.unlink(missing_ok=True)
-            raise
 
-        # The time only, which `state` reads. Not `copy2`: it also copies the
-        # file flags, and macOS refuses a user the flags a network share sets
-        # ("Operation not permitted")
-        times = path.stat()
-        os.utime(partial, ns=(times.st_atime_ns, times.st_mtime_ns))
-        os.replace(partial, target)
+            # The time only, which `state` reads. Not `copy2`: it also copies
+            # the file flags, and macOS refuses a user the flags a network
+            # share sets ("Operation not permitted")
+            times = path.stat()
+            os.utime(partial, ns=(times.st_atime_ns, times.st_mtime_ns))
 
     return local
 

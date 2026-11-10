@@ -200,5 +200,5 @@ def test_a_download_tells_its_bytes_and_can_be_stopped(tmp_path, monkeypatch):
         cache.download(main, folder, base, progress=stop)
 
     local = cache.local_folder(main, folder, base)
-    assert not list(local.glob(".*.part"))
+    assert not list(local.glob(".*.partial"))
     assert cache.pending(main, folder, base) == [folder / "summary.csv"]
