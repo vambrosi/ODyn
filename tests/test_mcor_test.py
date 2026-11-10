@@ -1161,6 +1161,64 @@ def test_the_mean_images_are_each_acquisitions_mean_and_their_average(tmp_path, 
     assert not list(mean_path.parent.glob(".*.partial"))
 
 
+def test_the_cellpose_candidates_come_from_the_mean_image(
+    tmp_path, caiman, monkeypatch
+):
+    pytest.importorskip("cellpose")
+    from odyn import segmentation
+    from odyn.cluster import groups_without_cellpose_candidates
+    from test_segmentation import known_cells
+
+    db, group_id = a_loop(tmp_path)
+    group = db.groups[group_id]
+
+    # No mean image yet
+    with pytest.raises(ValueError, match="save_mean_images"):
+        group.save_cellpose_candidates()
+
+    group.run_motion_correction(use_gui_parameters=False, is_test=False, pw_rigid=False)
+    group.save_mean_images(only_approved=False)
+    group = db.groups[group_id]
+    assert groups_without_cellpose_candidates(db) == [(group_id, "20260304/m1/e1")]
+
+    with pytest.raises(ValueError, match="cpdino"):
+        group.save_cellpose_candidates(model="cyto3")
+
+    with pytest.raises(FileNotFoundError, match="Cellpose weights"):
+        group.save_cellpose_candidates()
+
+    # The network, as known cells; it gets the mean image and the weights
+    weights = tmp_path / ".odyn" / "segmentation" / "cpdino"
+    weights.parent.mkdir(parents=True)
+    weights.write_bytes(b"")
+    seen = {}
+
+    def network(image, path, *, tile_px=None):
+        seen.update(shape=image.shape, path=path, tile_px=tile_px)
+        _, flows, prob = known_cells(*image.shape)
+
+        return flows, prob, {"model": path.name, "tile_px": tile_px}
+
+    monkeypatch.setattr(segmentation, "run_network", network)
+    path = group.save_cellpose_candidates(tile_um=20.0)
+
+    assert seen["shape"] == (48, 40) and seen["path"] == weights
+    assert seen["tile_px"] > 0
+    assert path == group._candidates_path()
+    assert path.parent.name == "segmentation"
+    assert path.parent.parent == group._reference_path().parent.parent
+    output = group.latest_output("Group.save_cellpose_candidates")
+    assert output == {
+        "candidates": path.relative_to(tmp_path).as_posix(),
+        "cells": 3,
+        "basins": 3,
+    }
+    found = segmentation.read_candidates(path)
+    assert found.settings["model"] == "cpdino" and found.settings["tile_um"] == 20.0
+    assert not list(path.parent.glob(".*.partial"))
+    assert groups_without_cellpose_candidates(db) == []
+
+
 def test_the_tick_records_which_jobs_stopped_for_the_app(tmp_path, slurm, monkeypatch):
     from odyn.cluster import mcor_tests, record_job_states
 

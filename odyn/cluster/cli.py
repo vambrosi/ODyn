@@ -25,6 +25,7 @@ from .mcor import (
 from .messages import REQUESTABLE, send_request
 from .records import (
     experiment_owner,
+    groups_without_cellpose_candidates,
     groups_without_full_report,
     groups_without_mean_images,
 )
@@ -140,6 +141,21 @@ def main(argv: None | list[str] = None) -> int:
     )
     means.add_argument("--user", help="whose (default: who added the experiment)")
 
+    cells = commands.add_parser(
+        "cellpose", help="find the cell candidates of a group with Cellpose"
+    )
+    cells.add_argument("--group", type=int, action="append", default=[])
+    cells.add_argument(
+        "--missing",
+        action="store_true",
+        help="list the groups with a mean image but no candidates",
+    )
+    cells.add_argument("--model", default="cpdino", help="the Cellpose 4 model")
+    cells.add_argument(
+        "--tile-um", type=float, help="normalize the brightness in tiles this wide"
+    )
+    cells.add_argument("--user", help="whose (default: who added the experiment)")
+
     ask = commands.add_parser("request", help="leave a request for the next tick")
     ask.add_argument("method", choices=REQUESTABLE)
     ask.add_argument("arguments", nargs="*", help="key=value")
@@ -246,6 +262,22 @@ def main(argv: None | list[str] = None) -> int:
             group = mine.groups[group_id]
             paths = group.save_mean_images(only_approved=not args.all_saved)
             print("Wrote " + ", ".join(str(path) for path in paths))
+
+    elif args.command == "cellpose":
+        db = Database(args.main_folder, project=args.project)
+
+        if args.missing:
+            for group_id, where in groups_without_cellpose_candidates(db):
+                print(f"  group {group_id}: {where}")
+
+        for group_id in args.group:
+            user = args.user or experiment_owner(db, group_id)
+            mine = Database(args.main_folder, project=args.project, user=user)
+            group = mine.groups[group_id]
+            path = group.save_cellpose_candidates(
+                model=args.model, tile_um=args.tile_um
+            )
+            print(f"Wrote {path}")
 
     elif args.command == "run-mcor-sweep":
         folder = run_mcor_sweep(args.sweep, args.task)

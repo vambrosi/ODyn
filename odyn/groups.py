@@ -2405,6 +2405,92 @@ class Group(CallRecorder):
 
         return list(paths)
 
+    @record_call
+    def save_cellpose_candidates(
+        self, *, model: str = "cpdino", tile_um: None | float = None
+    ) -> Path:
+        """
+        Cell candidates from Cellpose on the group mean image, to curate the
+        ROIs from. Saved as `cellpose_group_<id>.h5` in
+        `processed/segmentation/` of the first experiment; `odyn.segmentation`
+        says what it holds and reads it. The call output has the number of
+        `cells` Cellpose keeps at its defaults, and of candidate `basins` to add
+        more from.
+
+        **USAGE**
+        ```python
+        group = db.groups[some_index]
+        path = group.save_cellpose_candidates()
+        ```
+
+        **PARAMETERS**
+        - `model`: the Cellpose 4 model (`cpdino`, `cpdino-vitb`, `cpsam` or
+        `cpsam_v2`), a file of that name in `.odyn/segmentation/` of the main
+        folder.
+        - `tile_um`: normalize the brightness in tiles this wide (um), which
+        lifts dark regions. `None` normalizes the whole image at once.
+
+        Needs the mean image (`save_mean_images`) and Cellpose 4. On two CPU
+        cores it takes about 40 s for a field at 1 um/px; run it on the cluster
+        (`python -m odyn.cluster <main_folder> cellpose --group 7`).
+        """
+        from . import segmentation
+
+        if model not in segmentation.MODELS:
+            raise ValueError(
+                f"Unknown model {model!r}; one of {', '.join(segmentation.MODELS)}."
+            )
+
+        means = self.latest_output("Group.save_mean_images")
+
+        if not means:
+            raise ValueError(
+                f"Group {self.group_id} has no mean image. Run save_mean_images() first."
+            )
+
+        main = self.db.main_folder
+        weights = main / ODYN_FOLDER / segmentation.WEIGHTS_FOLDER / model
+
+        if not weights.is_file():
+            raise FileNotFoundError(
+                f"No {model} model at '{weights}'. Copy the Cellpose weights there."
+            )
+
+        experiment = self.experiments.iloc[0]
+        um_per_px = (
+            float(experiment["height_um"]) / int(experiment["height_px"]),
+            float(experiment["width_um"]) / int(experiment["width_px"]),
+        )
+        tile_px = None if tile_um is None else max(1, round(tile_um / um_per_px[1]))
+        image = tifffile.imread(main / means["mean"])
+        found = segmentation.find_candidates(image, weights, tile_px=tile_px)
+        found.settings.update(um_per_px=list(um_per_px), tile_um=tile_um)
+
+        path = self._candidates_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Written under a hidden name, then put in place: no reader finds half
+        hidden = path.parent / f".{path.name}.{self.current_call_id}.partial"
+
+        try:
+            found.write(hidden)
+            replace(hidden, path)
+        except BaseException:
+            hidden.unlink(missing_ok=True)
+            raise
+
+        self.add_output_file(path)
+        cells, basins = int(found.cells.size), int(found.basins.max())
+        self.set_output(
+            {
+                "candidates": path.relative_to(main).as_posix(),
+                "cells": cells,
+                "basins": basins,
+            }
+        )
+        logger.info(f"Cellpose kept {cells} cells, of {basins} candidates.")
+
+        return path
+
     def _report_margin(self) -> int:
         """
         The edge left out of the measures: the largest shift allowed (px), as
@@ -2994,6 +3080,15 @@ class Group(CallRecorder):
             folder / f"mean_group_{self.group_id}.tif",
             folder / f"means_group_{self.group_id}.tif",
         )
+
+    def _candidates_path(self) -> Path:
+        """
+        Where `save_cellpose_candidates` writes: `processed/segmentation/` of
+        the first experiment.
+        """
+        processed = self._reference_path().parent.parent
+
+        return processed / "segmentation" / f"cellpose_group_{self.group_id}.h5"
 
     @record_call
     def add_mcor_files(

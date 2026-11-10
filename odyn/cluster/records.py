@@ -356,6 +356,29 @@ def groups_without_mean_images(db: Database) -> list[tuple[int, str, bool]]:
     return missing
 
 
+def groups_without_cellpose_candidates(db: Database) -> list[tuple[int, str]]:
+    """
+    The groups with a mean image (`Group.save_mean_images`) but no Cellpose
+    candidates yet (`Group.save_cellpose_candidates`): `(group_id, experiment
+    folders)`.
+    """
+    missing = []
+
+    for group_id in sorted(set(db.group_experiments.index)):
+        group = db.groups[int(group_id)]
+
+        if group.acquisitions.empty or not group._mean_image_paths()[0].is_file():
+            continue
+
+        if group._candidates_path().is_file():
+            continue
+
+        where = ", ".join(str(p) for p in group.experiments["exp_path"])
+        missing.append((int(group_id), where))
+
+    return missing
+
+
 def groups_without_full_report(db: Database) -> list[tuple[int, str]]:
     """
     The groups whose correction is saved, aligned to a saved reference, but

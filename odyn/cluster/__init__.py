@@ -51,6 +51,8 @@ python -m odyn.cluster <main_folder> full-report --group 7 [--group 8 ...]
 python -m odyn.cluster <main_folder> full-report --missing
 python -m odyn.cluster <main_folder> mean-images --group 7 [--group 8 ...] [--all-saved]
 python -m odyn.cluster <main_folder> mean-images --missing
+python -m odyn.cluster <main_folder> cellpose --group 7 [--model cpdino] [--tile-um 200]
+python -m odyn.cluster <main_folder> cellpose --missing
 ```
 `full-previews` writes the full run's videos of a group corrected before
 they were written (`Group.save_full_previews`), and `full-report` the
@@ -59,6 +61,10 @@ groups without one), and `mean-images` the mean image of each corrected
 acquisition and their average (`Group.save_mean_images`; `--missing` lists
 the groups without them, `--all-saved` takes the acquisitions not approved
 yet too); run them on a node (`srun`), as they read every acquisition.
+`cellpose` finds the cell candidates in the mean image of a group
+(`Group.save_cellpose_candidates`; `--missing` lists the groups with a mean
+image and none), with the model weights in `.odyn/segmentation/` of the main
+folder; run it on a node too (a GPU is not needed).
 
 The code, by part: `config` (folders and settings), `slurm` (jobs and
 their states), `messages` (requests and claims), `records` (the test and
@@ -90,6 +96,7 @@ from .messages import apply_claims, pending_requests, send_request
 from .records import (
     archive_approved,
     experiment_owner,
+    groups_without_cellpose_candidates,
     groups_without_full_report,
     groups_without_mean_images,
     latest_approvals,
@@ -136,6 +143,7 @@ __all__ = [
     "cluster_folder",
     "crashed",
     "experiment_owner",
+    "groups_without_cellpose_candidates",
     "groups_without_full_report",
     "groups_without_mean_images",
     "heartbeat",
