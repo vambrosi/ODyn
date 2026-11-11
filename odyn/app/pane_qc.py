@@ -12,7 +12,9 @@ experiments' motion corrections, one row per experiment: its status (from
 its test jobs: the cluster's own test and the runs of sweeps), a way to
 download its test files to this computer (`cache`) and to open its folder and
 its window (`mcor_window`) from there: played from the share, a video is
-slow. Nothing is downloaded unless asked.
+slow. Nothing is downloaded unless asked. Once an experiment is approved,
+Curate ROIs opens the window its ROIs are curated in (`curation_window`), on
+its Cellpose candidates, read from the share (two files, not videos).
 
 The page opens on the first tab with rows; once a tab is picked, reloads keep
 it until the user changes.
@@ -62,8 +64,10 @@ from ..qc import (
     read_qc_summary,
     remote_size,
 )
+from ..segmentation import group_files
 from . import cache
 from .context import Context
+from .curation_window import CurationWindow, draft_name
 from ..drafts.draft import Draft
 from .mcor_window import McorWindow, Run
 from .models import FrameModel, fit_columns, sortable
@@ -563,6 +567,7 @@ class QcPane(QWidget):
         self.main_folder = Path(context.main_folder).resolve()  # as the database
         self.downloads: None | Downloads = None
         self.windows: dict[str, McorWindow] = {}  # open, by experiment folder
+        self.curations: dict[int, CurationWindow] = {}  # open, by group
         self.tab_names: list[str] = []
         self.tab_picked = False  # by the user, since the user last changed
         self.loading = 0  # the latest reload: an older one's rows are dropped
@@ -644,6 +649,8 @@ class QcPane(QWidget):
         self.show_folder.clicked.connect(self._show_folder)
         self.compare = QPushButton("Compare tests")
         self.compare.clicked.connect(self._compare)
+        self.curate = QPushButton("Curate ROIs")
+        self.curate.clicked.connect(self._curate)
         self.run_again = QPushButton("Run again")
         self.run_again.clicked.connect(self._run_again)
         self.tests_view = self._table(
@@ -657,6 +664,7 @@ class QcPane(QWidget):
                 self.show_folder,
                 self.run_again,
                 self.compare,
+                self.curate,
             ],
         )
         self.tests_view.setSelectionMode(QTableView.SelectionMode.ExtendedSelection)
@@ -994,6 +1002,12 @@ class QcPane(QWidget):
             "Check the full run, and compare the raw video and each test"
             + (tip or ("" if ready else " (once a test finished)"))
         )
+        approved = len(picked) == 1 and picked[0][1]["status"] == APPROVED
+        self.curate.setEnabled(approved)
+        self.curate.setStatusTip(
+            "Curate the ROIs of the experiment, from its Cellpose candidates"
+            + ("" if approved else " (once it is approved)")
+        )
 
     def _local(self, row: pd.Series) -> Path:
         return cache.local_folder(
@@ -1049,6 +1063,38 @@ class QcPane(QWidget):
         window.set_status(_window_status(row))
         window.closed.connect(lambda: self.windows.pop(key, None))
         self.windows[key] = window
+        window.show()
+
+    def _curate(self) -> None:
+        """
+        Open the ROI curation window of the selected approved experiment, on
+        the candidates and mean image on the share, with the draft of this
+        user kept here (beside where its files would be copied).
+        """
+        picked = self._picked()
+
+        if len(picked) != 1 or not self.curate.isEnabled():
+            return
+
+        label, row = picked[0]
+        group_id = int(row["group_id"])
+
+        if group_id in self.curations:
+            self.curations[group_id].raise_()
+            self.curations[group_id].activateWindow()
+            return
+
+        first = str(row["path"]).split(", ")[0]
+        mean, candidates = group_files(self.main_folder, first, group_id)
+        here = cache.local_folder(
+            self.main_folder, candidates.parent, self.context.cache_base
+        )
+        user = self.context.user or get_user()
+        window = CurationWindow(
+            label, group_id, mean, candidates, here / draft_name(group_id, user)
+        )
+        window.closed.connect(lambda: self.curations.pop(group_id, None))
+        self.curations[group_id] = window
         window.show()
 
     def _approve(self, key: str, excluded: list[int]) -> None:
@@ -1397,7 +1443,7 @@ class QcPane(QWidget):
         Close the experiments' windows and stop a download (after the file it
         is on), before the app closes.
         """
-        for window in list(self.windows.values()):
+        for window in [*self.windows.values(), *self.curations.values()]:
             window.close()
 
         self.poll.stop()

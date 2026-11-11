@@ -266,6 +266,23 @@ def default_cells(found: Candidates) -> np.ndarray:
     return cut(found, THRESHOLD, found.cells)
 
 
+def group_files(
+    main_folder: str | Path, experiment: str | Path, group_id: int
+) -> tuple[Path, Path]:
+    """
+    Where the mean image of a group is (`Group.save_mean_images`), and its
+    Cellpose candidates (`Group.save_cellpose_candidates`): in `processed/`
+    of `experiment`, the folder of its first experiment inside
+    `main_folder`. For the app, which finds them without the database.
+    """
+    processed = Path(main_folder) / experiment / "processed"
+
+    return (
+        processed / "mcor" / f"mean_group_{int(group_id)}.tif",
+        processed / "segmentation" / f"cellpose_group_{int(group_id)}.h5",
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Curation
 # --------------------------------------------------------------------------- #

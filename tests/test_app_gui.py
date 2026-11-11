@@ -1216,6 +1216,50 @@ def test_qc_opens_an_experiments_files(window, tmp_path, monkeypatch):
     assert (top / "metrics.json").is_file()
 
 
+def test_an_approved_experiment_opens_the_curation_of_its_rois(
+    window, tmp_path, monkeypatch
+):
+    import gc
+
+    from odyn.app import cache
+    from odyn.segmentation import group_files
+
+    db, group_id = a_tested_experiment(tmp_path / "data")
+    del db
+    gc.collect()  # closes its database (a cycle) in this thread
+
+    # Approved (an approval itself needs corrected files: see test_mcor_test)
+    approval = {"call_id": 10**6, "user": "tester", "called_at": "", "excluded": []}
+    monkeypatch.setattr("odyn.qc.latest_approvals", lambda db: {group_id: approval})
+
+    window.context.set_user("tester")
+    qc = window.qc
+    qc.reload()
+    settle(window.context)
+    assert qc.experiments["status"].tolist() == ["approved"]
+    assert not qc.curate.isEnabled()  # nothing selected
+    qc.tests_view.selectRow(0)
+    assert qc.curate.isEnabled()
+
+    # On the files of the group on the share, with the draft kept here
+    qc.curate.click()
+    [rois] = qc.curations.values()
+    rois.loader.wait()
+    QApplication.processEvents()
+    main = (tmp_path / "data").resolve()
+    mean, candidates = group_files(main, "20260304/m1/e1", group_id)
+    assert (rois.mean, rois.candidates) == (mean, candidates)
+    here = cache.local_folder(main, candidates.parent, window.context.cache_base)
+    assert rois.draft == here / f"rois_group_{group_id}_tester.draft.json"
+    assert f"cellpose --group {group_id}" in rois.canvas.message  # none yet
+
+    # Opened again, the same window comes up; closed, it goes
+    qc.curate.click()
+    assert list(qc.curations.values()) == [rois]
+    rois.close()
+    assert qc.curations == {}
+
+
 def test_a_test_is_picked_from_the_window(window, tmp_path, monkeypatch):
     import gc
     import json

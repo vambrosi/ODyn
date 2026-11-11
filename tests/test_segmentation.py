@@ -251,3 +251,15 @@ def test_putting_edits_back_undoes_them_and_they_read_back_as_json():
     assert list(table["basin"]) == [1, 3]
     assert list(table["kind"]) == ["resized", "added"]
     assert list(table["pixels"])[0] == 12
+
+
+def test_the_app_finds_the_files_of_a_group_where_the_group_writes_them(tmp_path):
+    from generate_data import a_tested_experiment
+
+    db, group_id = a_tested_experiment(tmp_path)
+    group = db.groups[group_id]
+
+    assert segmentation.group_files(tmp_path, "20260304/m1/e1", group_id) == (
+        group._mean_image_paths()[0],
+        group._candidates_path(),
+    )
