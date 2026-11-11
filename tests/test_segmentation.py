@@ -73,6 +73,36 @@ def test_a_basin_cut_at_a_threshold_is_what_cellpose_finds_there():
         np.testing.assert_array_equal(ours > 0, theirs > 0)
 
 
+def test_the_network_runs_in_float32_on_every_cpu(monkeypatch):
+    pytest.importorskip("cellpose")
+    import torch
+
+    from cellpose import models
+
+    built = {}
+
+    class Network:
+        """Stands in for the model: what it was built with, and zeros."""
+
+        device = torch.device("cpu")
+
+        def __init__(self, **options):
+            built.update(options, threads=torch.get_num_threads())
+
+        def eval(self, image, **options):
+            maps = np.zeros((3, *image.shape), np.float32)
+            return None, (None, maps[:2], maps[2]), None
+
+    monkeypatch.setattr(models, "CellposeModel", Network)
+    before = torch.get_num_threads()
+    flows, prob, settings = segmentation.run_network(np.ones((8, 9)), "cpdino")
+
+    assert built["use_bfloat16"] is False and settings["dtype"] == "float32"
+    assert built["threads"] == settings["threads"] == segmentation._usable_cpus()
+    assert torch.get_num_threads() == before  # put back for what runs next
+    assert flows.shape == (2, 8, 9) and prob.shape == (8, 9)
+
+
 def test_candidates_read_back_as_written(tmp_path):
     rng = np.random.default_rng(0)
     found = segmentation.Candidates(

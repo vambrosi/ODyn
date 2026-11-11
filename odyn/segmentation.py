@@ -39,6 +39,7 @@ from __future__ import annotations
 import copy
 import heapq
 import json
+import os
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -143,7 +144,8 @@ def run_network(
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """
     The Cellpose network output for `image`: the flows (2 x height x width),
-    the cell probability (logits) and the settings used.
+    the cell probability (logits) and the settings used. In float32, on
+    every CPU this process may use (or a GPU).
     """
     # Cellpose and torch are heavy, and only this needs them
     import cellpose
@@ -151,20 +153,45 @@ def run_network(
 
     from cellpose import models
 
-    model = models.CellposeModel(gpu=True, pretrained_model=str(weights))
-    normalize: Any = True if tile_px is None else {"tile_norm_blocksize": int(tile_px)}
-    _, (_, flows, prob), _ = model.eval(
-        np.asarray(image, np.float32), normalize=normalize, compute_masks=False
-    )
-    settings = {
-        "model": Path(weights).name,
-        "tile_px": tile_px,
-        "cellpose": cellpose.version,
-        "torch": torch.__version__,
-        "device": str(model.device),
-    }
+    # Every CPU, whatever the environment says: the caiman environment holds
+    # torch to one thread (for CaImAn), and nothing else runs meanwhile
+    threads = torch.get_num_threads()
+    torch.set_num_threads(_usable_cpus())
+
+    try:
+        # Not bfloat16, the Cellpose default: a CPU without it in hardware
+        # emulates it, three times slower on the cluster, for the same cells
+        model = models.CellposeModel(
+            gpu=True, pretrained_model=str(weights), use_bfloat16=False
+        )
+        normalize: Any = (
+            True if tile_px is None else {"tile_norm_blocksize": int(tile_px)}
+        )
+        _, (_, flows, prob), _ = model.eval(
+            np.asarray(image, np.float32), normalize=normalize, compute_masks=False
+        )
+        settings = {
+            "model": Path(weights).name,
+            "tile_px": tile_px,
+            "cellpose": cellpose.version,
+            "torch": torch.__version__,
+            "device": str(model.device),
+            "dtype": "float32",
+            "threads": torch.get_num_threads(),
+        }
+
+    finally:
+        torch.set_num_threads(threads)
 
     return np.asarray(flows, np.float32), np.asarray(prob, np.float32), settings
+
+
+def _usable_cpus() -> int:
+    """The CPUs this process may run on (those of the computer, if unknown)."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:  # not on Linux
+        return os.cpu_count() or 1
 
 
 def candidates_from_maps(
