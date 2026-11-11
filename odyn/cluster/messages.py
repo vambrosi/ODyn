@@ -17,6 +17,7 @@ from ..database import Database
 from ..shared import DONE_FOLDER, FAILED_FOLDER, Inbox, read_json, write_json
 from ..utils import get_user, logger
 from .config import REQUESTS_FOLDER, TIME_FORMAT, TickReport, cluster_folder
+from .mcor import submit_cellpose
 from .records import pick_candidate
 
 # What a request may ask for. A request is executed by name, so this list is
@@ -124,7 +125,9 @@ def apply_claims(main_folder: Path, project: None | str, report: TickReport) -> 
     Record each QC decision claimed in the app (`odyn.claims`), oldest first,
     as the person who made it, then file it in `claims/done/`. A decision
     that no longer applies (a pick while the last whole correction still
-    runs, say) stays, with why, for its author to see.
+    runs, say) stays, with why, for its author to see. An approval then
+    submits the mean images and Cellpose candidates of its group
+    (`submit_cellpose`).
     """
     from ..claims import claims  # it imports this module
 
@@ -181,3 +184,29 @@ def apply_claims(main_folder: Path, project: None | str, report: TickReport) -> 
         done = f"{path.stem}-{datetime.now():%Y%m%d-%H%M%S}"  # one per decision
         inbox.file(path, DONE_FOLDER, {"applied_at": stamp}, name=done)
         report.claims.append(f"{step} of group {group_id} for {user}")
+
+        if step == "approve":
+            _after_approval(main_folder, project, group, user, report)
+
+
+def _after_approval(
+    main_folder: Path, project: None | str, group, user: str, report: TickReport
+) -> None:
+    """
+    The mean images and Cellpose candidates of a group just approved, as a
+    job (`submit_cellpose`), unless the approval approved nothing. A job that
+    cannot be submitted is reported; the approval stands.
+    """
+    approval = group.latest_output("Group.approve_mcor_files") or {}
+
+    if not approval.get("approved"):
+        return
+
+    what = f"mean images and Cellpose candidates of group {group.group_id}"
+
+    try:
+        job_id = submit_cellpose(main_folder, project, group.group_id, user=user)
+        report.tests.append(f"{what} submitted (job {job_id})")
+
+    except Exception as error:  # by hand then: `mean-images`, then `cellpose`
+        report.errors.append(f"{what}: {type(error).__name__}: {error}")

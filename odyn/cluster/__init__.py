@@ -7,7 +7,9 @@ so anything that has to run there is left as a request file on the share,
 and a short `tick` on the cluster applies it. A tick also adds the submitted
 drafts whose recordings finished copying (`odyn.drafts.submissions`),
 submits a test motion correction of each experiment it added
-(`submit_mcor_test`), processes the sync files that arrived since their
+(`submit_mcor_test`), records the QC decisions made in the app (after an
+approval, it submits the mean images and Cellpose candidates of the group as
+one job: `submit_cellpose`), processes the sync files that arrived since their
 experiment was added, writes a heartbeat, and (as a chain) submits the next
 tick. Everything a tick does is safe to repeat, so a tick that ran twice, or
 not at all for a day, only delays work.
@@ -64,7 +66,8 @@ yet too); run them on a node (`srun`), as they read every acquisition.
 `cellpose` finds the cell candidates in the mean image of a group
 (`Group.save_cellpose_candidates`; `--missing` lists the groups with a mean
 image and none), with the model weights in `.odyn/segmentation/` of the main
-folder; run it on a node too (a GPU is not needed).
+folder; run it on a node too (a GPU is not needed). After an approval in the
+app, the tick runs both for the group, as one job.
 
 The code, by part: `config` (folders and settings), `slurm` (jobs and
 their states), `messages` (requests and claims), `records` (the test and
@@ -111,6 +114,7 @@ from .mcor import (
     mcor_backfill,
     run_mcor_sweep,
     run_mcor_test,
+    submit_cellpose,
     submit_mcor_sweep,
     submit_mcor_test,
     submit_picks,
@@ -164,6 +168,7 @@ __all__ = [
     "start_chain",
     "status",
     "stop_chain",
+    "submit_cellpose",
     "submit_mcor_sweep",
     "submit_mcor_test",
     "submit_picks",

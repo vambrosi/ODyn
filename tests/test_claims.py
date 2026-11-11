@@ -9,6 +9,7 @@ import os
 import pytest
 
 from generate_data import a_tested_experiment
+from test_add_mcor_files import build, write_mcor
 
 from odyn.claims import ClaimTaken, claim, claims, pending_claims
 from odyn.cluster import TickReport, apply_claims
@@ -79,3 +80,34 @@ def test_a_claim_the_tick_refuses_is_kept_for_its_author(tmp_path, monkeypatch):
 
     apply_claims(tmp_path, None, TickReport())  # left until decided again
     assert pending_claims(tmp_path)[(group_id, "again")]["failed"] == found["failed"]
+
+
+def test_an_approval_submits_the_mean_images_then_the_cell_candidates(tmp_path, slurm):
+    from odyn.cluster import cluster_folder
+
+    db, group = build(tmp_path)
+    group_id = group.group_id
+
+    # Nothing saved yet: recorded, with nothing to make images of
+    claim(tmp_path, None, group_id, "approve", "alice")
+    report = TickReport()
+    apply_claims(tmp_path, None, report)
+    assert report.claims and not report.tests and not report.errors
+
+    write_mcor(tmp_path, 1)
+    group.add_mcor_files()
+    claim(tmp_path, None, group_id, "approve", "alice")
+    report = TickReport()
+    apply_claims(tmp_path, None, report)
+
+    assert report.claims == [f"approve of group {group_id} for alice"]
+    assert report.tests == [
+        f"mean images and Cellpose candidates of group {group_id} submitted"
+        " (job 4242)"
+    ]
+    jobs = cluster_folder(tmp_path) / "jobs"
+    script = (jobs / f"cellpose-g{group_id}.sh").read_text()
+    means = script.index(f"mean-images --group {group_id} --user alice")
+    cells = script.index(f"cellpose --group {group_id} --user alice")
+    assert means < cells  # the candidates come from the mean image
+    assert f"sbatch --parsable --export=NONE {jobs}" in slurm.read_text()

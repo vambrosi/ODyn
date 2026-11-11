@@ -1,6 +1,7 @@
 """
 Submitting test motion corrections and sweeps (and what their jobs run),
-whole corrections after a pick, and runs asked again.
+whole corrections after a pick, runs asked again, and the mean images and
+Cellpose candidates after an approval.
 """
 
 from __future__ import annotations
@@ -475,6 +476,62 @@ def run_mcor_test(
         given["label"] = label
 
     return db.groups[group_id].test_motion_correction(whole=whole, **given)
+
+
+def submit_cellpose(
+    main_folder: str | Path,
+    project: None | str,
+    group_id: int,
+    *,
+    user: str,
+    dry_run: bool = False,
+) -> None | str:
+    """
+    Submit what follows an approval of group `group_id` as one job, its calls
+    recorded as made by `user`: the mean images of its approved acquisitions
+    (`Group.save_mean_images`), then the Cellpose candidates in them
+    (`Group.save_cellpose_candidates`, with the default model). Writes the
+    script to `jobs/` and returns the job id (`None` in a dry run, which only
+    writes and shows the script).
+    """
+    db = Database(main_folder, project=project)
+    config = ClusterConfig.read(main_folder)
+    path = group_paths(db, group_id)
+    where = f"group {group_id}" + (f" ({path})" if path else "")
+    steps = [
+        [*_odyn_command(main_folder, project), step, "--group", str(group_id)]
+        + ["--user", user]
+        for step in ("mean-images", "cellpose")
+    ]
+    script = (
+        cluster_folder(main_folder, project) / JOBS_FOLDER / f"cellpose-g{group_id}.sh"
+    )
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        _mcor_script(
+            main_folder,
+            project,
+            config,
+            name=f"odyn-cellpose-{project or 'main'}-g{group_id}",
+            about=f"Mean images and Cellpose candidates of {where} for {user}",
+            command="\n".join(shlex.join(step) for step in steps),
+            # It reads every acquisition, as a whole correction does
+            time=config.whole_time,
+            disk_gb=1,  # nothing goes to scratch
+        )
+    )
+    job_id = _sbatch([str(script)], dry_run)
+
+    if job_id is None:
+        print(script.read_text())
+        return None
+
+    logger.info(
+        f"Submitted the mean images and Cellpose candidates of group {group_id} "
+        f"as job {job_id}."
+    )
+
+    return job_id
 
 
 def submit_mcor_sweep(
