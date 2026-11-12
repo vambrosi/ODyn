@@ -1217,6 +1217,20 @@ def test_the_cellpose_candidates_come_from_the_mean_image(
     assert found.settings["model"] == "cpdino" and found.settings["tile_um"] == 20.0
     assert not list(path.parent.glob(".*.partial"))
     assert groups_without_cellpose_candidates(db) == []
+    calls = group.latest_calls("save_cellpose_candidates")
+    assert calls.iloc[0]["input_model"] == "cpdino"
+
+    # A group of deep experiments gets cpsam, and the call says so
+    exp_id = int(group.experiments.index[0])
+    db.add_annotations(
+        target_type="experiment", target_id=exp_id, values={"depth_goal": "deep"}
+    )
+    weights.with_name("cpsam").write_bytes(b"")
+    group = db.groups[group_id]
+    group.save_cellpose_candidates()
+    assert seen["path"] == weights.with_name("cpsam")
+    calls = group.latest_calls("save_cellpose_candidates")
+    assert calls.iloc[0]["input_model"] == "cpsam"
 
 
 def test_the_tick_records_which_jobs_stopped_for_the_app(tmp_path, slurm, monkeypatch):

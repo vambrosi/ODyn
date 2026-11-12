@@ -2393,7 +2393,7 @@ class Group(CallRecorder):
 
     @record_call
     def save_cellpose_candidates(
-        self, *, model: str = "cpdino", tile_um: None | float = None
+        self, *, model: None | str = None, tile_um: None | float = None
     ) -> Path:
         """
         Cell candidates from Cellpose on the group mean image, to curate the
@@ -2412,7 +2412,8 @@ class Group(CallRecorder):
         **PARAMETERS**
         - `model`: the Cellpose 4 model (`cpdino`, `cpdino-vitb`, `cpsam` or
         `cpsam_v2`), a file of that name in `.odyn/segmentation/` of the main
-        folder.
+        folder. `None` takes `cpsam` if an experiment of the group is annotated
+        deep (`depth_goal`), else `cpdino` (`segmentation.MODEL`).
         - `tile_um`: normalize the brightness in tiles this wide (um), which
         lifts dark regions. `None` normalizes the whole image at once.
 
@@ -2421,6 +2422,10 @@ class Group(CallRecorder):
         (`python -m odyn.cluster <main_folder> cellpose --group 7`).
         """
         from . import segmentation
+
+        if model is None:
+            model = self._cellpose_model()
+            self.update_parameters_used({"model": model})
 
         if model not in segmentation.MODELS:
             raise ValueError(
@@ -3057,6 +3062,24 @@ class Group(CallRecorder):
             folder / f"mean_group_{self.group_id}.tif",
             folder / f"means_group_{self.group_id}.tif",
         )
+
+    def _cellpose_model(self) -> str:
+        """
+        The Cellpose model for this group: `segmentation.DEEP_MODEL` if one of
+        its experiments is annotated deep (`depth_goal`), else
+        `segmentation.MODEL`.
+        """
+        from . import segmentation
+
+        goals = self.db.annotations_for("experiment")
+
+        if "depth_goal" in goals.columns:
+            depth = goals["depth_goal"].reindex(self.experiments.index)
+
+            if (depth == "deep").any():
+                return segmentation.DEEP_MODEL
+
+        return segmentation.MODEL
 
     def _candidates_path(self) -> Path:
         """

@@ -150,7 +150,10 @@ def main(argv: None | list[str] = None) -> int:
         action="store_true",
         help="list the groups with a mean image but no candidates",
     )
-    cells.add_argument("--model", default="cpdino", help="the Cellpose 4 model")
+    cells.add_argument(
+        "--model",
+        help="the Cellpose 4 model (default: cpsam for deep experiments, else cpdino)",
+    )
     cells.add_argument(
         "--tile-um", type=float, help="normalize the brightness in tiles this wide"
     )

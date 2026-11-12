@@ -61,6 +61,11 @@ NITER = 200  # steps along the flows, the Cellpose default without a diameter
 # `.odyn/segmentation/` folder of the main folder
 MODELS = ("cpdino", "cpdino-vitb", "cpsam", "cpsam_v2")
 WEIGHTS_FOLDER = "segmentation"
+# The model for a group, by the depth goal of its experiments (`depth_goal`):
+# cpdino, the pick of a survey of superficial fields, or cpsam for deep ones,
+# where cpdino takes the haze for cells and finds few somas or none
+MODEL = "cpdino"
+DEEP_MODEL = "cpsam"
 
 
 @dataclass

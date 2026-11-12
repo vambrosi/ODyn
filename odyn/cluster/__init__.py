@@ -53,7 +53,7 @@ python -m odyn.cluster <main_folder> full-report --group 7 [--group 8 ...]
 python -m odyn.cluster <main_folder> full-report --missing
 python -m odyn.cluster <main_folder> mean-images --group 7 [--group 8 ...] [--all-saved]
 python -m odyn.cluster <main_folder> mean-images --missing
-python -m odyn.cluster <main_folder> cellpose --group 7 [--model cpdino] [--tile-um 200]
+python -m odyn.cluster <main_folder> cellpose --group 7 [--model cpsam] [--tile-um 200]
 python -m odyn.cluster <main_folder> cellpose --missing
 ```
 `full-previews` writes the full run's videos of a group corrected before
@@ -66,8 +66,9 @@ yet too); run them on a node (`srun`), as they read every acquisition.
 `cellpose` finds the cell candidates in the mean image of a group
 (`Group.save_cellpose_candidates`; `--missing` lists the groups with a mean
 image and none), with the model weights in `.odyn/segmentation/` of the main
-folder; run it on a node too (a GPU is not needed). After an approval in the
-app, the tick runs both for the group, as one job.
+folder: `cpsam` for a group of experiments annotated deep, `cpdino` for the
+others, unless `--model` says. Run it on a node too (a GPU is not needed).
+After an approval in the app, the tick runs both for the group, as one job.
 
 The code, by part: `config` (folders and settings), `slurm` (jobs and
 their states), `messages` (requests and claims), `records` (the test and
