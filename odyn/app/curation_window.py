@@ -6,11 +6,12 @@ reject (`Curation`).
 
 The cells start as Cellpose keeps them at its defaults. A click on a cell
 selects it, and it stays selected, however small, rejected or outside the
-area range, until a click on it again or Esc. A click anywhere else adds the
-candidate there, or grows the cell of that basin until it takes the point
-clicked (`Curation.add`); where Cellpose has no basin, it grows a cell from
-the mean image (`Curation.grow`). The card of a cell switches it between its
-basin and the image.
+area range, until a click on it again, Esc, or a change that takes it away
+(an undo, or the flow check). A click anywhere else adds the candidate
+there, or grows the cell of that basin until it takes the point clicked
+(`Curation.add`); where Cellpose has no basin, it grows a cell from the mean
+image (`Curation.grow`). The card of a cell switches it between its basin
+and the image.
 
 - **Above the image**, the legend of the outlines, in the colors of the
   survey viewer: the cells of Cellpose cyan, resized ones pink, added ones
@@ -708,7 +709,7 @@ class CurationWindow(QWidget):
         self.found: None | Candidates = None
         self.curation: None | Curation = None
         self.levels: None | np.ndarray = None  # the mean image (`levels16`)
-        self.selected: None | int = None  # a basin
+        self.selected: None | int = None  # a cell, by its number
         self.undo_stack: list[Edits] = []
         self.redo_stack: list[Edits] = []
         self._outlines: dict[int, tuple[tuple, QPainterPath, QRectF]] = {}
@@ -1153,7 +1154,13 @@ class CurationWindow(QWidget):
             self.redo_stack.clear()
 
     def changed(self) -> None:
-        """After every change: redraw, and keep the draft soon."""
+        """
+        After every change: let the selected cell go if the change took it
+        away (an undo, or the flow check), redraw, and keep the draft soon.
+        """
+        if self.selected is not None and not self.curation.may_have_cell(self.selected):
+            self.selected = None
+
         self.redraw()
         self.saving.start()
 

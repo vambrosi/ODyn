@@ -595,10 +595,38 @@ class Curation:
         """Whether the cell of `basin` is grown from the image (`grow`)."""
         return basin in self._edits.grown
 
+    def may_have_cell(self, number: int) -> bool:
+        """
+        Whether cell `number` may be there under the edits, with pixels at
+        the threshold or not: one grown from the image, one added, or the
+        cell of a basin the flow check lets through (of any basin, with the
+        flow check off; see `Edits.flow_check`).
+        """
+        edits = self._edits
+
+        if number in edits.grown or number in edits.seeds:
+            return True
+
+        if not 1 <= number <= self.basin_count:
+            return False
+
+        if not edits.flow_check:
+            return True
+
+        return bool(
+            self.found.area[number - 1] >= MIN_SIZE
+            and self.found.flow_error[number - 1] <= FLOW_THRESHOLD
+        )
+
     def seed(self, basin: int) -> int:
         """Where the cell of `basin` grows from: the click, or the peak."""
         if basin in self._edits.grown:
             return self._edits.grown[basin]
+
+        if not 1 <= basin <= self.basin_count:
+            raise ValueError(
+                f"No basin or cell grown from the image is numbered {basin}."
+            )
 
         return int(self._edits.seeds.get(basin, self.found.peak[basin - 1]))
 
@@ -871,16 +899,6 @@ class Curation:
             edits.max_um2 is not None and area > edits.max_um2
         )
 
-    def _candidate(self, basin: int) -> bool:
-        """Whether `basin` may have a cell (see `Edits.flow_check`)."""
-        if basin in self._edits.seeds or not self._edits.flow_check:
-            return True
-
-        return bool(
-            self.found.area[basin - 1] >= MIN_SIZE
-            and self.found.flow_error[basin - 1] <= FLOW_THRESHOLD
-        )
-
     def _cell(self, basin: int) -> None | Cell:
         """The cell of `basin` under the edits, or `None` when it has none."""
         edits = self._edits
@@ -902,7 +920,7 @@ class Curation:
                 else None
             )
 
-        if not self._candidate(basin):
+        if not self.may_have_cell(basin):
             return None
 
         order, level = self.flood(basin)

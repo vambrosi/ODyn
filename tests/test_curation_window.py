@@ -201,6 +201,34 @@ def test_b_switches_a_cell_between_its_basin_and_the_image(app, tmp_path):
     window.close()
 
 
+def test_a_change_that_takes_the_selected_cell_away_lets_it_go(app, tmp_path):
+    window = opened(app, tmp_path)
+
+    # Grown where no basin is (numbered above the basins), then undone
+    window.click(4, 40)
+    assert window.selected == 4
+    press(window, "Ctrl+Z")
+    assert window.selected is None and not window.card.isVisible()
+    assert window.counts.text().startswith("2 cells kept")
+
+    # Redone: back, but no longer selected
+    press(window, "Ctrl+Shift+Z")
+    assert window.curation.from_image(4) and window.selected is None
+
+    # The dim spot, which the flow check leaves out: added, then undone; and
+    # without the flow check, until it is back on
+    window.click(24, 41)
+    assert window.selected == 3
+    press(window, "Ctrl+Z")
+    assert window.selected is None
+    window.flow_check.trigger()
+    window.click(24, 38)
+    assert window.selected == 3 and window.curation.cells[3].kind == "cellpose"
+    window.flow_check.trigger()
+    assert window.selected is None and 3 not in window.curation.cells
+    window.close()
+
+
 def test_the_selected_cell_is_resized_by_its_slider_and_keys(app, tmp_path):
     window = opened(app, tmp_path)
     window.click(10, 10)

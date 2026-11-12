@@ -362,6 +362,31 @@ def test_putting_edits_back_undoes_them_and_they_read_back_as_json():
     assert list(table["pixels"])[0] == 12
 
 
+def test_a_cell_undone_or_left_out_by_the_flow_check_is_there_no_more():
+    found = drawn_candidates()
+    curation = segmentation.Curation(found, image=drawn_image(found))
+    before = curation.edits
+    there = [curation.may_have_cell(number) for number in range(5)]
+    assert there == [False, True, True, False, False]
+
+    # The dim spot, without the flow check or added; a cell grown where no
+    # basin is, numbered above the basins
+    curation.set_flow_check(False)
+    assert curation.may_have_cell(3)
+    curation.set_flow_check(True)
+    curation.add(24, 38)
+    spot = curation.grow(4, 40)
+    assert curation.may_have_cell(3) and curation.may_have_cell(spot)
+
+    # Both undone: neither may be there, and the grown one has no seed
+    curation.edits = before
+    assert not curation.may_have_cell(3) and not curation.may_have_cell(spot)
+
+    for where in (curation.seed, curation.flood):
+        with pytest.raises(ValueError, match="grown from the image is numbered 4"):
+            where(spot)
+
+
 def test_the_app_finds_the_files_of_a_group_where_the_group_writes_them(tmp_path):
     from generate_data import a_tested_experiment
 
