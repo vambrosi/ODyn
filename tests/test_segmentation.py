@@ -174,6 +174,18 @@ def drawn_image(found: segmentation.Candidates) -> np.ndarray:
     return (found.prob + 6 + spot).astype(np.float32)
 
 
+def soma_image(center: tuple[int, int]) -> np.ndarray:
+    """
+    A mean image of the size of the drawn candidates, dark (1) but for one
+    soma: a Gaussian 10 high, of sigma 1.5 px, at `center`.
+    """
+    yy, xx = np.mgrid[:30, :44]
+    distance2 = (yy - center[0]) ** 2 + (xx - center[1]) ** 2
+    soma = 10 * np.exp(-distance2 / (2 * 1.5**2))
+
+    return (1 + soma).astype(np.float32)
+
+
 def test_the_curation_starts_from_the_cells_cellpose_keeps():
     found = drawn_candidates()
     curation = segmentation.Curation(found)
@@ -275,7 +287,7 @@ def test_a_click_where_no_basin_is_grows_a_cell_from_the_image():
     found = drawn_candidates()
     curation = segmentation.Curation(found, image=drawn_image(found))
 
-    # Next to the spot: a new cell, numbered above the basins, from the
+    # Next to the spot: a drawn cell, numbered above the basins, from the
     # brightest pixel near the click, as large as the spot at half its height
     cell = curation.add(4, 40)
     grown = curation.cells[cell]
@@ -285,22 +297,26 @@ def test_a_click_where_no_basin_is_grows_a_cell_from_the_image():
     assert not found.basins.flat[grown.pixels].any()  # where no basin is
     assert curation.cell_at(3, 39) == cell
 
-    # Resized, rejected and kept as the others are
+    # Resized and kept as the others are, its pixels in the edits
     curation.resize(cell, 5)
     assert len(curation.cells[cell].pixels) == 5
     table = curation.table()
     assert list(table["kind"]) == ["cellpose", "cellpose", "image"]
     assert list(table["basin"]) == [1, 2, 0]  # no basin
-    edits = segmentation.Edits.from_json(curation.edits.as_json())
-    assert edits.grown == {cell: 3 * 44 + 39} and edits.sizes[cell] == 5
+    drawn = curation.edits.drawn[cell]
+    assert drawn.seed == 3 * 44 + 39 and cell not in curation.edits.sizes
+    np.testing.assert_array_equal(drawn.pixels, curation.cells[cell].pixels)
+
+    # Rejected, it is gone: there is no candidate to put back
     curation.reject(cell)
+    assert cell not in curation.cells and not curation.may_have_cell(cell)
     assert [c.basin for c in curation.kept()] == [1, 2]
 
     # Without the image, there is nothing to grow it from
     assert segmentation.Curation(found).add(4, 40) is None
 
 
-def test_two_grown_cells_never_overlap_and_the_first_keeps_its_pixels():
+def test_drawn_cells_keep_their_pixels_and_never_overlap():
     found = drawn_candidates()
     curation = segmentation.Curation(found, image=drawn_image(found))
     first = curation.grow(3, 39)
@@ -313,53 +329,191 @@ def test_two_grown_cells_never_overlap_and_the_first_keeps_its_pixels():
 
     assert overlap() == 0
 
-    # The first grows over what the second had: the second gives it up
-    taken = set(curation.cells[second].pixels)
+    # The first, as large as it can be, goes around the second
+    taken = curation.cells[second].pixels.copy()
     curation.resize(first, len(curation.flood(first)[0]))
-    assert overlap() == 0 and taken & set(curation.cells[first].pixels)
+    assert overlap() == 0
+    np.testing.assert_array_equal(curation.cells[second].pixels, taken)
+
+    # Shrunk, it keeps some of its own pixels; grown back, the same ones
+    start = curation.cells[first].pixels.copy()
+    curation.resize(first, len(start) // 2)
+    assert set(curation.cells[first].pixels) < set(start)
+    curation.resize(first, len(start))
+    np.testing.assert_array_equal(curation.cells[first].pixels, start)
+
+
+def test_a_drawn_cell_crosses_basin_edges_and_cellpose_cells_go_around_it():
+    # A soma half in the basin of the dim spot, which has no cell, and half
+    # where no basin is: a cell drawn from either half takes all of it
+    found = drawn_candidates()
+    curation = segmentation.Curation(found, image=soma_image((27, 42)))
+    cell = curation.add(28, 42)
+    pixels = curation.cells[cell].pixels.copy()
+    assert set(found.basins.flat[pixels]) == {0, 3}
+
+    def overlap() -> int:
+        sizes = sum(len(cell.pixels) for cell in curation.cells.values())
+        return sizes - np.count_nonzero(curation.owner)
+
+    # Nothing moves it but an edit of its own: the dim spot, let in, goes
+    # around it, at any threshold
+    curation.set_flow_check(False)
+    assert 3 in curation.cells and not set(curation.cells[3].pixels) & set(pixels)
+
+    for threshold in (-2.0, 0.0, 2.0):
+        curation.set_threshold(threshold)
+        np.testing.assert_array_equal(curation.cells[cell].pixels, pixels)
+        assert overlap() == 0
+
+    curation.set_area_range(min_um2=len(pixels) + 1)
+    assert curation.cells[cell].excluded
+    np.testing.assert_array_equal(curation.cells[cell].pixels, pixels)
+
+    # Grown over the seed of the dim spot while it was left out, it leaves
+    # the dim spot no pixels once let in
+    curation.set_area_range()
+    curation.set_flow_check(True)
+    curation.resize(cell, len(curation.flood(cell)[0]))
+    assert curation.cell_at(*divmod(curation.seed(3), 44)) == cell
+    curation.set_flow_check(False)
+    assert curation.may_have_cell(3) and 3 not in curation.cells
+
+
+def test_a_drawn_cell_takes_the_pixels_of_a_rejected_cell_not_a_kept_one():
+    # A soma on the edge of cell 2, half in it
+    found = drawn_candidates()
+    image = soma_image((12, 32))
+    curation = segmentation.Curation(found, image=image)
+    before = set(curation.cells[2].pixels)
+
+    # Kept, cell 2 stops it
+    cell = curation.add(12, 35)
+    assert not set(curation.cells[cell].pixels) & before
+    small = len(curation.cells[cell].pixels)
+
+    # Rejected, it does not: cell 2 goes around the drawn cell, shown or
+    # put back, at any threshold
+    curation = segmentation.Curation(found, image=image)
+    curation.reject(2)
+    cell = curation.add(12, 35)
+    pixels = set(curation.cells[cell].pixels)
+    assert len(pixels) > small and pixels & before
+    rejected = set(curation.cells[2].pixels)
+    assert rejected < before and not rejected & pixels
+
+    curation.restore(2)
+    assert set(curation.cells[2].pixels) == rejected
+    curation.set_threshold(-2.0)
+    assert len(curation.cells[2].pixels) > len(before)
+    assert not set(curation.cells[2].pixels) & pixels
+    assert set(curation.cells[cell].pixels) == pixels
 
 
 def test_a_cell_switches_between_its_basin_and_the_image():
     found = drawn_candidates()
     curation = segmentation.Curation(found, image=drawn_image(found))
+    curation.resize(1, 60)
     before = curation.cells[1].pixels.copy()
 
-    curation.use_basin(1, False)
+    # From the image: a cell drawn in its place, as large as its edge
+    assert curation.use_basin(1, False)
     cell = curation.cells[1]
     assert cell.kind == "image" and curation.from_image(1)
-    assert set(found.basins.flat[cell.pixels]) <= {0, 1}  # its basin, or none
+    assert len(cell.pixels) != 60
 
-    curation.use_basin(1, True)
-    assert curation.cells[1].kind == "cellpose"
+    # From the basin again: the Cellpose cell as it was, its size its own
+    assert curation.use_basin(1, True)
+    assert curation.cells[1].kind == "resized"
     np.testing.assert_array_equal(curation.cells[1].pixels, before)
 
-    # A cell grown where no basin is has none to use
+    # A cell drawn where no basin is has none to use
     spot = curation.grow(4, 40)
-    curation.use_basin(spot, True)
-    assert curation.from_image(spot)
+    assert not curation.use_basin(spot, True) and curation.from_image(spot)
+
+    # Rejected while from the image: the drawn cell goes, the Cellpose cell
+    # stays, rejected
+    curation.use_basin(1, False)
+    curation.reject(1)
+    assert not curation.from_image(1) and curation.cells[1].rejected
 
 
 def test_putting_edits_back_undoes_them_and_they_read_back_as_json():
-    curation = segmentation.Curation(drawn_candidates())
+    found = drawn_candidates()
+    curation = segmentation.Curation(found, image=drawn_image(found))
     labels = curation.labels()
     before = curation.edits  # a copy
 
     curation.add(24, 38)
     curation.resize(1, 12)
     curation.reject(2)
+    curation.grow(4, 40)
     curation.set_area_range(5.0, 500.0)
     edits = segmentation.Edits.from_json(curation.edits.as_json())
     assert edits == curation.edits and before == segmentation.Edits()
+    assert len(curation.edits.as_json()["drawn"]["4"]["runs"]) < 10  # rows
 
     curation.edits = before
     np.testing.assert_array_equal(curation.labels(), labels)
 
     curation.edits = edits
-    assert sorted(curation.cells) == [1, 2, 3] and curation.cells[2].rejected
+    assert sorted(curation.cells) == [1, 2, 3, 4] and curation.cells[2].rejected
     table = curation.table()
-    assert list(table["basin"]) == [1, 3]
-    assert list(table["kind"]) == ["resized", "added"]
+    assert list(table["basin"]) == [1, 3, 0]
+    assert list(table["kind"]) == ["resized", "added", "image"]
     assert list(table["pixels"])[0] == 12
+
+
+def test_the_cells_follow_from_the_edits_alone():
+    # Random edits, each followed by the cells worked out afresh from the
+    # edits alone: the same, whatever came before
+    found = drawn_candidates()
+    image = drawn_image(found) + soma_image((12, 33)) + soma_image((26, 41))
+    curation = segmentation.Curation(found, image=image)
+    rng = np.random.default_rng(0)
+    history = [curation.edits]
+
+    for _ in range(250):
+        y, x = int(rng.integers(30)), int(rng.integers(44))
+        cells = sorted(curation.cells)
+        cell = int(rng.choice(cells)) if cells else 1
+        step = rng.integers(9)
+
+        if step == 0:
+            curation.set_threshold(float(rng.uniform(-2, 2)))
+        elif step == 1:
+            curation.set_flow_check(bool(rng.integers(2)))
+        elif step == 2:
+            curation.set_area_range(float(rng.uniform(0, 30)))
+        elif step == 3:
+            curation.add(y, x)
+        elif step == 4:
+            curation.grow(y, x)
+        elif step == 5 and cell in curation.cells:
+            total = len(curation.flood(cell)[0])
+            curation.resize(cell, int(rng.integers(1, total + 1)))
+        elif step == 6:
+            (curation.reject if rng.integers(2) else curation.restore)(cell)
+        elif step == 7:
+            curation.use_basin(cell, bool(rng.integers(2)))
+        else:  # back to an earlier step
+            curation.edits = history[int(rng.integers(len(history)))]
+
+        history.append(curation.edits)
+        fresh = segmentation.Curation(found, curation.edits, image=image)
+        assert sorted(fresh.cells) == sorted(curation.cells)
+        np.testing.assert_array_equal(fresh.owner, curation.owner)
+
+        for number, cell in fresh.cells.items():
+            other = curation.cells[number]
+            np.testing.assert_array_equal(cell.pixels, other.pixels)
+            assert (cell.kind, cell.rejected, cell.excluded) == (
+                other.kind,
+                other.rejected,
+                other.excluded,
+            )
+
+    assert any(cell.kind == "image" for cell in curation.cells.values())
 
 
 def test_a_cell_undone_or_left_out_by_the_flow_check_is_there_no_more():
@@ -369,7 +523,7 @@ def test_a_cell_undone_or_left_out_by_the_flow_check_is_there_no_more():
     there = [curation.may_have_cell(number) for number in range(5)]
     assert there == [False, True, True, False, False]
 
-    # The dim spot, without the flow check or added; a cell grown where no
+    # The dim spot, without the flow check or added; a cell drawn where no
     # basin is, numbered above the basins
     curation.set_flow_check(False)
     assert curation.may_have_cell(3)
@@ -378,12 +532,12 @@ def test_a_cell_undone_or_left_out_by_the_flow_check_is_there_no_more():
     spot = curation.grow(4, 40)
     assert curation.may_have_cell(3) and curation.may_have_cell(spot)
 
-    # Both undone: neither may be there, and the grown one has no seed
+    # Both undone: neither may be there, and the drawn one has no seed
     curation.edits = before
     assert not curation.may_have_cell(3) and not curation.may_have_cell(spot)
 
     for where in (curation.seed, curation.flood):
-        with pytest.raises(ValueError, match="grown from the image is numbered 4"):
+        with pytest.raises(ValueError, match="No basin or drawn cell is numbered 4"):
             where(spot)
 
 

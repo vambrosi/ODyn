@@ -10,8 +10,10 @@ area range, until a click on it again, Esc, or a change that takes it away
 (an undo, or the flow check). A click anywhere else adds the candidate
 there, or grows the cell of that basin until it takes the point clicked
 (`Curation.add`); where Cellpose has no basin, it grows a cell from the mean
-image (`Curation.grow`). The card of a cell switches it between its basin
-and the image.
+image (`Curation.grow`), over the pixels of no kept cell and of no other cell
+grown from the image. Such a cell keeps its pixels until it is edited, and
+Cellpose cells go around it. The card of a cell switches it between its
+basin and the image.
 
 - **Above the image**, the legend of the outlines, in the colors of the
   survey viewer: the cells of Cellpose cyan, resized ones pink, added ones
@@ -27,8 +29,8 @@ and the image.
 - **The card of the selected cell**, over the image, in the corner that
   leaves the cell in view: its number and threshold, what sets it apart
   (`cell_state`), its size in pixels and um2 on a logarithmic slider, Using
-  Cellpose basin (off: grown from the image), Follow threshold and Reject or
-  Restore.
+  Cellpose basin (off: grown from the image), Follow threshold and Reject
+  (Restore once rejected, Delete for a cell grown where no basin is).
 
 The wheel zooms at the pointer and a drag pans. The outlines run along the
 edges of the pixels.
@@ -148,7 +150,7 @@ KEYS = {
     "larger": ("]", "Increase cell area by 1 px"),
     "follow": ("T", "Follow the global threshold"),
     "basin": ("B", "Switch between basin and image"),
-    "reject": ("Backspace, Delete", "Reject or restore the cell"),
+    "reject": ("Backspace, Delete", "Reject, restore, or delete the cell"),
     "deselect": ("Esc", "Deselect the cell"),
     "undo": ("Ctrl+Z", "Undo"),
     "redo": ("Ctrl+Shift+Z", "Redo"),
@@ -173,7 +175,7 @@ AREA_DELAY_MS = 300
 CARD_WIDTH_PX = 340
 CARD_MARGIN_PX = 12
 
-DRAFT_VERSION = 1
+DRAFT_VERSION = 2
 DRAFT_DELAY_MS = 500  # a draft is written once the edits pause this long
 
 
@@ -1288,7 +1290,13 @@ class CurationWindow(QWidget):
             return
 
         self.remember()
-        self.curation.use_basin(self.selected, on)
+
+        if not self.curation.use_basin(self.selected, on):
+            self.undo_stack.pop()
+            self.say("Its seed is in another cell: nothing to grow from there.")
+            self.redraw()  # the toggle back as it was
+            return
+
         self.changed()
 
     def follow_threshold(self) -> None:
@@ -1401,8 +1409,9 @@ class CurationWindow(QWidget):
 
     def _outline(self, cell) -> tuple[QPainterPath, QRectF]:
         """
-        The outline of `cell`, made again only when its pixels changed (a
-        cell grown from the image can change them and keep its size).
+        The outline of `cell`, made again only when its pixels changed (they
+        can change at the same size: a Cellpose cell going around a drawn
+        one, or a cell drawn again in place of its Cellpose cell).
         """
         key = (len(cell.pixels), hash(cell.pixels.tobytes()))
         kept = self._outlines.get(cell.basin)
@@ -1449,9 +1458,12 @@ class CurationWindow(QWidget):
 
         area = size * self.curation.um2_per_px
         self.size_line.setText(f"{size} px, {area:.1f} µm²")
-        self.reject.setText(
-            "Restore" if cell is not None and cell.rejected else "Reject"
-        )
+        if cell is not None and cell.rejected:
+            self.reject.setText("Restore")
+        elif basin > self.curation.basin_count:  # drawn: gone once taken out
+            self.reject.setText("Delete")
+        else:
+            self.reject.setText("Reject")
 
         grown = self.curation.from_image(basin)
 
@@ -1541,9 +1553,9 @@ class CurationWindow(QWidget):
     def _size_card(self) -> None:
         """
         Make the card as wide as its buttons need, in the font and style of
-        this system, once shown (Restore being the wider of Reject and
-        Restore): one row of them, never cut, and the card never changes
-        width.
+        this system, once shown (Restore being the widest of Reject,
+        Restore, and Delete): one row of them, never cut, and the card never
+        changes width.
         """
         text = self.reject.text()
         self.reject.setText("Restore")

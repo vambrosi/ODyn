@@ -174,7 +174,7 @@ def test_a_click_selects_a_cell_and_one_elsewhere_adds_the_candidate(app, tmp_pa
     assert window.cell_line.text() == "Cell 4, from the image"
     assert window.cell_state.text() == ""
     assert not window.use_basin.isChecked() and not window.use_basin.isEnabled()
-    assert not window.follow.isEnabled()
+    assert not window.follow.isEnabled() and window.reject.text() == "Delete"
     assert kinds(window)[-1] == "selected" and "image" not in kinds(window)
     press(window, "Esc")
     assert kinds(window)[-1] == "image"
@@ -184,6 +184,7 @@ def test_a_click_selects_a_cell_and_one_elsewhere_adds_the_candidate(app, tmp_pa
 def test_b_switches_a_cell_between_its_basin_and_the_image(app, tmp_path):
     window = opened(app, tmp_path)
     window.click(10, 10)
+    press(window, "[")  # a size of its own
     before = len(window.curation.cells[1].pixels)
     assert window.use_basin.isChecked() and window.use_basin.isEnabled()
 
@@ -191,13 +192,30 @@ def test_b_switches_a_cell_between_its_basin_and_the_image(app, tmp_path):
     assert window.curation.from_image(1) and not window.use_basin.isChecked()
     assert window.cell_line.text() == "Cell 1, from the image"
     assert window.counts.text().startswith("2 cells kept (0 added, 0 resized, 1 from")
+    assert window.reject.text() == "Reject"  # its Cellpose cell stays
 
-    # Back with the button, and undone: from the image again
+    # Back with the button, as it was, and undone: from the image again
     window.use_basin.trigger()
     assert not window.curation.from_image(1) and window.use_basin.isChecked()
     assert len(window.curation.cells[1].pixels) == before
+    assert window.cell_state.text() == "resized"
     press(window, "Ctrl+Z")
     assert window.curation.from_image(1) and not window.use_basin.isChecked()
+    window.close()
+
+
+def test_a_cell_grown_where_no_basin_is_is_deleted_not_rejected(app, tmp_path):
+    window = opened(app, tmp_path)
+    window.click(4, 40)
+    assert window.selected == 4 and window.reject.text() == "Delete"
+
+    press(window, "Delete")
+    assert 4 not in window.curation.cells and window.selected is None
+    assert window.counts.text().startswith("2 cells kept (0 added, 0 resized, 0 from")
+    assert window.counts.text().endswith("0 rejected, 0 outside the area range")
+
+    press(window, "Ctrl+Z")
+    assert window.curation.from_image(4)
     window.close()
 
 
