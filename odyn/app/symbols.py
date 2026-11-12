@@ -122,6 +122,16 @@ GLYPHS = {
     "report": ("monitoring", "", "r"),
     "saved-files": ("folder_open", "", "o"),
     "pick": ("check_circle", "", "p"),
+    # The ROI curation window (`curation_window`)
+    "redo": ("redo", "", ">"),
+    "outlines": ("bubble_chart", "", "o"),
+    "show-excluded": ("filter_alt_off", "", "e"),
+    "show-rejected": ("block", "visibility", "r"),
+    "flow-check": ("editor_choice", "", "~"),
+    "image": ("contrast", "", "i"),
+    "follow-threshold": ("link", "", "t"),
+    "reject": ("block", "", "x"),
+    "help": ("keyboard", "", "?"),
 }
 
 

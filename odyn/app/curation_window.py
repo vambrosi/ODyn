@@ -8,21 +8,26 @@ The cells start as Cellpose keeps them at its defaults. A click on a cell
 selects it, and it stays selected, however small, rejected or outside the
 area range, until a click on it again or Esc. A click anywhere else adds the
 candidate there, or grows the cell of that basin until it takes the point
-clicked (`Curation.add`). The panel at the right has:
-- **All cells:** the threshold of every cell without a size of its own (to
-  the right, lower: every cell larger), the flow check, the area range (um2:
-  cells outside it are excluded), and whether excluded and rejected cells
-  show;
-- **Selected cell:** its size in pixels and um2, on a logarithmic slider (`[`
-  and `]`: one pixel), Follow threshold (T) to give it the threshold of all
-  again, and Reject or Restore (Delete);
-- **Image:** brightness and gamma of the mean image, and the outlines (O).
+clicked (`Curation.add`).
 
-Ctrl+Z undoes and Ctrl+Shift+Z redoes; the wheel zooms at the pointer, a drag
-pans and 0 fits. The outlines run along the edges of the pixels, in the
-colors of the survey viewer: the cells of Cellpose cyan, resized ones pink,
-added ones green, rejected ones red and excluded ones gray (both dashed), the
-selected one white.
+- **Above the image**, the legend of the outlines, in the colors of the
+  survey viewer: the cells of Cellpose cyan, resized ones pink, added ones
+  green, rejected ones red and those outside the area range gray (both
+  dashed), the selected one white.
+- **The bar at the right**, as in the other windows: undo, redo, fit, the
+  outlines, the cells outside the area range and the rejected ones, the
+  flow check, the brightness and gamma of the image, and the shortcuts
+  (`KEYS`, on a card in the middle of the image).
+- **Under the image**, for all cells: the threshold of every cell without a
+  size of its own (to the right, lower: every cell larger), the area range
+  (um2: cells outside it are excluded), and the counts.
+- **The card of the selected cell**, over the image, in the corner that
+  leaves the cell in view: its number and threshold, what sets it apart
+  (`cell_state`), its size in pixels and um2 on a logarithmic slider,
+  Follow threshold and Reject or Restore.
+
+The wheel zooms at the pointer and a drag pans. The outlines run along the
+edges of the pixels.
 
 The edits are kept on this computer as they are made (a draft, `draft`) and
 picked up when the window opens again on the same candidates; nothing goes
@@ -42,8 +47,19 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QObject,
+    QPointF,
+    QRectF,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QImage,
     QKeySequence,
@@ -54,21 +70,27 @@ from PySide6.QtGui import (
     QTransform,
 )
 from PySide6.QtWidgets import (
-    QCheckBox,
     QDoubleSpinBox,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
-    QPushButton,
+    QMenu,
     QSizePolicy,
     QSlider,
+    QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from ..segmentation import FLOOR, THRESHOLD, Candidates, Curation, Edits
 from ..segmentation import read_candidates
 from ..shared import read_json, write_json
 from . import style
+from .symbols import icon
 
 # The threshold slider: from this down to the lowest threshold kept, in these
 # steps, so that to the right every cell is larger
@@ -102,6 +124,47 @@ COLORS = {
     "excluded": "#8e9a95",
     "selected": "#ffffff",
 }
+
+# The legend above the image: each kind of outline and what it means
+LEGEND = {
+    "cellpose": "Cellpose",
+    "resized": "Resized",
+    "added": "Added",
+    "rejected-dashed": "Rejected",
+    "excluded-dashed": "Outside the area range",
+    "selected": "Selected",
+}
+
+# The shortcuts, as the tooltips and the shortcuts card name them (on the
+# card in this order, then what the mouse does)
+KEYS = {
+    "smaller": ("[", "Decrease cell area by 1 px"),
+    "larger": ("]", "Increase cell area by 1 px"),
+    "follow": ("T", "Follow the global threshold"),
+    "reject": ("Backspace, Delete", "Reject or restore the cell"),
+    "deselect": ("Esc", "Deselect the cell"),
+    "undo": ("Ctrl+Z", "Undo"),
+    "redo": ("Ctrl+Shift+Z", "Redo"),
+    "fit": ("0", "Show whole image"),
+    "outlines": ("O", "Show outlines"),
+    "show-excluded": ("E", "Show cells outside the area range"),
+    "show-rejected": ("R", "Show rejected cells"),
+    "image": ("I", "Brightness and gamma"),
+    "help": ("?", "Shortcuts"),
+}
+MOUSE = (
+    ("Click", "Select a cell, or add the one there"),
+    ("Drag", "Pan"),
+    ("Wheel", "Zoom"),
+)
+
+# The area range applies once its typing or its arrows pause this long
+AREA_DELAY_MS = 300
+
+# The card of the selected cell, kept this far from the edges of the image
+# and from the cell
+CARD_WIDTH_PX = 340
+CARD_MARGIN_PX = 12
 
 DRAFT_VERSION = 1
 DRAFT_DELAY_MS = 500  # a draft is written once the edits pause this long
@@ -274,6 +337,11 @@ def load(mean: Path, candidates: Path) -> dict:
     return {"levels": levels16(image), "found": found, "curation": Curation(found)}
 
 
+def _native(key: str) -> str:
+    """A key as this system writes it (on a Mac, Ctrl+Z is ⌘Z)."""
+    return QKeySequence(key).toString(QKeySequence.SequenceFormat.NativeText)
+
+
 @contextmanager
 def _quiet(widget: QObject):
     """`widget` set without its signals firing."""
@@ -310,10 +378,12 @@ class CellCanvas(QWidget):
     `shapes` are what is drawn over the image: `(outline, box, kind)`, in
     image units, with `kind` one of `COLORS`, `-dashed` added for a dashed
     line; `cross` the pixel the selected cell grows from, when it has no
-    pixels; `message` shows while there is no image.
+    pixels; `message` shows while there is no image. `viewed` fires when the
+    part of the image shown changes (a zoom, a pan, a new size).
     """
 
     clicked = Signal(int, int)
+    viewed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -341,6 +411,7 @@ class CellCanvas(QWidget):
         self.zoom = 1.0
         self.center = QPointF(0.5, 0.5)
         self.update()
+        self.viewed.emit()
 
     def source_rect(self) -> QRectF:
         """
@@ -502,6 +573,11 @@ class CellCanvas(QWidget):
             min(max(c.x(), half), 1 - half), min(max(c.y(), half), 1 - half)
         )
         self.update()
+        self.viewed.emit()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt's name)
+        super().resizeEvent(event)
+        self.viewed.emit()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt's name)
         if event.button() == Qt.MouseButton.LeftButton:
@@ -541,6 +617,58 @@ class CellCanvas(QWidget):
         self._dragged = False
 
 
+class _NoWheel(QObject):
+    """Swallows the wheel events of what it is installed on."""
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt's name)
+        return event.type() == QEvent.Type.Wheel
+
+
+class _Swatch(QWidget):
+    """An outline of the legend, on a chip as dark as the image."""
+
+    def __init__(self, kind: str, parent=None):
+        super().__init__(parent)
+        self.kind = kind
+        self.setFixedSize(22, 14)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt's name)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0))
+        painter.drawRoundedRect(QRectF(self.rect()), 3, 3)
+        painter.setPen(CellCanvas._pen(self.kind, 1.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(5, 3.5, -5, -3.5), 3, 3)
+        painter.end()
+
+
+class _Help(QFrame):
+    """The shortcuts card: a click on it puts it away."""
+
+    dismissed = Signal()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt's name)
+        self.dismissed.emit()
+
+
+def cell_state(cell) -> str:
+    """
+    What sets `cell` apart, for the second line of its card: added or
+    resized, rejected, outside the area range (empty for a cell of Cellpose
+    that follows the global threshold and is kept).
+    """
+    parts = [cell.kind] if cell.kind != "cellpose" else []
+    parts += ["rejected"] if cell.rejected else []
+    parts += ["outside the area range"] if cell.excluded else []
+
+    if len(parts) > 1:
+        return f"{', '.join(parts[:-1])} and {parts[-1]}"
+
+    return "".join(parts)
+
+
 class CurationWindow(QWidget):
     """
     The ROIs of group `group_id` (see the module description): the
@@ -577,31 +705,39 @@ class CurationWindow(QWidget):
         self._outlines: dict[int, tuple[tuple, QPainterPath, QRectF]] = {}
         self._pending_threshold: None | float = None
 
+        # The draft is written once the edits pause
+        self.saving = self._timer(DRAFT_DELAY_MS, self.save_draft)
+        # A threshold drag applies the latest position, not every one passed
+        self.thresholding = self._timer(0, self._apply_threshold)
+        # The area range applies once the typing or the arrows pause
+        self.ranging = self._timer(AREA_DELAY_MS, self._area_changed)
+
+        self.no_wheel = _NoWheel(self)
         self.canvas = CellCanvas()
         self.canvas.message = "Reading the Cellpose candidates and the mean image..."
         self.canvas.clicked.connect(self.click)
+        self.canvas.viewed.connect(self._place_card)
+        self.card = self._card(self.canvas)  # floats over the image
+        self.help = self._help_card(self.canvas)  # over the card too
+        self.canvas.viewed.connect(self._place_help)
         self.line = QLabel("")  # what the last click did, or what went wrong
         self.line.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
-        middle = QHBoxLayout()
-        middle.setContentsMargins(0, 0, 0, 0)
-        middle.addWidget(self.canvas, stretch=1)
-        middle.addWidget(self._panel())
+        view = QVBoxLayout()
+        view.setContentsMargins(0, 0, 0, 0)
+        view.setSpacing(0)
+        view.addWidget(self._legend())
+        view.addWidget(self.canvas, stretch=1)
+        stage = QHBoxLayout()
+        stage.setContentsMargins(0, 0, 0, 0)
+        stage.setSpacing(0)
+        stage.addLayout(view, stretch=1)
+        stage.addWidget(self._toolbar())
         layout = QVBoxLayout(self)
-        layout.addLayout(middle, stretch=1)
-        layout.addWidget(self.line)
-
-        # The draft is written once the edits pause
-        self.saving = QTimer(self)
-        self.saving.setSingleShot(True)
-        self.saving.setInterval(DRAFT_DELAY_MS)
-        self.saving.timeout.connect(self.save_draft)
-
-        # A threshold drag applies the latest position, not every one passed
-        self.thresholding = QTimer(self)
-        self.thresholding.setSingleShot(True)
-        self.thresholding.setInterval(0)
-        self.thresholding.timeout.connect(self._apply_threshold)
+        layout.setContentsMargins(8, 8, 0, 6)
+        layout.addLayout(stage, stretch=1)
+        layout.addWidget(self._controls())
+        layout.addLayout(self._status())
 
         self._shortcuts()
         self._enable()
@@ -615,131 +751,274 @@ class CurationWindow(QWidget):
     # Building
     # ----------------------------------------------------------------- #
 
-    def _panel(self) -> QWidget:
-        panel = QWidget()
-        panel.setFixedWidth(300)
-        column = QVBoxLayout(panel)
-        column.setContentsMargins(8, 0, 4, 0)
+    def _timer(self, delay_ms: int, then) -> QTimer:
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(delay_ms)
+        timer.timeout.connect(then)
 
-        column.addWidget(self._heading("All cells"))
-        self.threshold_line = QLabel("")
-        column.addWidget(self.threshold_line)
+        return timer
+
+    def _toolbar(self) -> QWidget:
+        """The tools, on a bar at the right, as the other windows have them."""
+        bar = QToolBar("ROIs")
+        bar.setOrientation(Qt.Orientation.Vertical)
+        bar.setMovable(False)
+        bar.setIconSize(QSize(style.BAR_ICON_PX, style.BAR_ICON_PX))
+        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        holder = QWidget()
+        column = QVBoxLayout(holder)
+        column.setContentsMargins(*style.BAR_MARGINS)
+        column.addWidget(bar)
+
+        self.undo_action = self._action(bar, "undo", self.undo)
+        self.redo_action = self._action(bar, "redo", self.redo)
+        bar.addSeparator()
+        self._action(bar, "fit", self.canvas.fit)
+        self.outlines = self._action(
+            bar, "outlines", self._outlines_toggled, checked=True
+        )
+        self.show_excluded = self._action(
+            bar, "show-excluded", lambda _: self.redraw(), checked=False
+        )
+        self.show_rejected = self._action(
+            bar, "show-rejected", lambda _: self.redraw(), checked=False
+        )
+        bar.addSeparator()
+        self.flow_check = self._action(
+            bar,
+            "flow-check",
+            self._flow_check_toggled,
+            checked=True,
+            title="Only cells that pass the flow check at 0",
+        )
+        # A menu, which I opens too (`_shortcuts`)
+        self.image_action = self._action(bar, "image", None)
+        self.image_action.setMenu(self._image_menu())
+        self.image_button = bar.widgetForAction(self.image_action)
+        self.image_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.image_button.setStyleSheet("QToolButton::menu-indicator { image: none; }")
+        bar.addSeparator()
+        self.help_action = self._action(bar, "help", self._show_help, checked=False)
+
+        return holder
+
+    def _action(
+        self,
+        bar: QToolBar,
+        name: str,
+        then,
+        checked: None | bool = None,
+        title: str = "",
+    ) -> QAction:
+        """
+        A bar button doing `then`, with the icon `name` and its shortcut and
+        title in `KEYS` (or `title`, with no shortcut), both in its tooltip;
+        a toggle when `checked` says how it starts.
+        """
+        key, title = KEYS.get(name, ("", title))
+        action = QAction(icon(name), title, self)
+        action.setToolTip(self._tip(name) if key else title)
+
+        if key and then is not None:
+            action.setShortcut(QKeySequence(key))
+            action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+
+        if checked is not None:
+            action.setCheckable(True)
+            action.setChecked(checked)
+            action.toggled.connect(then)
+        elif then is not None:
+            action.triggered.connect(lambda _=False: then())
+
+        bar.addAction(action)
+        button = bar.widgetForAction(action)
+
+        if isinstance(button, QToolButton):
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        return action
+
+    def _image_menu(self) -> QMenu:
+        """Brightness and gamma of the mean image, under the image tool."""
+        self.brightness = self._level_slider(BRIGHTNESS, "Brightness")
+        self.gamma = self._level_slider(GAMMA, "Gamma (lower: dim parts brighter)")
+        panel = QWidget()
+        rows = QFormLayout(panel)
+        rows.setContentsMargins(12, 8, 12, 8)
+        rows.addRow("Brightness", self.brightness)
+        rows.addRow("Gamma", self.gamma)
+        panel.setMinimumWidth(280)
+        menu = QMenu(self)
+        holder = QWidgetAction(menu)
+        holder.setDefaultWidget(panel)
+        menu.addAction(holder)
+
+        return menu
+
+    def _controls(self) -> QWidget:
+        """Under the image, for all cells: the threshold and the area range."""
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 6, 8, 0)
+
+        row.addWidget(QLabel("Threshold"))
+        row.addWidget(self._small("smaller cells"))
         self.threshold = QSlider(Qt.Orientation.Horizontal)
         self.threshold.setRange(0, threshold_position(FLOOR))
         self.threshold.setValue(threshold_position(THRESHOLD))
-        self.threshold.setToolTip(
-            "The threshold of every cell without a size of its own: to the "
-            "right, lower, and every cell larger"
-        )
         self.threshold.sliderPressed.connect(self.remember)
         self.threshold.valueChanged.connect(self._threshold_moved)
-        column.addWidget(self.threshold)
-        ends = QHBoxLayout()
-        ends.addWidget(self._small("smaller"))
-        ends.addStretch(1)
-        ends.addWidget(self._small("larger"))
-        column.addLayout(ends)
-
-        self.flow_check = QCheckBox("Flow check")
-        self.flow_check.setChecked(True)
-        self.flow_check.setToolTip(
-            "Only the candidates whose shape at threshold 0 agrees with the "
-            "flows (the Cellpose flow check); off, every candidate with a cell at "
-            "the "
-            "threshold"
+        row.addWidget(self.threshold, stretch=3)
+        row.addWidget(self._small("larger cells"))
+        self.threshold_line = QLabel("")
+        self.threshold_line.setMinimumWidth(
+            self.threshold_line.fontMetrics().horizontalAdvance("-0.00 (default)")
         )
-        self.flow_check.toggled.connect(self._flow_check_toggled)
-        column.addWidget(self.flow_check)
+        row.addWidget(self.threshold_line)
 
-        area = QHBoxLayout()
-        area.addWidget(QLabel("Area"))
+        row.addSpacing(18)
+        row.addWidget(QLabel("Area"))
         self.min_area = self._area_box("")
         self.max_area = self._area_box("no max")
-        area.addWidget(self.min_area, stretch=1)
-        area.addWidget(QLabel("to"))
-        area.addWidget(self.max_area, stretch=1)
-        column.addLayout(area)
-        self.show_excluded = QCheckBox("Show excluded")
-        self.show_excluded.setToolTip("The cells outside the area range, dashed gray")
-        self.show_rejected = QCheckBox("Show rejected")
-        self.show_rejected.setToolTip("The cells rejected, dashed red")
+        row.addWidget(self.min_area)
+        row.addWidget(QLabel("to"))
+        row.addWidget(self.max_area)
 
-        for box in (self.show_excluded, self.show_rejected):
-            box.toggled.connect(lambda _: self.redraw())
-            column.addWidget(box)
+        return bar
 
+    def _legend(self) -> QWidget:
+        """What the colors of the outlines mean, above the image."""
+        row = QWidget()
+        items = QHBoxLayout(row)
+        items.setContentsMargins(0, 0, 0, 6)
+        items.setSpacing(5)
+
+        for kind, text in LEGEND.items():
+            items.addWidget(_Swatch(kind))
+            items.addWidget(self._small(text))
+            items.addSpacing(10)
+
+        items.addStretch(1)
+
+        return row
+
+    def _help_card(self, parent: QWidget) -> QFrame:
+        """The shortcuts and what the mouse does, in the middle of the image."""
+        card = _Help(parent)
+        card.setObjectName("help")
+        card.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation)
+        card.installEventFilter(self.no_wheel)
+        card.setStyleSheet(
+            "QFrame#help { background: palette(window); border: 1px solid "
+            f"palette(mid); border-radius: {style.RADIUS}px; }}"
+            "QLabel#key { background: palette(base); border: 1px solid "
+            "palette(mid); border-radius: 4px; padding: 0px 5px; }"
+        )
+        column = QVBoxLayout(card)
+        column.setContentsMargins(18, 12, 18, 14)
+        column.setSpacing(10)
+        title = QLabel("Shortcuts")
+        title.setStyleSheet("font-weight: bold;")
+        column.addWidget(title)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(5)
+        keys = [(_native(key), text, "key") for key, text in KEYS.values()]
+        mouse = [(word, text, "") for word, text in MOUSE]
+
+        for row, entry in enumerate([*keys, None, *mouse]):
+            if entry is None:  # a gap between the keys and the mouse
+                grid.setRowMinimumHeight(row, 4)
+                continue
+
+            key, text, kind = entry
+            name = QLabel(key)
+            name.setObjectName(kind)
+            grid.addWidget(name, row, 0, alignment=Qt.AlignmentFlag.AlignLeft)
+            grid.addWidget(QLabel(text), row, 1)
+
+        column.addLayout(grid)
+        card.dismissed.connect(lambda: self.help_action.setChecked(False))
+        card.hide()
+
+        return card
+
+    def _status(self) -> QHBoxLayout:
+        """What the last click did, or what went wrong; the counts."""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 2, 8, 0)
+        row.addWidget(self.line, stretch=1)
         self.counts = QLabel("")
-        self.counts.setWordWrap(True)
         self.counts.setStyleSheet(style.text_style("computed"))
-        column.addWidget(self.counts)
+        row.addWidget(self.counts)
 
-        column.addWidget(self._heading("Selected cell"))
+        return row
+
+    def _card(self, parent: QWidget) -> QFrame:
+        """
+        The selected cell, floating over the image where it leaves the cell
+        in view (`_place_card`): what it is, its size, its two buttons.
+        """
+        card = QFrame(parent)
+        card.setObjectName("card")
+        # Clicks and the wheel on it stay off the image (and off its slider:
+        # the wheel is for zooming, not for resizing a cell by accident)
+        card.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation)
+        card.installEventFilter(self.no_wheel)
+        card.setStyleSheet(
+            "QFrame#card { background: palette(window); border: 1px solid "
+            f"palette(mid); border-radius: {style.RADIUS}px; }}"
+        )
+        card.setFixedWidth(CARD_WIDTH_PX)
+        column = QVBoxLayout(card)
+        column.setContentsMargins(12, 8, 12, 4)
+        column.setSpacing(4)
+
+        # Two lines, the second often empty, so the card keeps its height
         self.cell_line = QLabel("")
-        self.cell_line.setWordWrap(True)
-        column.addWidget(self.cell_line)
+        self.cell_line.setStyleSheet("font-weight: bold;")
+        self.cell_state = self._small("")
+        self.cell_state.setMinimumHeight(self.cell_state.fontMetrics().height())
+        title = QVBoxLayout()
+        title.setSpacing(0)
+        title.addWidget(self.cell_line)
+        title.addWidget(self.cell_state)
+        column.addLayout(title)
+
         size = QHBoxLayout()
         self.size = QSlider(Qt.Orientation.Horizontal)
         self.size.setRange(0, SIZE_STEPS)
-        self.size.setToolTip("Its size, from one pixel to its whole basin ([ and ])")
+        self.size.installEventFilter(self.no_wheel)
         self.size.sliderPressed.connect(self.remember)
+        self.size.sliderReleased.connect(self._place_card)
         self.size.valueChanged.connect(self._size_moved)
         size.addWidget(self.size, stretch=1)
         self.size_line = QLabel("")
+        self.size_line.setStyleSheet(style.text_style("computed"))
+        self.size_line.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        widest = self.size_line.fontMetrics().horizontalAdvance("9999 px, 9999.9 µm²")
+        self.size_line.setMinimumWidth(widest)  # the slider keeps its length
         size.addWidget(self.size_line)
         column.addLayout(size)
-        buttons = QHBoxLayout()
-        self.follow = QPushButton("Follow threshold")
-        self.follow.setToolTip(self._tip("Give it the threshold of all again", "T"))
-        self.follow.clicked.connect(self.follow_threshold)
-        self.reject = QPushButton("Reject")
-        self.reject.setToolTip(self._tip("Reject it, or restore it", "Delete"))
-        self.reject.clicked.connect(self.toggle_rejection)
-        buttons.addWidget(self.follow)
-        buttons.addWidget(self.reject)
-        column.addLayout(buttons)
 
-        column.addWidget(self._heading("Image"))
-        self.brightness = self._level_slider(BRIGHTNESS, "Brightness")
-        self.gamma = self._level_slider(GAMMA, "Gamma (lower: dim parts brighter)")
+        tools = QToolBar()
+        tools.setIconSize(QSize(18, 18))
+        tools.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.follow = QAction(icon("follow-threshold"), "Follow threshold", self)
+        self.follow.setToolTip(self._tip("follow"))
+        self.follow.triggered.connect(lambda _=False: self.follow_threshold())
+        self.reject = QAction(icon("reject"), "Reject", self)
+        self.reject.setToolTip(self._tip("reject"))
+        self.reject.triggered.connect(lambda _=False: self.toggle_rejection())
+        tools.addAction(self.follow)
+        tools.addAction(self.reject)
+        column.addWidget(tools)
+        card.hide()
 
-        for slider, name in ((self.brightness, "Brightness"), (self.gamma, "Gamma")):
-            row = QHBoxLayout()
-            label = QLabel(name)
-            label.setMinimumWidth(72)
-            row.addWidget(label)
-            row.addWidget(slider, stretch=1)
-            column.addLayout(row)
-
-        self.outlines = QCheckBox("Outlines")
-        self.outlines.setChecked(True)
-        self.outlines.setToolTip(self._tip("Show the outlines", "O"))
-        self.outlines.toggled.connect(self._outlines_toggled)
-        column.addWidget(self.outlines)
-
-        column.addStretch(1)
-        history = QHBoxLayout()
-        self.undo_button = QPushButton("Undo")
-        self.undo_button.setToolTip(self._tip("Undo", "Ctrl+Z"))
-        self.undo_button.clicked.connect(self.undo)
-        self.redo_button = QPushButton("Redo")
-        self.redo_button.setToolTip(self._tip("Redo", "Ctrl+Shift+Z"))
-        self.redo_button.clicked.connect(self.redo)
-        fit = QPushButton("Fit")
-        fit.setToolTip(self._tip("Show the whole image", "0"))
-        fit.clicked.connect(self.canvas.fit)
-        history.addWidget(self.undo_button)
-        history.addWidget(self.redo_button)
-        history.addWidget(fit)
-        column.addLayout(history)
-
-        return panel
-
-    @staticmethod
-    def _heading(text: str) -> QLabel:
-        label = QLabel(text)
-        label.setStyleSheet("font-weight: bold; margin-top: 6px;")
-
-        return label
+        return card
 
     @staticmethod
     def _small(text: str) -> QLabel:
@@ -749,11 +1028,11 @@ class CurationWindow(QWidget):
         return label
 
     @staticmethod
-    def _tip(title: str, key: str) -> str:
-        """A tooltip naming its shortcut, as this system writes it."""
-        native = QKeySequence(key).toString(QKeySequence.SequenceFormat.NativeText)
+    def _tip(name: str) -> str:
+        """The tooltip of `KEYS[name]`: what it does, and its key."""
+        key, title = KEYS[name]
 
-        return f"{title} ({native})"
+        return f"{title} ({_native(key)})"
 
     def _area_box(self, empty: str) -> QDoubleSpinBox:
         """A bound of the area range, in um2; `empty` is how 0 shows."""
@@ -762,12 +1041,12 @@ class CurationWindow(QWidget):
         box.setDecimals(0)
         box.setSingleStep(5.0)
         box.setSuffix(" µm²")
-        box.setKeyboardTracking(False)
 
         if empty:
             box.setSpecialValueText(empty)
 
-        box.editingFinished.connect(self._area_changed)
+        # Applied as it changes, by the arrows or by typing, once that pauses
+        box.valueChanged.connect(lambda _: self.ranging.start())
 
         return box
 
@@ -784,16 +1063,13 @@ class CurationWindow(QWidget):
 
     def _shortcuts(self) -> None:
         for key, do in (
-            ("Esc", lambda: self.select(None)),
+            ("Esc", self._escape),
             ("Delete", self.toggle_rejection),
             ("Backspace", self.toggle_rejection),
             ("[", lambda: self.nudge(-1)),
             ("]", lambda: self.nudge(1)),
             ("T", self.follow_threshold),
-            ("O", self.outlines.toggle),
-            ("0", self.canvas.fit),
-            ("Ctrl+Z", self.undo),
-            ("Ctrl+Shift+Z", self.redo),
+            ("I", self.image_button.showMenu),
         ):
             QShortcut(QKeySequence(key), self).activated.connect(do)
 
@@ -906,11 +1182,18 @@ class CurationWindow(QWidget):
         elif cell is not None:
             self.say(
                 "Added the candidate under the point clicked, at threshold "
-                f"{cell.threshold:.2f}. The size slider grows or shrinks it."
+                f"{cell.threshold:.2f}. Its size slider grows or shrinks it."
             )
 
         self.selected = basin
         self.changed()
+
+    def _escape(self) -> None:
+        """Esc: put the shortcuts away, or else let the selected cell go."""
+        if self.help_action.isChecked():
+            self.help_action.setChecked(False)
+        else:
+            self.select(None)
 
     def select(self, basin: None | int) -> None:
         self.selected = basin
@@ -950,8 +1233,6 @@ class CurationWindow(QWidget):
             self.remember()
             self.curation.set_area_range(low, high)
             self.changed()
-
-        self.canvas.setFocus()  # so the keys work on cells again
 
     def _size_moved(self, position: int) -> None:
         if self.curation is None or self.selected is None:
@@ -1086,6 +1367,7 @@ class CurationWindow(QWidget):
         self._show_threshold()
         self._show_counts()
         self._show_selected()
+        self._place_card()
 
     def _outline(self, cell) -> tuple[QPainterPath, QRectF]:
         """The outline of `cell`, made again only when its pixels changed."""
@@ -1100,8 +1382,8 @@ class CurationWindow(QWidget):
 
     def _show_threshold(self) -> None:
         threshold = threshold_at(self.threshold.value())
-        default = " (the Cellpose default)" if threshold == THRESHOLD else ""
-        self.threshold_line.setText(f"Threshold {threshold:.2f}{default}")
+        default = " (default)" if threshold == THRESHOLD else ""
+        self.threshold_line.setText(f"{threshold:.2f}{default}")
 
     def _show_counts(self) -> None:
         cells = list(self.curation.cells.values())
@@ -1110,9 +1392,9 @@ class CurationWindow(QWidget):
         resized = sum(cell.kind == "resized" for cell in kept)
         rejected = sum(cell.rejected for cell in cells)
         outside = sum(cell.excluded and not cell.rejected for cell in cells)
-        cells = "cell" if len(kept) == 1 else "cells"
+        noun = "cell" if len(kept) == 1 else "cells"
         self.counts.setText(
-            f"{len(kept)} {cells} kept ({added} added, {resized} resized), "
+            f"{len(kept)} {noun} kept ({added} added, {resized} resized), "
             f"{rejected} rejected, {outside} outside the area range"
         )
 
@@ -1120,12 +1402,6 @@ class CurationWindow(QWidget):
         basin = self.selected
 
         if basin is None:
-            self.cell_line.setText("Click a cell to select it.")
-            self.size_line.setText("")
-
-            with _quiet(self.size):
-                self.size.setValue(0)
-
             return
 
         cell = self.curation.cells.get(basin)
@@ -1138,23 +1414,94 @@ class CurationWindow(QWidget):
 
         area = size * self.curation.um2_per_px
         self.size_line.setText(f"{size} px, {area:.1f} µm²")
+        self.reject.setText(
+            "Restore" if cell is not None and cell.rejected else "Reject"
+        )
 
-        if cell is None:
-            self.cell_line.setText(
-                f"Cell {basin}: no pixels at this threshold (the cross is where "
-                "it grows from)."
-            )
+        if cell is None:  # the cross shows where it grows from
+            threshold = self.curation.edits.threshold
+            self.cell_line.setText(f"Cell {basin}, threshold {threshold:.2f}")
+            self.cell_state.setText("no pixels at this threshold")
             return
 
-        state = (
-            ", rejected"
-            if cell.rejected
-            else ", outside the area range" if cell.excluded else ""
-        )
-        self.cell_line.setText(
-            f"Cell {basin}, {cell.kind}{state}: threshold {cell.threshold:.2f}"
-        )
-        self.reject.setText("Restore" if cell.rejected else "Reject")
+        self.cell_line.setText(f"Cell {basin}, threshold {cell.threshold:.2f}")
+        self.cell_state.setText(cell_state(cell))
+
+    def _selected_box(self) -> None | QRectF:
+        """Where the selected cell is on the canvas: its box, or its seed."""
+        if self.curation is None or self.selected is None:
+            return None
+
+        cell = self.curation.cells.get(self.selected)
+
+        if cell is not None:
+            box = self._outline(cell)[1]
+            corner = self.canvas.canvas_point(box.top(), box.left())
+            far = self.canvas.canvas_point(box.bottom(), box.right())
+
+            return QRectF(corner, far)
+
+        row, column = divmod(self.curation.seed(self.selected), self.curation.width)
+        at = self.canvas.canvas_point(row + 0.5, column + 0.5)
+
+        return QRectF(at, at)
+
+    def _place_card(self) -> None:
+        """
+        Show the card of the selected cell in the bottom right corner of the
+        view, or else in the first other corner that leaves the cell in view
+        (bottom left, top right, top left), or else in the corner farthest
+        from it.
+        """
+        cell = self._selected_box()
+
+        if cell is None:
+            self.card.hide()
+            return
+
+        if self.size.isSliderDown():
+            return  # not from under the pointer: once the slider is let go
+
+        self.card.adjustSize()
+        width, height = self.card.width(), self.card.height()
+        right = self.canvas.width() - width - CARD_MARGIN_PX
+        bottom = self.canvas.height() - height - CARD_MARGIN_PX
+        corners = [
+            QRectF(x, y, width, height)
+            for x, y in (
+                (right, bottom),
+                (CARD_MARGIN_PX, bottom),
+                (right, CARD_MARGIN_PX),
+                (CARD_MARGIN_PX, CARD_MARGIN_PX),
+            )
+        ]
+        room = CARD_MARGIN_PX
+        around = cell.adjusted(-room, -room, room, room)
+        clear = [corner for corner in corners if not corner.intersects(around)]
+
+        if clear:
+            place = clear[0]
+        else:
+            place = max(
+                corners,
+                key=lambda corner: (corner.center() - cell.center()).manhattanLength(),
+            )
+
+        self.card.move(place.topLeft().toPoint())
+        self.card.show()
+
+    def _show_help(self, on: bool) -> None:
+        self.help.setVisible(on)
+        self._place_help()
+
+    def _place_help(self) -> None:
+        """The shortcuts card, in the middle of the image."""
+        if self.help.isVisible():
+            self.help.adjustSize()
+            x = (self.canvas.width() - self.help.width()) // 2
+            y = (self.canvas.height() - self.help.height()) // 2
+            self.help.move(max(x, 0), max(y, 0))
+            self.help.raise_()
 
     def _enable(self) -> None:
         ready = self.curation is not None
@@ -1174,8 +1521,8 @@ class CurationWindow(QWidget):
         self.size.setEnabled(picked)
         self.reject.setEnabled(has_cell)
         self.follow.setEnabled(picked and self.selected in self.curation.edits.sizes)
-        self.undo_button.setEnabled(bool(self.undo_stack))
-        self.redo_button.setEnabled(bool(self.redo_stack))
+        self.undo_action.setEnabled(bool(self.undo_stack))
+        self.redo_action.setEnabled(bool(self.redo_stack))
 
     # ----------------------------------------------------------------- #
     # The draft
@@ -1197,6 +1544,10 @@ class CurationWindow(QWidget):
         if self.thresholding.isActive():
             self.thresholding.stop()
             self._apply_threshold()
+
+        if self.ranging.isActive():
+            self.ranging.stop()
+            self._area_changed()
 
         self.save_draft()
         self.loader.wait()

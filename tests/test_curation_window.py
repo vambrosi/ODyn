@@ -1,8 +1,9 @@
 """
 `odyn.app.curation_window`, offscreen: the ROIs of a group curated on
 candidates drawn by hand (`test_segmentation.drawn_candidates`), with clicks,
-sliders and keys, undo, and the draft kept on this computer. Opening it from
-the QC page is tested in `test_app_gui.py`.
+sliders and keys, undo, the card of the selected cell, the shortcuts card,
+and the draft kept on this computer. Opening it from the QC page is tested in
+`test_app_gui.py`.
 """
 
 import os
@@ -15,16 +16,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 # Needs Qt and the system libraries it loads: skipped where either is missing
 try:
-    from PySide6.QtCore import QRectF, Qt
-    from PySide6.QtGui import QKeySequence, QShortcut
+    from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
+    from PySide6.QtGui import QKeySequence, QWheelEvent
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QLabel
 
 except ImportError as error:  # a missing library, not a missing module
     pytest.skip(f"Qt cannot load here: {error}", allow_module_level=True)
 
 from odyn.app.curation_window import (  # noqa: E402
+    AREA_DELAY_MS,
     COLORS,
+    LEGEND,
     CurationWindow,
     outline,
     size_at,
@@ -63,12 +66,20 @@ def opened(app, folder, mean=None, candidates=None) -> CurationWindow:
     return window
 
 
-def shortcut(window, key: str) -> QShortcut:
-    [found] = [
-        s for s in window.findChildren(QShortcut) if s.key() == QKeySequence(key)
-    ]
+def press(window, key: str) -> None:
+    """Press `key` as a person would: what it does is what its shortcut does."""
+    window.activateWindow()
+    assert QTest.qWaitForWindowActive(window, 2000)
+    QTest.keySequence(window, QKeySequence(key))
 
-    return found
+
+def on_canvas(window, basin: int) -> QRectF:
+    """Where the pixels of the cell of `basin` are on the canvas."""
+    rows, columns = np.divmod(window.curation.cells[basin].pixels, 44)
+    canvas = window.canvas
+    corner = canvas.canvas_point(rows.min(), columns.min())
+
+    return QRectF(corner, canvas.canvas_point(rows.max() + 1, columns.max() + 1))
 
 
 def kinds(window) -> list[str]:
@@ -103,8 +114,14 @@ def test_the_window_starts_from_the_cells_cellpose_keeps(app, tmp_path):
     assert sorted(window.curation.cells) == [1, 2]
     assert window.counts.text().startswith("2 cells kept (0 added, 0 resized)")
     assert kinds(window) == ["cellpose", "cellpose"]
-    assert window.threshold_line.text() == "Threshold 0.00 (the Cellpose default)"
+    assert window.threshold_line.text() == "0.00 (default)"
     assert (window.canvas.image.width(), window.canvas.image.height()) == (44, 30)
+    assert not window.card.isVisible()  # nothing selected
+    assert window.show_rejected.toolTip() == "Show rejected cells (R)"
+
+    # A legend for every kind of outline, above the image
+    legend = [label.text() for label in window.findChildren(QLabel)]
+    assert all(text in legend for text in LEGEND.values())
     window.close()
 
 
@@ -116,7 +133,8 @@ def test_a_click_selects_a_cell_and_one_elsewhere_adds_the_candidate(app, tmp_pa
     at = canvas.canvas_point(10.5, 10.5).toPoint()
     QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier(0), at)
     assert window.selected == 1
-    assert window.cell_line.text() == "Cell 1, cellpose: threshold 0.00"
+    assert window.cell_line.text() == "Cell 1, threshold 0.00"
+    assert window.cell_state.text() == ""  # of Cellpose, at the threshold
     assert kinds(window) == ["cellpose", "selected"]
     size = len(window.curation.cells[1].pixels)
     assert window.size_line.text() == f"{size} px, {size:.1f} µm²"  # 1 um/px
@@ -129,6 +147,7 @@ def test_a_click_selects_a_cell_and_one_elsewhere_adds_the_candidate(app, tmp_pa
     window.click(24, 41)
     assert window.selected == 3 and window.curation.cells[3].kind == "added"
     assert window.line.text().startswith("Added the candidate under the point")
+    assert window.cell_state.text() == "added"
 
     # Outside every basin: nothing, and why
     window.click(0, 43)
@@ -142,20 +161,31 @@ def test_the_selected_cell_is_resized_by_its_slider_and_keys(app, tmp_path):
     window.click(10, 10)
     start = len(window.curation.cells[1].pixels)
 
-    shortcut(window, "]").activated.emit()
+    height = window.card.height()
+    press(window, "]")
     assert len(window.curation.cells[1].pixels) == start + 1
     assert window.curation.cells[1].kind == "resized"
     assert kinds(window) == ["cellpose", "selected"]
+    assert window.cell_state.text() == "resized"
+    assert window.card.height() == height  # its second line was there, empty
 
     window.size.setValue(window.size.value() + 100)  # larger, toward the basin
     larger = len(window.curation.cells[1].pixels)
     assert larger > start + 1
     assert window.size_line.text().startswith(f"{larger} px")
 
+    # Outside the area range too
+    window.min_area.setValue(larger + 1)
+    QTest.qWait(AREA_DELAY_MS + 100)
+    assert window.cell_state.text() == "resized and outside the area range"
+    window.min_area.setValue(0)
+    QTest.qWait(AREA_DELAY_MS + 100)
+
     # T: the threshold of all again
-    shortcut(window, "T").activated.emit()
+    press(window, "T")
     assert len(window.curation.cells[1].pixels) == start
     assert window.curation.cells[1].kind == "cellpose"
+    assert window.cell_state.text() == ""
     window.close()
 
 
@@ -165,15 +195,15 @@ def test_the_threshold_slider_makes_every_cell_larger_to_the_right(app, tmp_path
 
     window.threshold.setValue(window.threshold.value() + 20)  # 1.0 lower
     app.processEvents()
-    assert window.threshold_line.text() == "Threshold -1.00"
+    assert window.threshold_line.text() == "-1.00"
     assert all(len(window.curation.cells[b].pixels) > n for b, n in before.items())
 
     # Undone, and done again
-    shortcut(window, "Ctrl+Z").activated.emit()
-    assert window.threshold_line.text() == "Threshold 0.00 (the Cellpose default)"
+    press(window, "Ctrl+Z")
+    assert window.threshold_line.text() == "0.00 (default)"
     assert {b: len(c.pixels) for b, c in window.curation.cells.items()} == before
-    shortcut(window, "Ctrl+Shift+Z").activated.emit()
-    assert window.threshold_line.text() == "Threshold -1.00"
+    press(window, "Ctrl+Shift+Z")
+    assert window.threshold_line.text() == "-1.00"
     window.close()
 
 
@@ -181,13 +211,15 @@ def test_rejected_and_excluded_cells_hide_until_shown(app, tmp_path):
     window = opened(app, tmp_path)
     window.click(10, 10)
 
-    shortcut(window, "Delete").activated.emit()
+    press(window, "Delete")
     assert window.curation.cells[1].rejected and window.reject.text() == "Restore"
+    assert window.cell_state.text() == "rejected"
     assert kinds(window) == ["cellpose", "selected"]  # dashed while selected
 
-    shortcut(window, "Esc").activated.emit()
+    press(window, "Esc")
     assert kinds(window) == ["cellpose"]
-    window.show_rejected.setChecked(True)
+    press(window, "R")
+    assert window.show_rejected.isChecked()
     assert kinds(window) == ["rejected", "cellpose"]
     assert window.counts.text() == (
         "1 cell kept (0 added, 0 resized), 1 rejected, 0 outside the area range"
@@ -195,11 +227,102 @@ def test_rejected_and_excluded_cells_hide_until_shown(app, tmp_path):
 
     # The area range: the other cell outside it, hidden until shown
     window.min_area.setValue(len(window.curation.cells[2].pixels) + 1)
-    window._area_changed()
+    QTest.qWait(AREA_DELAY_MS + 100)
     assert window.curation.cells[2].excluded
     assert kinds(window) == ["rejected"]
-    window.show_excluded.setChecked(True)
+    press(window, "E")
     assert kinds(window) == ["rejected", "excluded"]
+    window.close()
+
+
+def test_the_area_range_applies_as_its_arrows_step_it(app, tmp_path):
+    window = opened(app, tmp_path)
+    areas = {b: len(c.pixels) for b, c in window.curation.cells.items()}
+    assert areas[1] > areas[2] + 5  # 1 um/px
+
+    # Up a step from just under cell 2, in the box: cell 2 outside the range
+    # once the steps pause, without leaving the box
+    window.min_area.setValue(areas[2] - 1)
+    QTest.qWait(AREA_DELAY_MS + 100)
+    assert not window.curation.cells[2].excluded
+    window.min_area.setFocus()
+    QTest.keyClick(window.min_area, Qt.Key.Key_Up)  # as its up arrow
+    assert window.ranging.isActive() and not window.curation.cells[2].excluded
+    QTest.qWait(AREA_DELAY_MS + 100)
+    assert window.min_area.hasFocus()
+    assert window.curation.cells[2].excluded and window.curation.cells[1].kept
+    assert window.counts.text().endswith("1 outside the area range")
+
+    # One step back undoes it
+    press(window, "Ctrl+Z")
+    assert not window.curation.cells[2].excluded
+    assert window.min_area.value() == areas[2] - 1
+    window.close()
+
+
+def test_the_card_of_the_selected_cell_leaves_it_in_view(app, tmp_path):
+    window = opened(app, tmp_path)
+    canvas, card = window.canvas, window.card
+    middle = QPointF(canvas.width() / 2, canvas.height() / 2)
+
+    # Cell 1, top left in the image: the card in the bottom right corner
+    window.click(10, 10)
+    assert card.isVisible() and canvas.rect().contains(card.geometry())
+    assert card.geometry().topLeft().x() > middle.x()
+    assert card.geometry().topLeft().y() > middle.y()
+    assert not QRectF(card.geometry()).intersects(on_canvas(window, 1))
+
+    # The dim spot, bottom right: the card goes to a corner clear of it
+    window.click(24, 41)
+    assert window.selected == 3 and canvas.rect().contains(card.geometry())
+    assert not QRectF(card.geometry()).intersects(on_canvas(window, 3))
+
+    # The wheel over the card resizes nothing (and zooms nothing)
+    size, view = window.size.value(), canvas.source_rect()
+    at = QPointF(window.size.rect().center())
+    wheel = QWheelEvent(
+        at,
+        QPointF(window.size.mapToGlobal(at.toPoint())),
+        QPoint(0, 0),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    QApplication.sendEvent(window.size, wheel)
+    assert window.size.value() == size and canvas.source_rect() == view
+
+    # Nothing selected, no card
+    press(window, "Esc")
+    assert not card.isVisible()
+    window.close()
+
+
+def test_the_shortcuts_card_shows_in_the_middle_until_put_away(app, tmp_path):
+    window = opened(app, tmp_path)
+    canvas, card = window.canvas, window.help
+    window.click(10, 10)
+
+    press(window, "?")
+    assert card.isVisible() and window.help_action.isChecked()
+    middle = card.geometry().center() - canvas.rect().center()
+    assert abs(middle.x()) <= 1 and abs(middle.y()) <= 1
+    keys = [label.text() for label in card.findChildren(QLabel)]
+    assert "Shortcuts" in keys and "Decrease cell area by 1 px" in keys
+
+    # Esc puts it away first, then lets the cell go
+    press(window, "Esc")
+    assert not card.isVisible() and window.selected == 1
+    press(window, "Esc")
+    assert window.selected is None
+
+    # A click on it puts it away too, and is not a click on the image
+    window.help_action.trigger()
+    assert card.isVisible()
+    QTest.mouseClick(card, Qt.MouseButton.LeftButton)
+    assert not card.isVisible() and not window.help_action.isChecked()
+    assert window.selected is None and 3 not in window.curation.cells
     window.close()
 
 
