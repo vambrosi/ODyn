@@ -15,6 +15,11 @@ connected to its brightest pixel, which matches Cellpose run at that
 threshold. So cells can be resized, added and dropped later without the
 network (`Curation`).
 
+Where Cellpose has no basin for a cell, or a poor one, the cell can be grown
+from the mean image instead: from a click, the brightest pixel next to those
+taken, again and again, on the image smoothed a little and near the click
+(`Curation.grow`).
+
 **USAGE**
 ```python
 from odyn.segmentation import Curation, find_candidates, read_candidates
@@ -26,6 +31,8 @@ curation = Curation(read_candidates(path))  # the Cellpose defaults
 curation.set_threshold(-1.0)                # every cell bigger
 basin = curation.add(120, 85)               # the candidate under a point
 curation.resize(basin, 150)                 # 150 px
+curation = Curation(found, image=mean)      # with the mean image, to grow
+cell = curation.grow(40, 210)               # a cell grown from the image
 curation.reject(curation.cell_at(40, 32))
 labels = curation.labels()                  # the cells kept, numbered from 1
 ```
@@ -319,6 +326,16 @@ def group_files(
 # Curation
 # --------------------------------------------------------------------------- #
 
+# Cells grown from the mean image: on the image smoothed this much (um, the
+# sigma of a Gaussian), within this distance of their seed (um), starting at
+# the edge where the image falls this far from the peak of the cell to the
+# background around it (the lowest tenth within reach); a click moves to the
+# brightest pixel this near it (px)
+SMOOTH_UM = 1.5
+REACH_UM = 15.0
+EDGE = 0.5
+CLIMB_PX = 3
+
 
 def flood(
     found: Candidates,
@@ -350,23 +367,40 @@ def flood(
     if box is None or found.basins[y, x] != basin:
         raise ValueError(f"Pixel {seed} is not in basin {basin}.")
 
-    # Within the box of the basin, as Python lists: the loop below is the
-    # whole cost, and a row-major index there sorts as the one in the image
+    return _flood_box(found.prob[box], found.basins[box] == basin, box, seed, width)
+
+
+def _flood_box(
+    values: np.ndarray,
+    inside: np.ndarray,
+    box: tuple[slice, slice],
+    seed: int,
+    width: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    The flood of `flood` within `box`, over the pixels `inside` it, by
+    `values` (both of the box only), from `seed` (an index into the flattened
+    image, of width `width`). Returns the pixels taken (indices into the
+    flattened image), in order, and the lowest value on the way to each.
+    """
+    # As Python lists: the loop below is the whole cost, and a row-major
+    # index in the box sorts as the one in the image
     top, left = box[0].start, box[1].start
-    rows, cols = found.basins[box].shape
-    inside = (found.basins[box] == basin).ravel().tolist()
-    prob = found.prob[box].ravel().tolist()
+    rows, cols = values.shape
+    y, x = divmod(int(seed), width)
+    inside = inside.ravel().tolist()
+    value = values.ravel().tolist()
     start = (y - top) * cols + (x - left)
     taken = bytearray(rows * cols)
     taken[start] = 1
-    heap = [(-prob[start], start)]
+    heap = [(-value[start], start)]
     order, level = [], []
     lowest = float("inf")
 
     while heap:
         _, p = heapq.heappop(heap)
         order.append(p)
-        lowest = min(lowest, prob[p])
+        lowest = min(lowest, value[p])
         level.append(lowest)
         column = p % cols
 
@@ -378,7 +412,7 @@ def flood(
         ):
             if q >= 0 and inside[q] and not taken[q]:
                 taken[q] = 1
-                heapq.heappush(heap, (-prob[q], q))
+                heapq.heappush(heap, (-value[q], q))
 
     local = np.asarray(order, np.int64)
     pixels = (local // cols + top) * width + local % cols + left
@@ -404,6 +438,9 @@ class Edits:
     - `sizes`: cells with a size of their own (basin: pixels);
     - `seeds`: cells added by a click (basin: the pixel clicked, an index into
       the flattened image), grown from there;
+    - `grown`: cells grown from the mean image instead (cell: its seed): the
+      cell of a basin, or where no basin is, one numbered above the basins;
+      each has a size of its own;
     - `rejected`: cells taken out;
     - `min_um2`, `max_um2`: the area range; cells outside it are excluded.
     """
@@ -412,6 +449,7 @@ class Edits:
     flow_check: bool = True
     sizes: dict[int, int] = field(default_factory=dict)
     seeds: dict[int, int] = field(default_factory=dict)
+    grown: dict[int, int] = field(default_factory=dict)
     rejected: set[int] = field(default_factory=set)
     min_um2: float = 0.0
     max_um2: None | float = None
@@ -423,6 +461,7 @@ class Edits:
             "flow_check": self.flow_check,
             "sizes": {str(b): int(n) for b, n in self.sizes.items()},
             "seeds": {str(b): int(p) for b, p in self.seeds.items()},
+            "grown": {str(c): int(p) for c, p in self.grown.items()},
             "rejected": sorted(int(b) for b in self.rejected),
             "min_um2": self.min_um2,
             "max_um2": self.max_um2,
@@ -436,6 +475,7 @@ class Edits:
             flow_check=bool(values["flow_check"]),
             sizes={int(b): int(n) for b, n in values["sizes"].items()},
             seeds={int(b): int(p) for b, p in values["seeds"].items()},
+            grown={int(c): int(p) for c, p in values.get("grown", {}).items()},
             rejected={int(b) for b in values["rejected"]},
             min_um2=float(values["min_um2"]),
             max_um2=None if values["max_um2"] is None else float(values["max_um2"]),
@@ -445,11 +485,14 @@ class Edits:
 @dataclass(frozen=True)
 class Cell:
     """
-    One cell of a `Curation`: its `basin`, its `pixels` (indices into the
-    flattened image), its `kind` (`"cellpose"`, `"resized"` or `"added"`), the
-    `threshold` it stands at (for a resized or added cell, the probability of
-    its weakest pixel), and whether it is `rejected` or `excluded` (outside
-    the area range). Only cells neither rejected nor excluded are kept.
+    One cell of a `Curation`: its `basin` (for a cell grown from the image
+    where no basin is, its number above the basins), its `pixels` (indices
+    into the flattened image), its `kind` (`"cellpose"`, `"resized"`,
+    `"added"`, or `"image"` when grown from the image), the `threshold` it
+    stands at (for a resized or added cell, the probability of its weakest
+    pixel; none for one grown from the image), and whether it is `rejected`
+    or `excluded` (outside the area range). Only cells neither rejected nor
+    excluded are kept.
     """
 
     basin: int
@@ -482,13 +525,31 @@ class Curation:
     `cells` holds every cell, rejected and excluded ones too (flagged), and
     `owner` is the basin of every pixel in a cell (0 elsewhere), to find the
     cell under a point.
+
+    Cells grown from the image (`grow`) need the mean `image`. They take the
+    pixels of their basin or of none, so they never overlap a cell of
+    another basin; between two of them, the one numbered lower keeps the
+    pixels both could take.
     """
 
-    def __init__(self, found: Candidates, edits: None | Edits = None):
+    def __init__(
+        self,
+        found: Candidates,
+        edits: None | Edits = None,
+        *,
+        image: None | np.ndarray = None,
+    ):
         self.found = found
         self.height, self.width = found.basins.shape
         um_per_px = found.settings.get("um_per_px") or [1.0, 1.0]
         self.um2_per_px = float(um_per_px[0]) * float(um_per_px[1])
+        self.basin_count = len(found.peak)
+        self.image = None if image is None else np.asarray(image, np.float32)
+        px_per_um = 2 / (float(um_per_px[0]) + float(um_per_px[1]))
+        self._sigma_px = SMOOTH_UM * px_per_um
+        self._reach_px = max(1, round(REACH_UM * px_per_um))
+        self._smooth: None | np.ndarray = None
+        self._grown: dict[int, tuple[tuple, tuple[np.ndarray, np.ndarray]]] = {}
         self._boxes = ndi.find_objects(found.basins)
         self._floods: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
         self.cells: dict[int, Cell] = {}
@@ -519,12 +580,36 @@ class Curation:
 
         return basin or None
 
+    @property
+    def smooth(self) -> np.ndarray:
+        """The mean image smoothed (`SMOOTH_UM`): what grown cells follow."""
+        if self._smooth is None:
+            if self.image is None:
+                raise ValueError("Growing a cell from the image needs the image.")
+
+            self._smooth = ndi.gaussian_filter(self.image, self._sigma_px)
+
+        return self._smooth
+
+    def from_image(self, basin: int) -> bool:
+        """Whether the cell of `basin` is grown from the image (`grow`)."""
+        return basin in self._edits.grown
+
     def seed(self, basin: int) -> int:
         """Where the cell of `basin` grows from: the click, or the peak."""
+        if basin in self._edits.grown:
+            return self._edits.grown[basin]
+
         return int(self._edits.seeds.get(basin, self.found.peak[basin - 1]))
 
     def flood(self, basin: int) -> tuple[np.ndarray, np.ndarray]:
-        """`flood` of `basin` from its seed (kept for later)."""
+        """
+        `flood` of `basin` from its seed (kept for later), or for a cell
+        grown from the image, the flood of the smoothed image (`grow`).
+        """
+        if basin in self._edits.grown:
+            return self._image_flood(basin)
+
         key = (basin, self.seed(basin))
 
         if key not in self._floods:
@@ -547,8 +632,9 @@ class Curation:
 
     def table(self) -> pd.DataFrame:
         """
-        One row per cell kept, by its number in `labels`: its basin, kind,
-        size (px and um2), threshold and seed (row and column).
+        One row per cell kept, by its number in `labels`: its basin (0 for a
+        cell grown from the image where no basin is), kind, size (px and um2),
+        threshold and seed (row and column).
         """
         columns = ["label", "basin", "kind", "pixels", "area_um2", "threshold"]
         rows = []
@@ -557,9 +643,8 @@ class Curation:
             size = len(cell.pixels)
             area = size * self.um2_per_px
             y, x = divmod(self.seed(cell.basin), self.width)
-            rows.append(
-                [number, cell.basin, cell.kind, size, area, cell.threshold, y, x]
-            )
+            basin = cell.basin if cell.basin <= self.basin_count else 0
+            rows.append([number, basin, cell.kind, size, area, cell.threshold, y, x])
 
         return pd.DataFrame(rows, columns=[*columns, "seed_y", "seed_x"])
 
@@ -593,8 +678,9 @@ class Curation:
 
     def follow_threshold(self, basin: int) -> None:
         """Give the cell of `basin` the threshold of all again."""
-        self._edits.sizes.pop(basin, None)
-        self._refresh([basin])
+        if basin not in self._edits.grown:  # which has no threshold
+            self._edits.sizes.pop(basin, None)
+            self._refresh([basin])
 
     def reject(self, basin: int) -> None:
         """Take the cell of `basin` out; it stays, flagged as rejected."""
@@ -610,9 +696,11 @@ class Curation:
         """
         A click at pixel `(y, x)`: the cell of the basin there grows until it
         takes the pixel, or, when the basin has no cell, its candidate is
-        added, grown from the pixel. Either way the cell is kept, even if it
-        was rejected. Returns the basin, or `None` when no basin covers the
-        pixel (or the cell there cannot reach it).
+        added, grown from the pixel; where no basin is, a cell is grown from
+        the image (`grow`). Either way the cell is kept, even if it was
+        rejected. Returns the basin (or the cell grown), or `None` when the
+        cell there cannot reach the pixel, or no basin covers it and there is
+        no image.
 
         An added cell starts at the threshold of all when the pixel is above
         it. Otherwise it starts halfway between `FLOOR` and the peak of the
@@ -623,15 +711,17 @@ class Curation:
         basin = int(self.found.basins[y, x])
 
         if not basin:
-            return None
+            return self.grow(y, x)
 
-        if basin in self.cells:
+        if basin in self.cells or basin in self._edits.grown:
             where = np.flatnonzero(self.flood(basin)[0] == pixel)
 
             if not where.size:
                 return None
 
-            if where[0] >= len(self.cells[basin].pixels):
+            cell = self.cells.get(basin)
+
+            if cell is None or where[0] >= len(cell.pixels):
                 self._edits.sizes[basin] = int(where[0]) + 1
         else:
             prob = float(self.found.prob[y, x])
@@ -650,9 +740,136 @@ class Curation:
 
         return basin
 
+    def grow(self, y: int, x: int) -> None | int:
+        """
+        A cell grown from the image at pixel `(y, x)`: the cell of the basin
+        there, now from the image, or where no basin is, a new cell numbered
+        above the basins. From the brightest pixel near the click (`CLIMB_PX`)
+        it takes the brightest pixel next to those taken, again and again, on
+        the smoothed image (`smooth`), within `REACH_UM`; it starts with those
+        above its edge (`EDGE`), and is kept, even if it was rejected. Returns
+        the cell, or `None` when the pixel is in another cell or there is no
+        image.
+        """
+        if self.image is None:
+            return None
+
+        basin = int(self.found.basins[y, x])
+        cell = basin or max([self.basin_count, *self._edits.grown]) + 1
+
+        if int(self.owner[y, x]) not in (0, cell):
+            return None
+
+        box, allowed = self._reach(cell, y, x, CLIMB_PX)
+        values = np.where(allowed, self.smooth[box], -np.inf)
+        dy, dx = np.unravel_index(int(np.argmax(values)), values.shape)
+        self._edits.grown[cell] = (box[0].start + dy) * self.width + box[1].start + dx
+        self._edits.sizes[cell] = 1  # its pixels, before its edge is known
+        self._edits.rejected.discard(cell)
+        self._refresh([cell])
+        self._edits.sizes[cell] = self._edge_size(cell)
+        self._refresh([cell])
+
+        return cell
+
+    def use_basin(self, basin: int, on: bool) -> None:
+        """
+        Grow the cell of `basin` from the basin (on), as Cellpose would, or
+        from the image (off, `grow`), from where it grows now. A cell grown
+        where no basin is has no basin to use.
+        """
+        if basin > self.basin_count or on != (basin in self._edits.grown):
+            return
+
+        if not on:
+            self.grow(*divmod(self.seed(basin), self.width))
+            return
+
+        del self._edits.grown[basin]
+        self._edits.sizes.pop(basin, None)
+        self._refresh([basin])
+
+        # An added cell with no pixels at the threshold: as its click made it
+        if basin in self._edits.seeds and basin not in self.cells:
+            self.add(*divmod(self._edits.seeds.pop(basin), self.width))
+
     # ----------------------------------------------------------------- #
     # Inside
     # ----------------------------------------------------------------- #
+
+    def _disk(
+        self, y: int, x: int, radius: int
+    ) -> tuple[tuple[slice, slice], np.ndarray]:
+        """The box around `(y, x)`, and in it the pixels within `radius`."""
+        box = (
+            slice(max(y - radius, 0), min(y + radius + 1, self.height)),
+            slice(max(x - radius, 0), min(x + radius + 1, self.width)),
+        )
+        rows, columns = np.ogrid[box]
+
+        return box, (rows - y) ** 2 + (columns - x) ** 2 <= radius * radius
+
+    def _reach(
+        self, cell: int, y: int, x: int, radius: int
+    ) -> tuple[tuple[slice, slice], np.ndarray]:
+        """
+        The box around pixel `(y, x)` and, in it, the pixels `cell` may take
+        from the image: within `radius`, in its basin or in none, and not in a
+        cell numbered lower (only grown cells can be there).
+        """
+        box, allowed = self._disk(y, x, radius)
+        basins, owner = self.found.basins[box], self.owner[box]
+        allowed &= (basins == 0) | (basins == cell)
+        allowed &= (owner == 0) | (owner >= cell)
+
+        return box, allowed
+
+    def _image_flood(self, cell: int) -> tuple[np.ndarray, np.ndarray]:
+        """The flood of a grown cell (`grow`), kept while its reach stays."""
+        seed = self._edits.grown[cell]
+        y, x = divmod(seed, self.width)
+        box, allowed = self._reach(cell, y, x, self._reach_px)
+        key = (seed, allowed.tobytes())
+        kept = self._grown.get(cell)
+
+        if kept is None or kept[0] != key:
+            if allowed[y - box[0].start, x - box[1].start]:
+                flood = _flood_box(self.smooth[box], allowed, box, seed, self.width)
+            else:  # its seed went to a cell numbered lower
+                flood = (np.zeros(0, np.int64), np.zeros(0, np.float32))
+
+            kept = (key, flood)
+            self._grown[cell] = kept
+
+        return kept[1]
+
+    def _edge_size(self, cell: int) -> int:
+        """
+        How many pixels a grown cell starts with: those above its edge, `EDGE`
+        of the way from the background around it (the lowest tenth of the
+        smoothed image within reach) to its peak.
+        """
+        level = self.flood(cell)[1]
+
+        if not level.size:
+            return 1
+
+        box, disk = self._disk(
+            *divmod(self._edits.grown[cell], self.width), self._reach_px
+        )
+        background = float(np.percentile(self.smooth[box][disk], 10))
+        edge = background + EDGE * (float(level[0]) - background)
+
+        return max(1, _size_at(level, edge))
+
+    def _outside(self, size: int) -> bool:
+        """Whether a cell of `size` pixels is outside the area range."""
+        area = size * self.um2_per_px
+        edits = self._edits
+
+        return area < edits.min_um2 or (
+            edits.max_um2 is not None and area > edits.max_um2
+        )
 
     def _candidate(self, basin: int) -> bool:
         """Whether `basin` may have a cell (see `Edits.flow_check`)."""
@@ -668,6 +885,23 @@ class Curation:
         """The cell of `basin` under the edits, or `None` when it has none."""
         edits = self._edits
 
+        if basin in edits.grown:
+            order = self.flood(basin)[0]
+            size = min(edits.sizes.get(basin, 1), len(order))
+
+            return (
+                Cell(
+                    basin=basin,
+                    pixels=order[:size],
+                    kind="image",
+                    threshold=float("nan"),
+                    rejected=basin in edits.rejected,
+                    excluded=self._outside(size),
+                )
+                if size
+                else None
+            )
+
         if not self._candidate(basin):
             return None
 
@@ -679,7 +913,6 @@ class Curation:
         if size == 0 or (own is None and basin not in edits.seeds and size < MIN_SIZE):
             return None
 
-        area = size * self.um2_per_px
         kind = (
             "added"
             if basin in edits.seeds
@@ -692,23 +925,47 @@ class Curation:
             kind=kind,
             threshold=edits.threshold if own is None else float(level[size - 1]),
             rejected=basin in edits.rejected,
-            excluded=area < edits.min_um2
-            or (edits.max_um2 is not None and area > edits.max_um2),
+            excluded=self._outside(size),
         )
 
     def _refresh(self, basins: None | Iterable[int] = None) -> None:
-        """Work out the cells again: all of them, or those of `basins`."""
+        """
+        Work out the cells again: all of them, or those of `basins` and every
+        grown cell numbered above one of them that is or was grown (which may
+        take the pixels it leaves, or have to leave the ones it takes).
+        """
         if basins is None:
             self.cells = {}
             self.owner[:] = 0
-            basins = range(1, len(self.found.peak) + 1)
+            above = (c for c in self._edits.grown if c > self.basin_count)
+            basins = [*range(1, self.basin_count + 1), *above]
+        else:
+            basins = set(basins)
+            grown = [
+                b
+                for b in basins
+                if b in self._edits.grown
+                or (b in self.cells and self.cells[b].kind == "image")
+            ]
 
-        for basin in basins:
+            if grown:
+                lowest = min(grown)
+                basins |= {c for c in self._edits.grown if c > lowest}
+                basins |= {
+                    c
+                    for c, cell in self.cells.items()
+                    if cell.kind == "image" and c > lowest
+                }
+
+        basins = sorted(basins)
+
+        for basin in basins:  # all out first: then each takes what it may
             old = self.cells.pop(basin, None)
 
             if old is not None:
                 self.owner.flat[old.pixels] = 0
 
+        for basin in basins:
             cell = self._cell(basin)
 
             if cell is not None:

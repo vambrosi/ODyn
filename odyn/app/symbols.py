@@ -130,6 +130,7 @@ GLYPHS = {
     "flow-check": ("editor_choice", "", "~"),
     "image": ("contrast", "", "i"),
     "follow-threshold": ("link", "", "t"),
+    "use-basin": ("water_drop", "", "b"),
     "reject": ("block", "", "x"),
     "help": ("keyboard", "", "?"),
 }

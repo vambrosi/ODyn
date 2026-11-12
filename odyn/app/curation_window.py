@@ -8,12 +8,14 @@ The cells start as Cellpose keeps them at its defaults. A click on a cell
 selects it, and it stays selected, however small, rejected or outside the
 area range, until a click on it again or Esc. A click anywhere else adds the
 candidate there, or grows the cell of that basin until it takes the point
-clicked (`Curation.add`).
+clicked (`Curation.add`); where Cellpose has no basin, it grows a cell from
+the mean image (`Curation.grow`). The card of a cell switches it between its
+basin and the image.
 
 - **Above the image**, the legend of the outlines, in the colors of the
   survey viewer: the cells of Cellpose cyan, resized ones pink, added ones
-  green, rejected ones red and those outside the area range gray (both
-  dashed), the selected one white.
+  green, those grown from the image amber, rejected ones red and those
+  outside the area range gray (both dashed), the selected one white.
 - **The bar at the right**, as in the other windows: undo, redo, fit, the
   outlines, the cells outside the area range and the rejected ones, the
   flow check, the brightness and gamma of the image, and the shortcuts
@@ -23,8 +25,9 @@ clicked (`Curation.add`).
   (um2: cells outside it are excluded), and the counts.
 - **The card of the selected cell**, over the image, in the corner that
   leaves the cell in view: its number and threshold, what sets it apart
-  (`cell_state`), its size in pixels and um2 on a logarithmic slider,
-  Follow threshold and Reject or Restore.
+  (`cell_state`), its size in pixels and um2 on a logarithmic slider, Using
+  Cellpose basin (off: grown from the image), Follow threshold and Reject or
+  Restore.
 
 The wheel zooms at the pointer and a drag pans. The outlines run along the
 edges of the pixels.
@@ -120,6 +123,7 @@ COLORS = {
     "cellpose": "#3fd8ec",
     "resized": "#ff72dc",
     "added": "#7dff6b",
+    "image": "#ffb13b",
     "rejected": "#ff5b61",
     "excluded": "#8e9a95",
     "selected": "#ffffff",
@@ -130,6 +134,7 @@ LEGEND = {
     "cellpose": "Cellpose",
     "resized": "Resized",
     "added": "Added",
+    "image": "From the image",
     "rejected-dashed": "Rejected",
     "excluded-dashed": "Outside the area range",
     "selected": "Selected",
@@ -141,6 +146,7 @@ KEYS = {
     "smaller": ("[", "Decrease cell area by 1 px"),
     "larger": ("]", "Increase cell area by 1 px"),
     "follow": ("T", "Follow the global threshold"),
+    "basin": ("B", "Switch between basin and image"),
     "reject": ("Backspace, Delete", "Reject or restore the cell"),
     "deselect": ("Esc", "Deselect the cell"),
     "undo": ("Ctrl+Z", "Undo"),
@@ -161,8 +167,8 @@ MOUSE = (
 # The area range applies once its typing or its arrows pause this long
 AREA_DELAY_MS = 300
 
-# The card of the selected cell, kept this far from the edges of the image
-# and from the cell
+# The card of the selected cell, at least this wide (or as its buttons
+# need), kept this far from the edges of the image and from the cell
 CARD_WIDTH_PX = 340
 CARD_MARGIN_PX = 12
 
@@ -334,7 +340,9 @@ def load(mean: Path, candidates: Path) -> dict:
             f"{found.basins.shape}: made from another image."
         )
 
-    return {"levels": levels16(image), "found": found, "curation": Curation(found)}
+    curation = Curation(found, image=image)
+
+    return {"levels": levels16(image), "found": found, "curation": curation}
 
 
 def _native(key: str) -> str:
@@ -657,9 +665,10 @@ def cell_state(cell) -> str:
     """
     What sets `cell` apart, for the second line of its card: added or
     resized, rejected, outside the area range (empty for a cell of Cellpose
-    that follows the global threshold and is kept).
+    that follows the global threshold and is kept, and the first line says
+    when a cell is grown from the image).
     """
-    parts = [cell.kind] if cell.kind != "cellpose" else []
+    parts = [cell.kind] if cell.kind in ("added", "resized") else []
     parts += ["rejected"] if cell.rejected else []
     parts += ["outside the area range"] if cell.excluded else []
 
@@ -704,6 +713,7 @@ class CurationWindow(QWidget):
         self.redo_stack: list[Edits] = []
         self._outlines: dict[int, tuple[tuple, QPainterPath, QRectF]] = {}
         self._pending_threshold: None | float = None
+        self._card_sized = False  # as wide as its buttons need (`_size_card`)
 
         # The draft is written once the edits pause
         self.saving = self._timer(DRAFT_DELAY_MS, self.save_draft)
@@ -970,7 +980,7 @@ class CurationWindow(QWidget):
             "QFrame#card { background: palette(window); border: 1px solid "
             f"palette(mid); border-radius: {style.RADIUS}px; }}"
         )
-        card.setFixedWidth(CARD_WIDTH_PX)
+        card.setFixedWidth(CARD_WIDTH_PX)  # until it is shown (`_size_card`)
         column = QVBoxLayout(card)
         column.setContentsMargins(12, 8, 12, 4)
         column.setSpacing(4)
@@ -1007,15 +1017,21 @@ class CurationWindow(QWidget):
         tools = QToolBar()
         tools.setIconSize(QSize(18, 18))
         tools.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.use_basin = QAction(icon("use-basin"), "Using Cellpose basin", self)
+        self.use_basin.setCheckable(True)
+        self.use_basin.setToolTip(self._tip("basin"))
+        self.use_basin.triggered.connect(self._use_basin)
         self.follow = QAction(icon("follow-threshold"), "Follow threshold", self)
         self.follow.setToolTip(self._tip("follow"))
         self.follow.triggered.connect(lambda _=False: self.follow_threshold())
         self.reject = QAction(icon("reject"), "Reject", self)
         self.reject.setToolTip(self._tip("reject"))
         self.reject.triggered.connect(lambda _=False: self.toggle_rejection())
+        tools.addAction(self.use_basin)
         tools.addAction(self.follow)
         tools.addAction(self.reject)
         column.addWidget(tools)
+        self.card_tools = tools
         card.hide()
 
         return card
@@ -1069,6 +1085,7 @@ class CurationWindow(QWidget):
             ("[", lambda: self.nudge(-1)),
             ("]", lambda: self.nudge(1)),
             ("T", self.follow_threshold),
+            ("B", self.use_basin.trigger),
             ("I", self.image_button.showMenu),
         ):
             QShortcut(QKeySequence(key), self).activated.connect(do)
@@ -1144,7 +1161,7 @@ class CurationWindow(QWidget):
         """
         A click on a cell selects it, or lets it go if it was selected; a
         click elsewhere adds the candidate there or grows the cell of that
-        basin to it.
+        basin to it, and where no basin is, grows a cell from the image.
         """
         curation = self.curation
 
@@ -1158,26 +1175,23 @@ class CurationWindow(QWidget):
             return
 
         basin = int(self.found.basins[row, column])
-
-        if not basin:
-            self.select(None)
-            self.say(
-                "No Cellpose candidate covers this point (its probability is "
-                "below the lowest threshold kept)."
-            )
-            return
-
-        grows = basin in curation.cells
+        grows = basin in curation.cells or curation.from_image(basin)
         self.remember()
+        made = curation.add(row, column)
 
-        if curation.add(row, column) is None:
+        if made is None:
             self.undo_stack.pop()
             self.say("That point is in the basin of a cell, but not connected to it.")
             return
 
-        cell = curation.cells.get(basin)
+        cell = curation.cells.get(made)
 
-        if grows:
+        if not basin:
+            self.say(
+                "No Cellpose basin here: grew a cell from the image. Its size "
+                "slider grows or shrinks it."
+            )
+        elif grows:
             self.say("Grew that cell until it reaches the point clicked.")
         elif cell is not None:
             self.say(
@@ -1185,7 +1199,7 @@ class CurationWindow(QWidget):
                 f"{cell.threshold:.2f}. Its size slider grows or shrinks it."
             )
 
-        self.selected = basin
+        self.selected = made
         self.changed()
 
     def _escape(self) -> None:
@@ -1259,6 +1273,15 @@ class CurationWindow(QWidget):
 
         self.remember()
         self.curation.resize(self.selected, size + step)
+        self.changed()
+
+    def _use_basin(self, on: bool) -> None:
+        """The selected cell, from its Cellpose basin (on) or the image."""
+        if self.curation is None or self.selected is None:
+            return
+
+        self.remember()
+        self.curation.use_basin(self.selected, on)
         self.changed()
 
     def follow_threshold(self) -> None:
@@ -1370,8 +1393,11 @@ class CurationWindow(QWidget):
         self._place_card()
 
     def _outline(self, cell) -> tuple[QPainterPath, QRectF]:
-        """The outline of `cell`, made again only when its pixels changed."""
-        key = (self.curation.seed(cell.basin), len(cell.pixels))
+        """
+        The outline of `cell`, made again only when its pixels changed (a
+        cell grown from the image can change them and keep its size).
+        """
+        key = (len(cell.pixels), hash(cell.pixels.tobytes()))
         kept = self._outlines.get(cell.basin)
 
         if kept is None or kept[0] != key:
@@ -1390,12 +1416,14 @@ class CurationWindow(QWidget):
         kept = [cell for cell in cells if cell.kept]
         added = sum(cell.kind == "added" for cell in kept)
         resized = sum(cell.kind == "resized" for cell in kept)
+        grown = sum(cell.kind == "image" for cell in kept)
         rejected = sum(cell.rejected for cell in cells)
         outside = sum(cell.excluded and not cell.rejected for cell in cells)
         noun = "cell" if len(kept) == 1 else "cells"
         self.counts.setText(
-            f"{len(kept)} {noun} kept ({added} added, {resized} resized), "
-            f"{rejected} rejected, {outside} outside the area range"
+            f"{len(kept)} {noun} kept ({added} added, {resized} resized, "
+            f"{grown} from the image), {rejected} rejected, {outside} outside "
+            "the area range"
         )
 
     def _show_selected(self) -> None:
@@ -1418,14 +1446,24 @@ class CurationWindow(QWidget):
             "Restore" if cell is not None and cell.rejected else "Reject"
         )
 
-        if cell is None:  # the cross shows where it grows from
+        grown = self.curation.from_image(basin)
+
+        with _quiet(self.use_basin):
+            self.use_basin.setChecked(not grown)
+
+        if grown:
+            self.cell_line.setText(f"Cell {basin}, from the image")
+        elif cell is None:
             threshold = self.curation.edits.threshold
             self.cell_line.setText(f"Cell {basin}, threshold {threshold:.2f}")
-            self.cell_state.setText("no pixels at this threshold")
-            return
+        else:
+            self.cell_line.setText(f"Cell {basin}, threshold {cell.threshold:.2f}")
 
-        self.cell_line.setText(f"Cell {basin}, threshold {cell.threshold:.2f}")
-        self.cell_state.setText(cell_state(cell))
+        if cell is None:  # the cross shows where it grows from
+            left = "left" if grown else "at this threshold"
+            self.cell_state.setText(f"no pixels {left}")
+        else:
+            self.cell_state.setText(cell_state(cell))
 
     def _selected_box(self) -> None | QRectF:
         """Where the selected cell is on the canvas: its box, or its seed."""
@@ -1462,6 +1500,9 @@ class CurationWindow(QWidget):
         if self.size.isSliderDown():
             return  # not from under the pointer: once the slider is let go
 
+        if not self._card_sized:
+            self._size_card()
+
         self.card.adjustSize()
         width, height = self.card.width(), self.card.height()
         right = self.canvas.width() - width - CARD_MARGIN_PX
@@ -1489,6 +1530,22 @@ class CurationWindow(QWidget):
 
         self.card.move(place.topLeft().toPoint())
         self.card.show()
+
+    def _size_card(self) -> None:
+        """
+        Make the card as wide as its buttons need, in the font and style of
+        this system, once shown (Restore being the wider of Reject and
+        Restore): one row of them, never cut, and the card never changes
+        width.
+        """
+        text = self.reject.text()
+        self.reject.setText("Restore")
+        self.card.ensurePolished()
+        margins = self.card.layout().contentsMargins()
+        width = self.card_tools.sizeHint().width() + margins.left() + margins.right()
+        self.reject.setText(text)
+        self.card.setFixedWidth(max(CARD_WIDTH_PX, width + 2))  # and its border
+        self._card_sized = True
 
     def _show_help(self, on: bool) -> None:
         self.help.setVisible(on)
@@ -1518,9 +1575,12 @@ class CurationWindow(QWidget):
         ):
             control.setEnabled(ready)
 
+        own = picked and self.selected in self.curation.edits.sizes
+        grown = picked and self.curation.from_image(self.selected)
         self.size.setEnabled(picked)
         self.reject.setEnabled(has_cell)
-        self.follow.setEnabled(picked and self.selected in self.curation.edits.sizes)
+        self.follow.setEnabled(own and not grown)
+        self.use_basin.setEnabled(picked and self.selected <= self.curation.basin_count)
         self.undo_action.setEnabled(bool(self.undo_stack))
         self.redo_action.setEnabled(bool(self.redo_stack))
 

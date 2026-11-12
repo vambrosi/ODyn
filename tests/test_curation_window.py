@@ -7,6 +7,7 @@ and the draft kept on this computer. Opening it from the QC page is tested in
 """
 
 import os
+import time
 
 import numpy as np
 import pytest
@@ -25,7 +26,6 @@ except ImportError as error:  # a missing library, not a missing module
     pytest.skip(f"Qt cannot load here: {error}", allow_module_level=True)
 
 from odyn.app.curation_window import (  # noqa: E402
-    AREA_DELAY_MS,
     COLORS,
     LEGEND,
     CurationWindow,
@@ -33,7 +33,7 @@ from odyn.app.curation_window import (  # noqa: E402
     size_at,
     size_position,
 )
-from test_segmentation import drawn_candidates  # noqa: E402
+from test_segmentation import drawn_candidates, drawn_image  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -42,10 +42,13 @@ def app():
 
 
 def files(folder, found=None):
-    """Candidates (drawn ones by default) and a mean image like them."""
+    """
+    Candidates (drawn ones by default) and a mean image like them, with a
+    spot where no basin is (`drawn_image`).
+    """
     found = found or drawn_candidates()
     found.write(folder / "cellpose_group_1.h5")
-    tifffile.imwrite(folder / "mean_group_1.tif", (found.prob + 6).astype(np.float32))
+    tifffile.imwrite(folder / "mean_group_1.tif", drawn_image(found))
 
     return folder / "mean_group_1.tif", folder / "cellpose_group_1.h5"
 
@@ -71,6 +74,19 @@ def press(window, key: str) -> None:
     window.activateWindow()
     assert QTest.qWaitForWindowActive(window, 2000)
     QTest.keySequence(window, QKeySequence(key))
+
+
+def area_applied(window) -> None:
+    """
+    Wait until the area range applies, once its steps pause: its timer, not
+    a fixed time (other windows of earlier tests can keep the loop busy).
+    """
+    deadline = time.monotonic() + 5
+
+    while window.ranging.isActive() and time.monotonic() < deadline:
+        QTest.qWait(20)
+
+    assert not window.ranging.isActive()
 
 
 def on_canvas(window, basin: int) -> QRectF:
@@ -112,7 +128,9 @@ def test_the_window_starts_from_the_cells_cellpose_keeps(app, tmp_path):
     window = opened(app, tmp_path)
 
     assert sorted(window.curation.cells) == [1, 2]
-    assert window.counts.text().startswith("2 cells kept (0 added, 0 resized)")
+    assert window.counts.text().startswith(
+        "2 cells kept (0 added, 0 resized, 0 from the image)"
+    )
     assert kinds(window) == ["cellpose", "cellpose"]
     assert window.threshold_line.text() == "0.00 (default)"
     assert (window.canvas.image.width(), window.canvas.image.height()) == (44, 30)
@@ -149,10 +167,37 @@ def test_a_click_selects_a_cell_and_one_elsewhere_adds_the_candidate(app, tmp_pa
     assert window.line.text().startswith("Added the candidate under the point")
     assert window.cell_state.text() == "added"
 
-    # Outside every basin: nothing, and why
-    window.click(0, 43)
-    assert window.selected is None
-    assert window.line.text().startswith("No Cellpose candidate covers this point")
+    # By the spot, where no basin is: a cell grown from the image
+    window.click(4, 40)
+    assert window.selected == 4 and window.curation.from_image(4)
+    assert window.line.text().startswith("No Cellpose basin here: grew a cell")
+    assert window.cell_line.text() == "Cell 4, from the image"
+    assert window.cell_state.text() == ""
+    assert not window.use_basin.isChecked() and not window.use_basin.isEnabled()
+    assert not window.follow.isEnabled()
+    assert kinds(window)[-1] == "selected" and "image" not in kinds(window)
+    press(window, "Esc")
+    assert kinds(window)[-1] == "image"
+    window.close()
+
+
+def test_b_switches_a_cell_between_its_basin_and_the_image(app, tmp_path):
+    window = opened(app, tmp_path)
+    window.click(10, 10)
+    before = len(window.curation.cells[1].pixels)
+    assert window.use_basin.isChecked() and window.use_basin.isEnabled()
+
+    press(window, "B")
+    assert window.curation.from_image(1) and not window.use_basin.isChecked()
+    assert window.cell_line.text() == "Cell 1, from the image"
+    assert window.counts.text().startswith("2 cells kept (0 added, 0 resized, 1 from")
+
+    # Back with the button, and undone: from the image again
+    window.use_basin.trigger()
+    assert not window.curation.from_image(1) and window.use_basin.isChecked()
+    assert len(window.curation.cells[1].pixels) == before
+    press(window, "Ctrl+Z")
+    assert window.curation.from_image(1) and not window.use_basin.isChecked()
     window.close()
 
 
@@ -176,10 +221,10 @@ def test_the_selected_cell_is_resized_by_its_slider_and_keys(app, tmp_path):
 
     # Outside the area range too
     window.min_area.setValue(larger + 1)
-    QTest.qWait(AREA_DELAY_MS + 100)
+    area_applied(window)
     assert window.cell_state.text() == "resized and outside the area range"
     window.min_area.setValue(0)
-    QTest.qWait(AREA_DELAY_MS + 100)
+    area_applied(window)
 
     # T: the threshold of all again
     press(window, "T")
@@ -222,12 +267,13 @@ def test_rejected_and_excluded_cells_hide_until_shown(app, tmp_path):
     assert window.show_rejected.isChecked()
     assert kinds(window) == ["rejected", "cellpose"]
     assert window.counts.text() == (
-        "1 cell kept (0 added, 0 resized), 1 rejected, 0 outside the area range"
+        "1 cell kept (0 added, 0 resized, 0 from the image), 1 rejected, "
+        "0 outside the area range"
     )
 
     # The area range: the other cell outside it, hidden until shown
     window.min_area.setValue(len(window.curation.cells[2].pixels) + 1)
-    QTest.qWait(AREA_DELAY_MS + 100)
+    area_applied(window)
     assert window.curation.cells[2].excluded
     assert kinds(window) == ["rejected"]
     press(window, "E")
@@ -243,12 +289,12 @@ def test_the_area_range_applies_as_its_arrows_step_it(app, tmp_path):
     # Up a step from just under cell 2, in the box: cell 2 outside the range
     # once the steps pause, without leaving the box
     window.min_area.setValue(areas[2] - 1)
-    QTest.qWait(AREA_DELAY_MS + 100)
+    area_applied(window)
     assert not window.curation.cells[2].excluded
     window.min_area.setFocus()
     QTest.keyClick(window.min_area, Qt.Key.Key_Up)  # as its up arrow
     assert window.ranging.isActive() and not window.curation.cells[2].excluded
-    QTest.qWait(AREA_DELAY_MS + 100)
+    area_applied(window)
     assert window.min_area.hasFocus()
     assert window.curation.cells[2].excluded and window.curation.cells[1].kept
     assert window.counts.text().endswith("1 outside the area range")
