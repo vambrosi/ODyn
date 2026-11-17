@@ -8,6 +8,7 @@ and the draft kept on this computer. Opening it from the QC page is tested in
 
 import os
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -20,7 +21,7 @@ try:
     from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
     from PySide6.QtGui import QKeySequence, QWheelEvent
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QLabel
+    from PySide6.QtWidgets import QApplication, QLabel, QToolBar
 
 except ImportError as error:  # a missing library, not a missing module
     pytest.skip(f"Qt cannot load here: {error}", allow_module_level=True)
@@ -29,10 +30,12 @@ from odyn.app.curation_window import (  # noqa: E402
     COLORS,
     LEGEND,
     CurationWindow,
+    counts_text,
     outline,
     size_at,
     size_position,
 )
+from odyn.segmentation import Edits  # noqa: E402
 from test_segmentation import drawn_candidates, drawn_image  # noqa: E402
 
 
@@ -124,12 +127,44 @@ def test_the_size_slider_is_logarithmic_from_one_pixel_to_the_basin():
     assert all(size_at(size_position(n, 400), 400) == n for n in (1, 2, 20, 400))
 
 
+def test_the_counts_leave_out_what_is_none():
+    def cells(kept=(), excluded=()):
+        """Stand-ins: so many cells of each kind kept, or of each reason not."""
+        made = []
+
+        for kind, count in kept:
+            made += [SimpleNamespace(kind=kind, excluded_by=None, kept=True)] * count
+
+        for reason, count in excluded:
+            made += [
+                SimpleNamespace(kind="cellpose", excluded_by=reason, kept=False)
+            ] * count
+
+        return made
+
+    everything = cells(
+        kept=[("cellpose", 536), ("resized", 2), ("added", 1), ("image", 1)],
+        excluded=[("rejected", 1), ("area", 11), ("cellpose", 184)],
+    )
+    assert counts_text(everything) == (
+        "540 cells kept (2 resized, 1 added from basin, 1 added from image) and "
+        "196 excluded (1 rejected, 11 excluded by area, 184 excluded by Cellpose)"
+    )
+    assert counts_text(cells([("cellpose", 2)], [("rejected", 1)])) == (
+        "2 cells kept and 1 excluded (1 rejected)"
+    )
+    assert counts_text(cells([("cellpose", 1)])) == "1 cell kept"
+    assert counts_text([]) == "0 cells kept"
+
+
 def test_the_window_starts_from_the_cells_cellpose_keeps(app, tmp_path):
     window = opened(app, tmp_path)
 
-    assert sorted(window.curation.cells) == [1, 2]
-    assert window.counts.text().startswith(
-        "2 cells kept (0 added, 0 resized, 0 from the image)"
+    # The dim spot, which fails the flow check, is there but hidden
+    assert [cell.basin for cell in window.curation.kept()] == [1, 2]
+    assert window.curation.cells[3].dropped
+    assert window.counts.text() == (
+        "2 cells kept and 1 excluded (1 excluded by Cellpose)"
     )
     assert kinds(window) == ["cellpose", "cellpose"]
     assert window.threshold_line.text() == "0.00 (default)"
@@ -140,6 +175,52 @@ def test_the_window_starts_from_the_cells_cellpose_keeps(app, tmp_path):
     # A legend for every kind of outline, above the image
     legend = [label.text() for label in window.findChildren(QLabel)]
     assert all(text in legend for text in LEGEND.values())
+
+    # The bar: undo and redo, what is shown, the image, and the shortcuts
+    groups = [[]]
+    bars = window.findChildren(QToolBar)
+    bar = next(bar for bar in bars if bar.windowTitle() == "ROIs")
+
+    for action in bar.actions():
+        if action.isSeparator():
+            groups.append([])
+        else:
+            groups[-1].append(action.text())
+
+    assert groups == [
+        ["Undo", "Redo"],
+        [
+            "Show outlines",
+            "Show rejected cells",
+            "Show cells excluded by area",
+            "Show cells excluded by Cellpose",
+        ],
+        ["Show whole image", "Brightness and gamma"],
+        ["Shortcuts"],
+    ]
+    window.close()
+
+
+def test_a_click_on_a_cell_excluded_by_cellpose_adds_it(app, tmp_path):
+    window = opened(app, tmp_path)
+    dim = window.curation.cells[3].pixels.copy()
+
+    # Hidden: a click on it adds it as it is, and selects it
+    window.click(24, 38)
+    assert window.selected == 3 and window.curation.cells[3].kind == "added"
+    np.testing.assert_array_equal(window.curation.cells[3].pixels, dim)
+    assert window.line.text().startswith("Added the candidate under the point")
+
+    # Shown: dashed, and the same by the mouse
+    press(window, "Ctrl+Z")
+    press(window, "C")
+    assert kinds(window) == ["cellpose", "cellpose", "dropped"]
+    at = window.canvas.canvas_point(24.5, 38.5).toPoint()
+    QTest.mouseClick(
+        window.canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier(0), at
+    )
+    assert window.selected == 3 and window.curation.cells[3].kind == "added"
+    assert kinds(window) == ["cellpose", "cellpose", "selected"]
     window.close()
 
 
@@ -191,7 +272,7 @@ def test_b_switches_a_cell_between_its_basin_and_the_image(app, tmp_path):
     press(window, "B")
     assert window.curation.from_image(1) and not window.use_basin.isChecked()
     assert window.cell_line.text() == "Cell 1, from the image"
-    assert window.counts.text().startswith("2 cells kept (0 added, 0 resized, 1 from")
+    assert window.counts.text().startswith("2 cells kept (1 added from image)")
     assert window.reject.text() == "Reject"  # its Cellpose cell stays
 
     # Back with the button, as it was, and undone: from the image again
@@ -211,8 +292,9 @@ def test_a_cell_grown_where_no_basin_is_is_deleted_not_rejected(app, tmp_path):
 
     press(window, "Delete")
     assert 4 not in window.curation.cells and window.selected is None
-    assert window.counts.text().startswith("2 cells kept (0 added, 0 resized, 0 from")
-    assert window.counts.text().endswith("0 rejected, 0 outside the area range")
+    assert window.counts.text() == (
+        "2 cells kept and 1 excluded (1 excluded by Cellpose)"
+    )
 
     press(window, "Ctrl+Z")
     assert window.curation.from_image(4)
@@ -233,17 +315,12 @@ def test_a_change_that_takes_the_selected_cell_away_lets_it_go(app, tmp_path):
     press(window, "Ctrl+Shift+Z")
     assert window.curation.from_image(4) and window.selected is None
 
-    # The dim spot, which the flow check leaves out: added, then undone; and
-    # without the flow check, until it is back on
+    # The dim spot, excluded by Cellpose: added, then undone, it is excluded
+    # again and not selected
     window.click(24, 41)
     assert window.selected == 3
     press(window, "Ctrl+Z")
-    assert window.selected is None
-    window.flow_check.trigger()
-    window.click(24, 38)
-    assert window.selected == 3 and window.curation.cells[3].kind == "cellpose"
-    window.flow_check.trigger()
-    assert window.selected is None and 3 not in window.curation.cells
+    assert window.selected is None and window.curation.cells[3].dropped
     window.close()
 
 
@@ -268,7 +345,7 @@ def test_the_selected_cell_is_resized_by_its_slider_and_keys(app, tmp_path):
     # Outside the area range too
     window.min_area.setValue(larger + 1)
     area_applied(window)
-    assert window.cell_state.text() == "resized and outside the area range"
+    assert window.cell_state.text() == "resized and excluded by area"
     window.min_area.setValue(0)
     area_applied(window)
 
@@ -298,7 +375,7 @@ def test_the_threshold_slider_makes_every_cell_larger_to_the_right(app, tmp_path
     window.close()
 
 
-def test_rejected_and_excluded_cells_hide_until_shown(app, tmp_path):
+def test_the_cells_not_kept_hide_until_shown(app, tmp_path):
     window = opened(app, tmp_path)
     window.click(10, 10)
 
@@ -313,17 +390,21 @@ def test_rejected_and_excluded_cells_hide_until_shown(app, tmp_path):
     assert window.show_rejected.isChecked()
     assert kinds(window) == ["rejected", "cellpose"]
     assert window.counts.text() == (
-        "1 cell kept (0 added, 0 resized, 0 from the image), 1 rejected, "
-        "0 outside the area range"
+        "1 cell kept and 2 excluded (1 rejected, 1 excluded by Cellpose)"
     )
 
     # The area range: the other cell outside it, hidden until shown
     window.min_area.setValue(len(window.curation.cells[2].pixels) + 1)
     area_applied(window)
-    assert window.curation.cells[2].excluded
+    assert window.curation.cells[2].excluded_by == "area"
     assert kinds(window) == ["rejected"]
     press(window, "E")
     assert kinds(window) == ["rejected", "excluded"]
+
+    # The dim spot, excluded by Cellpose (and small): hidden until shown
+    press(window, "C")
+    assert window.show_dropped.isChecked()
+    assert kinds(window) == ["rejected", "excluded", "dropped"]
     window.close()
 
 
@@ -336,18 +417,18 @@ def test_the_area_range_applies_as_its_arrows_step_it(app, tmp_path):
     # once the steps pause, without leaving the box
     window.min_area.setValue(areas[2] - 1)
     area_applied(window)
-    assert not window.curation.cells[2].excluded
+    assert not window.curation.cells[2].outside
     window.min_area.setFocus()
     QTest.keyClick(window.min_area, Qt.Key.Key_Up)  # as its up arrow
-    assert window.ranging.isActive() and not window.curation.cells[2].excluded
+    assert window.ranging.isActive() and not window.curation.cells[2].outside
     area_applied(window)
     assert window.min_area.hasFocus()
-    assert window.curation.cells[2].excluded and window.curation.cells[1].kept
-    assert window.counts.text().endswith("1 outside the area range")
+    assert window.curation.cells[2].outside and window.curation.cells[1].kept
+    assert "1 excluded by area" in window.counts.text()
 
     # One step back undoes it
     press(window, "Ctrl+Z")
-    assert not window.curation.cells[2].excluded
+    assert not window.curation.cells[2].outside
     assert window.min_area.value() == areas[2] - 1
     window.close()
 
@@ -414,7 +495,7 @@ def test_the_shortcuts_card_shows_in_the_middle_until_put_away(app, tmp_path):
     assert card.isVisible()
     QTest.mouseClick(card, Qt.MouseButton.LeftButton)
     assert not card.isVisible() and not window.help_action.isChecked()
-    assert window.selected is None and 3 not in window.curation.cells
+    assert window.selected is None and window.curation.edits == Edits()
     window.close()
 
 
@@ -432,7 +513,7 @@ def test_the_draft_is_kept_here_and_picked_up_again(app, tmp_path):
     found = drawn_candidates()
     found.peak[0] -= 1
     other = opened(app, tmp_path, *files(tmp_path, found))
-    assert 3 not in other.curation.cells
+    assert other.curation.cells[3].dropped
     assert other.line.text().startswith("Your draft was for other candidates")
     other.close()
 

@@ -521,11 +521,10 @@ class Edits:
     and saved as JSON (`as_json`, `from_json`).
     - `threshold`: the probability threshold of the Cellpose cells that
       follow it (the Cellpose default, 0);
-    - `flow_check`: keep the basins Cellpose keeps at its defaults (on), or
-      every basin with a cell at the threshold (off);
     - `sizes`: Cellpose cells with a size of their own (basin: pixels);
     - `seeds`: Cellpose cells added by a click (basin: the pixel clicked, an
-      index into the flattened image), grown from there;
+      index into the flattened image), grown from there, kept even where
+      Cellpose drops them at its defaults;
     - `drawn`: cells drawn by a tool (`Drawn`), by number: the basin of the
       Cellpose cell one replaces, or a number above the basins;
     - `rejected`: Cellpose cells taken out (a drawn cell taken out is gone);
@@ -533,7 +532,6 @@ class Edits:
     """
 
     threshold: float = THRESHOLD
-    flow_check: bool = True
     sizes: dict[int, int] = field(default_factory=dict)
     seeds: dict[int, int] = field(default_factory=dict)
     drawn: dict[int, Drawn] = field(default_factory=dict)
@@ -545,7 +543,6 @@ class Edits:
         """The edits as JSON values (cells as text keys)."""
         return {
             "threshold": self.threshold,
-            "flow_check": self.flow_check,
             "sizes": {str(b): int(n) for b, n in self.sizes.items()},
             "seeds": {str(b): int(p) for b, p in self.seeds.items()},
             "drawn": {str(c): d.as_json() for c, d in self.drawn.items()},
@@ -559,7 +556,6 @@ class Edits:
         """The edits `as_json` gave."""
         return cls(
             threshold=float(values["threshold"]),
-            flow_check=bool(values["flow_check"]),
             sizes={int(b): int(n) for b, n in values["sizes"].items()},
             seeds={int(b): int(p) for b, p in values["seeds"].items()},
             drawn={int(c): Drawn.from_json(d) for c, d in values["drawn"].items()},
@@ -576,10 +572,13 @@ class Cell:
     cell or of the one a drawn cell replaces, else a number above the
     basins), its `pixels` (indices into the flattened image), its `kind`
     (`"cellpose"`, `"resized"`, `"added"`, or `"image"` when drawn from the
-    image), the `threshold` it stands at (for a resized or added cell, the
-    probability of its weakest pixel; none for a drawn one), and whether it
-    is `rejected` or `excluded` (outside the area range). Only cells neither
-    rejected nor excluded are kept.
+    image), and the `threshold` it stands at (for a resized or added cell,
+    the probability of its weakest pixel; none for a drawn one).
+
+    Three things keep a cell out: the curator `rejected` it, Cellpose drops
+    it at its defaults (`dropped`: its basin fails the flow check or holds
+    under `MIN_SIZE` pixels at threshold 0, and no click added it), or it is
+    `outside` the area range. Only cells with none of them are kept.
     """
 
     basin: int
@@ -587,11 +586,26 @@ class Cell:
     kind: str
     threshold: float
     rejected: bool
-    excluded: bool
+    dropped: bool
+    outside: bool
+
+    @property
+    def excluded_by(self) -> None | str:
+        """
+        Why it is not kept, one reason (`"rejected"`, `"cellpose"`, or
+        `"area"`, in this order of precedence), or `None` when it is kept.
+        """
+        if self.rejected:
+            return "rejected"
+
+        if self.dropped:
+            return "cellpose"
+
+        return "area" if self.outside else None
 
     @property
     def kept(self) -> bool:
-        return not (self.rejected or self.excluded)
+        return self.excluded_by is None
 
 
 class Curation:
@@ -609,9 +623,11 @@ class Curation:
     curation.edits = before  # undo
     ```
 
-    `cells` holds every cell, rejected and excluded ones too (flagged), and
-    `owner` is the number of the cell at every pixel (0 where none is), to
-    find the cell under a point.
+    `cells` holds every cell, those not kept too (flagged), and `owner` is
+    the number of the cell at every pixel (0 where none is), to find the
+    cell under a point. Every basin has its cell there when it has one at
+    the threshold, those Cellpose drops at its defaults too (`Cell.dropped`):
+    a click adds one (`add`).
 
     Cells are of two sorts, which never overlap:
     - Cellpose cells, one per basin and numbered as it: the pixels of the
@@ -643,6 +659,7 @@ class Curation:
         self._reach_px = max(1, round(REACH_UM * px_per_um))
         self._smooth: None | np.ndarray = None
         self._boxes = ndi.find_objects(found.basins)
+        self._passed = (found.area >= MIN_SIZE) & (found.flow_error <= FLOW_THRESHOLD)
         # The latest flood of each Cellpose cell (by basin and seed) and of
         # each drawn cell, with what it depends on besides
         self._floods: dict[tuple[int, int], tuple[bytes, tuple]] = {}
@@ -671,8 +688,8 @@ class Curation:
 
     def cell_at(self, y: int, x: int) -> None | int:
         """
-        The number of the cell at pixel `(y, x)`, rejected and excluded cells
-        included, or `None`.
+        The number of the cell at pixel `(y, x)`, cells not kept included, or
+        `None`.
         """
         number = int(self.owner[y, x])
 
@@ -695,28 +712,19 @@ class Curation:
 
         return drawn is not None and drawn.kind == "image"
 
-    def may_have_cell(self, number: int) -> bool:
+    def candidate(self, number: int) -> bool:
         """
-        Whether cell `number` may be there under the edits, with pixels at
-        the threshold or not: a drawn one, an added one, or the Cellpose
-        cell of a basin the flow check lets through (of any basin, with the
-        flow check off; see `Edits.flow_check`).
+        Whether cell `number` is a candidate under the edits, with pixels at
+        the threshold or not: a drawn cell, an added one, or the cell of a
+        basin Cellpose keeps at its defaults. The cell of any other basin is
+        dropped by Cellpose (`Cell.dropped`) until a click adds it.
         """
         edits = self._edits
 
         if number in edits.drawn or number in edits.seeds:
             return True
 
-        if not 1 <= number <= self.basin_count:
-            return False
-
-        if not edits.flow_check:
-            return True
-
-        return bool(
-            self.found.area[number - 1] >= MIN_SIZE
-            and self.found.flow_error[number - 1] <= FLOW_THRESHOLD
-        )
+        return 1 <= number <= self.basin_count and bool(self._passed[number - 1])
 
     def seed(self, cell: int) -> int:
         """
@@ -774,7 +782,7 @@ class Curation:
         return kept[1]
 
     def kept(self) -> list[Cell]:
-        """The cells kept (neither rejected nor excluded), by number."""
+        """The cells kept, by number."""
         return [cell for _, cell in sorted(self.cells.items()) if cell.kept]
 
     def labels(self) -> np.ndarray:
@@ -811,11 +819,6 @@ class Curation:
     def set_threshold(self, threshold: float) -> None:
         """The threshold of every Cellpose cell without a size of its own."""
         self._edits.threshold = float(threshold)
-        self._refresh()
-
-    def set_flow_check(self, on: bool) -> None:
-        """Keep only the basins Cellpose keeps at its defaults (on), or all."""
-        self._edits.flow_check = bool(on)
         self._refresh()
 
     def set_area_range(
@@ -861,9 +864,10 @@ class Curation:
         """
         A click at pixel `(y, x)`: the cell of the basin there grows until it
         takes the pixel (its Cellpose cell, or the cell drawn in its place),
-        or, when the basin has no cell, its candidate is added, grown from
-        the pixel; where no basin is, a cell is drawn from the image
-        (`grow`). Either way the cell is kept, even if it was rejected.
+        or, when the basin has no cell or one Cellpose drops, its candidate
+        is added, grown from the pixel; where no basin is, a cell is drawn
+        from the image (`grow`). Either way the cell is kept, even if it was
+        rejected.
         Returns the cell, or `None` when the cell there cannot reach the
         pixel, or no basin covers it and there is no image.
 
@@ -878,14 +882,14 @@ class Curation:
         if not basin:
             return self.grow(y, x)
 
-        if basin in self.cells or basin in self._edits.drawn:
+        cell = self.cells.get(basin)
+
+        if basin in self._edits.drawn or (cell is not None and not cell.dropped):
             order = self.flood(basin)[0]
             where = np.flatnonzero(order == pixel)
 
             if not where.size:
                 return None
-
-            cell = self.cells.get(basin)
 
             if cell is None or where[0] >= len(cell.pixels):
                 self._give_size(basin, order, int(where[0]) + 1)
@@ -1068,14 +1072,24 @@ class Curation:
                 kind=drawn.kind,
                 threshold=float("nan"),
                 rejected=False,
-                excluded=self._outside(len(drawn.pixels)),
+                dropped=False,
+                outside=self._outside(len(drawn.pixels)),
             )
 
-        if not self.may_have_cell(number):
+        if not 1 <= number <= self.basin_count:
             return None
 
-        order, level = self.flood(number)
         own = edits.sizes.get(number)
+
+        # One that follows the threshold from its peak has nothing above the
+        # threshold when its peak has not: no flood needed (most basins)
+        peak = self.found.peak[number - 1]
+
+        if own is None and number not in edits.seeds:
+            if not self.found.prob.flat[peak] > edits.threshold:
+                return None
+
+        order, level = self.flood(number)
         size = _size_at(level, edits.threshold) if own is None else min(own, len(order))
 
         # Cellpose drops cells under MIN_SIZE; a size chosen by hand stays
@@ -1094,7 +1108,8 @@ class Curation:
             kind=kind,
             threshold=edits.threshold if own is None else float(level[size - 1]),
             rejected=number in edits.rejected,
-            excluded=self._outside(size),
+            dropped=number not in edits.seeds and not self._passed[number - 1],
+            outside=self._outside(size),
         )
 
     def _refresh(self, numbers: None | Iterable[int] = None) -> None:

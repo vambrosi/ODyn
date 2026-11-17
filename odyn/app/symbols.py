@@ -125,9 +125,9 @@ GLYPHS = {
     # The ROI curation window (`curation_window`)
     "redo": ("redo", "", ">"),
     "outlines": ("bubble_chart", "", "o"),
-    "show-excluded": ("filter_alt_off", "", "e"),
     "show-rejected": ("block", "visibility", "r"),
-    "flow-check": ("editor_choice", "", "~"),
+    "show-excluded": ("filter_alt", "visibility", "e"),
+    "show-dropped": ("editor_choice", "visibility", "c"),
     "image": ("contrast", "", "i"),
     "follow-threshold": ("link", "", "t"),
     "use-basin": ("water_drop", "", "b"),

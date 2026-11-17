@@ -4,25 +4,31 @@ an approved experiment: the Cellpose candidates of the group
 (`odyn.segmentation`) over its mean image, as cells to keep, resize, add and
 reject (`Curation`).
 
-The cells start as Cellpose keeps them at its defaults. A click on a cell
-selects it, and it stays selected, however small, rejected or outside the
-area range, until a click on it again, Esc, or a change that takes it away
-(an undo, or the flow check). A click anywhere else adds the candidate
-there, or grows the cell of that basin until it takes the point clicked
+The cells start as Cellpose keeps them at its defaults. The cells kept have
+solid outlines; those not kept are dashed and hidden unless shown, in three
+sets: rejected, excluded by area (outside the area range), and excluded by
+Cellpose (dropped at its defaults: the flow check, or too small, at
+threshold 0). A cell leaves a dashed set only by an edit that keeps it.
+
+A click on a cell selects it, and it stays selected, however small,
+rejected or outside the area range, until a click on it again, Esc, or an
+undo that takes it away. A click on a cell excluded by Cellpose, shown or
+not, adds it instead, as a click anywhere else adds the candidate there, or
+grows the cell of that basin until it takes the point clicked
 (`Curation.add`); where Cellpose has no basin, it grows a cell from the mean
 image (`Curation.grow`), over the pixels of no kept cell and of no other cell
 grown from the image. Such a cell keeps its pixels until it is edited, and
 Cellpose cells go around it. The card of a cell switches it between its
 basin and the image.
 
-- **Above the image**, the legend of the outlines, in the colors of the
-  survey viewer: the cells of Cellpose cyan, resized ones pink, added ones
-  green, those grown from the image amber, rejected ones red and those
-  outside the area range gray (both dashed), the selected one white.
-- **The bar at the right**, as in the other windows: undo, redo, fit, the
-  outlines, the cells outside the area range and the rejected ones, the
-  flow check, the brightness and gamma of the image, and the shortcuts
-  (`KEYS`, on a card in the middle of the image).
+- **Above the image**, the legend of the outlines (`LEGEND`): the selected
+  one white; Cellpose cyan, resized pink, added from a basin green, and
+  added from the image amber; rejected red, excluded by area gray, and
+  excluded by Cellpose violet, dashed.
+- **The bar at the right**, as in the other windows: undo and redo; the
+  outlines and each dashed set, shown or hidden; fit, and the brightness and
+  gamma of the image; and the shortcuts (`KEYS`, on a card in the middle of
+  the image).
 - **Under the image**, for all cells: the threshold of every cell without a
   size of its own (to the right, lower: every cell larger), the area range
   (um2: cells outside it are excluded), and the counts.
@@ -129,19 +135,24 @@ COLORS = {
     "image": "#ffb13b",
     "rejected": "#ff5b61",
     "excluded": "#8e9a95",
+    "dropped": "#b392f0",
     "selected": "#ffffff",
 }
 
 # The legend above the image: each kind of outline and what it means
 LEGEND = {
+    "selected": "Selected",
     "cellpose": "Cellpose",
     "resized": "Resized",
-    "added": "Added",
-    "image": "From the image",
+    "added": "Added from basin",
+    "image": "Added from image",
     "rejected-dashed": "Rejected",
-    "excluded-dashed": "Outside the area range",
-    "selected": "Selected",
+    "excluded-dashed": "Excluded by area",
+    "dropped-dashed": "Excluded by Cellpose",
 }
+
+# The dashed set of each reason not to keep a cell (`Cell.excluded_by`)
+DASHED = {"rejected": "rejected", "area": "excluded", "cellpose": "dropped"}
 
 # The shortcuts, as the tooltips and the shortcuts card name them (on the
 # card in this order, then what the mouse does)
@@ -154,10 +165,11 @@ KEYS = {
     "deselect": ("Esc", "Deselect the cell"),
     "undo": ("Ctrl+Z", "Undo"),
     "redo": ("Ctrl+Shift+Z", "Redo"),
-    "fit": ("0", "Show whole image"),
     "outlines": ("O", "Show outlines"),
-    "show-excluded": ("E", "Show cells outside the area range"),
     "show-rejected": ("R", "Show rejected cells"),
+    "show-excluded": ("E", "Show cells excluded by area"),
+    "show-dropped": ("C", "Show cells excluded by Cellpose"),
+    "fit": ("0", "Show whole image"),
     "image": ("I", "Brightness and gamma"),
     "help": ("?", "Shortcuts"),
 }
@@ -175,7 +187,7 @@ AREA_DELAY_MS = 300
 CARD_WIDTH_PX = 340
 CARD_MARGIN_PX = 12
 
-DRAFT_VERSION = 2
+DRAFT_VERSION = 3
 DRAFT_DELAY_MS = 500  # a draft is written once the edits pause this long
 
 
@@ -664,16 +676,49 @@ class _Help(QFrame):
         self.dismissed.emit()
 
 
+def counts_text(cells) -> str:
+    """
+    The line of counts under the image: the cells kept, and those excluded
+    (each in one set), with their parts in brackets; a part with no cell is
+    left out, and so are the brackets with none, and the excluded if none.
+    """
+    kept = [cell for cell in cells if cell.kept]
+    reasons = [cell.excluded_by for cell in cells if not cell.kept]
+    noun = "cell" if len(kept) == 1 else "cells"
+    kinds = [cell.kind for cell in kept]
+    text = f"{len(kept)} {noun} kept" + _parts(
+        (kinds.count("resized"), "resized"),
+        (kinds.count("added"), "added from basin"),
+        (kinds.count("image"), "added from image"),
+    )
+
+    if not reasons:
+        return text
+
+    return f"{text} and {len(reasons)} excluded" + _parts(
+        (reasons.count("rejected"), "rejected"),
+        (reasons.count("area"), "excluded by area"),
+        (reasons.count("cellpose"), "excluded by Cellpose"),
+    )
+
+
+def _parts(*counts: tuple[int, str]) -> str:
+    """The counts above 0, as " (n name, ...)", or nothing."""
+    shown = [f"{count} {name}" for count, name in counts if count]
+
+    return f" ({', '.join(shown)})" if shown else ""
+
+
 def cell_state(cell) -> str:
     """
     What sets `cell` apart, for the second line of its card: added or
-    resized, rejected, outside the area range (empty for a cell of Cellpose
-    that follows the global threshold and is kept, and the first line says
-    when a cell is grown from the image).
+    resized, rejected, excluded by area (empty for a cell of Cellpose that
+    follows the global threshold and is kept, and the first line says when a
+    cell is grown from the image).
     """
     parts = [cell.kind] if cell.kind in ("added", "resized") else []
     parts += ["rejected"] if cell.rejected else []
-    parts += ["outside the area range"] if cell.excluded else []
+    parts += ["excluded by area"] if cell.outside else []
 
     if len(parts) > 1:
         return f"{', '.join(parts[:-1])} and {parts[-1]}"
@@ -787,24 +832,20 @@ class CurationWindow(QWidget):
         self.undo_action = self._action(bar, "undo", self.undo)
         self.redo_action = self._action(bar, "redo", self.redo)
         bar.addSeparator()
-        self._action(bar, "fit", self.canvas.fit)
         self.outlines = self._action(
             bar, "outlines", self._outlines_toggled, checked=True
-        )
-        self.show_excluded = self._action(
-            bar, "show-excluded", lambda _: self.redraw(), checked=False
         )
         self.show_rejected = self._action(
             bar, "show-rejected", lambda _: self.redraw(), checked=False
         )
-        bar.addSeparator()
-        self.flow_check = self._action(
-            bar,
-            "flow-check",
-            self._flow_check_toggled,
-            checked=True,
-            title="Only cells that pass the flow check at 0",
+        self.show_excluded = self._action(
+            bar, "show-excluded", lambda _: self.redraw(), checked=False
         )
+        self.show_dropped = self._action(
+            bar, "show-dropped", lambda _: self.redraw(), checked=False
+        )
+        bar.addSeparator()
+        self._action(bar, "fit", self.canvas.fit)
         # A menu, which I opens too (`_shortcuts`)
         self.image_action = self._action(bar, "image", None)
         self.image_action.setMenu(self._image_menu())
@@ -1116,8 +1157,8 @@ class CurationWindow(QWidget):
             self.say("Picked up your draft from where you left it.")
         elif self.draft.is_file():
             self.say(
-                "Your draft was for other candidates (made again since): "
-                "starting from the cells Cellpose keeps."
+                "Your draft was for other candidates, or an older version of "
+                "this window: starting from the cells Cellpose keeps."
             )
 
         self.redraw()
@@ -1158,9 +1199,9 @@ class CurationWindow(QWidget):
     def changed(self) -> None:
         """
         After every change: let the selected cell go if the change took it
-        away (an undo, or the flow check), redraw, and keep the draft soon.
+        away (an undo), redraw, and keep the draft soon.
         """
-        if self.selected is not None and not self.curation.may_have_cell(self.selected):
+        if self.selected is not None and not self.curation.candidate(self.selected):
             self.selected = None
 
         self.redraw()
@@ -1169,8 +1210,9 @@ class CurationWindow(QWidget):
     def click(self, row: int, column: int) -> None:
         """
         A click on a cell selects it, or lets it go if it was selected; a
-        click elsewhere adds the candidate there or grows the cell of that
-        basin to it, and where no basin is, grows a cell from the image.
+        click on a cell excluded by Cellpose adds it, and a click elsewhere
+        adds the candidate there or grows the cell of that basin to it, and
+        where no basin is, grows a cell from the image.
         """
         curation = self.curation
 
@@ -1179,12 +1221,13 @@ class CurationWindow(QWidget):
 
         basin = curation.cell_at(row, column)
 
-        if basin is not None:
+        if basin is not None and not curation.cells[basin].dropped:
             self.select(None if basin == self.selected else basin)
             return
 
         basin = int(self.found.basins[row, column])
-        grows = basin in curation.cells or curation.from_image(basin)
+        cell = curation.cells.get(basin)
+        grows = curation.from_image(basin) or (cell is not None and not cell.dropped)
         self.remember()
         made = curation.add(row, column)
 
@@ -1238,12 +1281,6 @@ class CurationWindow(QWidget):
         self.curation.set_threshold(self._pending_threshold)
         self._pending_threshold = None
         self.changed()
-
-    def _flow_check_toggled(self, on: bool) -> None:
-        if self.curation is not None:
-            self.remember()
-            self.curation.set_flow_check(on)
-            self.changed()
 
     def _area_changed(self) -> None:
         if self.curation is None:
@@ -1343,9 +1380,6 @@ class CurationWindow(QWidget):
         with _quiet(self.threshold):
             self.threshold.setValue(threshold_position(edits.threshold))
 
-        with _quiet(self.flow_check):
-            self.flow_check.setChecked(edits.flow_check)
-
         with _quiet(self.min_area), _quiet(self.max_area):
             self.min_area.setValue(edits.min_um2)
             self.max_area.setValue(edits.max_um2 or 0.0)
@@ -1369,26 +1403,19 @@ class CurationWindow(QWidget):
             return
 
         shapes, cross = [], None
-        show_rejected = self.show_rejected.isChecked()
-        show_excluded = self.show_excluded.isChecked()
+        shown = {
+            "rejected": self.show_rejected.isChecked(),
+            "area": self.show_excluded.isChecked(),
+            "cellpose": self.show_dropped.isChecked(),
+        }
 
         for basin, cell in sorted(self.curation.cells.items()):
-            if basin == self.selected:
+            reason = cell.excluded_by
+
+            if basin == self.selected or (reason and not shown[reason]):
                 continue
 
-            if cell.rejected and not show_rejected:
-                continue
-
-            if cell.excluded and not cell.rejected and not show_excluded:
-                continue
-
-            if cell.rejected:
-                kind = "rejected-dashed"
-            elif cell.excluded:
-                kind = "excluded-dashed"
-            else:
-                kind = cell.kind
-
+            kind = f"{DASHED[reason]}-dashed" if reason else cell.kind
             shapes.append((*self._outline(cell), kind))
 
         if self.selected is not None:
@@ -1428,19 +1455,7 @@ class CurationWindow(QWidget):
         self.threshold_line.setText(f"{threshold:.2f}{default}")
 
     def _show_counts(self) -> None:
-        cells = list(self.curation.cells.values())
-        kept = [cell for cell in cells if cell.kept]
-        added = sum(cell.kind == "added" for cell in kept)
-        resized = sum(cell.kind == "resized" for cell in kept)
-        grown = sum(cell.kind == "image" for cell in kept)
-        rejected = sum(cell.rejected for cell in cells)
-        outside = sum(cell.excluded and not cell.rejected for cell in cells)
-        noun = "cell" if len(kept) == 1 else "cells"
-        self.counts.setText(
-            f"{len(kept)} {noun} kept ({added} added, {resized} resized, "
-            f"{grown} from the image), {rejected} rejected, {outside} outside "
-            "the area range"
-        )
+        self.counts.setText(counts_text(self.curation.cells.values()))
 
     def _show_selected(self) -> None:
         basin = self.selected
@@ -1586,7 +1601,6 @@ class CurationWindow(QWidget):
 
         for control in (
             self.threshold,
-            self.flow_check,
             self.min_area,
             self.max_area,
             self.brightness,

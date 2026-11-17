@@ -190,18 +190,19 @@ def test_the_curation_starts_from_the_cells_cellpose_keeps():
     found = drawn_candidates()
     curation = segmentation.Curation(found)
 
-    assert sorted(curation.cells) == [1, 2]
-    assert all(
-        cell.kind == "cellpose" and cell.kept for cell in curation.cells.values()
-    )
-    np.testing.assert_array_equal(curation.owner, segmentation.default_cells(found))
-    labels = curation.labels()
-    assert sorted(np.unique(labels)) == [0, 1, 2]
+    assert [cell.basin for cell in curation.kept()] == [1, 2]
+    assert all(cell.kind == "cellpose" for cell in curation.kept())
+    np.testing.assert_array_equal(curation.labels(), segmentation.default_cells(found))
     assert curation.cell_at(10, 10) == 1 and curation.cell_at(0, 0) is None
 
-    # Without the flow check, the dim spot is a cell too
-    curation.set_flow_check(False)
-    assert sorted(curation.cells) == [1, 2, 3]
+    # The dim spot fails the flow check: there, excluded by Cellpose, until
+    # a click adds it
+    dim = curation.cells[3]
+    assert dim.dropped and dim.excluded_by == "cellpose"
+    assert curation.cell_at(24, 38) == 3 and not curation.candidate(3)
+    assert curation.add(24, 38) == 3
+    assert curation.cells[3].kept and curation.cells[3].kind == "added"
+    np.testing.assert_array_equal(curation.cells[3].pixels, dim.pixels)
 
 
 def test_a_flood_passes_through_every_threshold():
@@ -267,18 +268,27 @@ def test_a_click_adds_the_candidate_there_or_grows_the_cell_of_its_basin():
     assert curation.add(0, 43) is None
 
 
-def test_rejected_and_excluded_cells_stay_but_are_not_kept():
+def test_cells_not_kept_stay_with_one_reason_each():
     curation = segmentation.Curation(drawn_candidates())
     areas = {b: len(cell.pixels) for b, cell in curation.cells.items()}
 
     curation.reject(1)
-    assert curation.cells[1].rejected and [c.basin for c in curation.kept()] == [2]
+    assert curation.cells[1].excluded_by == "rejected"
+    assert [c.basin for c in curation.kept()] == [2]
     assert curation.cell_at(10, 10) == 1  # still there to click on
     assert list(curation.table()["basin"]) == [2]
 
     curation.restore(1)
     curation.set_area_range(min_um2=areas[2] + 1)
-    assert curation.cells[2].excluded and [c.basin for c in curation.kept()] == [1]
+    assert curation.cells[2].excluded_by == "area"
+    assert [c.basin for c in curation.kept()] == [1]
+
+    # One reason each: the curator first, then Cellpose, then the area
+    curation.reject(2)
+    assert curation.cells[2].outside and curation.cells[2].excluded_by == "rejected"
+    assert curation.cells[3].outside and curation.cells[3].excluded_by == "cellpose"
+
+    curation.restore(2)
     curation.set_area_range(max_um2=areas[2])
     assert [c.basin for c in curation.kept()] == [2]
 
@@ -309,7 +319,7 @@ def test_a_click_where_no_basin_is_grows_a_cell_from_the_image():
 
     # Rejected, it is gone: there is no candidate to put back
     curation.reject(cell)
-    assert cell not in curation.cells and not curation.may_have_cell(cell)
+    assert cell not in curation.cells and not curation.candidate(cell)
     assert [c.basin for c in curation.kept()] == [1, 2]
 
     # Without the image, there is nothing to grow it from
@@ -356,10 +366,10 @@ def test_a_drawn_cell_crosses_basin_edges_and_cellpose_cells_go_around_it():
         sizes = sum(len(cell.pixels) for cell in curation.cells.values())
         return sizes - np.count_nonzero(curation.owner)
 
-    # Nothing moves it but an edit of its own: the dim spot, let in, goes
-    # around it, at any threshold
-    curation.set_flow_check(False)
-    assert 3 in curation.cells and not set(curation.cells[3].pixels) & set(pixels)
+    # Nothing moves it but an edit of its own: the dim spot, excluded by
+    # Cellpose, goes around it, at any threshold
+    assert curation.cells[3].dropped
+    assert not set(curation.cells[3].pixels) & set(pixels)
 
     for threshold in (-2.0, 0.0, 2.0):
         curation.set_threshold(threshold)
@@ -367,17 +377,15 @@ def test_a_drawn_cell_crosses_basin_edges_and_cellpose_cells_go_around_it():
         assert overlap() == 0
 
     curation.set_area_range(min_um2=len(pixels) + 1)
-    assert curation.cells[cell].excluded
+    assert curation.cells[cell].outside
     np.testing.assert_array_equal(curation.cells[cell].pixels, pixels)
 
-    # Grown over the seed of the dim spot while it was left out, it leaves
-    # the dim spot no pixels once let in
+    # Grown over the seed of the dim spot, which is not kept, it leaves the
+    # dim spot no pixels
     curation.set_area_range()
-    curation.set_flow_check(True)
     curation.resize(cell, len(curation.flood(cell)[0]))
     assert curation.cell_at(*divmod(curation.seed(3), 44)) == cell
-    curation.set_flow_check(False)
-    assert curation.may_have_cell(3) and 3 not in curation.cells
+    assert 3 not in curation.cells
 
 
 def test_a_drawn_cell_takes_the_pixels_of_a_rejected_cell_not_a_kept_one():
@@ -482,7 +490,7 @@ def test_the_cells_follow_from_the_edits_alone():
         if step == 0:
             curation.set_threshold(float(rng.uniform(-2, 2)))
         elif step == 1:
-            curation.set_flow_check(bool(rng.integers(2)))
+            curation.follow_threshold(cell)
         elif step == 2:
             curation.set_area_range(float(rng.uniform(0, 30)))
         elif step == 3:
@@ -507,34 +515,34 @@ def test_the_cells_follow_from_the_edits_alone():
         for number, cell in fresh.cells.items():
             other = curation.cells[number]
             np.testing.assert_array_equal(cell.pixels, other.pixels)
-            assert (cell.kind, cell.rejected, cell.excluded) == (
+            assert (cell.kind, cell.rejected, cell.dropped, cell.outside) == (
                 other.kind,
                 other.rejected,
-                other.excluded,
+                other.dropped,
+                other.outside,
             )
 
     assert any(cell.kind == "image" for cell in curation.cells.values())
 
 
-def test_a_cell_undone_or_left_out_by_the_flow_check_is_there_no_more():
+def test_a_cell_undone_is_a_candidate_no_more():
     found = drawn_candidates()
     curation = segmentation.Curation(found, image=drawn_image(found))
     before = curation.edits
-    there = [curation.may_have_cell(number) for number in range(5)]
+    there = [curation.candidate(number) for number in range(5)]
     assert there == [False, True, True, False, False]
 
-    # The dim spot, without the flow check or added; a cell drawn where no
-    # basin is, numbered above the basins
-    curation.set_flow_check(False)
-    assert curation.may_have_cell(3)
-    curation.set_flow_check(True)
+    # The dim spot, added; a cell drawn where no basin is, numbered above the
+    # basins
     curation.add(24, 38)
     spot = curation.grow(4, 40)
-    assert curation.may_have_cell(3) and curation.may_have_cell(spot)
+    assert curation.candidate(3) and curation.candidate(spot)
 
-    # Both undone: neither may be there, and the drawn one has no seed
+    # Both undone: the dim spot excluded by Cellpose again, and the drawn
+    # one gone, with no seed
     curation.edits = before
-    assert not curation.may_have_cell(3) and not curation.may_have_cell(spot)
+    assert not curation.candidate(3) and curation.cells[3].dropped
+    assert not curation.candidate(spot) and spot not in curation.cells
 
     for where in (curation.seed, curation.flood):
         with pytest.raises(ValueError, match="No basin or drawn cell is numbered 4"):
