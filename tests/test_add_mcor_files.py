@@ -294,6 +294,33 @@ def test_overwrite_clears_approval(tmp_path):
     assert rows(db, "SELECT approved FROM mcor_files;")[0][0] == 0
 
 
+def test_a_pick_after_the_approval_leaves_nothing_approved(tmp_path):
+    """Picked again, the motion correction is checked again, as on the page."""
+    db, group = build(tmp_path, acquisitions=2)
+    write_mcor(tmp_path, 1)
+    write_mcor(tmp_path, 2)
+    group.add_mcor_files()
+    group.approve_mcor_files(exclude_acq_ids=[2])
+    assert list(group.approved_mcor_files.index) == [1]
+
+    # A pick of the same settings as the last whole correction: nothing is
+    # corrected again, and the files are approved no more
+    with db._locked() as con, con:
+        con.execute("""
+            INSERT INTO method_calls
+                ( group_id, user, method_name, module, code, parameter_inputs
+                , parameters_used, call_output )
+                VALUES (1, 'bob', 'Group.pick_mcor_candidate', 'odyn.groups', '{}'
+                       , '{}', '{}', '{"run": "rigid", "correct": false}');
+            """)
+
+    assert group.approved_mcor_files.empty
+    assert len(group.mcor_files[group.mcor_files["approved"].astype(bool)]) == 1
+
+    group.approve_mcor_files()  # approved again
+    assert list(group.approved_mcor_files.index) == [1, 2]
+
+
 def test_overwrite_keeps_what_it_has_if_it_finds_nothing(tmp_path):
     """Never drop a usable set to put nothing in its place."""
     db, group = build(tmp_path, acquisitions=1)

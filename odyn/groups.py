@@ -491,8 +491,45 @@ class Group(CallRecorder):
 
         Use this unless you are doing motion-correction specific analysis.
         Use `mcor_files` if you want ALL files from the latest mcor run.
+
+        Empty once a test is picked after the latest approval: the motion
+        correction is checked again, and nothing counts as approved until it
+        is approved again (as the QC page says).
         """
-        return self.mcor_files[self.mcor_files["approved"].astype(bool)]
+        approved = self.mcor_files[self.mcor_files["approved"].astype(bool)]
+
+        if approved.empty or not self._picked_since_approval():
+            return approved
+
+        return approved.iloc[0:0]
+
+    def _picked_since_approval(self) -> bool:
+        """
+        Whether a test was picked after the latest approval that approved
+        anything (read from the database, not from the cached calls).
+        """
+        with self.db._locked() as con:
+            latest = dict(
+                con.execute(
+                    """
+                    SELECT method_name = 'Group.approve_mcor_files'
+                         , MAX(method_call_id)
+                        FROM method_calls
+                        WHERE group_id = ? AND call_output IS NOT NULL
+                          AND ( method_name LIKE '%pick_mcor_candidate'
+                             OR ( method_name = 'Group.approve_mcor_files'
+                              AND json_array_length(call_output, '$.approved') > 0
+                                )
+                              )
+                        GROUP BY 1;
+                    """,
+                    [self.group_id],
+                ).fetchall()
+            )
+
+        approval, pick = latest.get(1), latest.get(0)
+
+        return approval is not None and pick is not None and pick > approval
 
     @property
     def method_calls(self) -> pd.DataFrame:
