@@ -37,6 +37,7 @@ from .cluster import (
     mcor_sweep_runs,
     mcor_tests,
     pending_requests,
+    segmentation_states,
 )
 from .database import SyncFlag
 from .groups import FULL_FOLDER, RAW_PREVIEW_FOLDER, mcor_test_folder
@@ -49,7 +50,7 @@ QC_FILE = "qc.json"
 
 # Bumped when the view file changes shape: an app that finds another version
 # builds the view itself instead of misreading it
-QC_VERSION = 1
+QC_VERSION = 2
 
 # The calls that add recordings, the kind each adds, and the output key listing
 # the ids it added
@@ -453,9 +454,10 @@ def qc_summary(db) -> dict:
     """
     Everything the QC page shows, for every user, as JSON: the recordings and
     the missing annotations (each row with its `user`), the test rows (see
-    `my_tests`), each group's latest pick, raw check and approval, the users'
-    names, what the cluster did last, and the file list of every folder a
-    download takes (`files`, a `Listing.seen`). Reads the database and lists
+    `my_tests`), each group's latest pick, raw check and approval, how far
+    its segmentation is (`segmentation_states`), the users' names, what the
+    cluster did last, and the file list of every folder a download takes
+    (`files`, a `Listing.seen`). Reads the database and lists
     the share: quick on the cluster, slow over a network.
     """
     listing = Listing()
@@ -485,6 +487,7 @@ def qc_summary(db) -> dict:
             "picks": latest_picks(db),
             "raw_checks": latest_raw_checks(db),
             "approvals": latest_approvals(db),
+            "segmentation": segmentation_states(db),
             "users": dict(zip(users["user_name"], users["display_name"])),
             "heartbeat": heartbeat(db.main_folder, db.project),
             "requests_waiting": len(pending_requests(db.main_folder, db.project)),

@@ -1,24 +1,27 @@
 """
 The QC page: what is waiting on the person using the app.
 
-Four lists, a tab each, with how many rows each has in its name. The drafts
+Five lists, a tab each, with how many rows each has in its name. The drafts
 this user submitted that the cluster has not added yet
 (`submissions.queued`), with how far their copy got or why they failed, and
 what can be done about each: add it now, submit it again, or take it back to
 edit. The recordings (experiments, z-stacks) the cluster added for
 this user, with what processing their sync file found, and a way to process an
-experiment's again. The required annotations still empty on them. And their
+experiment's again. The required annotations still empty on them. Their
 experiments' motion corrections, one row per experiment: its status (from
 its test jobs: the cluster's own test and the runs of sweeps), a way to
 download its test files to this computer (`cache`) and to open its folder and
 its window (`mcor_window`) from there: played from the share, a video is
-slow. Nothing is downloaded unless asked. Once an experiment is approved,
-Curate ROIs opens the window its ROIs are curated in (`curation_window`), on
-its Cellpose candidates, read from the share (two files, not videos), and
-Submit there hands them to the cluster.
+slow. Nothing is downloaded unless asked. And the segmentation of each
+experiment approved (`segmentation_rows`): its Cellpose candidates, its ROIs
+and their traces, with Curate ROIs to open the window its ROIs are curated
+in (`curation_window`), on its candidates, read from the share (two files,
+not videos), and Submit there to hand them to the cluster.
 
-The page opens on the first tab with rows; once a tab is picked, reloads keep
-it until the user changes.
+Hide done, on by default, keeps the approved experiments out of the motion
+correction tab, and those with traces out of the segmentation one. The page
+opens on the first tab with rows; once a tab is picked, reloads keep it
+until the user changes.
 """
 
 from __future__ import annotations
@@ -114,6 +117,26 @@ APPROVED = "approved"
 # An experiment some of whose files are downloaded (see `cache.state`)
 PARTLY = "partly"
 TO_DOWNLOAD = (cache.NOT_HERE, PARTLY, cache.NEWER)
+
+SEGMENTATION_COLUMNS = [
+    "path",
+    "status",
+    "ROIs",
+    "curated by",
+    "curated at",
+    "draft here",
+]
+SEGMENTATION_HIDDEN = ["group_id", "user", "curatable"]
+
+# How far the segmentation of an approved experiment is (`segmentation_status`)
+FINDING = "finding candidates"
+CANDIDATES_STOPPED = "candidates stopped"
+TO_CURATE = "ready to curate"
+EXTRACTING = "extracting traces"
+TRACES_STOPPED = "traces stopped"
+DONE = "done"
+CHECKED_AGAIN = "motion correction checked again"
+ROIS_CLAIMED = "ROIs submitted by {user}, waiting for the cluster"
 
 
 def my_queue(
@@ -429,7 +452,8 @@ def qc_view(
     missing annotations, the experiments (`my_experiments`, their downloads
     checked against the file lists in the view and the copies in `base`,
     with the decisions `claimed` and not recorded yet, see `with_claims`),
-    and the cluster line. Reads only this computer's disk.
+    their segmentation (`segmentation_rows`), and the cluster line. Reads
+    only this computer's disk.
     """
     main = Path(main_folder)
     listing = Listing(
@@ -477,8 +501,9 @@ def qc_view(
     )
     name = summary["users"].get(user) or user
     experiments = with_claims(experiments, claimed or {})
+    segmentation = segmentation_rows(experiments, summary, main, user, base, claimed)
 
-    return name, mine, missing, experiments, cluster_line(summary)
+    return name, mine, missing, experiments, segmentation, cluster_line(summary)
 
 
 # What a row says of a decision the cluster has not recorded yet, the
@@ -503,8 +528,11 @@ def with_claims(
     excluded = list(experiments["excluded"])
 
     for index, group_id in enumerate(experiments["group_id"]):
+        # The ROIs are the segmentation tab's (`segmentation_rows`)
         mine = {
-            step: found for (group, step), found in claimed.items() if group == group_id
+            step: found
+            for (group, step), found in claimed.items()
+            if group == group_id and step != "rois"
         }
         refused = [(step, found) for step, found in mine.items() if found.get("failed")]
 
@@ -527,6 +555,122 @@ def with_claims(
     return experiments.assign(
         status=status, **{"raw check": raw_check}, excluded=excluded
     )
+
+
+def segmentation_rows(
+    experiments: pd.DataFrame,
+    summary: dict,
+    main_folder: Path,
+    user: None | str,
+    base: None | Path = None,
+    claimed: None | dict[tuple[int, str], dict] = None,
+) -> pd.DataFrame:
+    """
+    One row per experiment of `experiments` (from `my_experiments`) whose
+    motion correction was approved, for the segmentation tab: how far it is
+    (`segmentation_status`, or the ROIs `claimed` and not recorded yet), how
+    many ROIs were recorded, by whom and when, and whether this computer has
+    a draft of `user` (beside where `base` keeps copies). Hidden: `group_id`,
+    `user` (whose the experiment is) and `curatable` (whether Curate ROIs
+    opens on it). Reads only this computer's disk.
+    """
+    approvals = {int(group): found for group, found in summary["approvals"].items()}
+    picks = {int(group): found for group, found in summary["picks"].items()}
+    states = {int(group): found for group, found in summary["segmentation"].items()}
+    rows = []
+
+    for _, row in experiments.iterrows():
+        group_id = int(row["group_id"])
+        approval = approvals.get(group_id)
+
+        if approval is None:
+            continue
+
+        steps = states.get(group_id, {})
+        status, curatable = segmentation_status(approval, picks.get(group_id), steps)
+        rois = (
+            steps.get("rois") if status in (EXTRACTING, TRACES_STOPPED, DONE) else None
+        )
+        count = "" if rois is None else rois.get("count", "")
+        found = (claimed or {}).get((group_id, "rois"))
+
+        if found is not None and found.get("failed"):
+            status = f"{STEPS['rois']} by {found['user']} refused: {found['failed']}"
+        elif found is not None:
+            status, count = ROIS_CLAIMED.format(**found), found.get("rois", "")
+
+        first = str(row["path"]).split(", ")[0]
+        _, candidates = group_files(main_folder, first, group_id)
+        here = cache.local_folder(main_folder, candidates.parent, base)
+        draft = here / draft_name(group_id, user or get_user())
+        rows.append(
+            {
+                "path": row["path"],
+                "status": status,
+                "ROIs": count,
+                "curated by": "" if rois is None else rois["user"],
+                "curated at": "" if rois is None else rois["called_at"][:16],
+                "draft here": "yes" if draft.is_file() else "",
+                "group_id": group_id,
+                "user": row["user"],
+                "curatable": curatable,
+            }
+        )
+
+    return pd.DataFrame(rows, columns=[*SEGMENTATION_COLUMNS, *SEGMENTATION_HIDDEN])
+
+
+def segmentation_status(
+    approval: dict, pick: None | dict, steps: dict
+) -> tuple[str, bool]:
+    """
+    How far the segmentation of an approved experiment is, from its latest
+    `approval` and `pick` (`cluster.latest_approvals`, `latest_picks`) and
+    the `steps` of its segmentation (`cluster.segmentation_states`), and
+    whether its ROIs can be curated: only once candidates were made after
+    the approval, and if no test was picked since.
+    """
+    if pick is not None and pick["call_id"] > approval["call_id"]:
+        return CHECKED_AGAIN, False
+
+    def since(step: str, call_id: int) -> None | dict:
+        found = steps.get(step)
+
+        return found if found is not None and found["call_id"] > call_id else None
+
+    def stopped(kind: str, at: str) -> bool:
+        """Whether the newest job of `kind`, since `at`, ended unfinished."""
+        job = steps.get("jobs", {}).get(kind)
+
+        return job is not None and job["since"] >= at and job["state"] in STOPPED_STATES
+
+    after = approval["call_id"]
+    means, candidates = since("means", after), since("candidates", after)
+
+    if candidates is None or candidates["state"] != "done":
+        failed = any(
+            found and found["state"] == "failed" for found in (means, candidates)
+        )
+        killed = stopped("cellpose", str(approval.get("called_at") or ""))
+
+        return (CANDIDATES_STOPPED if failed or killed else FINDING), False
+
+    rois = since("rois", candidates["call_id"])
+
+    if rois is None or rois["state"] != "done":
+        return TO_CURATE, True
+
+    traces = since("traces", rois["call_id"])
+
+    if traces is not None and traces["state"] == "done":
+        return DONE, True
+
+    if traces is not None and traces["state"] == "failed":
+        return TRACES_STOPPED, True
+
+    return (
+        TRACES_STOPPED if stopped("traces", rois["called_at"]) else EXTRACTING
+    ), True
 
 
 class _Job(QThread):
@@ -567,6 +711,14 @@ class QcPane(QWidget):
         self.experiments = pd.DataFrame(
             columns=[*EXPERIMENT_COLUMNS, *EXPERIMENT_HIDDEN]
         )
+        self.segmentation = pd.DataFrame(
+            columns=[*SEGMENTATION_COLUMNS, *SEGMENTATION_HIDDEN]
+        )
+        # The rows in the tables: those not hidden (Hide done), in the order
+        # each table has them before it sorts
+        self.experiments_shown = self.experiments
+        self.segmentation_shown = self.segmentation
+        self.everyone_shown = False  # whose each row is, a column
         self.main_folder = Path(context.main_folder).resolve()  # as the database
         self.downloads: None | Downloads = None
         self.windows: dict[str, McorWindow] = {}  # open, by experiment folder
@@ -652,10 +804,11 @@ class QcPane(QWidget):
         self.show_folder.clicked.connect(self._show_folder)
         self.compare = QPushButton("Compare tests")
         self.compare.clicked.connect(self._compare)
-        self.curate = QPushButton("Curate ROIs")
-        self.curate.clicked.connect(self._curate)
         self.run_again = QPushButton("Run again")
         self.run_again.clicked.connect(self._run_again)
+        self.hide_approved = self._hide_box(
+            "Hide the approved experiments (their ROIs are in the next tab)"
+        )
         self.tests_view = self._table(
             "Motion correction",
             "Your experiments' motion corrections: the cluster's tests and the "
@@ -667,10 +820,22 @@ class QcPane(QWidget):
                 self.show_folder,
                 self.run_again,
                 self.compare,
-                self.curate,
             ],
+            left=self.hide_approved,
         )
         self.tests_view.setSelectionMode(QTableView.SelectionMode.ExtendedSelection)
+
+        self.curate = QPushButton("Curate ROIs")
+        self.curate.clicked.connect(self._curate)
+        self.hide_traced = self._hide_box("Hide the experiments with traces saved")
+        self.segmentation_view = self._table(
+            "Segmentation",
+            "Your approved experiments' ROIs: their Cellpose candidates, the "
+            "ROIs curated and their traces",
+            [self.curate],
+            left=self.hide_traced,
+        )
+        self.segmentation_view.doubleClicked.connect(self._curate)
 
         # How far a download is, under the table, while there is one
         self.download_bar = QProgressBar()
@@ -688,7 +853,12 @@ class QcPane(QWidget):
         self._show_download(False)
         self.tests_view.doubleClicked.connect(self._compare)
 
-        for view in (self.queue_view, self.recordings_view, self.tests_view):
+        for view in (
+            self.queue_view,
+            self.recordings_view,
+            self.tests_view,
+            self.segmentation_view,
+        ):
             view.selectionModel().selectionChanged.connect(self._enable)
 
         context.follow_changes(self, self.reload)
@@ -702,10 +872,26 @@ class QcPane(QWidget):
         self.poll.start()
         self.reload()
 
+    def _hide_box(self, tip: str) -> QCheckBox:
+        """A Hide done box, on, that shows the rows again as it is toggled."""
+        box = QCheckBox("Hide done")
+        box.setChecked(True)
+        box.setStatusTip(tip)
+        box.toggled.connect(lambda _: self._show_rows())
+
+        return box
+
     def _table(
-        self, name: str, tip: str, buttons: list[QPushButton] = ()
+        self,
+        name: str,
+        tip: str,
+        buttons: list[QPushButton] = (),
+        left: None | QWidget = None,
     ) -> QTableView:
-        """A tab named `name` with a table and `buttons` under it."""
+        """
+        A tab named `name` with a table and `buttons` under it (and `left`,
+        at their left).
+        """
         box = QWidget()
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(0, 0, 0, 0)
@@ -722,6 +908,10 @@ class QcPane(QWidget):
 
         if buttons:
             row = QHBoxLayout()
+
+            if left is not None:
+                row.addWidget(left)
+
             row.addStretch(1)
 
             for button in buttons:
@@ -845,7 +1035,7 @@ class QcPane(QWidget):
 
     def _fill(self, view, queue, everyone, user) -> None:
         """Put one view (from `qc_view`) and the queue in the tables."""
-        name, mine, missing, experiments, (cluster, kind) = view
+        name, mine, missing, experiments, segmentation, (cluster, kind) = view
 
         if everyone:
             self.who.setText("To-do list of all users")
@@ -874,18 +1064,43 @@ class QcPane(QWidget):
             shown(missing, [c for c in missing.columns if c != "user"])
         )
         self.experiments = experiments.reset_index(drop=True)
-        columns = list(EXPERIMENT_COLUMNS)
-
-        if everyone:  # whose each is
-            columns.insert(columns.index("path") + 1, "user")
-
-        self._model(self.tests_view).set_frame(self.experiments[columns])
+        self.segmentation = segmentation.reset_index(drop=True)
+        self.everyone_shown = everyone
+        self._show_rows()
 
         for _, row in self.experiments.iterrows():
             if str(row["folder"]) in self.windows:
                 self.windows[str(row["folder"])].set_status(
                     _window_status(row), row["status"] == FINAL_CHECK
                 )
+
+    def _show_rows(self) -> None:
+        """
+        The experiments and their segmentation in their tables, the done ones
+        left out if Hide done says so; then the tab counts.
+        """
+        experiments, segmentation = self.experiments, self.segmentation
+
+        if self.hide_approved.isChecked():
+            experiments = experiments[experiments["status"] != APPROVED]
+
+        if self.hide_traced.isChecked():
+            segmentation = segmentation[segmentation["status"] != DONE]
+
+        self.experiments_shown = experiments.reset_index(drop=True)
+        self.segmentation_shown = segmentation.reset_index(drop=True)
+
+        for view, frame, columns in (
+            (self.tests_view, self.experiments_shown, EXPERIMENT_COLUMNS),
+            (self.segmentation_view, self.segmentation_shown, SEGMENTATION_COLUMNS),
+        ):
+            columns = list(columns)
+
+            if self.everyone_shown:  # whose each is
+                columns.insert(columns.index("path") + 1, "user")
+
+            self._model(view).set_frame(frame[columns])
+
         self._count_tabs()
         self._enable()
 
@@ -896,6 +1111,7 @@ class QcPane(QWidget):
             self.recordings_view,
             self.missing_view,
             self.tests_view,
+            self.segmentation_view,
         )
         counts = [self._model(view).rowCount() for view in views]
 
@@ -926,12 +1142,16 @@ class QcPane(QWidget):
         self.mine = self.mine.iloc[0:0]
         self.mine_ids = []
         self.experiments = self.experiments.iloc[0:0]
+        self.segmentation = self.segmentation.iloc[0:0]
+        self.experiments_shown = self.experiments
+        self.segmentation_shown = self.segmentation
 
         for view in (
             self.queue_view,
             self.recordings_view,
             self.missing_view,
             self.tests_view,
+            self.segmentation_view,
         ):
             self._model(view).set_frame(pd.DataFrame())
 
@@ -1005,11 +1225,12 @@ class QcPane(QWidget):
             "Check the full run, and compare the raw video and each test"
             + (tip or ("" if ready else " (once a test finished)"))
         )
-        approved = len(picked) == 1 and picked[0][1]["status"] == APPROVED
-        self.curate.setEnabled(approved)
+        row = self._selected(self.segmentation_view, self.segmentation_shown)
+        curatable = row is not None and bool(row["curatable"])
+        self.curate.setEnabled(curatable)
         self.curate.setStatusTip(
             "Curate the ROIs of the experiment, from its Cellpose candidates"
-            + ("" if approved else " (once it is approved)")
+            + ("" if curatable else " (once they are made)")
         )
 
     def _local(self, row: pd.Series) -> Path:
@@ -1068,19 +1289,19 @@ class QcPane(QWidget):
         self.windows[key] = window
         window.show()
 
-    def _curate(self) -> None:
+    def _curate(self, *_) -> None:
         """
-        Open the ROI curation window of the selected approved experiment, on
-        the candidates and mean image on the share, with the draft of this
-        user kept here (beside where its files would be copied).
+        Open the ROI curation window of the experiment selected in the
+        segmentation tab, on the candidates and mean image on the share, with
+        the draft of this user kept here (beside where its files would be
+        copied).
         """
-        picked = self._picked()
+        row = self._selected(self.segmentation_view, self.segmentation_shown)
 
-        if len(picked) != 1 or not self.curate.isEnabled():
+        if row is None or not self.curate.isEnabled():
             return
 
-        label, row = picked[0]
-        group_id = int(row["group_id"])
+        label, group_id = str(row["path"]), int(row["group_id"])
 
         if group_id in self.curations:
             self.curations[group_id].raise_()
@@ -1190,7 +1411,6 @@ class QcPane(QWidget):
             self.reload()
 
         self._background(make, made)
-
 
     def _approve(self, key: str, excluded: list[int]) -> None:
         """
@@ -1440,21 +1660,20 @@ class QcPane(QWidget):
         """The selected experiments, as `(what to call it, row)`, in view order."""
         model = self._model(self.tests_view)
         rows = sorted(i.row() for i in self.tests_view.selectionModel().selectedRows())
+        shown = self.experiments_shown
 
         return [
             (str(row["path"]), row)
-            for row in (
-                self.experiments.iloc[model.source_row(r)]
-                for r in rows
-                if r < len(self.experiments)
-            )
+            for row in (shown.iloc[model.source_row(r)] for r in rows if r < len(shown))
         ]
 
     def _not_here(self) -> list[tuple[str, pd.Series]]:
-        """The experiments with files not downloaded (or changed since)."""
+        """
+        The experiments shown with files not downloaded (or changed since).
+        """
         return [
             (str(row["path"]), row)
-            for _, row in self.experiments.iterrows()
+            for _, row in self.experiments_shown.iterrows()
             if row["local copy"] in TO_DOWNLOAD
         ]
 

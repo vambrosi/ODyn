@@ -347,17 +347,18 @@ sequenceDiagram
   were curated on what the group no longer has.
 - **On the page** a claim shows at once on its experiment row ("approved
   by alice, waiting for the cluster"), read with the `claims/` listing at
-  each load.
+  each load; ROIs on the segmentation row.
 
 ### The QC view: `qc.json`
 
 `.odyn/cluster/<project>/qc.json` (`odyn/qc.py`) holds what the QC page
 shows, for every user: the recordings and the missing annotations (each
 row saying whose), each experiment's tests with their state and numbers,
-each group's latest pick, raw check and approval, the users' names, what
-the cluster did last, and the file list (names, sizes, times) of every
-folder a download takes. Paths in it are inside the main folder, which
-each machine mounts elsewhere.
+each group's latest pick, raw check and approval, how far its
+segmentation is (the latest call of each step and the newest job of each
+kind), the users' names, what the cluster did last, and the file list
+(names, sizes, times) of every folder a download takes. Paths in it are
+inside the main folder, which each machine mounts elsewhere.
 
 - **Written on the cluster,** by one function, `qc_summary(db)`: in full by
   each tick, and again by each test or sweep job as it ends (`python -m

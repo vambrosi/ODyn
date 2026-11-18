@@ -1,12 +1,13 @@
 """
 The records of the test motion corrections (`mcor/`, `sweeps/`) and of
 the QC decisions in the database: what was submitted, how each job
-stands, the latest pick, approval and rerun of each group, and what an
-approved experiment keeps of its tests.
+stands, the latest pick, approval and rerun of each group, what an
+approved experiment keeps of its tests, and how far its segmentation is.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 
 from collections.abc import Sequence
@@ -19,6 +20,7 @@ from ..database import Database
 from ..groups import candidate_settings
 from ..segmentation import read_fingerprint
 from ..shared import read_json, write_json
+from ..utils import CallFlag
 from .config import (
     BASELINE_RUN,
     ENDED,
@@ -157,6 +159,92 @@ def latest_candidates(db: Database) -> dict[int, dict]:
             }
 
     return made
+
+
+# The calls of the segmentation of a group, by step (`segmentation_states`)
+SEGMENTATION_STEPS = {
+    "means": "Group.save_mean_images",
+    "candidates": "Group.save_cellpose_candidates",
+    "rois": "Group.import_mask",
+    "traces": "Group.save_roi_traces",
+}
+
+# The jobs of the segmentation, by the kind in their name (`odyn.cluster.mcor`)
+SEGMENTATION_JOBS = ("cellpose", "traces")
+
+
+def segmentation_states(db: Database) -> dict[int, dict]:
+    """
+    What each group has of its segmentation, for the QC page: the latest
+    call of each step of `SEGMENTATION_STEPS` (`call_id`, `user`,
+    `called_at` and `state`: "running", "failed" or "done"; for `rois`, the
+    `count` of ROIs and the mask `path` too), and in `jobs` the newest job
+    of each kind of `SEGMENTATION_JOBS` (its `state` and, in `since`, when
+    its log last changed). Groups with neither are left out.
+    """
+    calls = db.calls
+    states: dict[int, dict] = {}
+
+    if not calls.empty:
+        step_of = {method: step for step, method in SEGMENTATION_STEPS.items()}
+
+        for call_id, call in calls[calls["method_name"].isin(step_of)].iterrows():
+            output = call["call_output"]
+
+            if int(call["call_flag"]) & CallFlag.RAISED:
+                state = "failed"
+            else:
+                state = "running" if pd.isna(call["ended_at"]) else "done"
+
+            found = {
+                "call_id": int(call_id),
+                "user": str(call["user"]),
+                "called_at": str(call["called_at"]),
+                "state": state,
+            }
+
+            if call["method_name"] == "Group.import_mask" and isinstance(output, dict):
+                found["count"] = len(output.get("labels") or [])
+                found["path"] = output.get("mask_path")
+
+            mine = states.setdefault(int(call["group_id"]), {})
+            step = step_of[call["method_name"]]
+
+            if step not in mine or int(call_id) > mine[step]["call_id"]:
+                mine[step] = found
+
+    # The newest job of each kind and group, from the names of the job logs
+    folder = cluster_folder(db.main_folder, db.project)
+    project = re.escape(db.project or "main")
+    kinds = "|".join(SEGMENTATION_JOBS)
+    name = re.compile(rf"^odyn-({kinds})-{project}-g(\d+)-(\d+)\.out$")
+    newest: dict[tuple[int, str], int] = {}
+
+    for log in _job_logs(folder):
+        found = name.match(log)
+
+        if found:
+            key = (int(found.group(2)), found.group(1))
+            newest[key] = max(newest.get(key, 0), int(found.group(3)))
+
+    in_queue = _slurm_jobs() if newest else None
+
+    for (group_id, kind), job_id in newest.items():
+        log = (
+            folder
+            / JOBS_FOLDER
+            / f"odyn-{kind}-{db.project or 'main'}-g{group_id}-{job_id}.out"
+        )
+
+        try:
+            since = datetime.fromtimestamp(log.stat().st_mtime).strftime(TIME_FORMAT)
+        except OSError:
+            continue
+
+        jobs = states.setdefault(group_id, {}).setdefault("jobs", {})
+        jobs[kind] = {"state": _job_state(str(job_id), log, in_queue), "since": since}
+
+    return states
 
 
 def record_rois(db: Database, group_id: int, content: dict) -> None:

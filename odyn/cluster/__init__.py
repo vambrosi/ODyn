@@ -117,6 +117,7 @@ from .records import (
     pick_repeats,
     record_job_states,
     record_rois,
+    segmentation_states,
 )
 from .mcor import (
     mcor_backfill,
@@ -175,6 +176,7 @@ __all__ = [
     "record_rois",
     "run_mcor_sweep",
     "run_mcor_test",
+    "segmentation_states",
     "send_request",
     "start_chain",
     "status",

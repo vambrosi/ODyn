@@ -827,7 +827,13 @@ def test_qc_pane_lists_nothing_for_a_new_user(window):
 
     # One tab per list, no counts when empty, the first one shown
     names = [qc.tabs.tabText(i) for i in range(qc.tabs.count())]
-    assert names == ["Waiting", "Added", "Annotations", "Motion correction"]
+    assert names == [
+        "Waiting",
+        "Added",
+        "Annotations",
+        "Motion correction",
+        "Segmentation",
+    ]
     assert qc.tabs.currentIndex() == 0
 
 
@@ -1231,14 +1237,25 @@ def test_an_approved_experiment_opens_the_curation_of_its_rois(
     # Approved (an approval itself needs corrected files: see test_mcor_test)
     approval = {"call_id": 10**6, "user": "tester", "called_at": "", "excluded": []}
     monkeypatch.setattr("odyn.qc.latest_approvals", lambda db: {group_id: approval})
+    made = {"call_id": 10**6 + 1, "user": "x", "called_at": "", "state": "done"}
+    monkeypatch.setattr(
+        "odyn.qc.segmentation_states", lambda db: {group_id: {"candidates": made}}
+    )
 
     window.context.set_user("tester")
     qc = window.qc
     qc.reload()
     settle(window.context)
     assert qc.experiments["status"].tolist() == ["approved"]
+
+    # Out of the motion correction tab (Hide done), in the segmentation one
+    assert qc._model(qc.tests_view).rowCount() == 0
+    qc.hide_approved.setChecked(False)
+    assert qc._model(qc.tests_view).rowCount() == 1
+    assert qc.segmentation["status"].tolist() == ["ready to curate"]
+    assert qc.tabs.tabText(4) == "Segmentation (1)"
     assert not qc.curate.isEnabled()  # nothing selected
-    qc.tests_view.selectRow(0)
+    qc.segmentation_view.selectRow(0)
     assert qc.curate.isEnabled()
 
     # On the files of the group on the share, with the draft kept here
@@ -1277,6 +1294,10 @@ def test_rois_submitted_from_the_window_are_written_and_claimed(
     gc.collect()  # closes its database (a cycle) in this thread
     approval = {"call_id": 10**6, "user": "tester", "called_at": "", "excluded": []}
     monkeypatch.setattr("odyn.qc.latest_approvals", lambda db: {group_id: approval})
+    made = {"call_id": 10**6 + 1, "user": "x", "called_at": "", "state": "done"}
+    monkeypatch.setattr(
+        "odyn.qc.segmentation_states", lambda db: {group_id: {"candidates": made}}
+    )
     asked = []
     monkeypatch.setattr(
         window.context, "confirm", lambda *args, **_: asked.append(args) or True
@@ -1296,7 +1317,7 @@ def test_rois_submitted_from_the_window_are_written_and_claimed(
     qc = window.qc
     qc.reload()
     settle(window.context)
-    qc.tests_view.selectRow(0)
+    qc.segmentation_view.selectRow(0)
     qc.curate.click()
     [rois] = qc.curations.values()
     rois.loader.wait()
@@ -1318,6 +1339,11 @@ def test_rois_submitted_from_the_window_are_written_and_claimed(
     assert (main / claimed["path"]).parent == candidates.parent
     assert list(written.table["basin"]) == [1, 2] and about["user"] == "tester"
     assert about["candidates_path"] == candidates.relative_to(main).as_posix()
+
+    # The tab says so until the cluster records them
+    assert qc.segmentation["status"].tolist() == [
+        "ROIs submitted by tester, waiting for the cluster"
+    ]
 
 
 def test_a_test_is_picked_from_the_window(window, tmp_path, monkeypatch):
@@ -2683,7 +2709,7 @@ def test_a_sorted_qc_list_still_picks_the_row_selected(window):
         for path in ("b", "c", "a")
     ]
     qc.experiments = pd.DataFrame(rows)
-    qc._model(qc.tests_view).set_frame(qc.experiments[EXPERIMENT_COLUMNS])
+    qc._show_rows()  # into the table, as a reload puts them
 
     view = qc.tests_view
     view.sortByColumn(EXPERIMENT_COLUMNS.index("path"), Qt.SortOrder.AscendingOrder)
