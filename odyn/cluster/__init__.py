@@ -9,10 +9,11 @@ drafts whose recordings finished copying (`odyn.drafts.submissions`),
 submits a test motion correction of each experiment it added
 (`submit_mcor_test`), records the QC decisions made in the app (after an
 approval, it submits the mean images and Cellpose candidates of the group as
-one job: `submit_cellpose`), processes the sync files that arrived since their
-experiment was added, writes a heartbeat, and (as a chain) submits the next
-tick. Everything a tick does is safe to repeat, so a tick that ran twice, or
-not at all for a day, only delays work.
+one job, `submit_cellpose`, and after ROIs their traces, `submit_traces`),
+processes the sync files that arrived since their experiment was added,
+writes a heartbeat, and (as a chain) submits the next tick. Everything a
+tick does is safe to repeat, so a tick that ran twice, or not at all for a
+day, only delays work.
 
 Files, per database (`main` or the project's name), in
 `<main_folder>/.odyn/cluster/<name>/`:
@@ -55,6 +56,7 @@ python -m odyn.cluster <main_folder> mean-images --group 7 [--group 8 ...] [--al
 python -m odyn.cluster <main_folder> mean-images --missing
 python -m odyn.cluster <main_folder> cellpose --group 7 [--model cpsam] [--tile-um 200]
 python -m odyn.cluster <main_folder> cellpose --missing
+python -m odyn.cluster <main_folder> traces --group 7 [--group 8 ...]
 ```
 `full-previews` writes the full run's videos of a group corrected before
 they were written (`Group.save_full_previews`), and `full-report` the
@@ -69,6 +71,9 @@ image and none), with the model weights in `.odyn/segmentation/` of the main
 folder: `cpsam` for a group of experiments annotated deep, `cpdino` for the
 others, unless `--model` says. Run it on a node too (a GPU is not needed).
 After an approval in the app, the tick runs both for the group, as one job.
+`traces` saves the ROI traces of a group, on the last mask imported
+(`Group.save_roi_traces`); the tick runs it after it records ROIs submitted
+in the app.
 
 The code, by part: `config` (folders and settings), `slurm` (jobs and
 their states), `messages` (requests and claims), `records` (the test and
@@ -104,12 +109,14 @@ from .records import (
     groups_without_full_report,
     groups_without_mean_images,
     latest_approvals,
+    latest_candidates,
     latest_picks,
     mcor_sweep_runs,
     mcor_tests,
     pick_candidate,
     pick_repeats,
     record_job_states,
+    record_rois,
 )
 from .mcor import (
     mcor_backfill,
@@ -120,6 +127,7 @@ from .mcor import (
     submit_mcor_test,
     submit_picks,
     submit_reruns,
+    submit_traces,
     sweep_grid_for,
     sweep_runs,
 )
@@ -153,6 +161,7 @@ __all__ = [
     "groups_without_mean_images",
     "heartbeat",
     "latest_approvals",
+    "latest_candidates",
     "latest_picks",
     "main",
     "mcor_backfill",
@@ -163,6 +172,7 @@ __all__ = [
     "pick_repeats",
     "record_crash",
     "record_job_states",
+    "record_rois",
     "run_mcor_sweep",
     "run_mcor_test",
     "send_request",
@@ -174,6 +184,7 @@ __all__ = [
     "submit_mcor_test",
     "submit_picks",
     "submit_reruns",
+    "submit_traces",
     "sweep_grid_for",
     "sweep_runs",
     "tick",

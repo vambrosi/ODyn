@@ -27,8 +27,8 @@ basin and the image.
   excluded by Cellpose violet, dashed.
 - **The bar at the right**, as in the other windows: undo and redo; the
   outlines and each dashed set, shown or hidden; fit, and the brightness and
-  gamma of the image; and the shortcuts (`KEYS`, on a card in the middle of
-  the image).
+  gamma of the image; the shortcuts (`KEYS`, on a card in the middle of the
+  image); and Submit, at its foot.
 - **Under the image**, for all cells: the threshold of every cell without a
   size of its own (to the right, lower: every cell larger), the area range
   (um2: cells outside it are excluded), and the counts.
@@ -42,14 +42,17 @@ The wheel zooms at the pointer and a drag pans. The outlines run along the
 edges of the pixels.
 
 The edits are kept on this computer as they are made (a draft, `draft`) and
-picked up when the window opens again on the same candidates; nothing goes
-to the share from here. The candidates and the mean image are read from the
-share, off the main thread.
+picked up when the window opens again on the same candidates. Without one,
+the window starts from the ROIs submitted last for the same candidates, if
+any, and else from the cells Cellpose keeps. Submit, at the foot of the bar,
+hands the ROIs as they stand (`Curated`) to the QC page, which writes them
+beside the candidates and claims them for the cluster; nothing else goes to
+the share from here. The candidates, the mean image and the ROIs submitted
+before are read from the share, off the main thread.
 """
 
 from __future__ import annotations
 
-import hashlib
 import math
 
 from contextlib import contextmanager
@@ -99,7 +102,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..segmentation import FLOOR, THRESHOLD, Candidates, Curation, Edits
-from ..segmentation import read_candidates
+from ..segmentation import curated_edits, curated_sets, fingerprint, read_candidates
 from ..shared import read_json, write_json
 from . import style
 from .symbols import icon
@@ -172,6 +175,7 @@ KEYS = {
     "fit": ("0", "Show whole image"),
     "image": ("I", "Brightness and gamma"),
     "help": ("?", "Shortcuts"),
+    "submit": ("Ctrl+Return", "Submit the ROIs"),
 }
 MOUSE = (
     ("Click", "Select a cell, or add the one there"),
@@ -194,13 +198,6 @@ DRAFT_DELAY_MS = 500  # a draft is written once the edits pause this long
 def draft_name(group_id: int, user: str) -> str:
     """The file a draft of `user` for group `group_id` is kept in."""
     return f"rois_group_{int(group_id)}_{user}.draft.json"
-
-
-def fingerprint(found: Candidates) -> str:
-    """What tells candidate sets apart: the brightest pixel of every basin."""
-    peaks = np.ascontiguousarray(found.peak, np.int64)
-
-    return hashlib.sha1(peaks.tobytes()).hexdigest()
 
 
 def read_draft(path: Path, found: Candidates) -> None | Edits:
@@ -337,9 +334,11 @@ def threshold_at(position: int) -> float:
     return round(TOP_THRESHOLD - position * THRESHOLD_STEP, 6) + 0.0
 
 
-def load(mean: Path, candidates: Path) -> dict:
+def load(mean: Path, candidates: Path, group_id: None | int = None) -> dict:
     """
-    The mean image of a group and its candidates, ready to curate. Raises
+    The mean image of a group and its candidates, ready to curate, and the
+    ROIs submitted last on these candidates for group `group_id`
+    (`submitted`, see `submitted_last`; `None` without a group). Raises
     `FileNotFoundError` naming the one missing.
     """
     for path in (candidates, mean):
@@ -356,8 +355,40 @@ def load(mean: Path, candidates: Path) -> dict:
         )
 
     curation = Curation(found, image=image)
+    submitted = (
+        None if group_id is None else submitted_last(candidates, found, group_id)
+    )
 
-    return {"levels": levels16(image), "found": found, "curation": curation}
+    return {
+        "levels": levels16(image),
+        "found": found,
+        "curation": curation,
+        "submitted": submitted,
+    }
+
+
+def submitted_last(
+    candidates: Path, found: Candidates, group_id: int
+) -> None | tuple[Edits, dict]:
+    """
+    The edits of the ROIs submitted last for group `group_id` on the
+    candidates `found` (the file `candidates`, beside which they are), with
+    what was said of them; `None` when there are none. ROIs submitted on
+    other candidates, or with edits of another version (`DRAFT_VERSION`),
+    are passed over.
+    """
+    mine = fingerprint(found)
+
+    for path in curated_sets(Path(candidates).parent, group_id):
+        try:
+            made_on, edits, about = curated_edits(path)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue  # not readable: the one before, then
+
+        if made_on == mine and about.get("edits_version") == DRAFT_VERSION:
+            return edits, about
+
+    return None
 
 
 def _native(key: str) -> str:
@@ -381,13 +412,13 @@ class _Loader(QThread):
 
     loaded = Signal(object)
 
-    def __init__(self, mean: Path, candidates: Path, parent=None):
+    def __init__(self, mean: Path, candidates: Path, group_id: int, parent=None):
         super().__init__(parent)
-        self.mean, self.candidates = mean, candidates
+        self.mean, self.candidates, self.group_id = mean, candidates, group_id
 
     def run(self) -> None:  # noqa: D102 (Qt's)
         try:
-            self.loaded.emit(load(self.mean, self.candidates))
+            self.loaded.emit(load(self.mean, self.candidates, self.group_id))
         except FileNotFoundError as error:
             self.loaded.emit(("missing", str(error)))
         except Exception as error:
@@ -709,6 +740,18 @@ def _parts(*counts: tuple[int, str]) -> str:
     return f" ({', '.join(shown)})" if shown else ""
 
 
+def _submitted_by(about: dict) -> str:
+    """Who submitted ROIs, and when: "alice on 2026-11-17 at 14:02"."""
+    who = str(about.get("user") or "someone")
+
+    try:
+        when = datetime.fromisoformat(str(about["submitted_at"]))
+    except (KeyError, ValueError):
+        return who
+
+    return f"{who} on {when:%Y-%m-%d at %H:%M}"
+
+
 def cell_state(cell) -> str:
     """
     What sets `cell` apart, for the second line of its card: added or
@@ -731,7 +774,9 @@ class CurationWindow(QWidget):
     The ROIs of group `group_id` (see the module description): the
     candidates in the file `candidates`, over the mean image in the file
     `mean`, with the edits kept in the file `draft` on this computer.
-    `closed` fires as the window closes.
+    Submit calls `submit(curated, counts)` with the ROIs as they stand
+    (`Curated`) and the line of counts (`counts_text`); without `submit`
+    there is no Submit. `closed` fires as the window closes.
     """
 
     closed = Signal()
@@ -744,6 +789,7 @@ class CurationWindow(QWidget):
         candidates: Path,
         draft: Path,
         parent=None,
+        submit=None,
     ):
         super().__init__(parent)
         self.setWindowFlag(Qt.WindowType.Window)
@@ -753,6 +799,7 @@ class CurationWindow(QWidget):
         self.group_id = int(group_id)
         self.mean, self.candidates = Path(mean), Path(candidates)
         self.draft = Path(draft)
+        self.submit = submit
         self.found: None | Candidates = None
         self.curation: None | Curation = None
         self.levels: None | np.ndarray = None  # the mean image (`levels16`)
@@ -801,7 +848,7 @@ class CurationWindow(QWidget):
         self._enable()
         self.resize(1300, 850)
 
-        self.loader = _Loader(self.mean, self.candidates, self)
+        self.loader = _Loader(self.mean, self.candidates, self.group_id, self)
         self.loader.loaded.connect(self._loaded)
         self.loader.start()
 
@@ -854,6 +901,13 @@ class CurationWindow(QWidget):
         self.image_button.setStyleSheet("QToolButton::menu-indicator { image: none; }")
         bar.addSeparator()
         self.help_action = self._action(bar, "help", self._show_help, checked=False)
+
+        # The decision at the foot, as in the other windows
+        filler = QWidget()
+        filler.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        bar.addWidget(filler)
+        self.submit_action = self._action(bar, "submit", self._submit)
+        self.submit_action.setVisible(self.submit is not None)
 
         return holder
 
@@ -1150,11 +1204,21 @@ class CurationWindow(QWidget):
         self._show_image()
 
         edits = read_draft(self.draft, self.found)
+        submitted = result.get("submitted")
 
         if edits is not None:
             self.curation.edits = edits
             self._show_edits()
-            self.say("Picked up your draft from where you left it.")
+            self.say(
+                "Picked up your draft from where you left it."
+                + self._newer(edits, submitted)
+            )
+        elif submitted is not None:
+            self.curation.edits = submitted[0]
+            self._show_edits()
+            self.say(
+                f"Started from the ROIs submitted by {_submitted_by(submitted[1])}."
+            )
         elif self.draft.is_file():
             self.say(
                 "Your draft was for other candidates, or an older version of "
@@ -1162,6 +1226,25 @@ class CurationWindow(QWidget):
             )
 
         self.redraw()
+
+    def _newer(self, edits: Edits, submitted: None | tuple[Edits, dict]) -> str:
+        """
+        A note when other ROIs were `submitted` on these candidates after the
+        draft with `edits` was last kept (by someone else, say), else nothing.
+        """
+        if submitted is None or submitted[0] == edits:
+            return ""
+
+        try:
+            kept = self.draft.stat().st_mtime
+            when = datetime.fromisoformat(str(submitted[1]["submitted_at"]))
+        except (OSError, KeyError, ValueError):
+            return ""
+
+        if when.timestamp() <= kept:
+            return ""
+
+        return " Other ROIs were submitted since, by " f"{_submitted_by(submitted[1])}."
 
     def _problem(self, kind: str, text: str) -> str:
         if kind == "missing" and Path(text) == self.candidates:
@@ -1616,10 +1699,34 @@ class CurationWindow(QWidget):
         self.use_basin.setEnabled(picked and self.selected <= self.curation.basin_count)
         self.undo_action.setEnabled(bool(self.undo_stack))
         self.redo_action.setEnabled(bool(self.redo_stack))
+        kept = ready and any(cell.kept for cell in self.curation.cells.values())
+        self.submit_action.setEnabled(self.submit is not None and kept)
 
     # ----------------------------------------------------------------- #
-    # The draft
+    # The draft, and submitting
     # ----------------------------------------------------------------- #
+
+    def _settle(self) -> None:
+        """Apply a threshold drag or an area range still waiting to apply."""
+        if self.thresholding.isActive():
+            self.thresholding.stop()
+            self._apply_threshold()
+
+        if self.ranging.isActive():
+            self.ranging.stop()
+            self._area_changed()
+
+    def _submit(self) -> None:
+        """
+        Hand the ROIs as they stand, and their counts, to `submit` (the draft
+        kept first).
+        """
+        if self.submit is None or self.curation is None:
+            return
+
+        self._settle()
+        self.save_draft()
+        self.submit(self.curation.curated(), counts_text(self.curation.cells.values()))
 
     def save_draft(self) -> None:
         """Keep the edits on this computer (as they change, and on closing)."""
@@ -1634,14 +1741,7 @@ class CurationWindow(QWidget):
             self.say(f"Could not keep the draft here: {error}")
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt's name)
-        if self.thresholding.isActive():
-            self.thresholding.stop()
-            self._apply_threshold()
-
-        if self.ranging.isActive():
-            self.ranging.stop()
-            self._area_changed()
-
+        self._settle()
         self.save_draft()
         self.loader.wait()
         self.closed.emit()

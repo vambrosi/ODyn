@@ -17,6 +17,7 @@ import pandas as pd
 
 from ..database import Database
 from ..groups import candidate_settings
+from ..segmentation import read_fingerprint
 from ..shared import read_json, write_json
 from .config import (
     BASELINE_RUN,
@@ -130,6 +131,72 @@ def latest_approvals(db: Database) -> dict[int, dict]:
             }
 
     return approvals
+
+
+def latest_candidates(db: Database) -> dict[int, dict]:
+    """
+    Each group's latest `save_cellpose_candidates` that worked: `call_id`,
+    `called_at` and the `candidates` file (relative to the main folder).
+    """
+    calls = db.calls
+
+    if calls.empty:
+        return {}
+
+    made: dict[int, dict] = {}
+    saved = calls[calls["method_name"] == "Group.save_cellpose_candidates"]
+
+    for call_id, call in saved.sort_index().iterrows():
+        output = call["call_output"]
+
+        if isinstance(output, dict) and output.get("candidates"):
+            made[int(call["group_id"])] = {
+                "call_id": int(call_id),
+                "called_at": call["called_at"],
+                "candidates": str(output["candidates"]),
+            }
+
+    return made
+
+
+def record_rois(db: Database, group_id: int, content: dict) -> None:
+    """
+    Record ROIs curated in the app (a `rois` claim of `odyn.claims`: the
+    file `path` and the `candidates` fingerprint) with `Group.import_mask`,
+    as made by the user of `db`. Only ROIs curated on the candidates the
+    group has now, made after its latest approval; raises `ValueError`
+    saying why not otherwise (picked again, or candidates made again).
+    """
+    approval = latest_approvals(db).get(group_id)
+
+    if approval is None:
+        raise ValueError("its motion correction is not approved")
+
+    pick = latest_picks(db).get(group_id)
+
+    if pick is not None and pick["call_id"] > approval["call_id"]:
+        raise ValueError(
+            f"{pick['run']} was picked after the approval, so its motion "
+            "correction is checked again first"
+        )
+
+    made = latest_candidates(db).get(group_id)
+
+    if made is None or made["call_id"] < approval["call_id"]:
+        raise ValueError(
+            "its Cellpose candidates are made again after its latest approval; "
+            "curate the new ones once they are ready"
+        )
+
+    if read_fingerprint(db.main_folder / made["candidates"]) != content.get(
+        "candidates"
+    ):
+        raise ValueError(
+            "they were curated on other Cellpose candidates than the group has "
+            "now; open Curate ROIs again"
+        )
+
+    db.groups[group_id].import_mask(mask_path=content["path"])
 
 
 def archive_approved(

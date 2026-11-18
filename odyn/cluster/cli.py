@@ -159,6 +159,12 @@ def main(argv: None | list[str] = None) -> int:
     )
     cells.add_argument("--user", help="whose (default: who added the experiment)")
 
+    traces = commands.add_parser(
+        "traces", help="save the ROI traces of a group, on the last mask imported"
+    )
+    traces.add_argument("--group", type=int, action="append", default=[])
+    traces.add_argument("--user", help="whose (default: who added the experiment)")
+
     ask = commands.add_parser("request", help="leave a request for the next tick")
     ask.add_argument("method", choices=REQUESTABLE)
     ask.add_argument("arguments", nargs="*", help="key=value")
@@ -281,6 +287,14 @@ def main(argv: None | list[str] = None) -> int:
                 model=args.model, tile_um=args.tile_um
             )
             print(f"Wrote {path}")
+
+    elif args.command == "traces":
+        db = Database(args.main_folder, project=args.project)
+
+        for group_id in args.group:
+            user = args.user or experiment_owner(db, group_id)
+            mine = Database(args.main_folder, project=args.project, user=user)
+            print(f"Wrote {mine.groups[group_id].save_roi_traces()}")
 
     elif args.command == "run-mcor-sweep":
         folder = run_mcor_sweep(args.sweep, args.task)

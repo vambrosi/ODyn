@@ -494,6 +494,60 @@ def submit_cellpose(
     script to `jobs/` and returns the job id (`None` in a dry run, which only
     writes and shows the script).
     """
+    return _submit_group_job(
+        main_folder,
+        project,
+        group_id,
+        user=user,
+        kind="cellpose",
+        what="mean images and Cellpose candidates",
+        commands=("mean-images", "cellpose"),
+        dry_run=dry_run,
+    )
+
+
+def submit_traces(
+    main_folder: str | Path,
+    project: None | str,
+    group_id: int,
+    *,
+    user: str,
+    dry_run: bool = False,
+) -> None | str:
+    """
+    Submit the ROI traces of group `group_id` as a job, on the last mask
+    imported (`Group.save_roi_traces`), its call recorded as made by `user`.
+    Writes the script to `jobs/` and returns the job id (`None` in a dry
+    run, which only writes and shows the script).
+    """
+    return _submit_group_job(
+        main_folder,
+        project,
+        group_id,
+        user=user,
+        kind="traces",
+        what="ROI traces",
+        commands=("traces",),
+        dry_run=dry_run,
+    )
+
+
+def _submit_group_job(
+    main_folder: str | Path,
+    project: None | str,
+    group_id: int,
+    *,
+    user: str,
+    kind: str,
+    what: str,
+    commands: tuple[str, ...],
+    dry_run: bool,
+) -> None | str:
+    """
+    One job that runs the odyn `commands` on group `group_id` in turn, as
+    `user`: the script `jobs/<kind>-g<id>.sh`, the job named
+    `odyn-<kind>-<project>-g<id>`. Its job id, or `None` in a dry run.
+    """
     db = Database(main_folder, project=project)
     config = ClusterConfig.read(main_folder)
     path = group_paths(db, group_id)
@@ -501,10 +555,10 @@ def submit_cellpose(
     steps = [
         [*_odyn_command(main_folder, project), step, "--group", str(group_id)]
         + ["--user", user]
-        for step in ("mean-images", "cellpose")
+        for step in commands
     ]
     script = (
-        cluster_folder(main_folder, project) / JOBS_FOLDER / f"cellpose-g{group_id}.sh"
+        cluster_folder(main_folder, project) / JOBS_FOLDER / f"{kind}-g{group_id}.sh"
     )
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(
@@ -512,8 +566,8 @@ def submit_cellpose(
             main_folder,
             project,
             config,
-            name=f"odyn-cellpose-{project or 'main'}-g{group_id}",
-            about=f"Mean images and Cellpose candidates of {where} for {user}",
+            name=f"odyn-{kind}-{project or 'main'}-g{group_id}",
+            about=f"{what[:1].upper()}{what[1:]} of {where} for {user}",
             command="\n".join(shlex.join(step) for step in steps),
             # It reads every acquisition, as a whole correction does
             time=config.whole_time,
@@ -526,10 +580,7 @@ def submit_cellpose(
         print(script.read_text())
         return None
 
-    logger.info(
-        f"Submitted the mean images and Cellpose candidates of group {group_id} "
-        f"as job {job_id}."
-    )
+    logger.info(f"Submitted the {what} of group {group_id} as job {job_id}.")
 
     return job_id
 

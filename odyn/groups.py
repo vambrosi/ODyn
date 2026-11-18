@@ -166,6 +166,97 @@ class McorFlag(IntFlag):
     SOME_NOT_APPROVED = 1 << 10  # approval left some acquisitions out
 
 
+# The neuropil of a ROI, taken as suite2p takes it: the pixels of no cell in
+# a square around the ROI, past a gap, the square grown in steps until it
+# holds more than an area of them (um, um2 and um; suite2p has 2 px, 350 px
+# and 5 px, at about 1 um/px)
+NEUROPIL_GAP_UM = 2.0
+NEUROPIL_AREA_UM2 = 350.0
+NEUROPIL_STEP_UM = 5.0
+
+# Frames read at a time when saving traces, so no movie is ever whole in RAM
+TRACE_CHUNK_FRAMES = 32
+
+
+def neuropil_masks(
+    labels_image: np.ndarray,
+    labels: Sequence[int],
+    cells: None | np.ndarray = None,
+    *,
+    gap_px: int,
+    min_px: int,
+    step_px: int,
+) -> list[np.ndarray]:
+    """
+    The neuropil of each ROI of `labels` in `labels_image`, as suite2p takes
+    it: the pixels of no ROI and of no cell of `cells` (a mask of the other
+    cells, those not kept too) in a square around the ROI, but none within
+    `gap_px` of it, the square grown by `step_px` on every side until it
+    holds more than `min_px` of them, or the whole image. One array of
+    indices into the flattened image per ROI (empty for a label missing).
+    """
+    from scipy import ndimage as ndi
+
+    height, width = labels_image.shape
+    free = labels_image == 0
+
+    if cells is not None:
+        free &= ~np.asarray(cells, bool)
+
+    boxes = ndi.find_objects(labels_image.astype(np.intp, copy=False))
+    cross = ndi.generate_binary_structure(2, 1)
+    masks = []
+
+    for label in labels:
+        box = boxes[label - 1] if 0 < label <= len(boxes) else None
+
+        if box is None:
+            masks.append(np.zeros(0, np.int64))
+            continue
+
+        # The ROI and the band around it, in a box just big enough
+        top, left = max(0, box[0].start - gap_px), max(0, box[1].start - gap_px)
+        bottom = min(height, box[0].stop + gap_px)
+        right = min(width, box[1].stop + gap_px)
+        near = labels_image[top:bottom, left:right] == label
+
+        if gap_px > 0:
+            near = ndi.binary_dilation(near, cross, iterations=gap_px)
+
+        y0, x0, y1, x1 = top, left, bottom, right
+
+        while True:
+            y0, x0 = max(0, y0 - step_px), max(0, x0 - step_px)
+            y1, x1 = min(height, y1 + step_px), min(width, x1 + step_px)
+            window = free[y0:y1, x0:x1].copy()
+            window[top - y0 : bottom - y0, left - x0 : right - x0] &= ~near
+            whole = (y0, x0, y1, x1) == (0, 0, height, width)
+
+            if np.count_nonzero(window) > min_px or whole:
+                break
+
+        rows, columns = np.nonzero(window)
+        masks.append((rows + y0).astype(np.int64) * width + columns + x0)
+
+    return masks
+
+
+def _averaging(pixel_sets: Sequence[np.ndarray], size: int):
+    """
+    A sparse matrix whose row `i` averages the pixels `pixel_sets[i]` of an
+    image of `size` pixels, flattened (a row of zeros for no pixel). In
+    float64, so means of many pixels lose nothing to rounding.
+    """
+    from scipy import sparse
+
+    counts = np.array([len(pixels) for pixels in pixel_sets], np.int64)
+    rows = np.repeat(np.arange(len(pixel_sets)), counts)
+    columns = np.concatenate([np.zeros(0, np.int64), *pixel_sets])
+    weights = np.repeat(1 / np.maximum(counts, 1), counts)
+
+    return sparse.csr_matrix((weights, (rows, columns)), shape=(len(pixel_sets), size))
+
+
 @dataclass
 class RoiTraces:
     """
@@ -175,7 +266,12 @@ class RoiTraces:
     - `times`: when each frame happened, in seconds from the odor onset;
     - `roi_labels`: the ROI numbers, in the order of the last axis;
     - `acquisitions`: odor, program and outcome of each acquisition, in the
-    order of the first axis.
+    order of the first axis;
+    - `Fneu`: the brightness of the neuropil around each ROI, as `F` (see
+    `neuropil_masks`), `None` in files saved without it. Nothing here
+    subtracts it (suite2p uses `F - 0.7 * Fneu`);
+    - `rois`: the table of the ROIs the mask file had (from the curation:
+    kind, pixels, area, seed), with the pixels of each neuropil, or `None`.
 
     **EXAMPLE**
     ```python
@@ -195,6 +291,8 @@ class RoiTraces:
     frame_rate: float
     mask_path: str
     method_call_id: int
+    Fneu: None | np.ndarray = None
+    rois: None | pd.DataFrame = None
 
     @property
     def acq_ids(self) -> np.ndarray:
@@ -3633,6 +3731,43 @@ class Group(CallRecorder):
         Every acquisition comes back with same length and aligned on its own odor
         onset, so frame `i` is the same moment in all of them.
         """
+        path, start, stop = self._common_pages(
+            acq_id, photobleach_window_s, only_approved
+        )
+
+        # Reading the window directly keeps the rest of the movie out of RAM.
+        with tifffile.TiffFile(path) as tif:
+            return tif.asarray(key=slice(start, stop)).astype(np.float32)
+
+    def _common_chunks(
+        self,
+        acq_id: int,
+        photobleach_window_s: float,
+        only_approved: bool = True,
+        frames: int = TRACE_CHUNK_FRAMES,
+    ):
+        """
+        The frames `_common_movie` gives, in blocks of up to `frames` frames
+        (frame x row x column, float32), first to last.
+        """
+        path, start, stop = self._common_pages(
+            acq_id, photobleach_window_s, only_approved
+        )
+
+        with tifffile.TiffFile(path) as tif:
+            for first in range(start, stop, frames):
+                block = tif.asarray(key=slice(first, min(first + frames, stop)))
+
+                # One page comes back as a picture, not a stack of one
+                yield block.reshape(-1, *block.shape[-2:]).astype(np.float32)
+
+    def _common_pages(
+        self, acq_id: int, photobleach_window_s: float, only_approved: bool
+    ) -> tuple[Path, int, int]:
+        """
+        Where the `_common_frames` of an acquisition are: its mcor file, and
+        the first page and the one after the last.
+        """
         usable = self._mcors(only_approved)
 
         # Check here because .loc would only say "KeyError: <acq_id>"
@@ -3653,14 +3788,9 @@ class Group(CallRecorder):
             )
 
         onset_frame = int(onset_frame)
-
         path = self.db.main_folder / cast(str, usable.loc[acq_id, "mcor_path"])
 
-        # Reading the window directly keeps the rest of the movie out of RAM.
-        with tifffile.TiffFile(path) as tif:
-            return tif.asarray(
-                key=slice(onset_frame + first, onset_frame + last + 1)
-            ).astype(np.float32)
+        return path, onset_frame + first, onset_frame + last + 1
 
     def z_score_acquisition(
         self,
@@ -3708,25 +3838,34 @@ class Group(CallRecorder):
         *,
         photobleach_window_s: float = 1.0,
         only_approved: bool = True,
-    ) -> None:
+    ) -> Path:
         """
-        Save the average brightness of every ROI (per acquisition/frame)
+        Save the average brightness of every ROI, and of the neuropil around
+        it (per acquisition/frame)
 
         **USAGE**
         ```python
             group = db.groups[some_index]
             group.import_mask(mask_path="projects/PA_K99/outputs/masks.h5")
-            group.save_roi_traces()
+            path = group.save_roi_traces()
         ```
 
         **PARAMETERS**
         - `photobleach_window_s`: seconds dropped from the start
         - `only_approved`: use only approved motion corrections
 
-        Saves one HDF5 file, in the project's `outputs` folder, with:
+        Saves one HDF5 file per call, in the project's `outputs` folder, with:
         - the signal `F` with shape acquisition x frame x ROI;
+        - `Fneu`, the same for the neuropil around each ROI (see
+        `neuropil_masks`), which nothing subtracts yet;
         - `times` with the frames time in seconds relative to odor onset;
-        - `acq_ids` and `roi_labels`, saying what the other two axes are.
+        - `acq_ids` and `roi_labels`, saying what the other two axes are;
+        - `odor_ids` and `odors`, the odor of each acquisition (its id and
+        name; -1 and empty for none);
+        - `rois/`, the table of the ROIs from the mask file when it has one
+        (curated sets do), with `neuropil_pixels`.
+
+        Returns the path of the file; `roi_traces()` reads the last one.
 
         **TIPS**
 
@@ -3738,17 +3877,48 @@ class Group(CallRecorder):
         ```
         is the whole session in order, one row per frame and one column per ROI.
         """
+        from .segmentation import read_rois, write_table
 
         folder = self.db.outputs_folder
         folder.mkdir(parents=True, exist_ok=True)
 
+        if only_approved:
+            # Read for its call id only: which approval the traces come from
+            self.latest_output("Group.approve_mcor_files")
+
         labels_image, mask = self.mask_labels()
         labels = np.asarray(mask["labels"], dtype=np.intp)
+        cells, rois = read_rois(self.db.main_folder / cast(str, mask["mask_path"]))
 
-        # One pass per frame instead of one per ROI, and indexing by label
-        # keeps it right when the mask is not numbered 1..n
-        flat_labels = labels_image.ravel().astype(np.intp)
-        sizes = np.bincount(flat_labels)
+        # The pixels of each ROI, and of the neuropil around it, in um as
+        # suite2p sizes it in pixels, so fields of any resolution get alike
+        experiment = self.experiments.iloc[0]
+        um_per_px = (
+            float(experiment["height_um"]) / int(experiment["height_px"]),
+            float(experiment["width_um"]) / int(experiment["width_px"]),
+        )
+        px_per_um = 2 / (um_per_px[0] + um_per_px[1])
+        neuropil = {
+            "gap_px": round(NEUROPIL_GAP_UM * px_per_um),
+            "min_px": round(NEUROPIL_AREA_UM2 / (um_per_px[0] * um_per_px[1])),
+            "step_px": max(1, round(NEUROPIL_STEP_UM * px_per_um)),
+        }
+        flat = labels_image.ravel()
+        order = np.argsort(flat, kind="stable")
+        starts = np.searchsorted(flat[order], labels, "left")
+        stops = np.searchsorted(flat[order], labels, "right")
+        roi_pixels = [order[a:b] for a, b in zip(starts, stops)]
+        neuropils = neuropil_masks(labels_image, labels, cells, **neuropil)
+        without = [int(label) for label, n in zip(labels, neuropils) if not len(n)]
+
+        if without:
+            logger.warning(
+                f"ROIs {without} have no neuropil (no pixel free of cells around "
+                "them): their Fneu is NaN."
+            )
+
+        roi_weights = _averaging(roi_pixels, flat.size)
+        neuropil_weights = _averaging(neuropils, flat.size)
 
         first, last, frame_rate = self._common_frames(
             photobleach_window_s, only_approved
@@ -3769,7 +3939,9 @@ class Group(CallRecorder):
                 f"Leaving them out because they can't be aligned."
             )
 
-        traces = np.empty((len(chosen), last - first + 1, len(labels)), np.float32)
+        shape = (len(chosen), last - first + 1, len(labels))
+        traces = np.empty(shape, np.float32)
+        around = np.empty(shape, np.float32)
 
         logger.info(
             f"Shape: {len(chosen)} acquisitions "
@@ -3784,38 +3956,66 @@ class Group(CallRecorder):
         )
 
         for index, acq_id in enumerate(tqdm(chosen, desc="Reading acquisitions")):
-            movie = self._common_movie(int(acq_id), photobleach_window_s, only_approved)
+            done = 0
 
-            for frame, picture in enumerate(movie):
-                sums = np.bincount(
-                    flat_labels,
-                    weights=picture.ravel(),
-                    minlength=sizes.size,
+            for block in self._common_chunks(
+                int(acq_id), photobleach_window_s, only_approved
+            ):
+                pixels = block.reshape(len(block), -1).T  # pixel x frame
+                frames = slice(done, done + len(block))
+                traces[index, frames, :] = (roi_weights @ pixels).T
+                around[index, frames, :] = (neuropil_weights @ pixels).T
+                done += len(block)
+
+        around[:, :, np.array([not len(pixels) for pixels in neuropils])] = np.nan
+
+        odor_ids = self.acquisition_trials.reindex(chosen)["odor_id"]
+        names = self.db.odors["odor_name"]
+        odors = [
+            "" if pd.isna(odor) else str(names.get(int(odor), "")) for odor in odor_ids
+        ]
+        table = pd.DataFrame({"label": labels.astype(np.int64)})
+
+        if rois is not None and "label" in rois.columns:
+            table = table.merge(rois, on="label", how="left")
+
+        table["neuropil_pixels"] = [len(pixels) for pixels in neuropils]
+        path = folder / self._output_name("roi_traces", "h5", self.current_call_id)
+
+        with atomic_write(path) as hidden:
+            with h5py.File(hidden, "w") as handle:
+                handle.create_dataset("F", data=traces)
+                handle.create_dataset("Fneu", data=around)
+                handle.create_dataset("times", data=times)
+                handle.create_dataset(
+                    "acq_ids", data=np.asarray(chosen, dtype=np.int64)
                 )
-                traces[index, frame, :] = sums[labels] / sizes[labels]
+                handle.create_dataset("roi_labels", data=labels.astype(np.int64))
+                handle.create_dataset(
+                    "odor_ids", data=odor_ids.fillna(-1).to_numpy(dtype=np.int64)
+                )
+                handle.create_dataset(
+                    "odors",
+                    data=np.asarray(odors, dtype=object),
+                    dtype=h5py.string_dtype(),
+                )
+                write_table(handle.create_group("rois"), table)
 
-            del movie
-
-        path = folder / self._output_name("roi_traces", "h5")
-
-        with h5py.File(path, "w") as handle:
-            handle.create_dataset("F", data=traces)
-            handle.create_dataset("times", data=times)
-            handle.create_dataset("acq_ids", data=np.asarray(chosen, dtype=np.int64))
-            handle.create_dataset("roi_labels", data=labels.astype(np.int64))
-
-            handle.attrs["group_id"] = self.group_id
-            handle.attrs["frame_rate"] = frame_rate
-            handle.attrs["photobleach_s"] = photobleach_window_s
-            handle.attrs["method_call_id"] = self.current_call_id
-            handle.attrs["mask_path"] = mask["mask_path"]
+                handle.attrs["group_id"] = self.group_id
+                handle.attrs["frame_rate"] = frame_rate
+                handle.attrs["photobleach_s"] = photobleach_window_s
+                handle.attrs["method_call_id"] = self.current_call_id
+                handle.attrs["mask_path"] = mask["mask_path"]
+                handle.attrs["neuropil"] = json.dumps(neuropil)
 
         self.add_output_file(path)
         self.update_parameters_used(
-            {"frame_rate": frame_rate, "acquisitions": len(chosen)}
+            {"frame_rate": frame_rate, "acquisitions": len(chosen), **neuropil}
         )
 
         logger.info(f"Saved '{path}'.")
+
+        return path
 
     def roi_traces(self) -> RoiTraces:
         """
@@ -3832,9 +4032,11 @@ class Group(CallRecorder):
 
         `traces.F` has shape acquisition x frame x ROI, `traces.times` says
         when each frame happened relative to the odor onset, and
-        `traces.acquisitions` says what each acquisition was: its odor,
-        program and outcome, read from the database rather than from the file,
-        so a later correction shows up here.
+        `traces.acquisitions` says what each acquisition was: its odor (and
+        its name, `odor`), program and outcome, read from the database rather
+        than from the file, so a later correction shows up here. `traces.Fneu`
+        is the neuropil around each ROI, and `traces.rois` the table of the
+        ROIs (see `RoiTraces`).
 
         **ALERT**: run `save_roi_traces()` first. Acquisitions the database
         cannot describe are kept, with their odor and outcome left empty.
@@ -3863,6 +4065,8 @@ class Group(CallRecorder):
             / files.set_index("method_call_id").loc[newest, "file_path"]
         )
 
+        from .segmentation import read_table
+
         with h5py.File(path, "r") as handle:
             traces = np.asarray(handle["F"])
             times = np.asarray(handle["times"])
@@ -3871,6 +4075,9 @@ class Group(CallRecorder):
             saved_group = int(handle.attrs["group_id"])
             frame_rate = float(handle.attrs["frame_rate"])
             mask_path = str(handle.attrs["mask_path"])
+            # Files saved before the neuropil have neither
+            around = np.asarray(handle["Fneu"]) if "Fneu" in handle else None
+            rois = read_table(handle["rois"]) if "rois" in handle else None
 
         if saved_group != self.group_id:
             raise ValueError(
@@ -3886,11 +4093,14 @@ class Group(CallRecorder):
             frame_rate=frame_rate,
             mask_path=mask_path,
             method_call_id=int(newest),
+            Fneu=around,
+            rois=rois,
         )
 
     def _describe(self, acq_ids: np.ndarray) -> pd.DataFrame:
         """
-        Odor, program and outcome of each acquisition, in the order given.
+        Odor (its id and, in `odor`, its name), program and outcome of each
+        acquisition, in the order given.
 
         Rows the database cannot describe are kept and left empty, so the
         frame stays lined up with the first axis of `F`.
@@ -3912,6 +4122,16 @@ class Group(CallRecorder):
                 f"Acquisitions {missing} have no trial, so their odor, "
                 "program and outcome are empty."
             )
+
+        names = self.db.odors["odor_name"]
+        described.insert(
+            described.columns.get_loc("odor_id") + 1,
+            "odor",
+            [
+                None if pd.isna(odor) else names.get(int(odor))
+                for odor in described["odor_id"]
+            ],
+        )
 
         return described
 

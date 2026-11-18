@@ -36,6 +36,7 @@ curation = Curation(found, image=mean)      # with the mean image, to grow
 cell = curation.grow(40, 210)               # a cell grown from the image
 curation.reject(curation.cell_at(40, 32))
 labels = curation.labels()                  # the cells kept, numbered from 1
+curation.curated().write(path)              # to submit (`Curated`)
 ```
 
 `find_candidates` needs Cellpose 4 (and its `torch`); the rest needs only
@@ -45,12 +46,15 @@ numpy, scipy, pandas and h5py.
 from __future__ import annotations
 
 import copy
+import hashlib
 import heapq
 import json
 import os
+import re
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -321,6 +325,40 @@ def group_files(
         processed / "mcor" / f"mean_group_{int(group_id)}.tif",
         processed / "segmentation" / f"cellpose_group_{int(group_id)}.h5",
     )
+
+
+def fingerprint(found: Candidates) -> str:
+    """What tells candidate sets apart: the brightest pixel of every basin."""
+    return _digest(found.peak)
+
+
+def read_fingerprint(path: str | Path) -> str:
+    """
+    The `fingerprint` of the candidates in `path`, reading only their peaks.
+    """
+    with h5py.File(path, "r") as handle:
+        return _digest(np.asarray(handle["peak"]))
+
+
+def _digest(peaks: np.ndarray) -> str:
+    return hashlib.sha1(np.ascontiguousarray(peaks, np.int64).tobytes()).hexdigest()
+
+
+def curated_name(group_id: int, user: str, when: datetime) -> str:
+    """
+    The file ROIs curated for group `group_id` are submitted in, beside its
+    candidates: a new one each time, named by when and by whom.
+    """
+    who = re.sub(r"[^A-Za-z0-9_.-]+", "-", user).strip("-") or "someone"
+
+    return f"rois_group_{int(group_id)}_{when:%Y%m%d-%H%M%S}_{who}.h5"
+
+
+def curated_sets(folder: str | Path, group_id: int) -> list[Path]:
+    """The ROIs submitted for group `group_id` in `folder`, newest first."""
+    found = Path(folder).glob(f"rois_group_{int(group_id)}_*.h5")
+
+    return sorted(found, key=lambda path: path.name, reverse=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -810,7 +848,29 @@ class Curation:
             basin = cell.basin if cell.basin <= self.basin_count else 0
             rows.append([number, basin, cell.kind, size, area, cell.threshold, y, x])
 
-        return pd.DataFrame(rows, columns=[*columns, "seed_y", "seed_x"])
+        # Typed even with no row, so a file of it reads back the same
+        return pd.DataFrame(rows, columns=[*columns, "seed_y", "seed_x"]).astype(
+            {
+                "label": np.int64,
+                "basin": np.int64,
+                "kind": object,
+                "pixels": np.int64,
+                "area_um2": np.float64,
+                "threshold": np.float64,
+                "seed_y": np.int64,
+                "seed_x": np.int64,
+            }
+        )
+
+    def curated(self) -> Curated:
+        """The ROIs as they stand, to submit (`Curated`)."""
+        return Curated(
+            labels=self.labels(),
+            cells=self.owner > 0,
+            table=self.table(),
+            edits=self.edits,
+            candidates=fingerprint(self.found),
+        )
 
     # ----------------------------------------------------------------- #
     # Changing
@@ -1162,3 +1222,125 @@ class Curation:
             if cell is not None:
                 self.cells[number] = cell
                 self.owner.flat[cell.pixels] = number
+
+
+# --------------------------------------------------------------------------- #
+# Curated sets
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, eq=False)
+class Curated:
+    """
+    ROIs as a curator submits them (`Curation.curated`): the cells kept as a
+    label image (`labels`, numbered from 1 as the rows of `table`), every
+    cell with pixels as a mask (`cells`, kept or not: the neuropil of a ROI
+    keeps away from all of them), the table of the cells kept
+    (`Curation.table`), the `edits`, and the `fingerprint` of the candidates
+    they were made on (`candidates`).
+    """
+
+    labels: np.ndarray
+    cells: np.ndarray
+    table: pd.DataFrame
+    edits: Edits
+    candidates: str
+
+    def write(self, path: str | Path, **about: Any) -> None:
+        """
+        Write it all to one HDF5 file, with `about` (who, when, ...) as JSON
+        (`read_curated` reads it back): the label image as `masks/labels`,
+        where `Group.import_mask` reads it, the cells as `masks/cells`, and
+        the table as one dataset per column in `rois/`.
+        """
+        packed = {"compression": "gzip", "compression_opts": 4, "shuffle": True}
+
+        with h5py.File(path, "w") as handle:
+            handle.create_dataset(
+                "masks/labels", data=self.labels.astype(np.uint32), **packed
+            )
+            handle.create_dataset(
+                "masks/cells", data=self.cells.astype(np.uint8), **packed
+            )
+            write_table(handle.create_group("rois"), self.table)
+            handle.attrs["edits"] = json.dumps(self.edits.as_json())
+            handle.attrs["candidates"] = self.candidates
+            handle.attrs["about"] = json.dumps(about, default=str)
+
+
+def read_curated(path: str | Path) -> tuple[Curated, dict[str, Any]]:
+    """The ROIs `Curated.write` wrote, and what it said about them."""
+    with h5py.File(path, "r") as handle:
+        curated = Curated(
+            labels=np.asarray(handle["masks/labels"]),
+            cells=np.asarray(handle["masks/cells"]).astype(bool),
+            table=read_table(handle["rois"]),
+            edits=Edits.from_json(json.loads(handle.attrs["edits"])),
+            candidates=str(handle.attrs["candidates"]),
+        )
+
+        return curated, json.loads(handle.attrs["about"])
+
+
+def read_rois(path: str | Path) -> tuple[None | np.ndarray, None | pd.DataFrame]:
+    """
+    What a mask file says of its ROIs besides their labels, when it says it
+    (curated sets do, see `Curated.write`): every cell as a mask
+    (`masks/cells`), and the table of the ROIs (`rois/`). `None` for each
+    one missing.
+    """
+    with h5py.File(path, "r") as handle:
+        cells = handle.get("masks/cells")
+        rois = handle.get("rois")
+
+        return (
+            None if cells is None else np.asarray(cells).astype(bool),
+            None if rois is None else read_table(rois),
+        )
+
+
+def write_table(group: h5py.Group, table: pd.DataFrame) -> None:
+    """
+    `table` in the HDF5 `group`, a dataset per column (text as UTF-8), in
+    its order (`read_table` reads it back).
+    """
+    group.attrs["columns"] = json.dumps([str(column) for column in table.columns])
+
+    for column in table.columns:
+        values = table[column]
+
+        if values.dtype == object:  # text (the kind of each ROI)
+            text = np.asarray(values.astype(str).tolist(), dtype=object)
+            group.create_dataset(str(column), data=text, dtype=h5py.string_dtype())
+        else:
+            group.create_dataset(str(column), data=values.to_numpy())
+
+
+def read_table(group: h5py.Group) -> pd.DataFrame:
+    """The table `write_table` wrote in the HDF5 `group`."""
+    columns = json.loads(group.attrs["columns"])
+    text = [name for name in columns if h5py.check_string_dtype(group[name].dtype)]
+
+    return pd.DataFrame(
+        {
+            name: group[name].asstr()[()] if name in text else np.asarray(group[name])
+            for name in columns
+        },
+        columns=columns,
+    ).astype(
+        {name: object for name in text}
+    )  # as `Curation.table` has it
+
+
+def curated_edits(path: str | Path) -> tuple[str, Edits, dict[str, Any]]:
+    """
+    Of the ROIs `Curated.write` wrote, only what is needed to curate them
+    again: the `fingerprint` of their candidates, the edits, and what it said
+    about them (no image is read).
+    """
+    with h5py.File(path, "r") as handle:
+        return (
+            str(handle.attrs["candidates"]),
+            Edits.from_json(json.loads(handle.attrs["edits"])),
+            json.loads(handle.attrs["about"]),
+        )

@@ -17,8 +17,8 @@ from ..database import Database
 from ..shared import DONE_FOLDER, FAILED_FOLDER, Inbox, read_json, write_json
 from ..utils import get_user, logger
 from .config import REQUESTS_FOLDER, TIME_FORMAT, TickReport, cluster_folder
-from .mcor import submit_cellpose
-from .records import pick_candidate
+from .mcor import submit_cellpose, submit_traces
+from .records import pick_candidate, record_rois
 
 # What a request may ask for. A request is executed by name, so this list is
 # the whole of what another computer can make the cluster do.
@@ -127,7 +127,7 @@ def apply_claims(main_folder: Path, project: None | str, report: TickReport) -> 
     that no longer applies (a pick while the last whole correction still
     runs, say) stays, with why, for its author to see. An approval then
     submits the mean images and Cellpose candidates of its group
-    (`submit_cellpose`).
+    (`submit_cellpose`), and ROIs their traces (`submit_traces`).
     """
     from ..claims import claims  # it imports this module
 
@@ -169,6 +169,8 @@ def apply_claims(main_folder: Path, project: None | str, report: TickReport) -> 
                     main_folder / content["folder"],
                     content.get("set_aside") or [],
                 )
+            elif step == "rois":
+                record_rois(db, group_id, content)
             else:
                 raise ValueError(f"Unknown QC step {step!r}")
 
@@ -187,6 +189,26 @@ def apply_claims(main_folder: Path, project: None | str, report: TickReport) -> 
 
         if step == "approve":
             _after_approval(main_folder, project, group, user, report)
+        elif step == "rois":
+            _after_rois(main_folder, project, group, user, report)
+
+
+def _after_rois(
+    main_folder: Path, project: None | str, group, user: str, report: TickReport
+) -> None:
+    """
+    The traces of the ROIs of a group just recorded, as a job
+    (`submit_traces`). A job that cannot be submitted is reported; the ROIs
+    stand.
+    """
+    what = f"ROI traces of group {group.group_id}"
+
+    try:
+        job_id = submit_traces(main_folder, project, group.group_id, user=user)
+        report.tests.append(f"{what} submitted (job {job_id})")
+
+    except Exception as error:  # by hand then: `traces`
+        report.errors.append(f"{what}: {type(error).__name__}: {error}")
 
 
 def _after_approval(

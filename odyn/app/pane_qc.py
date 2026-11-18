@@ -14,7 +14,8 @@ download its test files to this computer (`cache`) and to open its folder and
 its window (`mcor_window`) from there: played from the share, a video is
 slow. Nothing is downloaded unless asked. Once an experiment is approved,
 Curate ROIs opens the window its ROIs are curated in (`curation_window`), on
-its Cellpose candidates, read from the share (two files, not videos).
+its Cellpose candidates, read from the share (two files, not videos), and
+Submit there hands them to the cluster.
 
 The page opens on the first tab with rows; once a tab is picked, reloads keep
 it until the user changes.
@@ -25,6 +26,7 @@ from __future__ import annotations
 import os
 
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -64,10 +66,11 @@ from ..qc import (
     read_qc_summary,
     remote_size,
 )
-from ..segmentation import group_files
+from ..segmentation import Curated, curated_name, group_files
+from ..shared import atomic_write
 from . import cache
 from .context import Context
-from .curation_window import CurationWindow, draft_name
+from .curation_window import DRAFT_VERSION, CurationWindow, draft_name
 from ..drafts.draft import Draft
 from .mcor_window import McorWindow, Run
 from .models import FrameModel, fit_columns, sortable
@@ -1091,11 +1094,103 @@ class QcPane(QWidget):
         )
         user = self.context.user or get_user()
         window = CurationWindow(
-            label, group_id, mean, candidates, here / draft_name(group_id, user)
+            label,
+            group_id,
+            mean,
+            candidates,
+            here / draft_name(group_id, user),
+            submit=lambda curated, counts: self._submit_rois(
+                group_id, label, curated, counts
+            ),
         )
         window.closed.connect(lambda: self.curations.pop(group_id, None))
         self.curations[group_id] = window
         window.show()
+
+    def _submit_rois(
+        self, group_id: int, label: str, curated: Curated, counts: str
+    ) -> None:
+        """
+        Once confirmed, submit the ROIs `curated` in the window of group
+        `group_id`: a new file beside its candidates, then a claim of it for
+        the user (the cluster records it with `Group.import_mask`, then
+        extracts the traces of the ROIs). The window closes once claimed.
+        """
+        window = self.curations.get(group_id)
+
+        if window is None:
+            return
+
+        if not self.context.confirm(
+            "Submit ROIs",
+            f"Submit the ROIs of {label}: {counts}?\n\nThe cluster records them "
+            "at its next run, then extracts their traces.",
+            "Submit",
+            parent=window,
+        ):
+            return
+
+        main, project = self.main_folder, self.context.worker.project
+        user = self.context.user or get_user()
+        now = datetime.now()
+        path = window.candidates.parent / curated_name(group_id, user, now)
+        about = {
+            "group_id": group_id,
+            "user": user,
+            "submitted_at": now.isoformat(timespec="seconds"),
+            "counts": counts,
+            "candidates_path": window.candidates.relative_to(main).as_posix(),
+            "mean_path": window.mean.relative_to(main).as_posix(),
+            "edits_version": DRAFT_VERSION,
+        }
+
+        def make():
+            try:
+                with atomic_write(path) as hidden:
+                    curated.write(hidden, **about)
+            except OSError as error:
+                return f"Could not create {path.name}: {error}"
+
+            try:
+                claim(
+                    main,
+                    project,
+                    group_id,
+                    "rois",
+                    user,
+                    path=path.relative_to(main).as_posix(),
+                    candidates=curated.candidates,
+                    rois=len(curated.table),
+                )
+            except ClaimTaken as taken:
+                # It will never be recorded, so no window should start from it
+                path.unlink(missing_ok=True)
+
+                return (
+                    f"The ROI submission of {label}: {taken}, and the cluster "
+                    "has not recorded it yet."
+                )
+
+            return None
+
+        def made(problem):
+            if problem is not None:
+                box = QMessageBox(
+                    QMessageBox.Icon.Warning, "Submit ROIs", problem, parent=window
+                )
+                box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+                box.open()
+                return
+
+            window.close()
+            self.context.status.emit(
+                f"ROIs of {label} submitted ({len(curated.table)} kept); the "
+                "cluster records them at its next run"
+            )
+            self.reload()
+
+        self._background(make, made)
+
 
     def _approve(self, key: str, excluded: list[int]) -> None:
         """

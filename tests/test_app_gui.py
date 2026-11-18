@@ -1260,6 +1260,66 @@ def test_an_approved_experiment_opens_the_curation_of_its_rois(
     assert qc.curations == {}
 
 
+def test_rois_submitted_from_the_window_are_written_and_claimed(
+    window, tmp_path, monkeypatch
+):
+    import gc
+
+    import tifffile
+
+    from test_segmentation import drawn_candidates, drawn_image
+
+    from odyn.claims import pending_claims
+    from odyn.segmentation import fingerprint, group_files, read_curated
+
+    db, group_id = a_tested_experiment(tmp_path / "data")
+    del db
+    gc.collect()  # closes its database (a cycle) in this thread
+    approval = {"call_id": 10**6, "user": "tester", "called_at": "", "excluded": []}
+    monkeypatch.setattr("odyn.qc.latest_approvals", lambda db: {group_id: approval})
+    asked = []
+    monkeypatch.setattr(
+        window.context, "confirm", lambda *args, **_: asked.append(args) or True
+    )
+
+    # Candidates and a mean image where the group has them
+    main = (tmp_path / "data").resolve()
+    mean, candidates = group_files(main, "20260304/m1/e1", group_id)
+    found = drawn_candidates()
+    for folder in (candidates.parent, mean.parent):
+        folder.mkdir(parents=True, exist_ok=True)
+
+    found.write(candidates)
+    tifffile.imwrite(mean, drawn_image(found))
+
+    window.context.set_user("tester")
+    qc = window.qc
+    qc.reload()
+    settle(window.context)
+    qc.tests_view.selectRow(0)
+    qc.curate.click()
+    [rois] = qc.curations.values()
+    rois.loader.wait()
+    QApplication.processEvents()
+    QApplication.processEvents()
+
+    rois.submit_action.trigger()
+    wait_until(lambda: not qc.jobs)
+    settle(window.context)
+
+    # Asked first, with the counts; then written beside the candidates and
+    # claimed for the cluster, and the window closed
+    assert asked[-1][0] == "Submit ROIs" and "2 cells kept" in asked[-1][1]
+    assert qc.curations == {}
+    claimed = pending_claims(main)[(group_id, "rois")]
+    assert claimed["user"] == "tester" and claimed["rois"] == 2
+    assert claimed["candidates"] == fingerprint(found)
+    written, about = read_curated(main / claimed["path"])
+    assert (main / claimed["path"]).parent == candidates.parent
+    assert list(written.table["basin"]) == [1, 2] and about["user"] == "tester"
+    assert about["candidates_path"] == candidates.relative_to(main).as_posix()
+
+
 def test_a_test_is_picked_from_the_window(window, tmp_path, monkeypatch):
     import gc
     import json

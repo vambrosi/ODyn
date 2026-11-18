@@ -1,15 +1,15 @@
 """
 QC decisions taken in the app, as claim files the cluster records later.
 
-A decision (a raw check, a pick, an approval, running stopped jobs again) is
-one small file, `claims/g<group>-<step>.json` in the database's cluster
-folder, created only if none is there (`claim`): a second person deciding the
-same step of the same experiment learns at once who did it first. The tick
-then records each claim in the database as the person who made it (with
-`cluster.apply_claims`), starts what follows (a whole correction after a
-pick), and files it in `claims/done/`. A claim the tick refuses stays, with
-the reason, for its author to see on the QC page; deciding that step again
-replaces it.
+A decision (a raw check, a pick, an approval, running stopped jobs again,
+ROIs curated) is one small file, `claims/g<group>-<step>.json` in the
+database's cluster folder, created only if none is there (`claim`): a second
+person deciding the same step of the same experiment learns at once who did
+it first. The tick then records each claim in the database as the person who
+made it (with `cluster.apply_claims`), starts what follows (a whole
+correction after a pick, the traces of ROIs), and files it in
+`claims/done/`. A claim the tick refuses stays, with the reason, for its
+author to see on the QC page; deciding that step again replaces it.
 
 **USAGE**
 ```python
@@ -40,6 +40,7 @@ STEPS = {
     "pick": "pick",
     "approve": "approval",
     "again": "run again",
+    "rois": "ROI submission",
 }
 
 

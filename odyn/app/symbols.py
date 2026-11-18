@@ -133,6 +133,7 @@ GLYPHS = {
     "use-basin": ("water_drop", "", "b"),
     "reject": ("block", "", "x"),
     "help": ("keyboard", "", "?"),
+    "submit": ("send", "", "s"),
 }
 
 

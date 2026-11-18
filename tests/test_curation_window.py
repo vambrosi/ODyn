@@ -56,13 +56,13 @@ def files(folder, found=None):
     return folder / "mean_group_1.tif", folder / "cellpose_group_1.h5"
 
 
-def opened(app, folder, mean=None, candidates=None) -> CurationWindow:
+def opened(app, folder, mean=None, candidates=None, submit=None) -> CurationWindow:
     """The window on the files in `folder`, once they are read."""
     if mean is None:
         mean, candidates = files(folder)
 
     window = CurationWindow(
-        "20260304/m1/e1", 1, mean, candidates, folder / "draft.json"
+        "20260304/m1/e1", 1, mean, candidates, folder / "draft.json", submit=submit
     )
     window.show()
     window.loader.wait()
@@ -176,7 +176,8 @@ def test_the_window_starts_from_the_cells_cellpose_keeps(app, tmp_path):
     legend = [label.text() for label in window.findChildren(QLabel)]
     assert all(text in legend for text in LEGEND.values())
 
-    # The bar: undo and redo, what is shown, the image, and the shortcuts
+    # The bar: undo and redo, what is shown, the image, and the shortcuts;
+    # Submit at its foot (with nothing to hand the ROIs to, hidden)
     groups = [[]]
     bars = window.findChildren(QToolBar)
     bar = next(bar for bar in bars if bar.windowTitle() == "ROIs")
@@ -184,7 +185,7 @@ def test_the_window_starts_from_the_cells_cellpose_keeps(app, tmp_path):
     for action in bar.actions():
         if action.isSeparator():
             groups.append([])
-        else:
+        elif action.text():  # not the room above Submit
             groups[-1].append(action.text())
 
     assert groups == [
@@ -196,7 +197,7 @@ def test_the_window_starts_from_the_cells_cellpose_keeps(app, tmp_path):
             "Show cells excluded by Cellpose",
         ],
         ["Show whole image", "Brightness and gamma"],
-        ["Shortcuts"],
+        ["Shortcuts", "Submit the ROIs"],
     ]
     window.close()
 
@@ -528,4 +529,79 @@ def test_without_candidates_the_window_says_how_to_make_them(app, tmp_path):
     files(tmp_path)
     window = opened(app, tmp_path, mean, tmp_path / "cellpose_group_1.h5")
     assert "mean-images --group 1" in window.canvas.message
+    window.close()
+
+
+def test_submit_hands_the_rois_as_they_stand_to_the_page(app, tmp_path):
+    handed = []
+    window = opened(app, tmp_path, submit=lambda *given: handed.append(given))
+    assert window.submit_action.isVisible() and window.submit_action.isEnabled()
+
+    window.click(24, 41)  # adds the cell Cellpose drops
+    press(window, "Ctrl+Return")
+
+    [(curated, counts)] = handed
+    assert list(curated.table["basin"]) == [1, 2, 3]
+    assert curated.edits == window.curation.edits
+    assert counts == window.counts.text() == "3 cells kept (1 added from basin)"
+    assert (tmp_path / "draft.json").is_file()  # kept first
+    window.close()
+
+    # With nothing kept, nothing to submit; with no page to take them, no
+    # Submit at all
+    window = opened(app, tmp_path, submit=lambda *given: handed.append(given))
+    window.curation.edits = Edits(rejected={1, 2})
+    window.changed()
+    assert not window.submit_action.isEnabled()
+    window.close()
+    window = opened(app, tmp_path)
+    assert not window.submit_action.isVisible()
+    window.close()
+
+
+def test_with_no_draft_the_window_starts_from_the_rois_submitted_last(app, tmp_path):
+    import dataclasses
+    import os
+
+    from datetime import datetime
+
+    from odyn.app.curation_window import DRAFT_VERSION, write_draft
+    from odyn.segmentation import Curation, curated_name
+
+    mean, candidates = files(tmp_path)
+    found = drawn_candidates()
+
+    def submitted(user, when, edits, candidates=None):
+        curated = Curation(found, edits).curated()
+
+        if candidates is not None:
+            curated = dataclasses.replace(curated, candidates=candidates)
+
+        name = curated_name(1, user, datetime.fromisoformat(when))
+        about = {"user": user, "submitted_at": when, "edits_version": DRAFT_VERSION}
+        curated.write(tmp_path / name, **about)
+
+    submitted("bob", "2026-11-16T10:00:00", Edits(rejected={1}))
+    submitted("alice", "2026-11-17T14:02:00", Edits(rejected={2}))
+    submitted("carol", "2026-11-18T09:00:00", Edits(), candidates="other ones")
+
+    # The last one on these candidates (carol's are on others)
+    window = opened(app, tmp_path, mean, candidates)
+    assert window.curation.edits.rejected == {2}
+    assert window.line.text() == (
+        "Started from the ROIs submitted by alice on 2026-11-17 at 14:02."
+    )
+    window.close()
+
+    # A draft kept here wins, with a word on the ROIs submitted since
+    draft = tmp_path / "draft.json"
+    write_draft(draft, found, Edits(threshold=-1.0))
+    before = datetime(2026, 11, 1).timestamp()
+    os.utime(draft, (before, before))
+    window = opened(app, tmp_path, mean, candidates)
+    assert window.curation.edits.threshold == -1.0
+    assert window.line.text() == (
+        "Picked up your draft from where you left it. Other ROIs were "
+        "submitted since, by alice on 2026-11-17 at 14:02."
+    )
     window.close()

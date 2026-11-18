@@ -7,6 +7,7 @@ it. `Group.save_cellpose_candidates` is tested beside the mean images, in
 """
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from odyn import segmentation
@@ -470,6 +471,63 @@ def test_putting_edits_back_undoes_them_and_they_read_back_as_json():
     assert list(table["basin"]) == [1, 3, 0]
     assert list(table["kind"]) == ["resized", "added", "image"]
     assert list(table["pixels"])[0] == 12
+
+
+def test_curated_rois_read_back_as_submitted(tmp_path):
+    found = drawn_candidates()
+    found.write(tmp_path / "cellpose_group_1.h5")
+    curation = segmentation.Curation(found, image=drawn_image(found))
+    curation.reject(2)
+    curation.grow(4, 40)
+    curated = curation.curated()
+
+    # Kept: basin 1 and the cell grown from the image; every cell in `cells`,
+    # the rejected one too (the neuropil keeps away from it)
+    assert list(curated.table["label"]) == [1, 2]
+    assert list(curated.table["kind"]) == ["cellpose", "image"]
+    np.testing.assert_array_equal(np.unique(curated.labels), [0, 1, 2])
+    assert curated.cells[12, 27] and not curated.labels[12, 27]
+    assert curated.candidates == segmentation.fingerprint(found)
+    assert segmentation.read_fingerprint(tmp_path / "cellpose_group_1.h5") == (
+        curated.candidates
+    )
+
+    curated.write(tmp_path / "rois.h5", user="alice", group_id=1)
+    back, about = segmentation.read_curated(tmp_path / "rois.h5")
+    np.testing.assert_array_equal(back.labels, curated.labels)
+    np.testing.assert_array_equal(back.cells, curated.cells)
+    pd.testing.assert_frame_equal(back.table, curated.table)
+    assert back.edits == curated.edits and about == {"user": "alice", "group_id": 1}
+    assert segmentation.curated_edits(tmp_path / "rois.h5") == (
+        curated.candidates,
+        curated.edits,
+        about,
+    )
+
+    # None kept: the table still reads back with its types
+    nothing = segmentation.Curation(found, segmentation.Edits(rejected={1, 2}))
+    nothing.curated().write(tmp_path / "none.h5")
+    back, _ = segmentation.read_curated(tmp_path / "none.h5")
+    pd.testing.assert_frame_equal(back.table, nothing.table())
+    assert not back.labels.any() and back.cells.any()
+
+
+def test_submitted_rois_are_named_by_when_and_by_whom(tmp_path):
+    from datetime import datetime
+
+    when = datetime(2026, 11, 17, 9, 5, 3)
+    name = segmentation.curated_name(7, "ana maria", when)
+    assert name == "rois_group_7_20261117-090503_ana-maria.h5"
+
+    for stamp in ("20261117-090503_b", "20261118-100000_a", "20261116-235959_c"):
+        (tmp_path / f"rois_group_7_{stamp}.h5").touch()
+
+    (tmp_path / "rois_group_70_20261119-000000_a.h5").touch()  # another group
+    assert [path.name for path in segmentation.curated_sets(tmp_path, 7)] == [
+        "rois_group_7_20261118-100000_a.h5",
+        "rois_group_7_20261117-090503_b.h5",
+        "rois_group_7_20261116-235959_c.h5",
+    ]
 
 
 def test_the_cells_follow_from_the_edits_alone():

@@ -322,7 +322,7 @@ sequenceDiagram
     S-->>B: exists: alice approved it at 11:20
     T->>S: claims, oldest first
     T->>S: check it in the database, record the call as alice
-    T->>S: start what follows (a whole correction after a pick)
+    T->>S: start what follows (a whole correction after a pick, ROI traces)
     T->>S: claim to done/ (or kept, with the reason)
     T->>S: rebuild qc.json
 ```
@@ -330,8 +330,10 @@ sequenceDiagram
 - **The race is settled when the file is written:** a second claim on the
   same step fails at once and says who made the first. No later process
   has to choose between two decisions.
-- **Steps** are the raw check, the pick, the approval and running again.
-  The claim's time, from the server, orders different steps of one group.
+- **Steps** are the raw check, the pick, the approval, running again, and
+  ROIs submitted (the curated set is a new file beside the candidates, and
+  the claim names it). The claim's time, from the server, orders different
+  steps of one group.
 - **Deciding again before the tick** replaces one's own claim.
 - **What waits for the tick** (`cluster.apply_claims`, right after the
   requests): the database record, its checks, and the next steps
@@ -340,7 +342,9 @@ sequenceDiagram
   still runs is refused at once), so a claim that fails later is rare. It
   then stays in `claims/` with why, shown on the experiment row, until
   someone decides that step again; recorded ones go to `claims/done/`,
-  one file per decision.
+  one file per decision. ROIs are refused when the motion correction was
+  picked or approved again since, or the candidates were made again: they
+  were curated on what the group no longer has.
 - **On the page** a claim shows at once on its experiment row ("approved
   by alice, waiting for the cluster"), read with the `claims/` listing at
   each load.
