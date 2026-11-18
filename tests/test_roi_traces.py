@@ -1,8 +1,10 @@
 """
 `Group.save_roi_traces` and `Group.roi_traces`: the traces of ROIs and of
 the neuropil around them, on movies known pixel by pixel, and the neuropil
-taken as suite2p takes it (`neuropil_masks`).
+as the free pixels nearest each ROI (`neuropil_masks`).
 """
+
+import json
 
 import h5py
 import numpy as np
@@ -110,12 +112,17 @@ def test_the_traces_of_rois_and_their_neuropil_are_saved_per_call(group):
 
     # The table of the mask file, with the pixels of each neuropil
     assert list(traces.rois["kind"]) == ["cellpose", "image"]
-    assert (traces.rois["neuropil_pixels"] > 350).all()  # 1 um/px: 350 um2
+    assert (traces.rois["neuropil_pixels"] >= 350).all()  # 1 um/px: 350 um2
     assert "odor" in traces.acquisitions.columns  # no trials here: empty
 
     with h5py.File(path) as handle:
         assert list(handle["odor_ids"]) == [-1, -1, -1]
         assert list(handle["odors"].asstr()[()]) == ["", "", ""]
+        assert json.loads(handle.attrs["neuropil"]) == {
+            "gap_um": 2.0,
+            "area_um2": 350.0,
+            "um_per_px": [1.0, 1.0],
+        }
 
     # A second call keeps the first file; the last one is read
     again = group.save_roi_traces(photobleach_window_s=0.0)
@@ -130,33 +137,58 @@ def test_the_traces_of_rois_and_their_neuropil_are_saved_per_call(group):
     assert {int(imported), int(approved)} <= set(consumed)
 
 
-def test_the_neuropil_leaves_out_the_cells_and_a_gap_and_grows_until_full():
+def nearest(labels, cells, gap, count=None):
+    """
+    What `neuropil_masks` should take for ROI 1, from the distances over the
+    whole image: the `count` free pixels nearest past `gap`, and any as near
+    as the last of them (all of them for `None`).
+    """
     from scipy import ndimage as ndi
 
+    distance = ndi.distance_transform_edt(labels != 1)
+    allowed = (labels == 0) & ~cells & (distance > gap)
+
+    if count is None:
+        return allowed
+
+    return allowed & (distance <= np.sort(distance[allowed])[count - 1])
+
+
+def taken(indices, shape):
+    mask = np.zeros(shape, bool)
+    mask.flat[indices] = True
+
+    return mask
+
+
+def test_the_neuropil_is_the_free_pixels_nearest_past_a_gap():
     labels = np.zeros((40, 40), np.uint32)
     labels[18:22, 18:22] = 1
+    labels[2:5, 2:5] = 2  # another ROI
     cells = np.zeros((40, 40), bool)
     cells[18:22, 24:28] = True
 
-    # What may be taken: no ROI, no cell, more than 2 steps from the ROI
-    steps = ndi.distance_transform_cdt(labels == 0, metric="taxicab")
-    allowed = (labels == 0) & ~cells & (steps > 2)
+    [near] = neuropil_masks(labels, [1], cells, gap=2, area=100)
+    np.testing.assert_array_equal(
+        taken(near, labels.shape), nearest(labels, cells, 2, 100)
+    )
+    assert len(near) >= 100
 
-    [ring] = neuropil_masks(labels, [1], cells, gap_px=2, min_px=100, step_px=3)
-    taken = np.zeros((40, 40), bool)
-    taken.flat[ring] = True
+    # In um: on pixels of 0.5 um, 1 um is 2 pixels and 25 um2 is 100
+    [fine] = neuropil_masks(labels, [1], cells, gap=1, area=25, sampling=(0.5, 0.5))
+    np.testing.assert_array_equal(np.sort(fine), np.sort(near))
 
-    assert len(ring) > 100 and not (taken & ~allowed).any()
-    assert taken[16, 16] and not taken[17, 17]  # 4 steps away, and 2
-
-    # A square from the ROI and its gap, grown by 3 px on every side
-    rows, columns = np.nonzero(taken)
-    assert (rows.min(), rows.max(), columns.min(), columns.max()) == (13, 26, 13, 26)
+    # Among other cells it reaches farther, still taking the nearest
+    crowd = np.zeros((40, 40), bool)
+    crowd[6:34, 6:34] = True
+    crowd[labels == 1] = False
+    [far] = neuropil_masks(labels, [1], crowd, gap=2, area=100)
+    np.testing.assert_array_equal(
+        taken(far, labels.shape), nearest(labels, crowd, 2, 100)
+    )
 
     # Asked for more than the image has, it takes all it can; a missing
     # label has none
-    [whole, none] = neuropil_masks(
-        labels, [1, 5], cells, gap_px=2, min_px=10**6, step_px=3
-    )
-    np.testing.assert_array_equal(np.sort(whole), np.flatnonzero(allowed))
+    [whole, none] = neuropil_masks(labels, [1, 5], cells, gap=2, area=10**6)
+    np.testing.assert_array_equal(taken(whole, labels.shape), nearest(labels, cells, 2))
     assert len(none) == 0

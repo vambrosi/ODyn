@@ -166,13 +166,11 @@ class McorFlag(IntFlag):
     SOME_NOT_APPROVED = 1 << 10  # approval left some acquisitions out
 
 
-# The neuropil of a ROI, taken as suite2p takes it: the pixels of no cell in
-# a square around the ROI, past a gap, the square grown in steps until it
-# holds more than an area of them (um, um2 and um; suite2p has 2 px, 350 px
-# and 5 px, at about 1 um/px)
+# The neuropil of a ROI: the pixels of no cell nearest to it, past a gap, as
+# many as cover an area (um and um2; suite2p has 2 px and 350 px, at about
+# 1 um/px, and grows a square around the ROI instead)
 NEUROPIL_GAP_UM = 2.0
 NEUROPIL_AREA_UM2 = 350.0
-NEUROPIL_STEP_UM = 5.0
 
 # Frames read at a time when saving traces, so no movie is ever whole in RAM
 TRACE_CHUNK_FRAMES = 32
@@ -183,17 +181,18 @@ def neuropil_masks(
     labels: Sequence[int],
     cells: None | np.ndarray = None,
     *,
-    gap_px: int,
-    min_px: int,
-    step_px: int,
+    gap: float,
+    area: float,
+    sampling: tuple[float, float] = (1.0, 1.0),
 ) -> list[np.ndarray]:
     """
-    The neuropil of each ROI of `labels` in `labels_image`, as suite2p takes
-    it: the pixels of no ROI and of no cell of `cells` (a mask of the other
-    cells, those not kept too) in a square around the ROI, but none within
-    `gap_px` of it, the square grown by `step_px` on every side until it
-    holds more than `min_px` of them, or the whole image. One array of
-    indices into the flattened image per ROI (empty for a label missing).
+    The neuropil of each ROI of `labels` in `labels_image`: the pixels of no
+    ROI and of no cell of `cells` (a mask of the other cells, those not kept
+    too) nearest to the ROI but farther than `gap` from it, as many as cover
+    `area`, and any as near as the last of them (or all there are). Lengths
+    and areas are in the units of `sampling`, the height and width of a
+    pixel, so in pixels by default. One array of indices into the flattened
+    image per ROI (empty for a label missing).
     """
     from scipy import ndimage as ndi
 
@@ -203,8 +202,9 @@ def neuropil_masks(
     if cells is not None:
         free &= ~np.asarray(cells, bool)
 
+    # Rounded first, so an area of a whole number of pixels takes no more
+    needed = max(1, int(np.ceil(round(area / (sampling[0] * sampling[1]), 6))))
     boxes = ndi.find_objects(labels_image.astype(np.intp, copy=False))
-    cross = ndi.generate_binary_structure(2, 1)
     masks = []
 
     for label in labels:
@@ -214,28 +214,35 @@ def neuropil_masks(
             masks.append(np.zeros(0, np.int64))
             continue
 
-        # The ROI and the band around it, in a box just big enough
-        top, left = max(0, box[0].start - gap_px), max(0, box[1].start - gap_px)
-        bottom = min(height, box[0].stop + gap_px)
-        right = min(width, box[1].stop + gap_px)
-        near = labels_image[top:bottom, left:right] == label
-
-        if gap_px > 0:
-            near = ndi.binary_dilation(near, cross, iterations=gap_px)
-
-        y0, x0, y1, x1 = top, left, bottom, right
+        # Every pixel within `reach` of the ROI is in its box grown by `reach`,
+        # so the box is grown until the pixels that near are enough, or it is
+        # the image (first by what a disk of `area` past the gap would need)
+        reach = gap + float(np.sqrt(area / np.pi))
 
         while True:
-            y0, x0 = max(0, y0 - step_px), max(0, x0 - step_px)
-            y1, x1 = min(height, y1 + step_px), min(width, x1 + step_px)
-            window = free[y0:y1, x0:x1].copy()
-            window[top - y0 : bottom - y0, left - x0 : right - x0] &= ~near
+            down, across = (int(np.ceil(reach / size)) for size in sampling)
+            y0, x0 = max(0, box[0].start - down), max(0, box[1].start - across)
+            y1 = min(height, box[0].stop + down)
+            x1 = min(width, box[1].stop + across)
+            outside = labels_image[y0:y1, x0:x1] != label
+            distance = ndi.distance_transform_edt(outside, sampling=sampling)
+            usable = free[y0:y1, x0:x1] & (distance > gap)
             whole = (y0, x0, y1, x1) == (0, 0, height, width)
 
-            if np.count_nonzero(window) > min_px or whole:
+            if not whole:
+                usable &= distance <= reach
+
+            if np.count_nonzero(usable) >= needed or whole:
                 break
 
-        rows, columns = np.nonzero(window)
+            reach *= 2
+
+        nearest = distance[usable]
+
+        if len(nearest) > needed:
+            usable &= distance <= np.partition(nearest, needed - 1)[needed - 1]
+
+        rows, columns = np.nonzero(usable)
         masks.append((rows + y0).astype(np.int64) * width + columns + x0)
 
     return masks
@@ -3927,25 +3934,31 @@ class Group(CallRecorder):
         labels = np.asarray(mask["labels"], dtype=np.intp)
         cells, rois = read_rois(self.db.main_folder / cast(str, mask["mask_path"]))
 
-        # The pixels of each ROI, and of the neuropil around it, in um as
-        # suite2p sizes it in pixels, so fields of any resolution get alike
+        # The pixels of each ROI, and of the neuropil around it, sized in um
+        # so fields of any resolution get alike
         experiment = self.experiments.iloc[0]
         um_per_px = (
             float(experiment["height_um"]) / int(experiment["height_px"]),
             float(experiment["width_um"]) / int(experiment["width_px"]),
         )
-        px_per_um = 2 / (um_per_px[0] + um_per_px[1])
         neuropil = {
-            "gap_px": round(NEUROPIL_GAP_UM * px_per_um),
-            "min_px": round(NEUROPIL_AREA_UM2 / (um_per_px[0] * um_per_px[1])),
-            "step_px": max(1, round(NEUROPIL_STEP_UM * px_per_um)),
+            "gap_um": NEUROPIL_GAP_UM,
+            "area_um2": NEUROPIL_AREA_UM2,
+            "um_per_px": list(um_per_px),
         }
         flat = labels_image.ravel()
         order = np.argsort(flat, kind="stable")
         starts = np.searchsorted(flat[order], labels, "left")
         stops = np.searchsorted(flat[order], labels, "right")
         roi_pixels = [order[a:b] for a, b in zip(starts, stops)]
-        neuropils = neuropil_masks(labels_image, labels, cells, **neuropil)
+        neuropils = neuropil_masks(
+            labels_image,
+            labels,
+            cells,
+            gap=NEUROPIL_GAP_UM,
+            area=NEUROPIL_AREA_UM2,
+            sampling=um_per_px,
+        )
         without = [int(label) for label, n in zip(labels, neuropils) if not len(n)]
 
         if without:
@@ -4047,7 +4060,11 @@ class Group(CallRecorder):
 
         self.add_output_file(path)
         self.update_parameters_used(
-            {"frame_rate": frame_rate, "acquisitions": len(chosen), **neuropil}
+            {
+                "frame_rate": frame_rate,
+                "acquisitions": len(chosen),
+                "neuropil": neuropil,
+            }
         )
 
         logger.info(f"Saved '{path}'.")
