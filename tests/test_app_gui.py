@@ -1328,9 +1328,10 @@ def test_rois_submitted_from_the_window_are_written_and_claimed(
     wait_until(lambda: not qc.jobs)
     settle(window.context)
 
-    # Asked first, with the counts; then written beside the candidates and
-    # claimed for the cluster, and the window closed
-    assert asked[-1][0] == "Submit ROIs" and "2 cells kept" in asked[-1][1]
+    # Asked first, with the counts listed; then written beside the candidates
+    # and claimed for the cluster, and the window closed
+    assert asked[-1][0] == "Submit ROIs"
+    assert "<li>2&nbsp;cells&nbsp;kept</li>" in asked[-1][1]
     assert qc.curations == {}
     claimed = pending_claims(main)[(group_id, "rois")]
     assert claimed["user"] == "tester" and claimed["rois"] == 2
@@ -1342,7 +1343,7 @@ def test_rois_submitted_from_the_window_are_written_and_claimed(
 
     # The tab says so until the cluster records them
     assert qc.segmentation["status"].tolist() == [
-        "ROIs submitted by tester, waiting for the cluster"
+        "submitted by tester (waiting for cluster)"
     ]
 
 

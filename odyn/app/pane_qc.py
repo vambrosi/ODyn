@@ -27,9 +27,11 @@ until the user changes.
 from __future__ import annotations
 
 import os
+import re
 
 from dataclasses import replace
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
 import pandas as pd
@@ -136,7 +138,8 @@ EXTRACTING = "extracting traces"
 TRACES_STOPPED = "traces stopped"
 DONE = "done"
 CHECKED_AGAIN = "motion correction checked again"
-ROIS_CLAIMED = "ROIs submitted by {user}, waiting for the cluster"
+ROIS_CLAIMED = "submitted by {user} (waiting for cluster)"
+ROIS_REFUSED = "refused submission: {failed}"
 
 
 def my_queue(
@@ -595,7 +598,7 @@ def segmentation_rows(
         found = (claimed or {}).get((group_id, "rois"))
 
         if found is not None and found.get("failed"):
-            status = f"{STEPS['rois']} by {found['user']} refused: {found['failed']}"
+            status = ROIS_REFUSED.format(**found)
         elif found is not None:
             status, count = ROIS_CLAIMED.format(**found), found.get("rois", "")
 
@@ -806,13 +809,10 @@ class QcPane(QWidget):
         self.compare.clicked.connect(self._compare)
         self.run_again = QPushButton("Run again")
         self.run_again.clicked.connect(self._run_again)
-        self.hide_approved = self._hide_box(
-            "Hide the approved experiments (their ROIs are in the next tab)"
-        )
+        self.hide_approved = self._hide_box("Hide approved (ROIs in the next tab)")
         self.tests_view = self._table(
             "Motion correction",
-            "Your experiments' motion corrections: the cluster's tests and the "
-            "runs of sweeps",
+            "Motion correction progress",
             [
                 self.download,
                 self.download_all,
@@ -826,12 +826,12 @@ class QcPane(QWidget):
         self.tests_view.setSelectionMode(QTableView.SelectionMode.ExtendedSelection)
 
         self.curate = QPushButton("Curate ROIs")
+        self.curate.setStatusTip("Curate ROIs from Cellpose candidates")
         self.curate.clicked.connect(self._curate)
         self.hide_traced = self._hide_box("Hide the experiments with traces saved")
         self.segmentation_view = self._table(
             "Segmentation",
-            "Your approved experiments' ROIs: their Cellpose candidates, the "
-            "ROIs curated and their traces",
+            "ROI curation progress",
             [self.curate],
             left=self.hide_traced,
         )
@@ -1226,12 +1226,7 @@ class QcPane(QWidget):
             + (tip or ("" if ready else " (once a test finished)"))
         )
         row = self._selected(self.segmentation_view, self.segmentation_shown)
-        curatable = row is not None and bool(row["curatable"])
-        self.curate.setEnabled(curatable)
-        self.curate.setStatusTip(
-            "Curate the ROIs of the experiment, from its Cellpose candidates"
-            + ("" if curatable else " (once they are made)")
-        )
+        self.curate.setEnabled(row is not None and bool(row["curatable"]))
 
     def _local(self, row: pd.Series) -> Path:
         return cache.local_folder(
@@ -1329,23 +1324,30 @@ class QcPane(QWidget):
         window.show()
 
     def _submit_rois(
-        self, group_id: int, label: str, curated: Curated, counts: str
+        self, group_id: int, label: str, curated: Curated, counts: list[str]
     ) -> None:
         """
-        Once confirmed, submit the ROIs `curated` in the window of group
-        `group_id`: a new file beside its candidates, then a claim of it for
-        the user (the cluster records it with `Group.import_mask`, then
-        extracts the traces of the ROIs). The window closes once claimed.
+        Once confirmed, with the `counts` listed, submit the ROIs `curated` in
+        the window of group `group_id`: a new file beside its candidates, then
+        a claim of it for the user (the cluster records it with
+        `Group.import_mask`, then extracts the traces of the ROIs). The window
+        closes once claimed.
         """
         window = self.curations.get(group_id)
 
         if window is None:
             return
 
+        # A list, so a count too long for the box wraps under its own text,
+        # and only after a comma (the spaces of each part do not break)
+        listed = "".join(
+            f"<li>{re.sub(r'(?<!,) ', '&nbsp;', escape(line))}</li>" for line in counts
+        )
+
         if not self.context.confirm(
             "Submit ROIs",
-            f"Submit the ROIs of {label}: {counts}?\n\nThe cluster records them "
-            "at its next run, then extracts their traces.",
+            f"<p>Submit ROIs of {escape(label)}?</p><ul>{listed}</ul>"
+            "<p>Cluster will record them and extract traces.</p>",
             "Submit",
             parent=window,
         ):

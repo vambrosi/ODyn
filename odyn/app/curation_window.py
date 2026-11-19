@@ -707,30 +707,41 @@ class _Help(QFrame):
         self.dismissed.emit()
 
 
-def counts_text(cells) -> str:
+def count_lines(cells) -> list[str]:
     """
-    The line of counts under the image: the cells kept, and those excluded
-    (each in one set), with their parts in brackets; a part with no cell is
-    left out, and so are the brackets with none, and the excluded if none.
+    The counts of the cells kept, and of those excluded (each in one set), a
+    line each, with their parts in brackets; a part with no cell is left
+    out, and so are the brackets with none, and the excluded if none.
     """
     kept = [cell for cell in cells if cell.kept]
     reasons = [cell.excluded_by for cell in cells if not cell.kept]
     noun = "cell" if len(kept) == 1 else "cells"
     kinds = [cell.kind for cell in kept]
-    text = f"{len(kept)} {noun} kept" + _parts(
-        (kinds.count("resized"), "resized"),
-        (kinds.count("added"), "added from basin"),
-        (kinds.count("image"), "added from image"),
-    )
+    lines = [
+        f"{len(kept)} {noun} kept"
+        + _parts(
+            (kinds.count("resized"), "resized"),
+            (kinds.count("added"), "added from basin"),
+            (kinds.count("image"), "added from image"),
+        )
+    ]
 
-    if not reasons:
-        return text
+    if reasons:
+        lines.append(
+            f"{len(reasons)} excluded"
+            + _parts(
+                (reasons.count("rejected"), "rejected"),
+                (reasons.count("area"), "excluded by area"),
+                (reasons.count("cellpose"), "excluded by Cellpose"),
+            )
+        )
 
-    return f"{text} and {len(reasons)} excluded" + _parts(
-        (reasons.count("rejected"), "rejected"),
-        (reasons.count("area"), "excluded by area"),
-        (reasons.count("cellpose"), "excluded by Cellpose"),
-    )
+    return lines
+
+
+def counts_text(cells) -> str:
+    """The line of counts under the image: the `count_lines` joined."""
+    return " and ".join(count_lines(cells))
 
 
 def _parts(*counts: tuple[int, str]) -> str:
@@ -775,8 +786,8 @@ class CurationWindow(QWidget):
     candidates in the file `candidates`, over the mean image in the file
     `mean`, with the edits kept in the file `draft` on this computer.
     Submit calls `submit(curated, counts)` with the ROIs as they stand
-    (`Curated`) and the line of counts (`counts_text`); without `submit`
-    there is no Submit. `closed` fires as the window closes.
+    (`Curated`) and their counts (`count_lines`); without `submit` there is
+    no Submit. `closed` fires as the window closes.
     """
 
     closed = Signal()
@@ -1726,7 +1737,7 @@ class CurationWindow(QWidget):
 
         self._settle()
         self.save_draft()
-        self.submit(self.curation.curated(), counts_text(self.curation.cells.values()))
+        self.submit(self.curation.curated(), count_lines(self.curation.cells.values()))
 
     def save_draft(self) -> None:
         """Keep the edits on this computer (as they change, and on closing)."""

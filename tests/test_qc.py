@@ -228,7 +228,7 @@ def test_the_segmentation_tab_has_the_approved_experiments_and_their_claims(
     assert rows["path"].tolist() == ["a/e1", "b/e1"]  # the approved ones
     assert rows["status"].tolist() == [
         "done",
-        "ROIs submitted by bob, waiting for the cluster",
+        "submitted by bob (waiting for cluster)",
     ]
     assert rows["ROIs"].tolist() == [540, 7]
     assert rows["curated by"].tolist() == ["ana", ""]
@@ -237,7 +237,7 @@ def test_the_segmentation_tab_has_the_approved_experiments_and_their_claims(
     assert rows["curatable"].tolist() == [True, True]
 
     # The motion correction rows are not about ROIs, even refused ones
-    refused = {(1, "rois"): {"user": "bob", "failed": "picked again"}}
+    refused = {(1, "rois"): {"user": "bob", "failed": "new Cellpose candidates"}}
     assert with_claims(experiments, refused)["status"].tolist() == [
         "approved",
         "approved",
@@ -245,7 +245,7 @@ def test_the_segmentation_tab_has_the_approved_experiments_and_their_claims(
     ]
     assert segmentation_rows(experiments, summary, tmp_path, "ana", None, refused)[
         "status"
-    ].tolist() == ["ROI submission by bob refused: picked again", "ready to curate"]
+    ].tolist() == ["refused submission: new Cellpose candidates", "ready to curate"]
 
 
 def test_the_view_says_how_far_each_segmentation_is(tmp_path, monkeypatch):

@@ -190,9 +190,9 @@ def test_rois_are_recorded_as_their_curator_then_their_traces_extracted(
 @pytest.mark.parametrize(
     "then, why",
     [
-        ("candidates", "other Cellpose candidates"),
-        ("approval", "made again after its latest approval"),
-        ("pick", "picked after the approval"),
+        ("candidates", "new Cellpose candidates"),
+        ("approval", "new Cellpose candidates being computed"),
+        ("pick", "motion correction checked again"),
     ],
 )
 def test_rois_curated_on_what_changed_since_are_refused(tmp_path, then, why):
@@ -211,5 +211,5 @@ def test_rois_curated_on_what_changed_since_are_refused(tmp_path, then, why):
     apply_claims(tmp_path, None, report)
 
     found = pending_claims(tmp_path)[(1, "rois")]
-    assert why in found["failed"] and not report.claims and not report.tests
+    assert found["failed"] == why and not report.claims and not report.tests
     assert db.calls[db.calls["method_name"] == "Group.import_mask"].empty

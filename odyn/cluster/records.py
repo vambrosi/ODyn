@@ -253,36 +253,29 @@ def record_rois(db: Database, group_id: int, content: dict) -> None:
     file `path` and the `candidates` fingerprint) with `Group.import_mask`,
     as made by the user of `db`. Only ROIs curated on the candidates the
     group has now, made after its latest approval; raises `ValueError`
-    saying why not otherwise (picked again, or candidates made again).
+    saying why not otherwise, in a few words for the QC page (picked
+    again, or candidates made again).
     """
     approval = latest_approvals(db).get(group_id)
 
     if approval is None:
-        raise ValueError("its motion correction is not approved")
+        raise ValueError("motion correction not approved")
 
     pick = latest_picks(db).get(group_id)
 
     if pick is not None and pick["call_id"] > approval["call_id"]:
-        raise ValueError(
-            f"{pick['run']} was picked after the approval, so its motion "
-            "correction is checked again first"
-        )
+        raise ValueError("motion correction checked again")
 
     made = latest_candidates(db).get(group_id)
 
+    # Made before the latest approval: new ones are on their way
     if made is None or made["call_id"] < approval["call_id"]:
-        raise ValueError(
-            "its Cellpose candidates are made again after its latest approval; "
-            "curate the new ones once they are ready"
-        )
+        raise ValueError("new Cellpose candidates being computed")
 
     if read_fingerprint(db.main_folder / made["candidates"]) != content.get(
         "candidates"
     ):
-        raise ValueError(
-            "they were curated on other Cellpose candidates than the group has "
-            "now; open Curate ROIs again"
-        )
+        raise ValueError("new Cellpose candidates")
 
     db.groups[group_id].import_mask(mask_path=content["path"])
 

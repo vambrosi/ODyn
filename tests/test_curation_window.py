@@ -30,6 +30,7 @@ from odyn.app.curation_window import (  # noqa: E402
     COLORS,
     LEGEND,
     CurationWindow,
+    count_lines,
     counts_text,
     outline,
     size_at,
@@ -146,14 +147,15 @@ def test_the_counts_leave_out_what_is_none():
         kept=[("cellpose", 536), ("resized", 2), ("added", 1), ("image", 1)],
         excluded=[("rejected", 1), ("area", 11), ("cellpose", 184)],
     )
-    assert counts_text(everything) == (
-        "540 cells kept (2 resized, 1 added from basin, 1 added from image) and "
-        "196 excluded (1 rejected, 11 excluded by area, 184 excluded by Cellpose)"
-    )
+    assert count_lines(everything) == [
+        "540 cells kept (2 resized, 1 added from basin, 1 added from image)",
+        "196 excluded (1 rejected, 11 excluded by area, 184 excluded by Cellpose)",
+    ]
+    assert counts_text(everything) == " and ".join(count_lines(everything))
     assert counts_text(cells([("cellpose", 2)], [("rejected", 1)])) == (
         "2 cells kept and 1 excluded (1 rejected)"
     )
-    assert counts_text(cells([("cellpose", 1)])) == "1 cell kept"
+    assert count_lines(cells([("cellpose", 1)])) == ["1 cell kept"]
     assert counts_text([]) == "0 cells kept"
 
 
@@ -543,7 +545,8 @@ def test_submit_hands_the_rois_as_they_stand_to_the_page(app, tmp_path):
     [(curated, counts)] = handed
     assert list(curated.table["basin"]) == [1, 2, 3]
     assert curated.edits == window.curation.edits
-    assert counts == window.counts.text() == "3 cells kept (1 added from basin)"
+    assert counts == ["3 cells kept (1 added from basin)"]
+    assert window.counts.text() == "3 cells kept (1 added from basin)"
     assert (tmp_path / "draft.json").is_file()  # kept first
     window.close()
 
