@@ -480,6 +480,26 @@ def test_the_plots_show_the_focused_runs_on_shared_axes(app, tmp_path):
     window.close()
 
 
+def test_the_frames_of_a_segment_fall_on_it_in_the_plots():
+    import pandas as pd
+
+    from odyn.app.mcor_window import frame_positions
+
+    # Acquisition 4 whole, then two segments of 500 frames of acquisition 9
+    # (a grab): its frames 0 to 499 and 2000 to 2499
+    data = {
+        "acq_ids": np.array([4, 9, 9]),
+        "frame_counts": np.array([100, 500, 500]),
+        "first_frames": np.array([0, 0, 2000]),
+    }
+    frames = pd.DataFrame({"acq_id": [4, 9, 9, 9], "frame_in_acq": [50, 0, 2000, 2499]})
+    assert frame_positions(frames, data).tolist() == [50, 100, 600, 1099]
+
+    # A frame of no segment plotted: the video is of another test
+    frames = pd.DataFrame({"acq_id": [9], "frame_in_acq": [1000]})
+    assert frame_positions(frames, data) is None
+
+
 def test_the_full_run_page_streams_every_acquisition(app, tmp_path):
     from odyn.app.mcor_window import FULL_PAGE, TESTS_PAGE, McorWindow
     from odyn.app.player import FrameStream

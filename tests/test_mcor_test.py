@@ -72,20 +72,35 @@ def caiman(monkeypatch, tmp_path):
                 self.x_shifts_els = np.full((frames, 4), -0.5)
                 self.y_shifts_els[1::2, :2] += 1
 
+    # caiman reads its own files and TIFFs alike
+    def load(path, subindices=None):
+        movie = tifffile.imread(path) if str(path).endswith(".tif") else np.load(path)
+
+        return movie if subindices is None else movie[subindices]
+
     module = types.ModuleType("caiman")
     module.cluster = types.SimpleNamespace(setup_cluster=lambda **_: (None, None, None))
     module.stop_server = lambda **_: None
-    # caiman reads its own files and TIFFs alike
-    module.load = lambda path: (
-        tifffile.imread(path) if str(path).endswith(".tif") else np.load(path)
-    )
+    module.load = load
+    module.concatenate = lambda movies, axis=0: np.concatenate(movies, axis=axis)
     motion = types.ModuleType("caiman.motion_correction")
     motion.MotionCorrect = MotionCorrect
     # A stand-in high-pass filter, recognizable in what caiman is given
     motion.high_pass_filter_space = lambda image, width: image - image.mean()
     module.motion_correction = motion
+    # Where caiman keeps its temporary files, and how it counts frames
+    paths = types.ModuleType("caiman.paths")
+    paths.get_tempdir = lambda: str(temp)
+    module.paths = paths
+    movies = types.ModuleType("caiman.base.movies")
+    movies.get_file_size = lambda path: (None, len(load(path)))
+    module.base = types.ModuleType("caiman.base")
+    module.base.movies = movies
     monkeypatch.setitem(sys.modules, "caiman", module)
     monkeypatch.setitem(sys.modules, "caiman.motion_correction", motion)
+    monkeypatch.setitem(sys.modules, "caiman.paths", paths)
+    monkeypatch.setitem(sys.modules, "caiman.base", module.base)
+    monkeypatch.setitem(sys.modules, "caiman.base.movies", movies)
 
     return seen
 
@@ -456,7 +471,7 @@ def test_a_test_leaves_the_files_to_judge_it_by(tmp_path, caiman, monkeypatch):
     monkeypatch.setattr(
         report,
         "plot_shifts",
-        lambda *args: titles.append(args[-1]) or plot(*args),
+        lambda *args, **kwargs: titles.append(args[-1]) or plot(*args, **kwargs),
     )
 
     folder = db.groups[group_id].test_motion_correction(
@@ -680,6 +695,182 @@ def test_a_video_takes_the_levels_and_the_title_it_is_given(tmp_path):
     )
     assert int(video.get(cv2.CAP_PROP_FRAME_COUNT)) == 6
     video.release()
+
+
+def two_grabs(tmp_path, frames=3000) -> tuple[Database, int]:
+    """
+    A field of view in two grabs of `frames` frames, before and after
+    anesthesia (the acquisition annotation `condition`), each its own
+    experiment and named for its condition (as another lab records them),
+    and their group.
+    """
+    for exp, name, hour in (("e1", "Baseline", 9), ("e2", "KetXyl", 10)):
+        generate(
+            tmp_path,
+            acquisitions=1,
+            frames=frames,
+            height=32,
+            width=40,
+            motion=0,
+            exp=exp,
+            acq_state="grab",
+            start=datetime(2026, 3, 4, hour),
+        )
+        raw = tmp_path / f"20260304/m1/{exp}/raw"
+        [tiff] = raw.glob("*.tif")
+        tiff.rename(raw / f"{name}_00001.tif")
+
+    db = Database(tmp_path, can_create=True, user="alice")
+    db.set_mouse(mouse_id=1)
+    session_id = db.add_session(mouse_id=1, session_date="2026-03-04")
+    exp_ids = [
+        db.add_experiment(
+            session_id=session_id,
+            exp_path=f"20260304/m1/{exp}",
+            objective=20,
+            exp_type="grab",
+        )
+        for exp in ("e1", "e2")
+    ]
+    group = db.add_group(exp_ids)
+
+    for acq_id, condition in zip(group.acquisitions.index, ("baseline", "ket/xyl")):
+        db.add_annotations(
+            target_type="acquisition",
+            target_id=int(acq_id),
+            values={"condition": condition},
+        )
+
+    return db, group.group_id
+
+
+def test_a_test_on_long_acquisitions_runs_on_segments_of_them(
+    tmp_path, caiman, monkeypatch
+):
+    import odyn.groups as groups
+
+    db, group_id = two_grabs(tmp_path)
+    group = db.groups[group_id]
+    baseline, ket = (int(i) for i in group.acquisitions.index)
+    labels = []
+    write = groups._write_preview_movie
+    monkeypatch.setattr(
+        groups,
+        "_write_preview_movie",
+        lambda *args, **kwargs: labels.append(kwargs["frame_labels"])
+        or write(*args, **kwargs),
+    )
+
+    folder = group.test_motion_correction(test_acqs=4)
+
+    # Six segments of 500 frames in each grab, and the test runs on two of
+    # each, spread over it, read from copies of their frames
+    copies = [
+        "Baseline_00001_f00501-01000.tif",
+        "Baseline_00001_f02001-02500.tif",
+        "KetXyl_00001_f00501-01000.tif",
+        "KetXyl_00001_f02001-02500.tif",
+    ]
+    assert caiman["batches"] == [copies]
+    temp = tmp_path / "caiman-temp"
+    raw = tifffile.imread(tmp_path / "20260304/m1/e1/raw/Baseline_00001.tif")
+    np.testing.assert_array_equal(tifffile.imread(temp / copies[1]), raw[2000:2500])
+
+    # A row each in the report, named for its frames, and where each starts
+    # for the plots of the app
+    summary = pd.read_csv(folder / "summary.csv")
+    assert summary["file"].tolist() == copies
+    assert summary["acq_id"].tolist() == [baseline, baseline, ket, ket]
+    assert summary["position"].tolist() == [1, 4, 7, 10]
+    plotted = np.load(folder / "shifts_summary.npz")
+    assert plotted["first_frames"].tolist() == [500, 2000] * 2
+    assert plotted["frame_counts"].tolist() == [500] * 4
+    assert np.load(folder / "shifts.npz")["first_frames"].tolist() == [500, 2000] * 2
+    segments = [
+        [baseline, 500, 500],
+        [baseline, 2000, 500],
+        [ket, 500, 500],
+        [ket, 2000, 500],
+    ]
+    assert db.latest_calls("test_motion_correction").iloc[0]["output_segments"] == (
+        segments
+    )
+
+    # The reference: from the middle third of each grab
+    call = db.latest_calls("run_motion_correction").iloc[0]
+    assert call["input_segments"] == segments
+    assert call["input_reference_segments"] == [
+        [baseline, 1000, 500],
+        [baseline, 1500, 500],
+        [ket, 1000, 500],
+        [ket, 1500, 500],
+    ]
+    assert call["input_reference_conditions"] == ["baseline", "ket/xyl"]
+
+    # The videos, raw and test: the same frames of each segment, which they
+    # name, and the frame maps say where they are in the grabs
+    parts = [
+        f"acq {baseline}  frames 501-1000",
+        f"acq {baseline}  frames 2001-2500",
+        f"acq {ket}  frames 501-1000",
+        f"acq {ket}  frames 2001-2500",
+    ]
+    assert labels[0] == labels[1] == [part for part in parts for _ in range(15)]
+    [video] = folder.glob("*_test.avi")
+    frames = groups.read_frame_map(groups.frame_map_path(video))
+    assert frames["acq_id"].tolist() == [baseline] * 30 + [ket] * 30
+    assert frames["frame_in_acq"].iloc[[0, 14, 15, 29]].tolist() == [
+        500,
+        999,
+        2000,
+        2499,
+    ]
+    rate = float(group.experiments["frame_rate"].iloc[0])
+    speed = db.latest_calls("save_preview_movie").iloc[0]["output_speed"]
+    assert speed == round(30 * 2000 / (rate * 60), 1)  # 2000 frames read
+
+    # After a restart, the names say which segments the .mmap files are
+    again = Database(tmp_path, user="alice").groups[group_id]
+    acq_ids, sources, _, first_frames = again._latest_test_movies()
+    assert acq_ids == [baseline, baseline, ket, ket]
+    assert [path.name for path in sources] == copies
+    assert first_frames == [500, 2000] * 2
+
+    # The copies go with the temporary files
+    group.delete_temp_files()
+    assert not list(temp.glob("*.tif"))
+
+    # A whole correction is on acquisitions still, one file each
+    caiman["batches"].clear()
+    whole = group.test_motion_correction(
+        test_acqs=4, movie=False, whole=True, batch_acqs=1
+    )
+    assert caiman["batches"] == [["Baseline_00001.tif"], ["KetXyl_00001.tif"]]
+    assert pd.read_csv(whole / "summary.csv")["position"].tolist() == [0, 1]
+    assert "first_frames" not in np.load(whole / "shifts_summary.npz")
+
+
+def test_a_segment_copy_is_named_for_its_frames():
+    from odyn.groups import segment_file_name, segment_in_name
+
+    name = segment_file_name("Baseline_00001", 500, 500)
+    assert name == "Baseline_00001_f00501-01000.tif"
+    assert segment_in_name(name, "Baseline_00001") == (500, 500)
+
+    # And the .mmap caiman makes of it; not that of the raw file
+    mmap = "Baseline_00001_f00501-01000_rig__d1_32_d2_40_d3_1_order_F_frames_500.mmap"
+    assert segment_in_name(mmap, "Baseline_00001") == (500, 500)
+    assert segment_in_name("Baseline_00001_rig__d1_32.mmap", "Baseline_00001") is None
+    assert segment_in_name(name, "Baseline") is None
+
+
+def test_a_grab_stopped_early_is_told_apart(tmp_path, caiman):
+    db, group_id = two_grabs(tmp_path)
+    path = tmp_path / "20260304/m1/e2/raw/KetXyl_00001.tif"
+    tifffile.imwrite(path, tifffile.imread(path)[:2400])
+
+    with pytest.raises(ValueError, match="has 2400 frames, not the 3000 its header"):
+        db.groups[group_id].test_motion_correction(test_acqs=4, movie=False)
 
 
 # --------------------------------------------------------------------------- #

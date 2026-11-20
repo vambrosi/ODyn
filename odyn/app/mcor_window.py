@@ -212,17 +212,41 @@ def frame_positions(
 ) -> None | np.ndarray:
     """
     Where each video frame (`frames`, its frame map) falls on the plots of
-    `data` (a `shifts_summary.npz`), or `None` when they do not match.
+    `data` (a `shifts_summary.npz`), or `None` when they do not match. A
+    test on segments of long acquisitions has `first_frames` too, where each
+    part starts in its acquisition.
     """
     if frames is None:
         return None
 
-    starts = dict(
-        zip(
-            data["acq_ids"].tolist(),
-            np.concatenate([[0], np.cumsum(data["frame_counts"])[:-1]]),
+    edges = np.concatenate([[0], np.cumsum(data["frame_counts"])[:-1]])
+
+    if "first_frames" in data:
+        parts = list(
+            zip(
+                data["acq_ids"].tolist(),
+                data["first_frames"].tolist(),
+                data["frame_counts"].tolist(),
+                edges.tolist(),
+            )
         )
-    )
+        found = []
+
+        for acq_id, within in zip(frames["acq_id"], frames["frame_in_acq"]):
+            where = [
+                start + within - first
+                for part, first, count, start in parts
+                if part == acq_id and first <= within < first + count
+            ]
+
+            if not where:
+                return None
+
+            found.append(where[0])
+
+        return np.array(found, float)
+
+    starts = dict(zip(data["acq_ids"].tolist(), edges))
 
     if not set(frames["acq_id"]) <= set(starts):
         return None

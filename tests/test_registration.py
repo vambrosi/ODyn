@@ -16,6 +16,7 @@ from odyn.registration import (
     reference_by_condition,
     reference_image,
     sample_frames,
+    segments,
     spread_acquisitions,
     spread_by_condition,
 )
@@ -101,6 +102,24 @@ def test_frames_are_sampled_evenly_from_each_file(tmp_path):
 
     assert frames.shape == (6, 4, 5) and frames.dtype == np.float32
     assert list(frames[:, 0, 0]) == [0, 4, 9, 100, 104, 109]  # rounded positions
+
+    # Or from some of the frames of a file (a segment of a long acquisition)
+    frames = sample_frames(paths, per_file=3, ranges=[(5, 5), None])
+    assert list(frames[:, 0, 0]) == [5, 7, 9, 100, 104, 109]
+
+
+def test_a_long_acquisition_is_cut_into_segments():
+    # A loop is not cut: an acquisition shorter than one and a half segments
+    # is one
+    assert segments([56, 596, 749]) == [(0, 0, 56), (1, 0, 596), (2, 0, 749)]
+
+    # A grab is cut into segments of about 500 frames, one after the other
+    cut = segments([400, 13000])
+    assert cut[0] == (0, 0, 400) and len(cut) == 27
+    assert {frames for _, _, frames in cut[1:]} == {500}
+    assert [first for _, first, _ in cut[1:4]] == [0, 500, 1000]
+    assert segments([1201]) == [(0, 0, 600), (0, 600, 601)]
+    assert segments([750], length=500) == [(0, 0, 375), (0, 375, 375)]
 
 
 def test_each_condition_gets_its_share(tmp_path):

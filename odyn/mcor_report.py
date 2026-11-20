@@ -1,7 +1,9 @@
 """
 The files a test motion correction is judged by, before the app shows it.
 
-For the acquisitions a test ran on, written into one folder:
+For the acquisitions a test ran on (segments of them, for long
+acquisitions, each standing for an acquisition below), written into one
+folder:
 - `reference.tif`: the image every acquisition was aligned to, when it is not
 saved elsewhere already (the experiment's `processed/mcor/`, named in
 `metrics.json` with its SHA-1 instead: one file per experiment);
@@ -25,7 +27,8 @@ axes: per frame, the shift (`dy`, `dx`; for piecewise rigid the median of
 the patches, with their 10th and 90th percentiles in `dy_p10`, `dy_p90`,
 `dx_p10`, `dx_p90`), and the correlation with the reference of the raw and
 the corrected frame (`raw_corr`, `corr`); `acq_ids` and `frame_counts` say
-which acquisition each frame is from.
+which acquisition each frame is from (and `first_frames`, for a test on
+segments of long acquisitions, where in it each segment starts).
 
 A final correction also gets the same numbers on every acquisition
 (`FullReport`, in `full/` of the test folder, built as each is saved):
@@ -111,6 +114,7 @@ def write_report(
     side_by_side: bool = False,
     title: str = TITLE,
     reference_file: None | dict = None,
+    first_frames: None | Sequence[int] = None,
 ) -> list[Path]:
     """
     Write the report on one test into `folder` (see the module's description)
@@ -118,7 +122,9 @@ def write_report(
     acquisitions in order, `load` reads a corrected one as `(frames, height,
     width)`, `shifts` holds every frame's `(dy, dx)` one acquisition after
     the other (for piecewise rigid, the median of the patches'), and
-    `positions` and `acq_ids` say which acquisitions they were.
+    `positions` and `acq_ids` say which acquisitions they were. A test on
+    segments of long acquisitions has a row per segment, and `first_frames`
+    says where in its acquisition each starts, for the plots of the app.
     Without a `reference` (caiman's own template), the average of the
     corrected means stands in for it, and the frames are not compared.
     `patch_shifts` are piecewise rigid's `(dy, dx)` per frame and patch, each
@@ -260,6 +266,7 @@ def write_report(
         frame_counts=np.array(frame_counts),
         positions=np.array(positions),
         acq_ids=np.array(acq_ids),
+        **({} if first_frames is None else {"first_frames": np.array(first_frames)}),
         **(
             {}
             if patch_shifts is None or not keep_patch_shifts
@@ -277,8 +284,17 @@ def write_report(
         np.concatenate(test_frames) if test_frames else [],
         acq_ids,
         frame_counts,
+        first_frames,
     )
-    plot_shifts(written["png"], shifts, frame_counts, rows, max_shifts, title)
+    plot_shifts(
+        written["png"],
+        shifts,
+        frame_counts,
+        rows,
+        max_shifts,
+        title,
+        unit="acquisition" if first_frames is None else "segment",
+    )
 
     return list(written.values())
 
@@ -562,11 +578,14 @@ def write_shifts_summary(
     corr: Sequence[float],
     acq_ids: Sequence[int],
     frame_counts: Sequence[int],
+    first_frames: None | Sequence[int] = None,
 ) -> None:
     """
     The per-frame numbers the app plots (see the module description), as
     float32. `raw_corr` and `corr` are left out when there is no reference
-    (no frame was compared).
+    (no frame was compared). `first_frames`, for segments of long
+    acquisitions, says where in its acquisition each part starts (each part
+    is then an acquisition from there, so `acq_ids` repeat).
     """
     shifts = np.asarray(shifts, np.float32).reshape(-1, 2)
     content = {
@@ -575,6 +594,9 @@ def write_shifts_summary(
         "acq_ids": np.asarray(acq_ids, np.int64),
         "frame_counts": np.asarray(frame_counts, np.int64),
     }
+
+    if first_frames is not None:
+        content["first_frames"] = np.asarray(first_frames, np.int64)
 
     if patch_shifts is not None:
         for name, patches in zip(("dy", "dx"), patch_shifts):
@@ -599,11 +621,13 @@ def plot_shifts(
     rows: list[dict],
     max_shifts: Sequence[int],
     title: str = TITLE,
+    unit: str = "acquisition",
 ) -> None:
     """
     The shifts of every frame (dy, dx), how each acquisition's frames match the
     reference, and the motion left in its mean, as a PNG. The shift axes fit
-    the shifts, and say the limit.
+    the shifts, and say the limit. `unit` names the rows on the axes
+    ("segment" for segments of long acquisitions).
     """
     import matplotlib
 
@@ -611,10 +635,12 @@ def plot_shifts(
     import matplotlib.pyplot as plt
 
     with plt.rc_context({"font.size": 12, "legend.fontsize": 11}):
-        _draw_shifts(plt, path, shifts, frame_counts, rows, max_shifts, title)
+        _draw_shifts(plt, path, shifts, frame_counts, rows, max_shifts, title, unit)
 
 
-def _draw_shifts(plt, path, shifts, frame_counts, rows, max_shifts, title) -> None:
+def _draw_shifts(
+    plt, path, shifts, frame_counts, rows, max_shifts, title, unit="acquisition"
+) -> None:
     fig, axes = plt.subplots(4, 1, figsize=(14, 14), layout="constrained")
     fig.get_layout_engine().set(h_pad=0.25)
     fig.suptitle(title, fontsize=16)
@@ -641,7 +667,7 @@ def _draw_shifts(plt, path, shifts, frame_counts, rows, max_shifts, title) -> No
             color="0.4",
         )
 
-    axes[1].set_xlabel("frame (acquisitions one after the other, gray lines between)")
+    axes[1].set_xlabel(f"frame ({unit}s one after the other, gray lines between)")
 
     positions = [row["position"] for row in rows]
 
@@ -670,7 +696,7 @@ def _draw_shifts(plt, path, shifts, frame_counts, rows, max_shifts, title) -> No
     axes[3].set_ylim(bottom=0)
     axes[3].set_ylabel("motion left in the\ntest mean (px)")
     axes[3].legend(loc="best")
-    axes[3].set_xlabel("acquisition position in the experiment")
+    axes[3].set_xlabel(f"{unit} position in the experiment")
 
     fig.savefig(path, dpi=150)
     plt.close(fig)

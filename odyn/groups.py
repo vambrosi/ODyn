@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -624,12 +625,16 @@ class Group(CallRecorder):
 
         return f"{stem}.{extension}"
 
-    def _latest_test_movies(self) -> tuple[list[int], list[Path], list[Path]]:
+    def _latest_test_movies(
+        self,
+    ) -> tuple[list[int], list[Path], list[Path], list[None | int]]:
         """
         Raw files and their .mmap files, from the last test motion correction.
 
-        Returns `(acq_ids, raw_paths, mmap_paths)`, matched by file name and in
-        acquisition order. Read from `call_output` using `get_tempdir()`.
+        Returns `(acq_ids, raw_paths, mmap_paths, first_frames)`, matched by
+        file name and in acquisition order (a segment of a long acquisition
+        with the copy of it and where it starts, see `_pair_with_raw`). Read
+        from `call_output` using `get_tempdir()`.
 
         This lets `save_preview_movie` show a test run even after a kernel
         crash, as long as all relevant .mmap files are present. A test this
@@ -666,23 +671,43 @@ class Group(CallRecorder):
 
     def _pair_with_raw(
         self, temp_folder: Path, mmap_paths: list[Path]
-    ) -> tuple[list[int], list[Path], list[Path]]:
-        """Each of a test's .mmap files with its acquisition and raw file."""
+    ) -> tuple[list[int], list[Path], list[Path], list[None | int]]:
+        """
+        Each of the .mmap files of a test with its acquisition, the file
+        caiman read for it, and where that file starts in the acquisition.
+        That is the raw file and `None` for a whole acquisition, and the copy
+        of a segment of a long one and its first frame, as their names say
+        (see `segment_file_name`).
+        """
         # Pair .mmap with the raw file it came from by name
         acq_ids: list[int] = []
         raw_paths: list[Path] = []
         matched: list[Path] = []
+        first_frames: list[None | int] = []
 
         for acq_id, raw_name in self.acquisitions["raw_path"].items():
             raw_path = Path(cast(str, raw_name))
 
-            # Pick the first with the right name
             for path in mmap_paths:
-                if path.name.startswith(f"{raw_path.stem}_") and path.is_file():
-                    acq_ids.append(int(cast(int, acq_id)))
-                    raw_paths.append(self.db.main_folder / raw_path)
-                    matched.append(path)
-                    break
+                if not (path.name.startswith(f"{raw_path.stem}_") and path.is_file()):
+                    continue
+
+                acq_ids.append(int(cast(int, acq_id)))
+                matched.append(path)
+                cut = segment_in_name(path.name, raw_path.stem)
+
+                # Every segment of the acquisition, each from its copy
+                if cut is not None:
+                    raw_paths.append(
+                        temp_folder / segment_file_name(raw_path.stem, *cut)
+                    )
+                    first_frames.append(cut[0])
+                    continue
+
+                # Otherwise the first with the right name
+                raw_paths.append(self.db.main_folder / raw_path)
+                first_frames.append(None)
+                break
 
         # A test run only covers some of the acquisitions, so the ones left over
         # are expected. An .mmap with nothing to pair it to is not: either it
@@ -693,7 +718,7 @@ class Group(CallRecorder):
                 "Rerun 'run_motion_correction(is_test=True)'."
             )
 
-        return acq_ids, raw_paths, matched
+        return acq_ids, raw_paths, matched, first_frames
 
     def _reset_caches(self) -> None:
         # Both views of the same tables
@@ -838,16 +863,23 @@ class Group(CallRecorder):
         """
         from caiman.paths import get_tempdir
 
-        # Get file paths for mmaps in the temp folder
         path = Path(get_tempdir())
 
+        # Get file paths for mmaps in the temp folder, and for the copies of
+        # segments of long acquisitions that tests read
         exp_movies = []
         for exp_name in self.exp_names:
-            exp_movies.append((exp_name, sorted(path.glob(f"{exp_name}*.mmap"))))
+            exp_movies.append(
+                (
+                    exp_name,
+                    sorted(path.glob(f"{exp_name}*.mmap"))
+                    + sorted(path.glob(f"{exp_name}*_f[0-9]*-[0-9]*.tif")),
+                )
+            )
 
         # Remove files
         for exp_name, movie_paths in exp_movies:
-            logger.info(f"Removing .mmap files that start with {exp_name}...")
+            logger.info(f"Removing temporary files that start with {exp_name}...")
             if movie_paths:
                 total_size = 0.0  # in bytes
                 for movie_path in movie_paths:
@@ -861,7 +893,7 @@ class Group(CallRecorder):
                 )
 
             else:
-                logger.info("No .mmap files found.")
+                logger.info("No temporary files found.")
 
     @record_call
     def pick_mcor_parameters(
@@ -1556,16 +1588,16 @@ class Group(CallRecorder):
 
         logger.info(f"Saving movie to {path}")
 
-        movie, frame_acq, frame_in_acq = self._load_preview_movie(
-            movie_types, downsample_ratio, downsample_type, raw_of_test
+        movie, frame_acq, frame_in_acq, frame_labels, frames_in = (
+            self._load_preview_movie(
+                movie_types, downsample_ratio, downsample_type, raw_of_test
+            )
         )
 
-        # Get the total number of frames in consideration
-        # np.unique because frame_acq to not get repeated acq_ids
+        # The experiments shown (np.unique: frame_acq repeats acq_ids)
         acq_ids = np.unique(frame_acq)
         shown = self.acquisitions.loc[acq_ids]
         experiments = self.experiments.loc[shown["exp_id"]]
-        frames_in = int(shown["frame_count"].sum())
 
         # Speed relative to real-time is more informative than downsample_ratio
         # when viewing the movie. However, the latter is a better control of
@@ -1583,7 +1615,7 @@ class Group(CallRecorder):
             movie,
             frame_rate=frame_rate,
             panels=[movie_type.value for movie_type in movie_types],
-            frame_acq=frame_acq,
+            frame_labels=frame_labels,
             um_per_px=um_per_px,
             speed=speed,
             q_min=q_min,
@@ -1616,31 +1648,37 @@ class Group(CallRecorder):
 
     def _movie_paths(
         self, movie_types: tuple[MovieType, ...], raw_of_test: bool = False
-    ) -> dict[MovieType, list[Path]]:
+    ) -> dict[MovieType, list[tuple[int, Path, None | int]]]:
         """
-        Every file each panel needs, checked before anything is loaded.
+        Every file each panel needs, checked before anything is loaded, as
+        `(acq_id, path, first)`, where `first` is `None` for a whole
+        acquisition and the first frame of a segment of a long one (which a
+        test reads from a copy, see `_pair_with_raw`).
 
         This is to do checks upfront, since files can be very slow to load.
         """
         test_acq_ids: list[int] = []
         raw_paths: list[Path] = []
         test_paths: list[Path] = []
+        first_frames: list[None | int] = []
 
         of_test = MovieType.TEST in movie_types or raw_of_test
 
         # Raises if the test files are missing
         if of_test:
-            test_acq_ids, raw_paths, test_paths = self._latest_test_movies()
+            test_acq_ids, raw_paths, test_paths, first_frames = (
+                self._latest_test_movies()
+            )
 
-        paths_by_type: dict[MovieType, list[tuple[int, Path]]] = {}
+        paths_by_type: dict[MovieType, list[tuple[int, Path, None | int]]] = {}
 
         for movie_type in movie_types:
             if movie_type == MovieType.TEST:
-                pairs = list(zip(test_acq_ids, test_paths))
+                pairs = list(zip(test_acq_ids, test_paths, first_frames))
 
             # A test uses a slice of the raw files, so only pick those
             elif of_test:
-                pairs = list(zip(test_acq_ids, raw_paths))
+                pairs = list(zip(test_acq_ids, raw_paths, first_frames))
 
             else:
                 stored = (
@@ -1649,7 +1687,11 @@ class Group(CallRecorder):
                     else self.mcor_files["mcor_path"]
                 )
                 pairs = [
-                    (int(cast(int, acq_id)), self.db.main_folder / cast(str, path))
+                    (
+                        int(cast(int, acq_id)),
+                        self.db.main_folder / cast(str, path),
+                        None,
+                    )
                     for acq_id, path in stored.items()
                 ]
 
@@ -1658,7 +1700,7 @@ class Group(CallRecorder):
                     f"{self!r} has no {movie_type.value} files to put in a movie."
                 )
 
-            missing = [path for _, path in pairs if not path.is_file()]
+            missing = [path for _, path, _ in pairs if not path.is_file()]
 
             if missing:
                 raise FileNotFoundError(
@@ -1676,17 +1718,20 @@ class Group(CallRecorder):
         downsample_ratio: float,
         downsample_type: str,
         raw_of_test: bool = False,
-    ) -> tuple[cm.movie, list[np.ndarray]]:
+    ) -> tuple[cm.movie, np.ndarray, np.ndarray, list[str], int]:
         """
         Load and downsample the movies for `movie_types`, side by side.
 
         Frames go along time and the types along width, so a two-type grid is
         one movie with the panels next to each other.
 
-        Returns `(movie, frame_acq, frame_in_acq)`: `frame_acq` says which
-        acquisition each frame came from, and `frame_in_acq` which frame of
-        it (the middle of the frames averaged, for "average"). Panels share
-        the time axis, so one array each is enough.
+        Returns `(movie, frame_acq, frame_in_acq, frame_labels, frames_in)`:
+        `frame_acq` says which acquisition each frame came from,
+        `frame_in_acq` which frame of it (the middle of the frames averaged,
+        for "average"), `frame_labels` what the video calls it (`acq 12`, or
+        `acq 12  frames 501-1000` for a segment of a long acquisition), and
+        `frames_in` how many frames the files of a panel have in all. Panels
+        share the time axis, so one of each is enough.
 
         NOTE:
         - We check that the frame -> acq_id map is the same for all panels.
@@ -1698,6 +1743,8 @@ class Group(CallRecorder):
         movie_chains = []
         labels: list[np.ndarray] = []
         within: list[np.ndarray] = []
+        named: list[list[str]] = []
+        frames_in = 0
         paths_by_type = self._movie_paths(movie_types, raw_of_test)
 
         for movie_type in movie_types:
@@ -1712,15 +1759,17 @@ class Group(CallRecorder):
             movie_chain = None
             frame_acq = []
             frame_in_acq = []
+            frame_labels: list[str] = []
+            total_frames = 0
 
-            for acq_id, path in tqdm(
+            for acq_id, path, first in tqdm(
                 movie_paths, desc=f"Loading {movie_type.value} movies"
             ):
                 if downsample_type == "skip":
                     # This should be equal for all acquisitions in the movie.
                     # We recompute every time, though, to always match what the
                     # "else" path would produce.
-                    frames_to_keep = _frames_to_keep(path, downsample_ratio)
+                    frames_to_keep, total = _frames_to_keep(path, downsample_ratio)
 
                     movie = cm.load(path, subindices=frames_to_keep)
 
@@ -1730,7 +1779,7 @@ class Group(CallRecorder):
                     if movie.ndim == 2:
                         movie = movie[np.newaxis]
 
-                    frame_in_acq.append(np.asarray(frames_to_keep, int))
+                    frame_in_acq.append((first or 0) + np.asarray(frames_to_keep, int))
 
                 else:
                     movie = cm.load(path)
@@ -1738,10 +1787,20 @@ class Group(CallRecorder):
                     movie = movie.resize(1, 1, downsample_ratio)
                     bins = total / len(movie)
                     frame_in_acq.append(
-                        ((np.arange(len(movie)) + 0.5) * bins).astype(int)
+                        (first or 0)
+                        + ((np.arange(len(movie)) + 0.5) * bins).astype(int)
                     )
 
+                total_frames += total
+
                 frame_acq.append(np.full(len(movie), acq_id))
+                frame_labels += [
+                    (
+                        f"acq {acq_id}"
+                        if first is None
+                        else f"acq {acq_id}  frames {first + 1}-{first + total}"
+                    )
+                ] * len(movie)
 
                 movie_chain = (
                     movie
@@ -1754,6 +1813,8 @@ class Group(CallRecorder):
             movie_chains.append(movie_chain)
             labels.append(np.concatenate(frame_acq))
             within.append(np.concatenate(frame_in_acq))
+            named.append(frame_labels)
+            frames_in = frames_in or total_frames
 
         # frame -> acq_id map represented by frame_acq must be the same
         # for all panels, or else something upstream failed.
@@ -1765,7 +1826,7 @@ class Group(CallRecorder):
 
         movie_chain = cm.concatenate(movie_chains, axis=2)
 
-        return movie_chain, labels[0], within[0]
+        return movie_chain, labels[0], within[0], named[0], frames_in
 
     @memorize_params
     @record_call
@@ -1810,7 +1871,12 @@ class Group(CallRecorder):
         - `test_acqs`: how many acquisitions to use in a test. (Ignored if
         `is_test == False`.) Picks will be evenly spread over the experiment and
         centered on its middle. All acquisitions in both test and final motion
-        corrections are aligned to the same template.
+        corrections are aligned to the same template. A long acquisition (a
+        grab of thousands of frames) counts as its segments of about
+        `SEGMENT_FRAMES` frames (see `odyn.registration.segments`), so a test
+        reads about as much whatever the files. The segments picked are
+        copied to the caiman temporary folder, and the reference takes its
+        frames from segments too.
         - `by_condition`: take the test acquisitions and the reference from
         every condition alike (the acquisition annotation `condition`): a
         share of each, spread over that condition. Acquisitions with no
@@ -1901,8 +1967,16 @@ class Group(CallRecorder):
         if gsig_filt_um is not None:
             shifts_opencv = True
 
+        # A test runs on segments: whole acquisitions, and pieces of long
+        # ones (see `odyn.registration.segments`)
+        cut = self._segments()
+        chosen = (
+            [cut[i] for i in self._test_segments(test_acqs, by_condition)]
+            if is_test
+            else []
+        )
         positions = (
-            self._test_positions(test_acqs, by_condition)
+            [position for position, _, _ in chosen]
             if is_test
             else list(range(len(self.acquisitions)))
         )
@@ -1931,12 +2005,21 @@ class Group(CallRecorder):
             }
         )
 
+        if self._partial(chosen):
+            self.update_parameters_used({"segments": self._segment_rows(chosen)})
+
         # --- Get settings for CaImAn MotionCorrection class --- #
 
         # Get raw paths
         raw_paths = [self.db.main_folder / p for p in acquisitions_slice["raw_path"]]
 
         assert raw_paths, "The group has no acquisitions."
+
+        # A test reads the raw file of a segment that is a whole acquisition,
+        # and a copy of the frames of any other, beside the caiman temporary
+        # files
+        if is_test:
+            raw_paths = self._segment_files(chosen, raw_paths)
 
         # CaImAn only uses pixels as units, so we make the conversion
         factor = [
@@ -2927,12 +3010,13 @@ class Group(CallRecorder):
         ```
 
         Runs `run_motion_correction` as a test on `test_acqs` acquisitions
-        spread over the experiment, all aligned to the experiment's reference,
-        then writes into `cache/mcor-tests/<experiment>_g<group>/` (in the files
-        folder; in a folder `run` inside it when given): a summary and a plot
-        of the shifts, the settings and the numbers for the whole test, which
-        name the experiment's reference (one file, in its `processed/mcor/`;
-        see `odyn.mcor_report`), and its video. Returns the folder.
+        spread over the experiment (segments of long ones, a report row each),
+        all aligned to the experiment's reference, then writes into
+        `cache/mcor-tests/<experiment>_g<group>/` (in the files folder; in a
+        folder `run` inside it when given): a summary and a plot of the
+        shifts, the settings and the numbers for the whole test, which name
+        the experiment's reference (one file, in its `processed/mcor/`; see
+        `odyn.mcor_report`), and its video. Returns the folder.
 
         Every test of the experiment shows the same frames of the same
         acquisitions, so their videos compare; the raw video of those frames is
@@ -2943,7 +3027,7 @@ class Group(CallRecorder):
         go with them; what is written here is what judging the test needs.
 
         **PARAMETERS**
-        - `test_acqs`: how many acquisitions
+        - `test_acqs`: how many acquisitions (segments, for long ones)
         - `max_shift_um`: max allowed rigid shift
         - `pw_rigid`, `strides_um`, `overlap_um`, `max_deviation_um`:
         piecewise rigid and its patches (see `run_motion_correction`)
@@ -2974,8 +3058,20 @@ class Group(CallRecorder):
         from .mcor_report import write_report
 
         acquisitions = self.acquisitions
-        positions = self._test_positions(test_acqs, by_condition)
-        acq_ids = [int(i) for i in acquisitions.index[positions]]
+        cut: list[tuple[int, int, int]] = []
+
+        # A whole correction reports on acquisitions; a test runs on segments
+        # (whole acquisitions, and pieces of long ones), and the positions in
+        # the report are where they are among those
+        if whole:
+            positions = self._test_positions(test_acqs, by_condition)
+            acq_ids = [int(i) for i in acquisitions.index[positions]]
+        else:
+            positions = self._test_segments(test_acqs, by_condition)
+            cut = [self._segments()[i] for i in positions]
+            acq_ids = [int(acquisitions.index[position]) for position, _, _ in cut]
+
+        segments = self._segment_rows(cut) if self._partial(cut) else None
         folder = self.mcor_test_folder(run)
 
         self.run_motion_correction(
@@ -3076,10 +3172,11 @@ class Group(CallRecorder):
             side_by_side=side_by_side,
             title=f"{where} — group {self.group_id} — {title}",
             reference_file=reference,
+            first_frames=None if segments is None else [row[1] for row in segments],
         )
 
         if movie:
-            levels = levels or self._raw_preview(acq_ids, movie_size)
+            levels = levels or self._raw_preview(acq_ids, movie_size, segments)
             paths.append(
                 self.save_preview_movie(
                     grid=["test"],
@@ -3111,17 +3208,24 @@ class Group(CallRecorder):
             {
                 "folder": folder.relative_to(self.db.main_folder).as_posix(),
                 "acq_ids": acq_ids,
+                **({} if segments is None else {"segments": segments}),
             }
         )
 
         return folder
 
-    def _raw_preview(self, acq_ids: list[int], size: float) -> list[float]:
+    def _raw_preview(
+        self,
+        acq_ids: list[int],
+        size: float,
+        segments: None | list[list[int]] = None,
+    ) -> list[float]:
         """
-        The raw video of a test's acquisitions (`acq_ids`, the frames every
-        test video shows) in `raw/` of the experiment's test folder, written
-        unless there for the same acquisitions, and its black and white, which
-        every test video uses.
+        The raw video of the acquisitions of a test (`acq_ids`, the frames
+        every test video shows; `segments`, the parts of long ones, as
+        `[acq_id, first frame, frames]`) in `raw/` of the experiment test
+        folder, written unless there for the same frames, and its black and
+        white, which every test video uses.
         """
         folder = self.mcor_test_folder() / RAW_PREVIEW_FOLDER
         saved = folder / RAW_LEVELS_FILE
@@ -3129,7 +3233,11 @@ class Group(CallRecorder):
         if saved.is_file():
             known = read_json(saved)
 
-            if known.get("acq_ids") == acq_ids and list(folder.glob("*_raw.*")):
+            if (
+                known.get("acq_ids") == acq_ids
+                and known.get("segments") == segments
+                and list(folder.glob("*_raw.*"))
+            ):
                 return [float(v) for v in known["movie_levels"]]
 
         for old in folder.glob("*_raw.*"):
@@ -3144,7 +3252,14 @@ class Group(CallRecorder):
             size=size,
         )
         levels = [float(v) for v in self.preview_levels]
-        write_json(saved, {"movie_levels": levels, "acq_ids": acq_ids})
+        write_json(
+            saved,
+            {
+                "movie_levels": levels,
+                "acq_ids": acq_ids,
+                **({} if segments is None else {"segments": segments}),
+            },
+        )
         self.add_output_file(saved)
 
         if path.is_file():
@@ -3169,26 +3284,40 @@ class Group(CallRecorder):
         acquisition to (see `odyn.registration`), from `wanted` acquisitions
         of the whole group, test run or not, so tests and the final share it.
         With `by_condition`, `wanted` of each condition, and as many frames
-        from each condition.
+        from each condition. A long acquisition counts as its segments (see
+        `_segments`), so for a condition that is one grab, the frames come
+        from `wanted` segments over the middle third of it.
         """
         from .registration import reference_by_condition, reference_image, sample_frames
 
         acquisitions = self.acquisitions
+        cut = self._segments()
         conditions = self._conditions(by_condition)
-        chosen = reference_by_condition(conditions, wanted)
-        positions = [position for picks in chosen for position in picks]
+        chosen = reference_by_condition(
+            [conditions[position] for position, _, _ in cut], wanted
+        )
+        picks = [cut[i] for where in chosen for i in where]
+        positions = [position for position, _, _ in picks]
         paths = [
             self.db.main_folder / p for p in acquisitions["raw_path"].iloc[positions]
         ]
         acq_ids = [int(i) for i in acquisitions.index[positions]]
+        whole = self._whole_segments(picks)
 
         # Each condition takes its share of the frames, whatever the number of
         # acquisitions it has
         share = REFERENCE_FRAMES // len(chosen)
-        per_file = [max(1, share // len(picks)) for picks in chosen for _ in picks]
+        per_file = [max(1, share // len(where)) for where in chosen for _ in where]
 
         logger.info(f"Building the reference image from acquisitions {acq_ids}...")
-        frames = sample_frames(paths, per_file=per_file)
+        frames = sample_frames(
+            paths,
+            per_file=per_file,
+            ranges=[
+                None if all_of else (first, count)
+                for (_, first, count), all_of in zip(picks, whole)
+            ],
+        )
         template = reference_image(frames, max_shifts)
 
         path = self._reference_path()
@@ -3201,12 +3330,53 @@ class Group(CallRecorder):
         self.add_output_file(path)
         self.update_parameters_used({"reference_acq_ids": acq_ids})
 
+        if self._partial(picks):
+            self.update_parameters_used(
+                {"reference_segments": self._segment_rows(picks)}
+            )
+
         if len(chosen) > 1:
             self.update_parameters_used(
-                {"reference_conditions": [conditions[picks[0]] for picks in chosen]}
+                {
+                    "reference_conditions": [
+                        conditions[cut[where[0]][0]] for where in chosen
+                    ]
+                }
             )
 
         return template
+
+    def _segments(self) -> list[tuple[int, int, int]]:
+        """
+        The segments of the group acquisitions in time order (one for each,
+        but several for a long one), as `(acquisition position, first frame,
+        frames)`; see `odyn.registration.segments`.
+        """
+        from .registration import segments
+
+        return segments([int(n) for n in self.acquisitions["frame_count"]])
+
+    def _whole_segments(self, chosen: Sequence[tuple[int, int, int]]) -> list[bool]:
+        """Whether each of `chosen` (`_segments`) is all of its acquisition."""
+        counts = self.acquisitions["frame_count"]
+
+        return [
+            first == 0 and frames == int(counts.iloc[position])
+            for position, first, frames in chosen
+        ]
+
+    def _partial(self, chosen: Sequence[tuple[int, int, int]]) -> bool:
+        """Whether some of `chosen` (`_segments`) are part of an acquisition."""
+        return not all(self._whole_segments(chosen))
+
+    def _segment_rows(self, chosen: Sequence[tuple[int, int, int]]) -> list[list[int]]:
+        """Each of `chosen` (see `_segments`) as `[acq_id, first, frames]`."""
+        ids = self.acquisitions.index
+
+        return [
+            [int(ids[position]), int(first), int(frames)]
+            for position, first, frames in chosen
+        ]
 
     def _conditions(self, by_condition: bool = True) -> list[None | str]:
         """
@@ -3232,13 +3402,80 @@ class Group(CallRecorder):
 
     def _test_positions(self, wanted: int, by_condition: bool = True) -> list[int]:
         """
-        The positions of the acquisitions a test runs on: `wanted` spread over
-        the experiment, or over each condition alike with `by_condition` (see
-        `odyn.registration.spread_by_condition`).
+        The positions of the `wanted` acquisitions a whole correction reports
+        on, spread over the experiment (over each condition alike with
+        `by_condition`, see `odyn.registration.spread_by_condition`), as
+        `_test_segments` picks segments.
         """
         from .registration import spread_by_condition
 
         return spread_by_condition(self._conditions(by_condition), wanted)
+
+    def _test_segments(self, wanted: int, by_condition: bool = True) -> list[int]:
+        """
+        Which of `_segments` a test runs on, as `_test_positions` picks
+        acquisitions (the same ones, when no acquisition is cut).
+        """
+        from .registration import spread_by_condition
+
+        conditions = self._conditions(by_condition)
+
+        return spread_by_condition(
+            [conditions[position] for position, _, _ in self._segments()], wanted
+        )
+
+    def _segment_files(
+        self, chosen: Sequence[tuple[int, int, int]], raw_paths: Sequence[Path]
+    ) -> list[Path]:
+        """
+        The file a test reads for each of `chosen` (see `_segments`), from
+        the raw files in `raw_paths`. That is the raw file for a segment that
+        is a whole acquisition, and for any other a copy of its frames in the
+        caiman temporary folder, named for them (see `segment_file_name`).
+        Each raw file is opened once, as finding a frame means reading every
+        frame header before it.
+        """
+        whole = self._whole_segments(chosen)
+
+        if all(whole):
+            return list(raw_paths)
+
+        from caiman.paths import get_tempdir
+
+        folder = Path(get_tempdir())
+        files = list(raw_paths)
+        wanted: dict[Path, list[int]] = {}
+
+        for k, (path, all_of) in enumerate(zip(raw_paths, whole)):
+            if not all_of:
+                wanted.setdefault(Path(path), []).append(k)
+
+        for path, ks in wanted.items():
+            with tifffile.TiffFile(path) as tif:
+                found = len(tif.pages)
+
+                for k in ks:
+                    position, first, frames = chosen[k]
+
+                    # The frame count is from the header, as set
+                    if first + frames > found:
+                        expected = int(self.acquisitions["frame_count"].iloc[position])
+                        raise ValueError(
+                            f"'{path}' has {found} frames, not the {expected} "
+                            "its header says (a grab stopped early?)."
+                        )
+
+                    files[k] = folder / segment_file_name(path.stem, first, frames)
+                    tifffile.imwrite(
+                        files[k], tif.asarray(key=range(first, first + frames))
+                    )
+
+        logger.info(
+            f"Copied {len(chosen) - sum(whole)} segments of long acquisitions to "
+            f"{folder}"
+        )
+
+        return files
 
     def _reference_path(self) -> Path:
         """
@@ -4560,9 +4797,10 @@ def read_frame_map(path: Path) -> None | pd.DataFrame:
         return None
 
 
-def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:
+def _frames_to_keep(path: Path, downsample_ratio: float) -> tuple[np.ndarray, int]:
     """
-    Which frames of `path` to read to downsample it by `downsample_ratio`.
+    Which frames of `path` to read to downsample it by `downsample_ratio`,
+    and how many frames it has.
 
     Matches how many frames caiman's `resize` would leave, so that skipping and
     averaging produce movies of the same length. It keeps `int(ratio * frames)`
@@ -4578,7 +4816,7 @@ def _frames_to_keep(path: Path, downsample_ratio: float) -> np.ndarray:
 
     keep = max(1, min(int(frames), int(downsample_ratio * frames)))
 
-    return np.linspace(0, frames - 1, keep).round().astype(int)
+    return np.linspace(0, frames - 1, keep).round().astype(int), int(frames)
 
 
 def _draw_label(
@@ -4742,7 +4980,7 @@ def _write_preview_movie(
     *,
     frame_rate: float,
     panels: Sequence[str] = (),
-    frame_acq: np.ndarray | None = None,
+    frame_labels: None | Sequence[str] = None,
     speed: float | None = None,
     um_per_px: float | None = None,
     q_min: float = 1.0,
@@ -4761,8 +4999,8 @@ def _write_preview_movie(
     cannot compare movie scales, which is the opposite of the z-score renderer;
     `levels` gives them instead, for videos that should compare.
 
-    `panels` names the panels left to right, `frame_acq` says which
-    acquisition each frame came from, `speed` is how many times real time the
+    `panels` names the panels left to right, `frame_labels` names the source
+    of each frame (`acq 12`), `speed` is how many times real time the
     result plays at, `um_per_px` sizes the scale bar, and `title` goes in the
     top right corner.
     """
@@ -4821,8 +5059,8 @@ def _write_preview_movie(
                 _draw_label(
                     picture,
                     (
-                        f"{name}  acq {frame_acq[frame]}"
-                        if frame_acq is not None
+                        f"{name}  {frame_labels[frame]}"
+                        if frame_labels is not None
                         else name
                     ),
                     (index * panel_width + margin, margin + round(20 * scale)),
@@ -4958,6 +5196,32 @@ def exp_names(acquisitions: pd.DataFrame) -> pd.Series:
     stems = acquisitions.sort_values("acq_start").groupby("exp_id")["raw_path"].first()
 
     return stems.map(lambda path: Path(path).stem.rsplit("_", 1)[0])
+
+
+def segment_file_name(stem: str, first: int, frames: int) -> str:
+    """
+    The name of the copy a test reads of `frames` frames from `first` of the
+    raw file `stem` (a segment of a long acquisition, see
+    `Group._segment_files`). `Baseline_00001_f00501-01000.tif` has frames
+    501 to 1000 of `Baseline_00001`, counted from 1.
+    """
+    return f"{stem}_f{first + 1:05d}-{first + frames:05d}.tif"
+
+
+def segment_in_name(name: str, stem: str) -> None | tuple[int, int]:
+    """
+    `(first, frames)` when `name` is the copy of a segment of the raw file
+    `stem`, or the .mmap caiman made of that copy (see `segment_file_name`);
+    `None` otherwise.
+    """
+    found = re.match(rf"{re.escape(stem)}_f(\d+)-(\d+)[._]", name)
+
+    if found is None:
+        return None
+
+    first = int(found[1]) - 1
+
+    return first, int(found[2]) - first
 
 
 def mcor_test_folder(db, group_id: int, acquisitions: pd.DataFrame) -> Path:

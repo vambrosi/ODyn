@@ -34,6 +34,11 @@ from scipy import ndimage
 SEED_FRAMES = 20
 PASSES = 3
 
+# A test runs on pieces of about this many frames. An acquisition of a loop
+# is one, and a long one (a grab of thousands of frames) is cut into
+# segments this long, so a test reads about as much whatever the files
+SEGMENT_FRAMES = 500
+
 
 def reference_acquisitions(count: int, wanted: int = 4) -> list[int]:
     """
@@ -89,6 +94,31 @@ def spread_acquisitions(count: int, wanted: int) -> list[int]:
         int(np.floor(middle + (i - (wanted - 1) / 2) * step + 0.5))
         for i in range(wanted)
     ]
+
+
+def segments(
+    frame_counts: Sequence[int], length: int = SEGMENT_FRAMES
+) -> list[tuple[int, int, int]]:
+    """
+    The segments of acquisitions of `frame_counts` frames, in time order, as
+    `(acquisition position, first frame, frames)`. An acquisition shorter
+    than one and a half times `length` is one segment, so a loop is not cut;
+    a longer one is cut into consecutive segments of about `length` frames,
+    all within a frame of each other.
+
+    **EXAMPLE**
+    ```python
+    segments([400, 1200])   # [(0, 0, 400), (1, 0, 600), (1, 600, 600)]
+    ```
+    """
+    cut = []
+
+    for position, count in enumerate(frame_counts):
+        pieces = max(1, int(count / length + 0.5))
+        edges = np.linspace(0, count, pieces + 1).round().astype(int)
+        cut += [(position, int(a), int(b - a)) for a, b in zip(edges, edges[1:])]
+
+    return cut
 
 
 def condition_positions(conditions: Sequence[Hashable]) -> list[list[int]]:
@@ -155,20 +185,26 @@ def spread_by_condition(conditions: Sequence[Hashable], wanted: int) -> list[int
     )
 
 
-def sample_frames(paths: Sequence[Path], per_file: int | Sequence[int]) -> np.ndarray:
+def sample_frames(
+    paths: Sequence[Path],
+    per_file: int | Sequence[int],
+    ranges: None | Sequence[None | tuple[int, int]] = None,
+) -> np.ndarray:
     """
     Up to `per_file` frames from each TIFF in `paths` (one number for all, or
     one per file), evenly spread in time, as one `(frames, height, width)`
-    float32 array.
+    float32 array. `ranges` limits each file to `frames` frames from `first`,
+    as `(first, frames)` (a segment of a long acquisition), or leaves all of
+    it (`None`).
     """
     stacks = []
     counts = [per_file] * len(paths) if isinstance(per_file, int) else per_file
 
-    for path, per_file in zip(paths, counts):
+    for path, per_file, within in zip(paths, counts, ranges or [None] * len(paths)):
         with tifffile.TiffFile(path) as tif:
-            count = len(tif.pages)
+            first, count = (0, len(tif.pages)) if within is None else within
             keys = np.unique(np.linspace(0, count - 1, min(count, per_file)).round())
-            frames = tif.asarray(key=[int(k) for k in keys])
+            frames = tif.asarray(key=[first + int(k) for k in keys])
 
         stacks.append(
             np.asarray(frames, dtype=np.float32).reshape(-1, *frames.shape[-2:])
