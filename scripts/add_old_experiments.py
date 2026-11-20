@@ -9,15 +9,22 @@ recorded it, so their motion correction is checked by them (see
 `experiments.csv` has a line per experiment: `exp_path` (`YYYYMMDD/<mouse>/eN`,
 relative to the main folder), `user` (who recorded it) and `objective` (10,
 20, ...). Any other column is left alone. A line with no objective is skipped
-and said, since the scale of the images depends on it.
+and said, since the scale of the images depends on it. Two columns may be
+added:
+- `exp_type`, `loop` (when left out) or `grab`: what ScanImage was set to;
+- `condition`, written on every acquisition of the experiment (the
+acquisition annotation `condition`, as Submit writes it). Left out, a grab
+takes its file name without the number (`Baseline_00001.tif` is `Baseline`)
+and a loop none. A condition the database does not know yet is added to the
+options of the annotation.
 
 For each experiment: the mouse is registered when it is new (its number only;
 the rest is for its people to fill in, in the app), the session (mouse and
 day) is added when it is not there yet, then the experiment (`add_experiment`:
-its TIFFs and olfactometer files), all recorded as `user`. An experiment
-already in the database is skipped, so the script can run again after a fix.
-The sync file is left to the cluster tick, which processes the sync file of
-every experiment in the database.
+its TIFFs and olfactometer files) and its condition, all recorded as `user`.
+An experiment already in the database is skipped, so the script can run again
+after a fix. The sync file is left to the cluster tick, which processes the
+sync file of every experiment in the database.
 
 Reads every TIFF header, so run it on the cluster (`srun`), near the files.
 """
@@ -32,8 +39,12 @@ import sys
 from pathlib import Path
 
 from odyn import Database
+from odyn.database import EXP_TYPES
 
 EXP_PATH = re.compile(r"(\d{8})/([A-Za-z]*\d+)/e(\d+)")
+
+# What a TIFF name holds before its number (`Baseline_00001.tif`)
+RECORDING_NAME = re.compile(r"(.+)_\d+")
 
 
 def main() -> int:
@@ -53,11 +64,17 @@ def main() -> int:
     for row in rows:
         exp_path = row["exp_path"].strip().strip("/")
         user = row["user"].strip()
-        objective = row.get("objective", "").strip()
+        objective = (row.get("objective") or "").strip()
+        exp_type = (row.get("exp_type") or "").strip().lower() or "loop"
+        condition = (row.get("condition") or "").strip()
         match = EXP_PATH.fullmatch(exp_path)
 
         if match is None:
             failed.append(f"{exp_path}: not YYYYMMDD/<mouse>/eN")
+            continue
+
+        if exp_type not in EXP_TYPES:
+            failed.append(f"{exp_path}: exp_type is one of {', '.join(EXP_TYPES)}")
             continue
 
         if not objective:
@@ -67,6 +84,9 @@ def main() -> int:
         if not (args.main_folder / exp_path).is_dir():
             failed.append(f"{exp_path}: no such folder")
             continue
+
+        if not condition and exp_type == "grab":
+            condition = recording_name(args.main_folder / exp_path)
 
         day, mouse, number = match.groups()
         session_date = f"{day[:4]}-{day[4:6]}-{day[6:]}"
@@ -84,6 +104,8 @@ def main() -> int:
             continue
 
         what = f"{exp_path} as {user}, {objective}x"
+        what += ", a grab" if exp_type == "grab" else ""
+        what += f", condition {condition}" if condition else ""
 
         if args.dry_run:
             added.append(f"would add {what}")
@@ -96,8 +118,15 @@ def main() -> int:
                 session_id = db.add_session(mouse_id=mouse, session_date=session_date)
 
             exp_id = db.add_experiment(
-                session_id=session_id, exp_path=exp_path, objective=int(objective)
+                session_id=session_id,
+                exp_path=exp_path,
+                objective=int(objective),
+                exp_type=exp_type,
             )
+
+            if exp_id is not None and condition:
+                write_condition(db, exp_id, condition)
+
         except Exception as error:  # said, and the next line is tried
             failed.append(f"{exp_path}: {type(error).__name__}: {error}")
             continue
@@ -114,6 +143,42 @@ def main() -> int:
             print(f"  {line}")
 
     return 1 if failed else 0
+
+
+def recording_name(folder: Path) -> str:
+    """
+    The name the first TIFF of `folder` (an experiment) was recorded under:
+    its file name without the number, or `""` when it has none.
+    """
+    tiffs = sorted((folder / "raw").glob("[!.]?*.tif"))
+    match = RECORDING_NAME.fullmatch(tiffs[0].stem) if tiffs else None
+
+    return match.group(1) if match else ""
+
+
+def write_condition(db: Database, exp_id: int, condition: str) -> None:
+    """
+    Write `condition` on every acquisition of experiment `exp_id`, first
+    adding it to the options of the annotation when it is new (the options
+    match whatever the case).
+    """
+    options = db.annotation_keys.loc[("acquisition", "condition"), "allowed_values"]
+
+    if condition.lower() not in {str(option).lower() for option in options}:
+        db.update_annotation_key(
+            applies_to="acquisition", key="condition", add_values=[condition]
+        )
+
+    rows = db.from_query(
+        "SELECT acq_id FROM acquisitions WHERE exp_id = ?;", [int(exp_id)]
+    )
+
+    for acq_id in rows["acq_id"]:
+        db.add_annotations(
+            target_type="acquisition",
+            target_id=int(acq_id),
+            values={"condition": condition},
+        )
 
 
 if __name__ == "__main__":
