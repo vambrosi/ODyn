@@ -53,7 +53,7 @@ from .records import (
     record_job_states,
     test_name,
 )
-from .slurm import _sbatch, job_name, queued_ticks, stop_reason
+from .slurm import _charged_to, _sbatch, job_name, queued_ticks, stop_reason
 
 
 def tick(
@@ -445,7 +445,10 @@ def heartbeat(main_folder: str | Path, project: None | str = None) -> None | dic
 def tick_script(
     main_folder: str | Path, project: None | str, config: ClusterConfig
 ) -> str:
-    """The job script of one chained tick."""
+    """
+    The job script of one chained tick, charged to `account` and `qos` when
+    they are set.
+    """
     main_folder = Path(main_folder).resolve()
     logs = cluster_folder(main_folder, project) / JOBS_FOLDER
     command = [
@@ -460,7 +463,7 @@ def tick_script(
 
     return f"""#!/bin/bash
 #SBATCH --partition={config.partition}
-#SBATCH --job-name={job_name(project)}
+{_charged_to(config)}#SBATCH --job-name={job_name(project)}
 #SBATCH --output={logs}/%x-%j.out
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={config.tick_cpus}

@@ -705,6 +705,31 @@ def test_jobs_keep_off_the_nodes_excluded(tmp_path, slurm):
     assert lines.index(f"#SBATCH --exclude={slow}") < lines.index("set -euo pipefail")
 
 
+def test_jobs_are_charged_to_the_account_set(tmp_path, slurm):
+    from odyn.cluster import ClusterConfig, tick_script
+
+    _, group_id = a_loop(tmp_path)
+    script_of = cluster_folder(tmp_path) / "jobs" / f"mcor-test-g{group_id}.sh"
+
+    # Left to Slurm by default
+    submit_mcor_test(tmp_path, None, group_id)
+    assert "--account" not in script_of.read_text()
+    assert "--qos" not in script_of.read_text()
+
+    (tmp_path / ".odyn" / "cluster.json").write_text(
+        json.dumps({"partition": "basic", "account": "basic", "qos": "basic"})
+    )
+    submit_mcor_test(tmp_path, None, group_id)
+    chained = tick_script(tmp_path, None, ClusterConfig.read(tmp_path))
+
+    # Every job, ticks too, with the other options before the first command
+    for script in (script_of.read_text(), chained):
+        lines = script.splitlines()
+        assert "#SBATCH --partition=basic" in lines
+        assert lines.index("#SBATCH --account=basic") < lines.index("set -euo pipefail")
+        assert lines.index("#SBATCH --qos=basic") < lines.index("set -euo pipefail")
+
+
 def test_a_test_is_a_job_of_its_own_for_who_added_the_loop(tmp_path, slurm):
     _, group_id = a_loop(tmp_path, user="alice")
 
@@ -737,6 +762,26 @@ def test_a_group_that_does_not_exist_is_refused_before_anything_is_written(
 
     assert not (cluster_folder(tmp_path) / "jobs").exists()
     assert "sbatch" not in (slurm.read_text() if slurm.exists() else "")
+
+
+def test_a_whole_correction_goes_in_the_batches_set(tmp_path, monkeypatch):
+    from odyn.groups import Group
+
+    _, group_id = a_loop(tmp_path)
+    seen = []
+    monkeypatch.setattr(
+        Group,
+        "test_motion_correction",
+        lambda self, **given: seen.append(given) or tmp_path,
+    )
+    (tmp_path / ".odyn" / "cluster.json").write_text(
+        json.dumps({"whole_batch_acqs": 1})
+    )
+
+    run_mcor_test(tmp_path, None, group_id, "alice", whole=True)
+    run_mcor_test(tmp_path, None, group_id, "alice")  # a test has no batches
+
+    assert seen == [{"whole": True, "batch_acqs": 1}, {"whole": False}]
 
 
 def test_the_job_records_the_test_as_the_owners(tmp_path, monkeypatch):
@@ -1388,6 +1433,35 @@ def test_old_experiments_are_corrected_in_batches(tmp_path, slurm):
     sent = json.loads((cluster_folder(tmp_path) / "mcor" / "3.json").read_text())
     assert sent["user"] == "bob"
     assert slurm.read_text().count("sbatch") == 6
+
+
+def test_old_experiments_get_a_test_when_new_ones_get_no_whole_correction(
+    tmp_path, slurm
+):
+    from odyn.cluster import mcor_backfill
+
+    _, group_id = a_loop(tmp_path)
+    run = {"strides_um": [96, 96], "overlap_um": [48, 48], "max_deviation_um": 6}
+    (tmp_path / ".odyn" / "cluster.json").write_text(
+        json.dumps(
+            {
+                "whole_new_experiments": False,
+                "sweep_grid": {"test_acqs": 2, "runs": [run]},
+            }
+        )
+    )
+
+    assert mcor_backfill(tmp_path, None, batch=1, dry_run=True) == [
+        f"20260304/m1/e1 (20x, group {group_id}): would submit a test and a sweep"
+    ]
+    assert mcor_backfill(tmp_path, None, batch=1) == [
+        f"20260304/m1/e1 (20x, group {group_id}): test job 4242, sweep jobs 4242 "
+        "and 4242"
+    ]
+    sent = json.loads(
+        (cluster_folder(tmp_path) / "mcor" / f"{group_id}.json").read_text()
+    )
+    assert not sent["whole"]
 
 
 def test_an_approved_experiment_keeps_its_tests_numbers_only(tmp_path, caiman):

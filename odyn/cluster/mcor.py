@@ -69,7 +69,8 @@ def mcor_backfill(
     Correct the next `batch` experiments of the database that were never
     tested (no test submitted, by the tick or by hand), oldest first, as the
     tick does a new one: the whole rigid correction (which saves every
-    acquisition, over the files there) and a sweep with the grid of the
+    acquisition, over the files there), or a test when
+    `whole_new_experiments` is off, and a sweep with the grid of the
     experiment's objective (`sweep_grid_for`). `objective` keeps those
     through it. Each is recorded as its owner's (`experiment_owner`), whose
     QC page lists it. Returns what was done (or would be), a line each.
@@ -78,6 +79,8 @@ def mcor_backfill(
     """
     db = Database(main_folder, project=project)
     config = ClusterConfig.read(main_folder)
+    whole = config.whole_new_experiments
+    first = "the whole correction" if whole else "a test"
     folder = cluster_folder(main_folder, project)
     links = db.group_experiments
     sizes = links.index.value_counts()
@@ -111,12 +114,12 @@ def mcor_backfill(
             continue
 
         if dry_run:
-            done.append(f"{what}: would submit the whole correction and a sweep")
+            done.append(f"{what}: would submit {first} and a sweep")
             sent += 1
             continue
 
         try:
-            whole = submit_mcor_test(main_folder, project, group_id, whole=True)
+            job = submit_mcor_test(main_folder, project, group_id, whole=whole)
             sweep = (
                 submit_mcor_sweep(
                     main_folder, project, group_id, grid, time=config.sweep_time
@@ -130,7 +133,7 @@ def mcor_backfill(
 
         sent += 1
         done.append(
-            f"{what}: whole correction job {whole}"
+            f"{what}: {'whole correction' if whole else 'test'} job {job}"
             + (f", sweep jobs {sweep[0]} and {sweep[1]}" if sweep else "")
         )
 
@@ -465,15 +468,20 @@ def run_mcor_test(
     label: None | str = None,
 ) -> Path:
     """
-    What the job runs: the test (`whole`: saving every acquisition), with
-    `settings` (`CANDIDATE_SETTINGS`) and `label`, recorded as `user`.
-    Returns the test folder.
+    What the job runs: the test (`whole`: saving every acquisition,
+    `whole_batch_acqs` at a time when set), with `settings`
+    (`CANDIDATE_SETTINGS`) and `label`, recorded as `user`. Returns the test
+    folder.
     """
     db = Database(main_folder, project=project, user=user)
+    config = ClusterConfig.read(main_folder)
     given = candidate_settings(settings) if settings else {}
 
     if label:
         given["label"] = label
+
+    if whole and config.whole_batch_acqs:
+        given["batch_acqs"] = int(config.whole_batch_acqs)
 
     return db.groups[group_id].test_motion_correction(whole=whole, **given)
 

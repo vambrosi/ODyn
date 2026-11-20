@@ -105,7 +105,7 @@ def main(argv: None | list[str] = None) -> int:
 
     backfill = commands.add_parser(
         "mcor-backfill",
-        help="correct the next experiments never tested: whole rigid, and a sweep",
+        help="test and sweep the next experiments never tested",
     )
     backfill.add_argument("--batch", type=int, required=True, help="how many")
     backfill.add_argument("--objective", type=int, help="only those through it")

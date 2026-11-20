@@ -59,15 +59,28 @@ class ClusterConfig:
     ```json
     {"partition": "batch", "conda_env": "caiman", "every_minutes": 30}
     ```
+
+    On an account of its own, with no whole rigid correction of each new
+    experiment:
+    ```json
+    {"partition": "basic", "account": "basic", "qos": "basic",
+     "whole_new_experiments": false, "whole_batch_acqs": 1}
+    ```
     """
 
     partition: str = "batch"
+    # The Slurm account and QOS every job is charged to (`--account`,
+    # `--qos`), ticks included. Left out, Slurm uses the default of whoever
+    # submits, which may be none
+    account: None | str = None
+    qos: None | str = None
     conda_sh: str = "$HOME/miniforge3/etc/profile.d/conda.sh"
     conda_env: str = "caiman"
     every_minutes: int = 30
-    # The tick submits a test motion correction of each experiment it adds;
-    # with `whole_new_experiments`, one that corrects and saves every
-    # acquisition (the final rigid correction), reporting on the test's
+    # The tick submits a test motion correction of each experiment it adds,
+    # and `mcor-backfill` of each experiment never tested; with
+    # `whole_new_experiments`, one that corrects and saves every acquisition
+    # (the final rigid correction), reporting on the test acquisitions
     whole_new_experiments: bool = True
     test_new_experiments: bool = True
     # With a grid (as `submit_mcor_sweep` takes it), the tick also submits a
@@ -91,6 +104,12 @@ class ClusterConfig:
     whole_time: str = "6:00:00"
     whole_pw_time: str = "12:00:00"  # piecewise rigid, slower
     whole_disk_gb: int = 200
+    # How many acquisitions a whole correction corrects and saves at a time
+    # (`Group.test_motion_correction`, 40 by default). A job that stops goes
+    # on from the last batch saved, so fewer per batch lose less to a time
+    # limit; long acquisitions (grabs of thousands of frames) want 1. A
+    # correction stopped partway starts over when this changes
+    whole_batch_acqs: None | int = None
     scratch: str = "/mnt/scratch"
     # Nodes motion correction jobs are not sent to, as Slurm writes them
     # ("cnode-07-[21-29],cnode-08-[24-27,29-35]"): caiman ran about 4 times

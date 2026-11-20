@@ -58,6 +58,15 @@ def _odyn_command(main_folder: str | Path, project: None | str) -> list[str]:
     ]
 
 
+def _charged_to(config: ClusterConfig) -> str:
+    """The `#SBATCH` lines of the account and QOS to charge, when set."""
+    return "".join(
+        f"#SBATCH --{option}={value}\n"
+        for option, value in (("account", config.account), ("qos", config.qos))
+        if value
+    )
+
+
 def _mcor_script(
     main_folder: str | Path,
     project: None | str,
@@ -72,7 +81,7 @@ def _mcor_script(
     """
     A job script that runs `command` with caiman's files on scratch
     (`disk_gb` of it, `mcor_disk_gb` by default), on no node of
-    `exclude_nodes`.
+    `exclude_nodes`, charged to `account` and `qos` when set.
     """
     logs = cluster_folder(Path(main_folder).resolve(), project) / JOBS_FOLDER
     exclude = (
@@ -81,7 +90,7 @@ def _mcor_script(
 
     return f"""#!/bin/bash
 #SBATCH --partition={config.partition}
-#SBATCH --job-name={name}
+{_charged_to(config)}#SBATCH --job-name={name}
 #SBATCH --output={logs}/%x-%j.out
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={config.mcor_cpus}

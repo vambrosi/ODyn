@@ -36,8 +36,8 @@ by the tick;
 submitted (`g<group_id>.json`: its runs and jobs, see `submit_mcor_sweep`);
 - `STOP` stops the chain (the running tick does not submit the next one).
 
-The cluster's own settings (partition, conda environment, chain interval) are
-in `<main_folder>/.odyn/cluster.json`, see `ClusterConfig`.
+The cluster's own settings (partition and account, conda environment, chain
+interval) are in `<main_folder>/.odyn/cluster.json`, see `ClusterConfig`.
 
 **COMMAND LINE**
 ```
