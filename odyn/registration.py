@@ -22,7 +22,7 @@ reference = reference_image(frames, max_shift_px=(40, 40))
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -91,14 +91,80 @@ def spread_acquisitions(count: int, wanted: int) -> list[int]:
     ]
 
 
-def sample_frames(paths: Sequence[Path], per_file: int) -> np.ndarray:
+def condition_positions(conditions: Sequence[Hashable]) -> list[list[int]]:
     """
-    Up to `per_file` frames from each TIFF in `paths`, evenly spread in time,
-    as one `(frames, height, width)` float32 array.
+    The positions (0-based, in time order) of each condition in
+    `conditions` (one per acquisition), in the order the conditions first
+    appear. Acquisitions with no condition (`None`) are one more.
+
+    **EXAMPLE**
+    ```python
+    condition_positions(["base", "base", "ket", "ket"])   # [[0, 1], [2, 3]]
+    ```
+    """
+    positions: dict[Hashable, list[int]] = {}
+
+    for position, condition in enumerate(conditions):
+        positions.setdefault(condition, []).append(position)
+
+    return list(positions.values())
+
+
+def reference_by_condition(
+    conditions: Sequence[Hashable], wanted: int = 4
+) -> list[list[int]]:
+    """
+    For each condition (see `condition_positions`), the positions of the
+    acquisitions its share of the reference is taken from: `wanted` of them
+    spread over the middle third of that condition (`reference_acquisitions`).
+    With one condition (or none annotated), the same as
+    `reference_acquisitions` over the whole experiment.
+
+    **EXAMPLE**
+    ```python
+    reference_by_condition(["baseline"] * 80 + ["ket"] * 80)
+    # [[30, 36, 43, 50], [110, 116, 123, 130]]
+    ```
+    """
+    return [
+        [where[i] for i in reference_acquisitions(len(where), wanted)]
+        for where in condition_positions(conditions)
+    ]
+
+
+def spread_by_condition(conditions: Sequence[Hashable], wanted: int) -> list[int]:
+    """
+    The positions of `wanted` acquisitions shared out evenly between the
+    conditions (see `condition_positions`), each share spread over its
+    condition (`spread_acquisitions`), in time order. The earlier conditions
+    take one more when `wanted` does not divide evenly. With one condition
+    (or none annotated), the same as `spread_acquisitions`.
+
+    **EXAMPLE**
+    ```python
+    spread_by_condition(["baseline"] * 6 + ["ket"] * 4, 4)   # [1, 4, 7, 9]
+    ```
+    """
+    groups = condition_positions(conditions)
+    share, extra = divmod(max(0, wanted), max(1, len(groups)))
+
+    return sorted(
+        where[i]
+        for k, where in enumerate(groups)
+        for i in spread_acquisitions(len(where), share + (k < extra))
+    )
+
+
+def sample_frames(paths: Sequence[Path], per_file: int | Sequence[int]) -> np.ndarray:
+    """
+    Up to `per_file` frames from each TIFF in `paths` (one number for all, or
+    one per file), evenly spread in time, as one `(frames, height, width)`
+    float32 array.
     """
     stacks = []
+    counts = [per_file] * len(paths) if isinstance(per_file, int) else per_file
 
-    for path in paths:
+    for path, per_file in zip(paths, counts):
         with tifffile.TiffFile(path) as tif:
             count = len(tif.pages)
             keys = np.unique(np.linspace(0, count - 1, min(count, per_file)).round())

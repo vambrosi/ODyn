@@ -89,6 +89,11 @@ class ClusterConfig:
     # per objective instead: {"20": grid, "10": grid} (see `sweep_grid_for`)
     sweep_grid: None | dict = None
     sweep_time: None | str = None
+    # Tests and sweeps take their acquisitions, and the reference its
+    # frames, from every condition alike (the acquisition annotation
+    # `condition`, as before and after anesthesia): a share of each, spread
+    # over it. Experiments with one condition, or none, are not affected
+    by_condition: bool = True
     # Days after an approval its tests are kept on the share, before the tick
     # keeps their numbers in `processed/mcor/report/` and deletes the rest
     keep_tests_days: float = 7.0

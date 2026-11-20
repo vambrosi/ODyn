@@ -11,10 +11,13 @@ from scipy import ndimage
 
 from odyn.registration import (
     _align,
+    condition_positions,
     reference_acquisitions,
+    reference_by_condition,
     reference_image,
     sample_frames,
     spread_acquisitions,
+    spread_by_condition,
 )
 
 
@@ -100,6 +103,36 @@ def test_frames_are_sampled_evenly_from_each_file(tmp_path):
     assert list(frames[:, 0, 0]) == [0, 4, 9, 100, 104, 109]  # rounded positions
 
 
+def test_each_condition_gets_its_share(tmp_path):
+    conditions = ["baseline"] * 6 + ["ket/xyl"] * 2
+
+    assert condition_positions(conditions) == [[0, 1, 2, 3, 4, 5], [6, 7]]
+    assert condition_positions([None, "a", None]) == [[0, 2], [1]]
+
+    # The test: half of the acquisitions from each, the earlier ones first
+    assert spread_by_condition(conditions, 4) == [1, 4, 6, 7]
+    assert spread_by_condition(conditions, 5) == [1, 3, 5, 6, 7]
+    assert spread_by_condition(["a"] * 3 + ["b"] * 3 + ["c"] * 3, 2) == [1, 4]
+
+    # The reference: the middle third of each
+    assert reference_by_condition(conditions) == [[2, 3], [6, 7]]
+
+    # One condition, or none: as before
+    for one in ([None] * 224, ["baseline"] * 224):
+        assert spread_by_condition(one, 24) == spread_acquisitions(224, 24)
+        assert reference_by_condition(one) == [reference_acquisitions(224)]
+
+    # As many frames from each file as asked
+    paths = []
+
+    for index in range(2):
+        path = tmp_path / f"acq{index}.tif"
+        tifffile.imwrite(path, np.arange(10)[:, None, None] * np.ones((10, 4, 5)))
+        paths.append(path)
+
+    assert len(sample_frames(paths, per_file=[2, 5])) == 7
+
+
 def test_run_motion_correction_hands_caiman_one_reference(tmp_path, monkeypatch):
     """With a stand-in for caiman, which this test only watches."""
     import sys
@@ -163,3 +196,25 @@ def test_run_motion_correction_hands_caiman_one_reference(tmp_path, monkeypatch)
         use_gui_parameters=False, is_test=True, test_acqs=2, reference_acqs=0
     )
     assert seen["template"] is None
+
+    # Before and after anesthesia: the test and the reference from each alike
+    for acq_id in group.acquisitions.index:
+        db.add_annotations(
+            target_type="acquisition",
+            target_id=int(acq_id),
+            values={"condition": "baseline" if acq_id <= 6 else "ket/xyl"},
+        )
+
+    group.run_motion_correction(use_gui_parameters=False, is_test=True, test_acqs=4)
+    call = db.latest_calls("run_motion_correction").iloc[0]
+    assert call["input_acq_ids"] == [2, 5, 7, 8]
+    assert call["input_reference_acq_ids"] == [3, 4, 7, 8]
+    assert call["input_reference_conditions"] == ["baseline", "ket/xyl"]
+
+    # Unless asked not to
+    group.run_motion_correction(
+        use_gui_parameters=False, is_test=True, test_acqs=4, by_condition=False
+    )
+    call = db.latest_calls("run_motion_correction").iloc[0]
+    assert call["input_acq_ids"] == [2, 4, 6, 8]
+    assert call["input_reference_acq_ids"] == [4, 5, 6]

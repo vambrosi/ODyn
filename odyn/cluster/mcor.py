@@ -470,12 +470,13 @@ def run_mcor_test(
     """
     What the job runs: the test (`whole`: saving every acquisition,
     `whole_batch_acqs` at a time when set), with `settings`
-    (`CANDIDATE_SETTINGS`) and `label`, recorded as `user`. Returns the test
-    folder.
+    (`CANDIDATE_SETTINGS`), `label` and `by_condition`, recorded as `user`.
+    Returns the test folder.
     """
     db = Database(main_folder, project=project, user=user)
     config = ClusterConfig.read(main_folder)
     given = candidate_settings(settings) if settings else {}
+    given["by_condition"] = config.by_condition
 
     if label:
         given["label"] = label
@@ -647,6 +648,9 @@ def submit_mcor_sweep(
         "test_acqs": int(grid.get("test_acqs", 24)),
         "max_shift_um": list(grid.get("max_shift_um", [80, 80])),
         "keep_patch_shifts": bool(grid.get("keep_patch_shifts", False)),
+        # Every run of the sweep on the same acquisitions, whatever
+        # cluster.json says by the time it runs
+        "by_condition": config.by_condition,
         "runs": runs,
     }
     write_json(sweep, content)
@@ -788,6 +792,7 @@ def run_mcor_sweep(sweep: str | Path, task: int) -> Path:
         "test_acqs": content["test_acqs"],
         "max_shift_um": content["max_shift_um"],
         "side_by_side": False,
+        "by_condition": bool(content.get("by_condition", True)),
     }
 
     if task == 0:

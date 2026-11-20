@@ -1577,8 +1577,11 @@ class Database(CallRecorder):
         ```
 
         **ALERT**
-        odyn's processing does not use annotations. Those are for analysis
-        only. Anything the pipeline has to use must be a column instead.
+        odyn's processing reads only two annotations: the experiment
+        `depth_goal` (which Cellpose model finds its cells) and the
+        acquisition `condition` (how tests and the reference are shared out,
+        see `Group.run_motion_correction`). The others are for analysis only.
+        Anything else the pipeline has to use must be a column instead.
 
         Annotations are never overwritten. Writing a key twice keeps both, and
         the later one is used (so the whole history stays visible).

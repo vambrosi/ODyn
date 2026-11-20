@@ -781,7 +781,10 @@ def test_a_whole_correction_goes_in_the_batches_set(tmp_path, monkeypatch):
     run_mcor_test(tmp_path, None, group_id, "alice", whole=True)
     run_mcor_test(tmp_path, None, group_id, "alice")  # a test has no batches
 
-    assert seen == [{"whole": True, "batch_acqs": 1}, {"whole": False}]
+    assert seen == [
+        {"whole": True, "batch_acqs": 1, "by_condition": True},
+        {"whole": False, "by_condition": True},
+    ]
 
 
 def test_the_job_records_the_test_as_the_owners(tmp_path, monkeypatch):
@@ -792,7 +795,7 @@ def test_the_job_records_the_test_as_the_owners(tmp_path, monkeypatch):
     monkeypatch.setattr(
         Group,
         "test_motion_correction",
-        lambda self, whole: seen.append((self.group_id, self.db.user, whole))
+        lambda self, whole, **_: seen.append((self.group_id, self.db.user, whole))
         or tmp_path,
     )
 
@@ -915,6 +918,16 @@ def test_the_runs_take_the_baselines_reference_and_levels(tmp_path, slurm, monke
     assert second["strides_um"] == [128, 96]
     assert "levels" not in second
     assert (second["test_acqs"], second["max_shift_um"]) == (4, [20, 20])
+    assert first["by_condition"] is second["by_condition"] is True
+
+    # Every run on the same acquisitions: as cluster.json said at submission
+    (tmp_path / ".odyn" / "cluster.json").write_text('{"by_condition": false}')
+    run_mcor_sweep(sweep, 1)
+    assert asked[-1][1]["by_condition"] is True
+
+    submit_mcor_sweep(tmp_path, None, group_id, GRID)
+    run_mcor_sweep(sweep, 1)
+    assert asked[-1][1]["by_condition"] is False
 
 
 def a_whole_report(db, group_id, **settings) -> Path:
@@ -1052,7 +1065,12 @@ def test_the_tick_corrects_with_the_test_picked_once(tmp_path, slurm, monkeypatc
     run_mcor_test(
         tmp_path, None, group_id, "bob", True, sent["settings"], sent["label"]
     )
-    assert seen == {"whole": True, **PIECEWISE, "label": "s128_o64_d6 (all)"}
+    assert seen == {
+        "whole": True,
+        **PIECEWISE,
+        "label": "s128_o64_d6 (all)",
+        "by_condition": True,
+    }
 
 
 def test_a_video_frame_map_says_where_each_frame_is_from(tmp_path):

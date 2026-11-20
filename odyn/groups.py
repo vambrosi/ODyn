@@ -1789,6 +1789,7 @@ class Group(CallRecorder):
         batch_acqs: int = FINAL_BATCH_ACQS,
         report_positions: Sequence[int] = (),
         resume: bool = True,
+        by_condition: bool = True,
     ) -> None:
         """
         Method that does test/final motion correction
@@ -1810,10 +1811,16 @@ class Group(CallRecorder):
         `is_test == False`.) Picks will be evenly spread over the experiment and
         centered on its middle. All acquisitions in both test and final motion
         corrections are aligned to the same template.
+        - `by_condition`: take the test acquisitions and the reference from
+        every condition alike (the acquisition annotation `condition`): a
+        share of each, spread over that condition. Acquisitions with no
+        condition count as one more; with one condition, or none annotated,
+        it changes nothing.
 
         *Reference*
         - `reference_acqs`: how many acquisitions, spread around the middle of
-        the experiment, the reference image is built from. Every acquisition is
+        the experiment (of each condition, with `by_condition`), the reference
+        image is built from. Every acquisition is
         aligned to that one image (saved as `reference_group_<id>.tif` in the
         `processed/mcor` folder of the first). `0` leaves it to caiman, which
         aligns each acquisition to the template of the one before, starting
@@ -1866,7 +1873,6 @@ class Group(CallRecorder):
         from caiman.motion_correction import MotionCorrect
 
         from .mcor_report import FullReport
-        from .registration import spread_acquisitions
 
         # --- Optionally override parameters with GUI-picked values --- #
         # These override both the passed arguments and use_last_parameters.
@@ -1896,7 +1902,7 @@ class Group(CallRecorder):
             shifts_opencv = True
 
         positions = (
-            spread_acquisitions(len(self.acquisitions), test_acqs)
+            self._test_positions(test_acqs, by_condition)
             if is_test
             else list(range(len(self.acquisitions)))
         )
@@ -1976,7 +1982,9 @@ class Group(CallRecorder):
             )
 
         elif reference_acqs > 0:
-            template = self._reference_template(reference_acqs, settings["max_shifts"])
+            template = self._reference_template(
+                reference_acqs, settings["max_shifts"], by_condition
+            )
 
         # A final correction goes in batches of acquisitions, each saved and
         # its temporary files deleted before the next: caiman's float32 copies
@@ -2903,6 +2911,7 @@ class Group(CallRecorder):
         whole: bool = False,
         batch_acqs: int = FINAL_BATCH_ACQS,
         resume: bool = True,
+        by_condition: bool = True,
     ) -> Path:
         """
         A test motion correction, and the files to judge it by
@@ -2957,14 +2966,15 @@ class Group(CallRecorder):
         report and videos from the same `test_acqs` acquisitions as a test,
         `batch_acqs` at a time (see `run_motion_correction`); with `resume`,
         a whole correction stopped partway goes on from where it stopped
+        - `by_condition`: the test acquisitions and the reference from every
+        condition alike (see `run_motion_correction`)
         """
         import caiman as cm
 
         from .mcor_report import write_report
-        from .registration import spread_acquisitions
 
         acquisitions = self.acquisitions
-        positions = spread_acquisitions(len(acquisitions), test_acqs)
+        positions = self._test_positions(test_acqs, by_condition)
         acq_ids = [int(i) for i in acquisitions.index[positions]]
         folder = self.mcor_test_folder(run)
 
@@ -2983,6 +2993,7 @@ class Group(CallRecorder):
             report_positions=positions if whole else (),
             batch_acqs=batch_acqs,
             resume=resume,
+            by_condition=by_condition,
         )
 
         settings = {
@@ -3150,21 +3161,34 @@ class Group(CallRecorder):
 
         return folder if run is None else folder / run
 
-    def _reference_template(self, wanted: int, max_shifts) -> np.ndarray:
+    def _reference_template(
+        self, wanted: int, max_shifts, by_condition: bool = True
+    ) -> np.ndarray:
         """
         Build, save and record the image `run_motion_correction` aligns every
         acquisition to (see `odyn.registration`), from `wanted` acquisitions
         of the whole group, test run or not, so tests and the final share it.
+        With `by_condition`, `wanted` of each condition, and as many frames
+        from each condition.
         """
-        from .registration import reference_acquisitions, reference_image, sample_frames
+        from .registration import reference_by_condition, reference_image, sample_frames
 
         acquisitions = self.acquisitions
-        chosen = acquisitions.iloc[reference_acquisitions(len(acquisitions), wanted)]
-        paths = [self.db.main_folder / p for p in chosen["raw_path"]]
-        acq_ids = [int(i) for i in chosen.index]
+        conditions = self._conditions(by_condition)
+        chosen = reference_by_condition(conditions, wanted)
+        positions = [position for picks in chosen for position in picks]
+        paths = [
+            self.db.main_folder / p for p in acquisitions["raw_path"].iloc[positions]
+        ]
+        acq_ids = [int(i) for i in acquisitions.index[positions]]
+
+        # Each condition takes its share of the frames, whatever the number of
+        # acquisitions it has
+        share = REFERENCE_FRAMES // len(chosen)
+        per_file = [max(1, share // len(picks)) for picks in chosen for _ in picks]
 
         logger.info(f"Building the reference image from acquisitions {acq_ids}...")
-        frames = sample_frames(paths, per_file=max(1, REFERENCE_FRAMES // len(paths)))
+        frames = sample_frames(paths, per_file=per_file)
         template = reference_image(frames, max_shifts)
 
         path = self._reference_path()
@@ -3177,7 +3201,44 @@ class Group(CallRecorder):
         self.add_output_file(path)
         self.update_parameters_used({"reference_acq_ids": acq_ids})
 
+        if len(chosen) > 1:
+            self.update_parameters_used(
+                {"reference_conditions": [conditions[picks[0]] for picks in chosen]}
+            )
+
         return template
+
+    def _conditions(self, by_condition: bool = True) -> list[None | str]:
+        """
+        The condition of each acquisition, in time order (`None` where none is
+        annotated), or all `None` without `by_condition`.
+        """
+        count = len(self.acquisitions)
+
+        if not by_condition:
+            return [None] * count
+
+        try:
+            annotated = self.db.annotations_for("acquisition")
+        except ValueError:  # nothing can be annotated on an acquisition
+            return [None] * count
+
+        if "condition" not in annotated.columns:
+            return [None] * count
+
+        values = annotated["condition"].reindex(self.acquisitions.index)
+
+        return [None if pd.isna(value) else str(value) for value in values]
+
+    def _test_positions(self, wanted: int, by_condition: bool = True) -> list[int]:
+        """
+        The positions of the acquisitions a test runs on: `wanted` spread over
+        the experiment, or over each condition alike with `by_condition` (see
+        `odyn.registration.spread_by_condition`).
+        """
+        from .registration import spread_by_condition
+
+        return spread_by_condition(self._conditions(by_condition), wanted)
 
     def _reference_path(self) -> Path:
         """
