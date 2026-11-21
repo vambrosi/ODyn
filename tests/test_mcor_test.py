@@ -1120,6 +1120,15 @@ def test_the_runs_take_the_baselines_reference_and_levels(tmp_path, slurm, monke
     run_mcor_sweep(sweep, 1)
     assert asked[-1][1]["by_condition"] is False
 
+    # A sweep written before the setting goes on as it started
+    (tmp_path / ".odyn" / "cluster.json").unlink()
+    submit_mcor_sweep(tmp_path, None, group_id, GRID)
+    content = json.loads(sweep.read_text())
+    assert content.pop("by_condition") is True
+    sweep.write_text(json.dumps(content))
+    run_mcor_sweep(sweep, 1)
+    assert asked[-1][1]["by_condition"] is False
+
 
 def a_whole_report(db, group_id, **settings) -> Path:
     """The report of a whole correction of `group_id`, with `settings`."""

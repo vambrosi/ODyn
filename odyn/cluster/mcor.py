@@ -792,7 +792,9 @@ def run_mcor_sweep(sweep: str | Path, task: int) -> Path:
         "test_acqs": content["test_acqs"],
         "max_shift_um": content["max_shift_um"],
         "side_by_side": False,
-        "by_condition": bool(content.get("by_condition", True)),
+        # A sweep from before the setting took the test acquisitions and the
+        # reference over the whole experiment, so its other runs do too
+        "by_condition": bool(content.get("by_condition", False)),
     }
 
     if task == 0:
